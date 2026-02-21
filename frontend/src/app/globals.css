@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --klein: #002FA7;
+}
+
+/* ── Scrollbar ─────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 9px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+
+/* ── Prose overrides for chat messages ─────────────── */
+.prose pre {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  border-radius: 8px;
+  font-size: 0.8125rem;
+}
+
+.prose code:not(pre code) {
+  background: #f0f2f5;
+  color: #c7254e;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  font-size: 0.875em;
+}
+
+/* ── Streaming cursor ──────────────────────────────── */
+.streaming-cursor::after {
+  content: "▍";
+  display: inline-block;
+  animation: blink 1s step-end infinite;
+  color: #002FA7;
+  margin-left: 1px;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ── Highlight.js theme (GitHub light) ────────────── */
+.hljs {
+  background: #1e1e1e;
+  color: #d4d4d4;
+}
+.hljs-keyword, .hljs-selector-tag, .hljs-title { color: #569cd6; }
+.hljs-string, .hljs-attr { color: #ce9178; }
+.hljs-comment { color: #6a9955; }
+.hljs-number { color: #b5cea8; }
+.hljs-built_in { color: #dcdcaa; }
+.hljs-literal { color: #569cd6; }

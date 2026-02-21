@@ -1,0 +1,45 @@
+# ── Environment ───────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Python ────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+
+# ── Backend runtime data ───────────────────────────────
+backend/sessions/
+backend/storage/
+backend/config.json
+backend/SKILLS_SNAPSHOT.md
+
+# ── Node ──────────────────────────────────────────────
+node_modules/
+frontend/.next/
+frontend/out/
+
+# ── macOS ─────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── Editors ───────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Misc ──────────────────────────────────────────────
+*.log
+*.pid
