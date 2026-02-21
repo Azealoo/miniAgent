@@ -162,9 +162,9 @@ async def _generate_title(agent_manager, first_message: str) -> str:
                 ),
                 HumanMessage(
                     content=(
-                        f"Generate a title for a conversation that starts with: "
+                        f"Generate a short English title for a conversation that starts with: "
                         f"'{first_message[:200]}'. "
-                        "Maximum 10 Chinese characters. No punctuation, no quotes."
+                        "Maximum 6 words. No punctuation, no quotes."
                     )
                 ),
             ]

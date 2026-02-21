@@ -40,6 +40,10 @@ frontend/out/
 *.swp
 *.swo
 
+# ── Project planning / AI assistant files ─────────────
+CLAUDE.md
+Plan.md
+
 # ── Misc ──────────────────────────────────────────────
 *.log
 *.pid
