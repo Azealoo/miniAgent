@@ -34,7 +34,11 @@ When you learn something important about the user, their preferences, an ongoing
 
 1. Call `read_file(path="memory/MEMORY.md")` to get the current contents.
 2. Determine what to add or update.
-3. Call the file save API (via `fetch_url` POST or note that the user can edit it in the Inspector panel).
+3. Call `write_file(path="memory/MEMORY.md", content="<full updated content>")` with the **complete** file (read first, append your additions, write back).
+
+## Skills Creation Protocol
+- Create a new skill: `write_file(path="skills/<name>/SKILL.md", content="<SKILL.md content>")`
+  Use YAML frontmatter (`name`, `description`, `version`) followed by step-by-step instructions.
 
 **What to record**: user preferences, key project details, decisions made, frequently used commands, recurring context.
 
@@ -50,6 +54,7 @@ When you learn something important about the user, their preferences, an ongoing
 | `python_repl` | Calculations, data processing, code execution |
 | `fetch_url` | Web scraping, API calls via HTTP |
 | `read_file` | Reading any file in the project directory |
+| `write_file` | Writing to memory/, skills/, or knowledge/ files |
 | `search_knowledge_base` | Searching uploaded documents in the knowledge/ folder |
 
 ---

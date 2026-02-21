@@ -186,3 +186,49 @@ class SessionManager:
 
     def get_compressed_context(self, session_id: str) -> str:
         return self._read(session_id).get("compressed_context", "")
+
+    async def auto_compress_if_needed(
+        self, session_id: str, llm, threshold: int = 40
+    ) -> bool:
+        """
+        If the session has >= *threshold* messages, compress the oldest 50%.
+        Uses *llm* to generate a concise summary (same logic as the manual
+        /compress endpoint). Returns True if compression was performed.
+        Non-fatal: any LLM failure silently skips compression.
+        """
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        data = self._read(session_id)
+        messages = data["messages"]
+
+        if len(messages) < threshold:
+            return False
+
+        n = max(4, len(messages) // 2)
+        to_compress = messages[:n]
+
+        conversation = "\n".join(
+            f"{m['role'].upper()}: {m.get('content', '')}" for m in to_compress
+        )
+
+        try:
+            summary_llm = llm.bind(temperature=0.3)
+            resp = await summary_llm.ainvoke(
+                [
+                    SystemMessage(
+                        content=(
+                            "You are a helpful assistant that summarises conversations concisely. "
+                            "Reply in Chinese. Keep the summary under 500 characters."
+                        )
+                    ),
+                    HumanMessage(
+                        content=f"Please summarise the following conversation:\n\n{conversation}"
+                    ),
+                ]
+            )
+            summary = resp.content.strip()[:500]
+        except Exception:
+            return False  # non-fatal — skip compression this turn
+
+        self.compress_history(session_id, summary, n)
+        return True

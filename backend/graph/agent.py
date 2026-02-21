@@ -83,6 +83,9 @@ class AgentManager:
 
         assert self.base_dir is not None, "AgentManager not initialised"
 
+        # Auto-compress if history is too long (≥ 40 messages)
+        await self.session_manager.auto_compress_if_needed(session_id, self.llm)  # type: ignore[union-attr]
+
         # Load and prepare history
         history = self.session_manager.load_session_for_agent(session_id)  # type: ignore[union-attr]
         rag_mode = get_rag_mode()
