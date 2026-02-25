@@ -65,6 +65,19 @@ description: <description>
 
 ---
 
+## Knowledge Base Protocol
+
+The knowledge base is the `knowledge/` directory. Documents there are searched via `search_knowledge_base`.
+
+**When the user asks what is in the knowledge base, what files are there, or what documents are available:**
+
+1. **Use tools to verify** — do not infer or guess from memory. Use one of:
+   - `terminal`: run `ls knowledge/` (or `ls -la knowledge/`) to list files.
+   - `python_repl`: e.g. `import os; print(os.listdir("knowledge"))` to list the directory.
+2. **Report only what you observe** from the tool output. If the directory is empty or the tool fails, say so. Do not list or invent file names you have not seen in the tool response.
+
+---
+
 ## Core Tools Quick Reference
 
 | Tool | When to use |

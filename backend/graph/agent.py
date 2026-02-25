@@ -8,12 +8,21 @@ from pathlib import Path
 from typing import AsyncGenerator, Optional
 
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_deepseek import ChatDeepSeek
 
 from .memory_indexer import MemoryIndexer
 from .prompt_builder import build_system_prompt
 from .session_manager import SessionManager
+
+# Tool name -> single arg name for replayed tool_calls (session stores flat "input" string)
+_TOOL_ARG_KEY: dict[str, str] = {
+    "terminal": "command",
+    "python_repl": "code",
+    "fetch_url": "url",
+    "read_file": "path",
+    "search_knowledge_base": "query",
+}
 
 
 class AgentManager:
@@ -50,7 +59,9 @@ class AgentManager:
     # ------------------------------------------------------------------ #
 
     def _build_messages(self, history: list[dict]) -> list:
-        """Convert session history dicts to LangChain message objects."""
+        """Convert session history dicts to LangChain message objects.
+        Preserves tool_calls and tool results so the LLM sees full turn structure.
+        """
         messages = []
         for msg in history:
             role = msg.get("role", "")
@@ -58,7 +69,25 @@ class AgentManager:
             if role == "user":
                 messages.append(HumanMessage(content=content))
             elif role == "assistant":
-                messages.append(AIMessage(content=content))
+                tool_calls = msg.get("tool_calls") or []
+                if tool_calls:
+                    lc_tool_calls = []
+                    tool_outputs = []
+                    for i, tc in enumerate(tool_calls):
+                        cid = f"call_{len(messages)}_{i}"
+                        name = tc.get("tool", "")
+                        arg_key = _TOOL_ARG_KEY.get(name, "input")
+                        lc_tool_calls.append({
+                            "id": cid,
+                            "name": name,
+                            "args": {arg_key: tc.get("input", "")},
+                        })
+                        tool_outputs.append((cid, tc.get("output", "")))
+                    messages.append(AIMessage(content=content, tool_calls=lc_tool_calls))
+                    for cid, output in tool_outputs:
+                        messages.append(ToolMessage(content=output, tool_call_id=cid))
+                else:
+                    messages.append(AIMessage(content=content))
         return messages
 
     def _build_agent(self, rag_mode: bool = False):

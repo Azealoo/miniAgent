@@ -63,6 +63,11 @@ async def chat(request: ChatRequest):
         def _sse(payload: dict) -> str:
             return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
+        # Persist user message immediately so it is saved even if the agent errors
+        session_manager.save_message(
+            request.session_id, "user", request.message
+        )
+
         try:
             async for ev in agent_manager.astream(request.message, history):
                 t = ev["type"]
@@ -105,10 +110,7 @@ async def chat(request: ChatRequest):
                 elif t == "done":
                     _flush_segment()
 
-                    # Persist user message + each assistant segment to session
-                    session_manager.save_message(
-                        request.session_id, "user", request.message
-                    )
+                    # Persist each assistant segment (user message already saved above)
                     for seg in segments:
                         session_manager.save_message(
                             request.session_id,

@@ -107,11 +107,14 @@ class SessionManager:
         messages = data["messages"]
         compressed = data.get("compressed_context", "")
 
-        # Merge consecutive assistant messages
+        # Merge consecutive assistant messages (content + tool_calls so LLM sees full turn)
         merged: list[dict] = []
         for msg in messages:
             if merged and merged[-1]["role"] == "assistant" and msg["role"] == "assistant":
                 merged[-1]["content"] += "\n\n" + msg["content"]
+                merged[-1]["tool_calls"] = (merged[-1].get("tool_calls") or []) + (
+                    msg.get("tool_calls") or []
+                )
             else:
                 merged.append(dict(msg))
 
