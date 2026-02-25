@@ -1,11 +1,15 @@
 """
 Thin wrapper around LangChain's PythonREPLTool that renames it to 'python_repl'
 and trims overly long outputs.
+
+The underlying PythonREPLTool instance is created lazily on first use and reused
+for the lifetime of this tool instance, making variables, imports, and state defined
+in one call available in subsequent calls (true persistent REPL).
 """
-from typing import Type
+from typing import Any, Type
 
 from langchain_core.tools import BaseTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 _MAX_OUTPUT = 5_000
 
@@ -23,12 +27,15 @@ class PythonReplTool(BaseTool):
     )
     args_schema: Type[BaseModel] = PythonReplInput
 
+    _repl: Any = PrivateAttr(default=None)
+
     def _run(self, code: str) -> str:
         try:
-            from langchain_experimental.tools import PythonREPLTool
+            if self._repl is None:
+                from langchain_experimental.tools import PythonREPLTool
 
-            repl = PythonREPLTool()
-            output = repl.run(code)
+                self._repl = PythonREPLTool()
+            output = self._repl.run(code)
             if len(str(output)) > _MAX_OUTPUT:
                 output = str(output)[:_MAX_OUTPUT] + "\n...[output truncated]"
             return str(output)

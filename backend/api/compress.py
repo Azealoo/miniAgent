@@ -4,7 +4,7 @@ POST /api/sessions/{id}/compress
 Compresses the oldest 50% of messages in a session:
 1. Validates that ≥ 4 messages exist.
 2. Takes the first 50% (min 4).
-3. Calls DeepSeek to generate a concise Chinese summary (≤ 500 chars).
+3. Calls DeepSeek to generate a concise English summary (≤ 500 chars).
 4. Archives the messages + stores the summary in compressed_context.
 """
 from fastapi import APIRouter, HTTPException
@@ -39,7 +39,7 @@ async def compress(session_id: str):
                 SystemMessage(
                     content=(
                         "You are a helpful assistant that summarises conversations concisely. "
-                        "Reply in Chinese. Keep the summary under 500 characters."
+                        "Reply in English. Keep the summary under 500 characters."
                     )
                 ),
                 HumanMessage(

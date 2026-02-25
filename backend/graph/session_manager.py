@@ -218,7 +218,7 @@ class SessionManager:
                     SystemMessage(
                         content=(
                             "You are a helpful assistant that summarises conversations concisely. "
-                            "Reply in Chinese. Keep the summary under 500 characters."
+                            "Reply in English. Keep the summary under 500 characters."
                         )
                     ),
                     HumanMessage(

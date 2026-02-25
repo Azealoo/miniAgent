@@ -106,13 +106,13 @@ async def generate_title(session_id: str):
                 ),
                 HumanMessage(
                     content=(
-                        f"Generate a title for a conversation that starts with: '{first_user[:200]}'. "
-                        "Maximum 10 Chinese characters. No punctuation, no quotes."
+                        f"Generate a short English title for a conversation that starts with: '{first_user[:200]}'. "
+                        "Maximum 10 words. No punctuation, no quotes."
                     )
                 ),
             ]
         )
-        title = resp.content.strip()[:15]
+        title = resp.content.strip()[:60]
     except Exception as exc:
         raise HTTPException(500, str(exc))
 

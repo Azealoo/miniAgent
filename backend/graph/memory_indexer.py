@@ -7,11 +7,13 @@ class MemoryIndexer:
     """
     Manages a LlamaIndex vector index over memory/MEMORY.md.
     Rebuilds automatically when the file changes (MD5-based detection).
+    Index is persisted to storage/memory_index/ between restarts.
     Uses BM25 + vector hybrid retrieval.
     """
 
     def __init__(self, base_dir: Path) -> None:
         self.memory_path = base_dir / "memory" / "MEMORY.md"
+        self._storage_path = base_dir / "storage" / "memory_index"
         self._index: Optional[Any] = None
         self._nodes: list = []
         self._last_md5: str = ""
@@ -35,13 +37,41 @@ class MemoryIndexer:
     # ------------------------------------------------------------------ #
 
     def rebuild_index(self) -> None:
-        """Read MEMORY.md, chunk it, and build an in-memory vector index."""
-        from llama_index.core import VectorStoreIndex, Document
+        """
+        Build a VectorStoreIndex from MEMORY.md and persist to storage/memory_index/.
+
+        Fast path: if the persisted index exists and its stored MD5 matches the current
+        file, load from disk (no re-embedding). Slow path: parse, embed, persist.
+        """
+        from llama_index.core import (
+            Document,
+            StorageContext,
+            VectorStoreIndex,
+            load_index_from_storage,
+        )
         from llama_index.core.node_parser import SentenceSplitter
 
+        current_md5 = self._file_md5()
+        md5_file = self._storage_path / "md5.txt"
+
+        # ── Fast path: load persisted index if file hasn't changed ────────
+        if self._storage_path.exists() and md5_file.exists() and current_md5:
+            if md5_file.read_text(encoding="utf-8").strip() == current_md5:
+                try:
+                    storage_context = StorageContext.from_defaults(
+                        persist_dir=str(self._storage_path)
+                    )
+                    self._index = load_index_from_storage(storage_context)
+                    self._nodes = list(self._index.docstore.docs.values())
+                    self._last_md5 = current_md5
+                    return
+                except Exception:
+                    pass  # Fall through to full rebuild
+
+        # ── Slow path: rebuild from file ───────────────────────────────────
         self._index = None
         self._nodes = []
-        self._last_md5 = self._file_md5()
+        self._last_md5 = current_md5
 
         if not self.memory_path.exists():
             return
@@ -55,7 +85,11 @@ class MemoryIndexer:
         self._nodes = splitter.get_nodes_from_documents([doc])
 
         if self._nodes:
-            self._index = VectorStoreIndex(self._nodes)
+            self._storage_path.mkdir(parents=True, exist_ok=True)
+            storage_context = StorageContext.from_defaults()
+            self._index = VectorStoreIndex(self._nodes, storage_context=storage_context)
+            self._index.storage_context.persist(persist_dir=str(self._storage_path))
+            md5_file.write_text(current_md5, encoding="utf-8")
 
     def retrieve(self, query: str, top_k: int = 3) -> list[dict]:
         """

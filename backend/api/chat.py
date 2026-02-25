@@ -12,7 +12,6 @@ SSE event types emitted:
   error        {type, error}
 """
 import json
-from typing import Optional
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
@@ -37,6 +36,14 @@ async def chat(request: ChatRequest):
     existing = session_manager.load_session(request.session_id)
     is_first_message = len(existing) == 0
 
+    # Auto-compress if history is too long (≥ 40 messages)
+    await session_manager.auto_compress_if_needed(  # type: ignore[union-attr]
+        request.session_id, agent_manager.llm
+    )
+
+    # Load and prepare history for the agent
+    history = session_manager.load_session_for_agent(request.session_id)  # type: ignore[union-attr]
+
     async def event_generator():
         # Per-request accumulators
         segments: list[dict] = []          # [{content, tool_calls}]
@@ -57,7 +64,7 @@ async def chat(request: ChatRequest):
             return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
         try:
-            async for ev in agent_manager.astream(request.message, request.session_id):
+            async for ev in agent_manager.astream(request.message, history):
                 t = ev["type"]
 
                 if t == "retrieval":
@@ -98,7 +105,7 @@ async def chat(request: ChatRequest):
                 elif t == "done":
                     _flush_segment()
 
-                    # Persist to session
+                    # Persist user message + each assistant segment to session
                     session_manager.save_message(
                         request.session_id, "user", request.message
                     )
@@ -164,11 +171,11 @@ async def _generate_title(agent_manager, first_message: str) -> str:
                     content=(
                         f"Generate a short English title for a conversation that starts with: "
                         f"'{first_message[:200]}'. "
-                        "Maximum 6 words. No punctuation, no quotes."
+                        "Maximum 10 words. No punctuation, no quotes."
                     )
                 ),
             ]
         )
-        return resp.content.strip()[:15]
+        return resp.content.strip()[:60]
     except Exception:
         return "New Chat"

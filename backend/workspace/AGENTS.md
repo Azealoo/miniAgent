@@ -34,11 +34,30 @@ When you learn something important about the user, their preferences, an ongoing
 
 1. Call `read_file(path="memory/MEMORY.md")` to get the current contents.
 2. Determine what to add or update.
-3. Call `write_file(path="memory/MEMORY.md", content="<full updated content>")` with the **complete** file (read first, append your additions, write back).
+3. Use `python_repl` to write the updated file back (read first, then write the **complete** updated content):
+
+```python
+content = """...full updated MEMORY.md content..."""
+with open("memory/MEMORY.md", "w", encoding="utf-8") as f:
+    f.write(content)
+```
+
+Alternatively, use `terminal` with a heredoc or `printf` command if Python is not suitable.
 
 ## Skills Creation Protocol
-- Create a new skill: `write_file(path="skills/<name>/SKILL.md", content="<SKILL.md content>")`
-  Use YAML frontmatter (`name`, `description`, `version`) followed by step-by-step instructions.
+- Create a new skill using `python_repl`:
+
+```python
+import os
+os.makedirs("skills/<name>", exist_ok=True)
+with open("skills/<name>/SKILL.md", "w", encoding="utf-8") as f:
+    f.write("""---
+name: <name>
+description: <description>
+---
+## Steps
+...""")
+```
 
 **What to record**: user preferences, key project details, decisions made, frequently used commands, recurring context.
 
@@ -51,10 +70,9 @@ When you learn something important about the user, their preferences, an ongoing
 | Tool | When to use |
 |---|---|
 | `terminal` | Shell commands, file system operations, running scripts |
-| `python_repl` | Calculations, data processing, code execution |
+| `python_repl` | Calculations, data processing, code execution, writing files |
 | `fetch_url` | Web scraping, API calls via HTTP |
 | `read_file` | Reading any file in the project directory |
-| `write_file` | Writing to memory/, skills/, or knowledge/ files |
 | `search_knowledge_base` | Searching uploaded documents in the knowledge/ folder |
 
 ---
