@@ -10,7 +10,9 @@ GET    /api/sessions/{id}/history    — raw messages with tool_calls
 POST   /api/sessions/{id}/generate-title
 """
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from graph.session_manager import _validate_session_id
 
 router = APIRouter()
 
@@ -19,6 +21,13 @@ def _sm():
     from graph.agent import agent_manager
 
     return agent_manager.session_manager
+
+
+def _check_session_id(session_id: str) -> None:
+    try:
+        _validate_session_id(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session_id")
 
 
 # ------------------------------------------------------------------ #
@@ -45,15 +54,24 @@ def create_session():
 class RenameRequest(BaseModel):
     title: str
 
+    @field_validator("title")
+    @classmethod
+    def _check_title_length(cls, v: str) -> str:
+        if len(v) > 200:
+            raise ValueError("title too long (max 200 characters)")
+        return v.strip() or "New Chat"
+
 
 @router.put("/sessions/{session_id}")
 def rename_session(session_id: str, body: RenameRequest):
+    _check_session_id(session_id)
     _sm().rename_session(session_id, body.title)
     return _sm().get_session_meta(session_id)
 
 
 @router.delete("/sessions/{session_id}", status_code=204)
 def delete_session(session_id: str):
+    _check_session_id(session_id)
     _sm().delete_session(session_id)
 
 
@@ -65,6 +83,7 @@ def delete_session(session_id: str):
 @router.get("/sessions/{session_id}/messages")
 def get_messages(session_id: str):
     """Returns full message list including a leading system prompt entry."""
+    _check_session_id(session_id)
     from graph.agent import agent_manager
     from graph.prompt_builder import build_system_prompt
     from config import get_rag_mode
@@ -77,6 +96,7 @@ def get_messages(session_id: str):
 @router.get("/sessions/{session_id}/history")
 def get_history(session_id: str):
     """Returns raw stored messages (with tool_calls, without system prompt)."""
+    _check_session_id(session_id)
     return _sm().load_session(session_id)
 
 
@@ -87,6 +107,7 @@ def get_history(session_id: str):
 
 @router.post("/sessions/{session_id}/generate-title")
 async def generate_title(session_id: str):
+    _check_session_id(session_id)
     from graph.agent import agent_manager
     from langchain_core.messages import HumanMessage, SystemMessage
 

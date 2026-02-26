@@ -69,15 +69,20 @@ class MemoryIndexer:
                     pass  # Fall through to full rebuild
 
         # ── Slow path: rebuild from file ───────────────────────────────────
+        # Reset state but do NOT set _last_md5 yet — we only update it after a
+        # successful build so that a failed embedding call (e.g. API error) causes
+        # a fresh retry on the next retrieve() call rather than silently leaving
+        # the index broken forever.
         self._index = None
         self._nodes = []
-        self._last_md5 = current_md5
 
         if not self.memory_path.exists():
+            self._last_md5 = current_md5  # empty/missing file is a valid "built" state
             return
 
         content = self.memory_path.read_text(encoding="utf-8").strip()
         if not content:
+            self._last_md5 = current_md5  # empty file is also valid
             return
 
         doc = Document(text=content, metadata={"source": "MEMORY.md"})
@@ -90,6 +95,10 @@ class MemoryIndexer:
             self._index = VectorStoreIndex(self._nodes, storage_context=storage_context)
             self._index.storage_context.persist(persist_dir=str(self._storage_path))
             md5_file.write_text(current_md5, encoding="utf-8")
+
+        # Only record the MD5 after a successful build so failed embedding calls
+        # trigger a retry on the next access.
+        self._last_md5 = current_md5
 
     def retrieve(self, query: str, top_k: int = 3) -> list[dict]:
         """

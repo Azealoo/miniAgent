@@ -2,6 +2,7 @@
 NCBI E-utilities helper: esearch, efetch, esummary for PubMed, Gene, etc.
 Uses rate limit (no API key required; with API key can increase rate).
 """
+import threading
 import time
 import urllib.parse
 from typing import Optional, Type
@@ -12,13 +13,16 @@ from pydantic import BaseModel, Field
 _BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 _LAST_CALL = [0.0]
 _MIN_INTERVAL = 0.34  # ~3 requests per second without API key
+_rate_lock = threading.Lock()
 
 
 def _rate_limit() -> None:
-    elapsed = time.time() - _LAST_CALL[0]
-    if elapsed < _MIN_INTERVAL:
-        time.sleep(_MIN_INTERVAL - elapsed)
-    _LAST_CALL[0] = time.time()
+    """Thread-safe rate limiter — prevents NCBI 429 responses."""
+    with _rate_lock:
+        elapsed = time.time() - _LAST_CALL[0]
+        if elapsed < _MIN_INTERVAL:
+            time.sleep(_MIN_INTERVAL - elapsed)
+        _LAST_CALL[0] = time.time()
 
 
 class NcbiEutilsInput(BaseModel):
@@ -88,11 +92,19 @@ class NcbiEutilsTool(BaseTool):
         retmax: Optional[int] = 20,
         retmode: str = "json",
     ) -> str:
-        return self._run(
-            operation=operation,
-            db=db,
-            term=term,
-            id=id,
-            retmax=retmax,
-            retmode=retmode,
+        import asyncio
+        import functools
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            functools.partial(
+                self._run,
+                operation=operation,
+                db=db,
+                term=term,
+                id=id,
+                retmax=retmax,
+                retmode=retmode,
+            ),
         )

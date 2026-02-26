@@ -1,7 +1,13 @@
 import json
+import os
+import tempfile
+import threading
 from pathlib import Path
 
 _CONFIG_FILE = Path(__file__).parent / "config.json"
+# Protects all read-modify-write operations so concurrent API calls can't
+# overwrite each other's changes.
+_config_lock = threading.Lock()
 _DEFAULT: dict = {
     "rag_mode": False,
     "skills": {
@@ -30,7 +36,25 @@ def _load() -> dict:
 
 
 def _save(cfg: dict) -> None:
-    _CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+    """Write config atomically: write to a temp file then rename.
+
+    os.replace() is atomic on POSIX (Linux/macOS) — readers either see the
+    old file or the new file, never a partial write.  This prevents corruption
+    when the process is killed mid-write.
+    """
+    content = json.dumps(cfg, indent=2)
+    dir_path = _CONFIG_FILE.parent
+    fd, tmp_path = tempfile.mkstemp(dir=str(dir_path), suffix=".tmp.json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, str(_CONFIG_FILE))  # atomic on POSIX
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def get_rag_mode() -> bool:
@@ -38,9 +62,10 @@ def get_rag_mode() -> bool:
 
 
 def set_rag_mode(enabled: bool) -> None:
-    cfg = _load()
-    cfg["rag_mode"] = enabled
-    _save(cfg)
+    with _config_lock:
+        cfg = _load()
+        cfg["rag_mode"] = enabled
+        _save(cfg)
 
 
 def get_skills_extra_dirs(base_dir: Path) -> list[Path]:

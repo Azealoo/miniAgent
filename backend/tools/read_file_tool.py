@@ -2,6 +2,7 @@
 Sandboxed file reader. The agent can read files under root_dir or under
 any path in extra_allowed_roots (for skills in .agents/skills or configurable dirs).
 """
+import re
 from pathlib import Path
 from typing import Type
 
@@ -9,6 +10,23 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 _MAX_OUTPUT = 10_000
+
+# File name/extension patterns that must never be read (credential / secret files)
+_BLOCKED_FILENAMES = {".env"}
+_BLOCKED_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".crt", ".cer"}
+_BLOCKED_PATTERNS_RE = [
+    re.compile(r"^\.env(\..+)?$", re.I),  # .env, .env.local, .env.production, etc.
+    re.compile(r"^.*\.env$", re.I),        # any file ending with .env
+]
+
+
+def _is_credential_file(path: Path) -> bool:
+    name = path.name.lower()
+    if name in _BLOCKED_FILENAMES:
+        return True
+    if path.suffix.lower() in _BLOCKED_SUFFIXES:
+        return True
+    return any(p.match(path.name) for p in _BLOCKED_PATTERNS_RE)
 
 
 class ReadFileInput(BaseModel):
@@ -38,8 +56,20 @@ class ReadFileTool(BaseTool):
                 target = (root / path_str).resolve()
 
             allowed = [root] + [Path(r).resolve() for r in self.extra_allowed_roots]
-            if not any(str(target).startswith(str(a)) for a in allowed):
+            # Use relative_to() to avoid prefix attacks where a sibling directory
+            # name starts with an allowed root's name (e.g. /project/backend_evil).
+            def _is_under(t: Path, base: Path) -> bool:
+                try:
+                    t.relative_to(base)
+                    return True
+                except ValueError:
+                    return False
+
+            if not any(_is_under(target, a) for a in allowed):
                 return "[BLOCKED] Access denied — path is outside allowed directories."
+
+            if _is_credential_file(target):
+                return "[BLOCKED] Reading credential / secret files is not allowed."
 
             if not target.exists():
                 return f"[ERROR] File not found: {path}"

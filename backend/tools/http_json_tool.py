@@ -2,7 +2,10 @@
 Structured HTTP tool: GET or POST with JSON response parsing, timeout, retries, and size cap.
 Use for APIs instead of raw fetch_url when JSON is expected.
 """
+import ipaddress
+import re
 from typing import Any, Optional, Type
+from urllib.parse import urlparse
 
 import httpx
 from langchain_core.tools import BaseTool
@@ -11,6 +14,35 @@ from pydantic import BaseModel, Field
 _TIMEOUT = 30
 _MAX_BODY = 100_000
 _RETRIES = 2
+
+# SSRF: block requests to localhost and RFC-1918/link-local networks.
+_BLOCKED_HOSTS_RE = re.compile(
+    r"^(localhost|.*\.local|.*\.internal|metadata\.google\.internal|"
+    r"169\.254\.169\.254|100\.100\.100\.200)$",
+    re.IGNORECASE,
+)
+_PRIVATE_NETWORKS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+]
+
+
+def _is_blocked_url(url: str) -> bool:
+    """Return True if *url* targets localhost or a private/internal network."""
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        if _BLOCKED_HOSTS_RE.match(host):
+            return True
+        addr = ipaddress.ip_address(host)
+        return any(addr in net for net in _PRIVATE_NETWORKS)
+    except ValueError:
+        return False
 
 
 class HttpJsonInput(BaseModel):
@@ -36,6 +68,8 @@ class HttpJsonTool(BaseTool):
     ) -> str:
         if not url.strip():
             return "[ERROR] URL is required."
+        if _is_blocked_url(url):
+            return "[BLOCKED] Requests to localhost or private networks are not allowed."
         method = method.upper().strip()
         if method not in ("GET", "POST"):
             return "[ERROR] Method must be GET or POST."

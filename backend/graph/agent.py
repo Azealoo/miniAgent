@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import AsyncGenerator, Optional
 
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_deepseek import ChatDeepSeek
 
 from .memory_indexer import MemoryIndexer
@@ -59,6 +59,9 @@ class AgentManager:
                 messages.append(HumanMessage(content=content))
             elif role == "assistant":
                 messages.append(AIMessage(content=content))
+            elif role == "system":
+                # Used for injected context such as RAG-retrieved memory
+                messages.append(SystemMessage(content=content))
         return messages
 
     def _build_agent(self, rag_mode: bool = False):
@@ -101,9 +104,10 @@ class AgentManager:
                 if results:
                     yield {"type": "retrieval", "query": message, "results": results}
                     context_lines = "\n".join(f"- {r['text']}" for r in results)
-                    rag_block = f"[Retrieved Memory]\n{context_lines}"
-                    # Injected as a temporary assistant message (not persisted)
-                    history = history + [{"role": "assistant", "content": rag_block}]
+                    rag_block = f"[Retrieved Memory — use as background context only]\n{context_lines}"
+                    # Injected as a system message so the model treats this as
+                    # provided context, not as something it previously said.
+                    history = history + [{"role": "system", "content": rag_block}]
             except Exception:
                 pass  # RAG failure is non-fatal
 

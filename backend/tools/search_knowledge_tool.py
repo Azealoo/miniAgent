@@ -30,16 +30,43 @@ class SearchKnowledgeBaseTool(BaseTool):
     _index: Optional[Any] = PrivateAttr(default=None)
     _nodes: list = PrivateAttr(default_factory=list)
     _built: bool = PrivateAttr(default=False)
+    _last_mtime: float = PrivateAttr(default=0.0)
+
+    def _dir_mtime(self) -> float:
+        """Return the latest modification time of any supported file in knowledge_dir."""
+        knowledge_path = Path(self.knowledge_dir)
+        if not knowledge_path.exists():
+            return 0.0
+        latest = 0.0
+        supported = {".md", ".txt", ".pdf"}
+        for f in knowledge_path.rglob("*"):
+            if f.is_file() and f.suffix.lower() in supported:
+                try:
+                    latest = max(latest, f.stat().st_mtime)
+                except OSError:
+                    pass
+        return latest
 
     def _ensure_index(self) -> None:
-        if self._built:
+        current_mtime = self._dir_mtime()
+        # Short-circuit when nothing has changed since the last successful build.
+        # We do NOT require _index is not None here: an empty knowledge dir is a
+        # legitimate "built" state (index=None) and should not trigger a rebuild
+        # on every call just because the index is absent.
+        if self._built and current_mtime <= self._last_mtime:
             return
-        self._built = True
+
+        # Reset state — do NOT mark _built=True until build succeeds
+        self._index = None
+        self._nodes = []
 
         knowledge_path = Path(self.knowledge_dir)
         storage_path = Path(self.storage_dir) / "knowledge_index"
 
         if not knowledge_path.exists():
+            # Nothing to index — record mtime so we don't retry on every call
+            self._built = True
+            self._last_mtime = current_mtime
             return
 
         # Check for any supported files
@@ -48,6 +75,8 @@ class SearchKnowledgeBaseTool(BaseTool):
             f for f in knowledge_path.rglob("*") if f.suffix.lower() in supported_exts
         ]
         if not files:
+            self._built = True
+            self._last_mtime = current_mtime
             return
 
         try:
@@ -61,19 +90,32 @@ class SearchKnowledgeBaseTool(BaseTool):
 
             storage_path.mkdir(parents=True, exist_ok=True)
 
-            # Try loading persisted index
-            try:
-                storage_context = StorageContext.from_defaults(
-                    persist_dir=str(storage_path)
-                )
-                self._index = load_index_from_storage(storage_context)
-                # Rebuild nodes list for BM25
-                self._nodes = list(self._index.docstore.docs.values())
-                return
-            except Exception:
-                pass
+            # Only load the persisted index when mtime has NOT changed (cold start).
+            # If mtime DID change (files added/modified) we skip the stale persisted
+            # index and always do a full rebuild so new content is included.
+            if self._last_mtime == 0.0 or current_mtime <= self._last_mtime:
+                try:
+                    storage_context = StorageContext.from_defaults(
+                        persist_dir=str(storage_path)
+                    )
+                    self._index = load_index_from_storage(storage_context)
+                    # Rebuild nodes list for BM25
+                    self._nodes = list(self._index.docstore.docs.values())
+                    self._built = True
+                    self._last_mtime = current_mtime
+                    return
+                except Exception:
+                    pass
 
-            # Build fresh
+            # Fresh build (first build or mtime changed) — wipe stale persisted index
+            import shutil
+            if storage_path.exists():
+                try:
+                    shutil.rmtree(str(storage_path))
+                except Exception:
+                    pass
+            storage_path.mkdir(parents=True, exist_ok=True)
+
             reader = SimpleDirectoryReader(
                 str(knowledge_path), recursive=True
             )
@@ -86,8 +128,12 @@ class SearchKnowledgeBaseTool(BaseTool):
                 self._nodes, storage_context=storage_context
             )
             self._index.storage_context.persist(persist_dir=str(storage_path))
+            self._built = True
+            self._last_mtime = current_mtime
 
-        except Exception as exc:
+        except Exception:
+            # Build failed — leave _built=False and _last_mtime unchanged so the
+            # next call will retry instead of permanently skipping the rebuild.
             self._index = None
             self._nodes = []
 

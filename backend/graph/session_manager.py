@@ -1,8 +1,26 @@
+import asyncio
 import json
+import re
 import time
 import uuid
 from pathlib import Path
 from typing import Optional
+
+# Per-session locks prevent two concurrent requests from compressing the same
+# session simultaneously (which would double-archive messages).
+_compress_locks: dict[str, asyncio.Lock] = {}
+
+# Only allow standard UUID v4 strings produced by uuid.uuid4().
+# This blocks path traversal payloads like "../config" or "../../etc/passwd".
+_SESSION_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+def _validate_session_id(session_id: str) -> None:
+    """Raise ValueError if *session_id* does not look like a UUID v4."""
+    if not _SESSION_ID_RE.match(session_id):
+        raise ValueError(f"Invalid session_id: {session_id!r}")
 
 
 class SessionManager:
@@ -17,6 +35,7 @@ class SessionManager:
     # ------------------------------------------------------------------ #
 
     def _path(self, session_id: str) -> Path:
+        _validate_session_id(session_id)
         return self.sessions_dir / f"{session_id}.json"
 
     def _read(self, session_id: str) -> dict:
@@ -24,7 +43,12 @@ class SessionManager:
         if not path.exists():
             return self._empty(session_id)
 
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            # Corrupted or unreadable file — return a fresh session structure
+            # rather than propagating a 500 error to the user.
+            return self._empty(session_id)
 
         # v1 migration: plain list → v2 dict
         if isinstance(raw, list):
@@ -115,11 +139,13 @@ class SessionManager:
             else:
                 merged.append(dict(msg))
 
-        # Prepend compressed context
+        # Prepend compressed context as a system message.
+        # Using "assistant" here would cause API rejection: most LLMs require that
+        # the first non-system message be a user message, not an assistant message.
         if compressed:
             synthetic = {
-                "role": "assistant",
-                "content": f"[Summary of previous conversation]\n{compressed}",
+                "role": "system",
+                "content": f"[Summary of earlier conversation — treat as background context]\n{compressed}",
             }
             merged = [synthetic] + merged
 
@@ -148,6 +174,14 @@ class SessionManager:
         path = self._path(session_id)
         if path.exists():
             path.unlink()
+        # Clean up the per-session lock to prevent unbounded memory growth
+        _compress_locks.pop(session_id, None)
+
+    def get_or_create_compress_lock(self, session_id: str) -> asyncio.Lock:
+        """Return (creating if needed) the asyncio.Lock for *session_id*."""
+        if session_id not in _compress_locks:
+            _compress_locks[session_id] = asyncio.Lock()
+        return _compress_locks[session_id]
 
     def get_session_meta(self, session_id: str) -> dict:
         data = self._read(session_id)
@@ -195,7 +229,19 @@ class SessionManager:
         Uses *llm* to generate a concise summary (same logic as the manual
         /compress endpoint). Returns True if compression was performed.
         Non-fatal: any LLM failure silently skips compression.
+
+        A per-session asyncio.Lock prevents concurrent requests from compressing
+        the same session simultaneously (which would double-archive messages).
         """
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        async with self.get_or_create_compress_lock(session_id):
+            return await self._do_compress_if_needed(session_id, llm, threshold)
+
+    async def _do_compress_if_needed(
+        self, session_id: str, llm, threshold: int
+    ) -> bool:
+        """Inner compress logic — must be called with the session lock held."""
         from langchain_core.messages import HumanMessage, SystemMessage
 
         data = self._read(session_id)
@@ -218,7 +264,8 @@ class SessionManager:
                     SystemMessage(
                         content=(
                             "You are a helpful assistant that summarises conversations concisely. "
-                            "Reply in English. Keep the summary under 500 characters."
+                            "Reply in English. Keep the summary under 2000 characters. "
+                            "Preserve key facts: gene names, PMIDs, decisions, file paths, and conclusions."
                         )
                     ),
                     HumanMessage(
@@ -226,7 +273,7 @@ class SessionManager:
                     ),
                 ]
             )
-            summary = resp.content.strip()[:500]
+            summary = resp.content.strip()[:2000]
         except Exception:
             return False  # non-fatal — skip compression this turn
 

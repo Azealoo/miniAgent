@@ -47,7 +47,11 @@ class WriteFileTool(BaseTool):
                 )
 
             target = (root / path_clean).resolve()
-            if not str(target).startswith(str(root)):
+            # Use relative_to() instead of startswith() to avoid prefix attacks
+            # e.g. /project/backend_evil would falsely pass startswith(/project/backend)
+            try:
+                target.relative_to(root)
+            except ValueError:
                 return "[BLOCKED] Resolved path is outside the project directory."
 
             if len(content) > _MAX_CONTENT:
@@ -57,10 +61,22 @@ class WriteFileTool(BaseTool):
             target.write_text(content, encoding="utf-8")
 
             if path_clean == "memory/MEMORY.md":
+                # Rebuild memory vector index so RAG retrieval sees the new content.
                 try:
                     from graph.agent import agent_manager
                     if agent_manager.memory_indexer:
                         agent_manager.memory_indexer.rebuild_index()
+                except Exception:
+                    pass
+
+            if path_clean.startswith("skills/"):
+                # Rescan skills so SKILLS_SNAPSHOT.md is updated immediately and
+                # the agent sees the new skill in its system prompt on the next turn.
+                try:
+                    from tools.skills_scanner import scan_skills
+                    from graph.agent import agent_manager
+                    if agent_manager.base_dir:
+                        scan_skills(agent_manager.base_dir)
                 except Exception:
                     pass
 

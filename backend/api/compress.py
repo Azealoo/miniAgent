@@ -10,50 +10,60 @@ Compresses the oldest 50% of messages in a session:
 from fastapi import APIRouter, HTTPException
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from graph.session_manager import _validate_session_id
+
 router = APIRouter()
 
 
 @router.post("/sessions/{session_id}/compress")
 async def compress(session_id: str):
+    try:
+        _validate_session_id(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+
     from graph.agent import agent_manager
 
-    sm = agent_manager.session_manager
-    messages = sm.load_session(session_id)  # type: ignore[union-attr]
+    sm = agent_manager.session_manager  # type: ignore[union-attr]
 
-    if len(messages) < 4:
-        raise HTTPException(400, "Need at least 4 messages to compress.")
+    # Hold the per-session lock for the full compress operation so that
+    # simultaneous manual compress calls and auto-compress cannot race.
+    async with sm.get_or_create_compress_lock(session_id):
+        messages = sm.load_session(session_id)
 
-    n = max(4, len(messages) // 2)
-    to_compress = messages[:n]
+        if len(messages) < 4:
+            raise HTTPException(400, "Need at least 4 messages to compress.")
 
-    # Format conversation for summarisation
-    conversation = "\n".join(
-        f"{m['role'].upper()}: {m.get('content', '')}" for m in to_compress
-    )
+        n = max(4, len(messages) // 2)
+        to_compress = messages[:n]
 
-    try:
-        # Use a lower-temperature variant for consistent summaries
-        summary_llm = agent_manager.llm.bind(temperature=0.3)  # type: ignore[union-attr]
-        resp = await summary_llm.ainvoke(
-            [
-                SystemMessage(
-                    content=(
-                        "You are a helpful assistant that summarises conversations concisely. "
-                        "Reply in English. Keep the summary under 500 characters."
-                    )
-                ),
-                HumanMessage(
-                    content=f"Please summarise the following conversation:\n\n{conversation}"
-                ),
-            ]
+        # Format conversation for summarisation
+        conversation = "\n".join(
+            f"{m['role'].upper()}: {m.get('content', '')}" for m in to_compress
         )
-        summary = resp.content.strip()[:500]
-    except Exception as exc:
-        raise HTTPException(500, f"Summary generation failed: {exc}")
 
-    archived_count, remaining_count = sm.compress_history(  # type: ignore[union-attr]
-        session_id, summary, n
-    )
+        try:
+            # Use a lower-temperature variant for consistent summaries
+            summary_llm = agent_manager.llm.bind(temperature=0.3)  # type: ignore[union-attr]
+            resp = await summary_llm.ainvoke(
+                [
+                    SystemMessage(
+                        content=(
+                            "You are a helpful assistant that summarises conversations concisely. "
+                            "Reply in English. Keep the summary under 2000 characters. "
+                            "Preserve key facts: gene names, PMIDs, decisions, file paths, and conclusions."
+                        )
+                    ),
+                    HumanMessage(
+                        content=f"Please summarise the following conversation:\n\n{conversation}"
+                    ),
+                ]
+            )
+            summary = resp.content.strip()[:2000]
+        except Exception as exc:
+            raise HTTPException(500, f"Summary generation failed: {exc}")
+
+        archived_count, remaining_count = sm.compress_history(session_id, summary, n)
 
     return {
         "session_id": session_id,

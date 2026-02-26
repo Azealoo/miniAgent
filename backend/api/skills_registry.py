@@ -86,13 +86,14 @@ class SkillEntryUpdate(BaseModel):
 @router.put("/skills/registry/{skill_name}")
 def update_skill_entry(skill_name: str, body: SkillEntryUpdate):
     import config as cfg
-    data = cfg._load()
-    if "skills" not in data:
-        data["skills"] = {"extra_dirs": [], "entries": {}}
-    if "entries" not in data["skills"]:
-        data["skills"]["entries"] = {}
-    data["skills"]["entries"][skill_name] = {"enabled": body.enabled}
-    cfg._save(data)
+    with cfg._config_lock:
+        data = cfg._load()
+        if "skills" not in data:
+            data["skills"] = {"extra_dirs": [], "entries": {}}
+        if "entries" not in data["skills"]:
+            data["skills"]["entries"] = {}
+        data["skills"]["entries"][skill_name] = {"enabled": body.enabled}
+        cfg._save(data)
     # Rescan so SKILLS_SNAPSHOT.md reflects the change
     from tools.skills_scanner import scan_skills
     scan_skills(_base_dir())
