@@ -121,15 +121,16 @@ def save_file(body: SaveRequest):
 @router.get("/skills")
 def list_skills():
     base = _base_dir()
-    skills_dir = base / "skills"
+    from tools.skills_scanner import collect_skill_entries
+
     skills = []
-    if skills_dir.exists():
-        for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
-            relative = str(skill_md.relative_to(base))
-            skills.append(
-                {
-                    "name": skill_md.parent.name,
-                    "path": relative,
-                }
-            )
+    for entry in collect_skill_entries(base, respect_enabled=False):
+        skills.append(
+            {
+                "name": entry["name"],
+                "path": entry["location"].removeprefix("./"),
+                "category": entry.get("category", ""),
+                "stage": entry.get("stage", ""),
+            }
+        )
     return skills

@@ -6,6 +6,13 @@ version: 1.0
 requires_tools: [search_knowledge_base, ncbi_eutils, uniprot_api, fetch_url, python_repl, write_file]
 requires_network: true
 user_invocable: true
+tags: [perturbation, hypothesis, target-discovery, perturb-seq]
+aliases: [perturbation_ideation]
+species: any
+modality: perturb_seq
+stage: design
+stability: evolving
+safety_level: medium
 ---
 
 # Generate Perturbation Hypothesis
@@ -85,3 +92,8 @@ If user wants to save, use `write_file` to `knowledge/hypotheses/{cell_type}_{go
 - No literature found: Report "No PubMed results for query; hypotheses based on local knowledge only."
 - Unknown cell type: Proceed with general knowledge; flag uncertainty.
 - Too broad a goal: Ask user to narrow the phenotype (e.g. "induce apoptosis via intrinsic pathway").
+
+## Examples
+- "Suggest perturbation targets to increase interferon response in melanoma cells."
+- "Generate Perturb-seq hypotheses for rejuvenating exhausted CD8 T cells."
+- "What genes should we perturb in K562 cells to reduce MYC-driven proliferation?"

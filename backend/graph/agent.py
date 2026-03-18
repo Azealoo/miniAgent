@@ -123,9 +123,14 @@ class AgentManager:
         # ── Stream events ──────────────────────────────────────────────
         after_tool = False
 
+        # Biology workflows (PubMed, UniProt, multi-step reasoning) often need
+        # many tool calls; default recursion_limit=25 can be hit. Raise to 75.
+        run_config = {"recursion_limit": 75}
         try:
             async for event in agent.astream_events(
-                {"messages": lc_messages}, version="v2"
+                {"messages": lc_messages},
+                version="v2",
+                config=run_config,
             ):
                 kind = event["event"]
 

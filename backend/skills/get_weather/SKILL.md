@@ -1,13 +1,32 @@
 ---
 name: get_weather
 description: Get the current weather for a specified city using wttr.in
+category: general/utilities
+version: 1.0
+requires_tools: [fetch_url]
+requires_network: true
+user_invocable: true
+tags: [weather, city, forecast]
+aliases: [weather_lookup]
+stage: utilities
+stability: stable
+safety_level: low
 ---
 
-# Skill: Get Weather
+# Get Weather
 
 ## Purpose
 
 Retrieve real-time weather information for any city and present it clearly to the user.
+
+## When to use
+
+Use this skill when the user asks for the current weather, a short forecast, or basic weather conditions for a named city.
+
+## Required inputs
+
+- **city_name**: The city to look up.
+- **detail_level** (optional): `brief` for a compact status line, `detailed` for JSON-backed detail.
 
 ## Steps
 
@@ -31,14 +50,26 @@ Retrieve real-time weather information for any city and present it clearly to th
    - Wind speed and direction
    - Humidity (if available)
 
-## Example
+## Output format
+
+- **City**
+- **Current condition**
+- **Temperature**
+- **Wind**
+- **Humidity** (if available)
+
+## Failure modes
+
+- Missing city: ask the user to specify a city.
+- City not found: try a common English spelling or ask the user to clarify.
+- Network error: say the weather service could not be reached and suggest retrying later.
+
+## Examples
 
 User: "What's the weather in Beijing?"
 → `fetch_url("https://wttr.in/Beijing?format=3")`
 → Parse and present: "Beijing: ⛅ Partly cloudy, 22°C, Wind: 15 km/h NE"
 
-## Notes
-
-- wttr.in supports most major cities worldwide.
-- If the city is not found, try an alternative spelling or ask the user to clarify.
-- For privacy, do not use the user's IP-based location; always ask for a city name.
+User: "Give me a detailed weather report for New York."
+→ `fetch_url("https://wttr.in/New+York?format=j1")`
+→ Parse and present the current conditions in a compact bullet list.

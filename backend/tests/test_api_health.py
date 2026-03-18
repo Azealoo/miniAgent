@@ -36,10 +36,12 @@ def client(tmp_path):
         from api.sessions import router as sessions_router
         from api.files import router as files_router
         from api.config_api import router as config_router
+        from api.skills_registry import router as skills_registry_router
 
         test_app.include_router(sessions_router, prefix="/api")
         test_app.include_router(files_router, prefix="/api")
         test_app.include_router(config_router, prefix="/api")
+        test_app.include_router(skills_registry_router, prefix="/api")
 
         @test_app.get("/")
         def health():
@@ -56,6 +58,25 @@ def client(tmp_path):
         (tmp_path / "memory" / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
         (tmp_path / "SKILLS_SNAPSHOT.md").write_text("<available_skills/>", encoding="utf-8")
         (tmp_path / "skills").mkdir(exist_ok=True)
+        (tmp_path / "skills" / "demo").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "skills" / "demo" / "SKILL.md").write_text(
+            (
+                "---\nname: demo\ndescription: Demo skill\ncategory: bio/test\n"
+                "stage: analysis\ntags: [demo]\naliases: [demo_alias]\nversion: 1.0\n"
+                "requires_tools: [read_file]\nrequires_network: false\nuser_invocable: true\n"
+                "---\n# Demo\n## Steps\n1. Do stuff\n"
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "skills" / "bio" / "nested" / "deep_skill").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "skills" / "bio" / "nested" / "deep_skill" / "SKILL.md").write_text(
+            (
+                "---\nname: deep_skill\ndescription: Nested skill\ncategory: bio/test\n"
+                "stage: qc\nversion: 1.0\nrequires_tools: [read_file]\n"
+                "requires_network: false\nuser_invocable: true\n---\n# Nested\n## Steps\n1. Do stuff\n"
+            ),
+            encoding="utf-8",
+        )
 
         yield TestClient(test_app)
 
@@ -140,6 +161,25 @@ class TestFilesEndpoints:
         resp = client.get("/api/skills")
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
+        names = {item["name"] for item in resp.json()}
+        assert "demo" in names
+        assert "deep_skill" in names
+
+    def test_list_skills_includes_metadata(self, client):
+        resp = client.get("/api/skills")
+        demo = next(item for item in resp.json() if item["name"] == "demo")
+        assert demo["category"] == "bio/test"
+        assert demo["stage"] == "analysis"
+
+    def test_skills_registry_exposes_extended_metadata(self, client):
+        resp = client.get("/api/skills/registry")
+        assert resp.status_code == 200
+        demo = next(item for item in resp.json() if item["name"] == "demo")
+        assert demo["category"] == "bio/test"
+        assert demo["stage"] == "analysis"
+        assert demo["tags"] == ["demo"]
+        assert demo["aliases"] == ["demo_alias"]
+        assert demo["enabled"] is True
 
 
 class TestConfigEndpoints:

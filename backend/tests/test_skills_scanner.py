@@ -8,7 +8,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tools.skills_scanner import scan_skills, _parse_frontmatter
+from tools.skills_scanner import (
+    _parse_frontmatter,
+    collect_skill_entries,
+    scan_skills,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -50,11 +54,15 @@ class TestParseFrontmatter:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestScanSkills:
-    def _make_skill(self, base: Path, name: str, description: str) -> None:
-        skill_dir = base / "skills" / name
+    def _make_skill(self, base: Path, name: str, description: str, nested: str = "") -> None:
+        skill_dir = base / "skills" / nested / name if nested else base / "skills" / name
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: {description}\n---\n## Steps\n1. Do stuff",
+            (
+                f"---\nname: {name}\ndescription: {description}\ncategory: bio/test\n"
+                "tags: [alpha, beta]\naliases: [alias_one]\nstage: analysis\n"
+                "---\n## Steps\n1. Do stuff"
+            ),
             encoding="utf-8",
         )
 
@@ -80,6 +88,15 @@ class TestScanSkills:
         scan_skills(tmp_path)
         content = (tmp_path / "SKILLS_SNAPSHOT.md").read_text()
         assert "skills/gamma/SKILL.md" in content
+
+    def test_snapshot_contains_extended_metadata(self, tmp_path):
+        self._make_skill(tmp_path, "meta", "Metadata skill")
+        scan_skills(tmp_path)
+        content = (tmp_path / "SKILLS_SNAPSHOT.md").read_text()
+        assert "<category>bio/test</category>" in content
+        assert "<stage>analysis</stage>" in content
+        assert "<tags>alpha, beta</tags>" in content
+        assert "<aliases>alias_one</aliases>" in content
 
     def test_snapshot_is_xml_format(self, tmp_path):
         self._make_skill(tmp_path, "delta", "Delta")
@@ -112,6 +129,13 @@ class TestScanSkills:
         scan_skills(tmp_path)
         content = (tmp_path / "SKILLS_SNAPSHOT.md").read_text()
         assert "unnamed" in content
+
+    def test_collect_skill_entries_supports_nested_directories(self, tmp_path):
+        self._make_skill(tmp_path, "nested_skill", "Nested skill", nested="bio/scRNA")
+        entries = collect_skill_entries(tmp_path, respect_enabled=False)
+        assert len(entries) == 1
+        assert entries[0]["name"] == "nested_skill"
+        assert entries[0]["location"].endswith("skills/bio/scRNA/nested_skill/SKILL.md")
 
     def test_real_skills_directory(self):
         """Smoke-test against the real skills/ directory."""

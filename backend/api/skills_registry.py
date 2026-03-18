@@ -4,7 +4,6 @@ Skills registry API: list, enable/disable, and get details of skills.
 GET  /api/skills/registry         — list all skills with metadata + enabled status
 PUT  /api/skills/registry/{name}  — enable or disable a skill by name
 """
-import json
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -30,44 +29,15 @@ def _save_config(data: dict) -> None:
 
 
 def _scan_skills_meta(base_dir: Path) -> list[dict]:
-    """Collect all skill frontmatter from skills directory."""
-    import yaml
+    """Collect all skill frontmatter from the same sources as skills_scanner."""
+    from tools.skills_scanner import collect_skill_entries
 
-    skills: list[dict] = []
-    skills_dir = base_dir / "skills"
-    if not skills_dir.exists():
-        return skills
-
-    for skill_md in sorted(skills_dir.rglob("SKILL.md")):
-        try:
-            content = skill_md.read_text(encoding="utf-8")
-            parts = content.split("---", 2)
-            fm = {}
-            if len(parts) >= 3:
-                try:
-                    fm = yaml.safe_load(parts[1]) or {}
-                except Exception:
-                    pass
-            name = fm.get("name", skill_md.parent.name)
-            skills.append({
-                "name": name,
-                "description": fm.get("description", ""),
-                "category": fm.get("category", ""),
-                "version": fm.get("version", ""),
-                "requires_tools": fm.get("requires_tools", []),
-                "requires_network": fm.get("requires_network", False),
-                "user_invocable": fm.get("user_invocable", True),
-                "location": str(skill_md.relative_to(base_dir)),
-            })
-        except Exception:
-            continue
-    return skills
+    return collect_skill_entries(base_dir, respect_enabled=False)
 
 
 @router.get("/skills/registry")
 def list_registry():
     base = _base_dir()
-    import config as cfg
     skills_meta = _scan_skills_meta(base)
     cfg_data = _load_config()
     entries = cfg_data.get("skills", {}).get("entries", {})
@@ -75,7 +45,13 @@ def list_registry():
     for s in skills_meta:
         name = s["name"]
         enabled = bool(entries.get(name, {}).get("enabled", True)) if name in entries else True
-        result.append({**s, "enabled": enabled})
+        result.append(
+            {
+                **s,
+                "location": s["location"].removeprefix("./"),
+                "enabled": enabled,
+            }
+        )
     return result
 
 
