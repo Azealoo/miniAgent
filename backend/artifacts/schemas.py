@@ -1,0 +1,702 @@
+"""Structured artifact schemas for the BioAPEX core schema pack v1."""
+
+from __future__ import annotations
+
+import json
+import re
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .naming import is_valid_run_id
+
+SCHEMA_PACK_VERSION = "1.0.0"
+
+ArtifactFormat = Literal["json", "yaml"]
+
+ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
+    "dataset_manifest": "yaml",
+    "workflow_run": "json",
+    "evidence_card": "yaml",
+    "compliance_report": "json",
+    "protocol_run": "yaml",
+    "qa_report": "json",
+}
+
+_NORMALIZED_IDENTIFIER_RE = re.compile(r"^[a-z0-9]+(?:[._:-][a-z0-9]+)*$")
+_NORMALIZE_IDENTIFIER_CHARS_RE = re.compile(r"[^a-z0-9._:-]+")
+
+RiskCategory = Literal[
+    "none",
+    "biosafety",
+    "human_subjects",
+    "privacy",
+    "dangerous_procedure",
+    "export_control",
+]
+WorkflowLifecycleStatus = Literal[
+    "created",
+    "preflight_checked",
+    "running",
+    "waiting",
+    "failed",
+    "completed",
+    "blocked",
+]
+WorkflowQCStatus = Literal["pending", "passed", "warning", "failed", "not_applicable"]
+ConfidenceLevel = Literal["low", "medium", "high"]
+ComplianceDisposition = Literal["allow", "allow_with_warning", "require_approval", "block"]
+ComplianceBlockStatus = Literal["not_blocked", "blocked"]
+ComplianceSeverity = Literal["low", "medium", "high", "critical"]
+ProtocolCompletionState = Literal["not_started", "in_progress", "completed", "blocked", "aborted"]
+DeviationSeverity = Literal["minor", "major", "critical"]
+QAOverallStatus = Literal["passed", "warning", "failed", "blocked"]
+QACheckSeverity = Literal["warning", "error", "critical"]
+PrivacyClassification = Literal["public", "internal", "controlled", "restricted"]
+AssayType = Literal[
+    "bulk_rna_seq",
+    "scrna_seq",
+    "atac_seq",
+    "perturb_seq",
+    "crispr_screen",
+    "proteomics",
+    "metabolomics",
+    "custom",
+]
+EvidenceSourceDatabase = Literal["pubmed", "pmc", "uniprot", "ensembl", "doi", "custom"]
+
+
+def _require_non_empty(value: str, *, field_name: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"{field_name} must not be empty.")
+    return cleaned
+
+
+def normalize_identifier(value: str) -> str:
+    candidate = _require_non_empty(value, field_name="identifier").lower()
+    candidate = candidate.replace("/", "-").replace(" ", "-")
+    candidate = _NORMALIZE_IDENTIFIER_CHARS_RE.sub("-", candidate)
+    candidate = re.sub(r"-{2,}", "-", candidate).strip("._:-")
+    if not candidate or not _NORMALIZED_IDENTIFIER_RE.fullmatch(candidate):
+        raise ValueError(
+            "Identifiers must use lowercase letters, digits, and separators . _ : - only."
+        )
+    return candidate
+
+
+def _require_normalized_identifier(value: str, *, field_name: str) -> str:
+    cleaned = _require_non_empty(value, field_name=field_name)
+    normalized = normalize_identifier(cleaned)
+    if cleaned != normalized:
+        raise ValueError(f"{field_name} must already be normalized as {normalized!r}.")
+    return normalized
+
+
+def _require_prefixed_identifier(value: str, *, field_name: str) -> str:
+    cleaned = _require_non_empty(value, field_name=field_name)
+    prefix, separator, suffix = cleaned.partition(":")
+    if separator != ":":
+        raise ValueError(f"{field_name} must use the format '<source>:<identifier>'.")
+    normalized_prefix = normalize_identifier(prefix)
+    normalized_suffix = suffix.strip()
+    if not normalized_suffix:
+        raise ValueError(f"{field_name} suffix must not be empty.")
+    if any(ch.isspace() for ch in normalized_suffix):
+        raise ValueError(f"{field_name} must not contain whitespace.")
+    normalized = f"{normalized_prefix}:{normalized_suffix}"
+    if cleaned != normalized:
+        raise ValueError(f"{field_name} must already be normalized as {normalized!r}.")
+    return normalized
+
+
+def _normalize_relative_path(value: str | PurePosixPath) -> str:
+    raw = str(value).strip()
+    if not raw:
+        raise ValueError("Path must not be empty.")
+    if "\\" in raw:
+        raise ValueError("Paths must use forward slashes.")
+
+    candidate = PurePosixPath(raw)
+    if candidate.is_absolute():
+        raise ValueError("Paths must be relative, not absolute.")
+    if candidate.parts == (".",):
+        raise ValueError("Paths must not resolve to '.'.")
+    if any(part == ".." for part in candidate.parts):
+        raise ValueError("Paths must not contain '..'.")
+    return str(candidate)
+
+
+def _normalize_timestamp(value: datetime, *, field_name: str) -> datetime:
+    if value.tzinfo is None:
+        raise ValueError(f"{field_name} must include timezone information.")
+    return value.astimezone(timezone.utc).replace(microsecond=0)
+
+
+class ArtifactReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_type: str
+    path: str
+    id: str | None = None
+    run_id: str | None = None
+
+    @field_validator("artifact_type")
+    @classmethod
+    def _validate_artifact_type(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="artifact_type")
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: str) -> str:
+        return _normalize_relative_path(value)
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_normalized_identifier(value, field_name="id")
+
+    @field_validator("run_id")
+    @classmethod
+    def _validate_run_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not is_valid_run_id(value):
+            raise ValueError(f"Invalid run_id format: {value!r}")
+        return value
+
+
+class ArtifactDocument(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = Field(default=SCHEMA_PACK_VERSION)
+    artifact_type: str
+    id: str
+    run_id: str
+    created_at: datetime
+    source_workflow: str | None = None
+    source_tool: str | None = None
+    source_agent: str | None = None
+    related_artifacts: list[ArtifactReference]
+
+    @field_validator("schema_version")
+    @classmethod
+    def _validate_schema_version(cls, value: str) -> str:
+        if value != SCHEMA_PACK_VERSION:
+            raise ValueError(f"Unsupported schema version {value!r}; expected {SCHEMA_PACK_VERSION!r}.")
+        return value
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="id")
+
+    @field_validator("run_id")
+    @classmethod
+    def _validate_run_id(cls, value: str) -> str:
+        if not is_valid_run_id(value):
+            raise ValueError(f"Invalid run_id format: {value!r}")
+        return value
+
+    @field_validator("created_at")
+    @classmethod
+    def _validate_created_at(cls, value: datetime) -> datetime:
+        return _normalize_timestamp(value, field_name="created_at")
+
+    @model_validator(mode="after")
+    def _validate_source_context(self) -> "ArtifactDocument":
+        if not any((self.source_workflow, self.source_tool)):
+            raise ValueError(
+                "Artifacts must include at least one of source_workflow or source_tool."
+            )
+        return self
+
+
+class DatasetDesign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    study_name: str
+    experiment_type: str
+    condition_summary: str
+    replicate_structure: str | None = None
+    timepoints: list[str] = Field(default_factory=list)
+    factors: list[str] = Field(default_factory=list)
+    notes: str | None = None
+
+    @field_validator("study_name", "condition_summary")
+    @classmethod
+    def _validate_text_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @field_validator("experiment_type")
+    @classmethod
+    def _validate_experiment_type(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="experiment_type")
+
+
+class DatasetManifest(ArtifactDocument):
+    artifact_type: Literal["dataset_manifest"] = "dataset_manifest"
+    assay_type: AssayType
+    organism: str
+    reference_build: str
+    privacy_classification: PrivacyClassification
+    design: DatasetDesign
+    source_files: list[str] = Field(min_length=1)
+
+    @field_validator("organism", "reference_build")
+    @classmethod
+    def _validate_normalized_fields(cls, value: str, info) -> str:
+        return _require_normalized_identifier(value, field_name=info.field_name)
+
+    @field_validator("source_files")
+    @classmethod
+    def _validate_source_files(cls, value: list[str]) -> list[str]:
+        return [_normalize_relative_path(item) for item in value]
+
+
+class WorkflowIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    slug: str
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="name")
+
+    @field_validator("slug")
+    @classmethod
+    def _validate_slug(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="slug")
+
+
+class WorkflowEnvironment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    conda_env: str | None = None
+    container_image: str | None = None
+    platform: str | None = None
+    python_version: str | None = None
+    hostname: str | None = None
+
+
+class WorkflowStepRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    status: WorkflowLifecycleStatus
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    inputs_resolved: list[ArtifactReference] = Field(default_factory=list)
+    outputs_produced: list[ArtifactReference] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="id")
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="name")
+
+    @field_validator("start_time", "end_time")
+    @classmethod
+    def _validate_times(cls, value: datetime | None, info) -> datetime | None:
+        if value is None:
+            return None
+        return _normalize_timestamp(value, field_name=info.field_name)
+
+    @model_validator(mode="after")
+    def _validate_time_order(self) -> "WorkflowStepRecord":
+        if self.start_time and self.end_time and self.end_time < self.start_time:
+            raise ValueError("Workflow step end_time must be on or after start_time.")
+        return self
+
+
+class WorkflowRun(ArtifactDocument):
+    artifact_type: Literal["workflow_run"] = "workflow_run"
+    workflow: WorkflowIdentity
+    lifecycle_status: WorkflowLifecycleStatus
+    qc_status: WorkflowQCStatus
+    engine: str
+    parameters: dict[str, Any]
+    environment: WorkflowEnvironment
+    inputs: list[ArtifactReference]
+    outputs: list[ArtifactReference]
+    steps: list[WorkflowStepRecord] = Field(default_factory=list)
+    provenance_exports: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+    @field_validator("engine")
+    @classmethod
+    def _validate_engine(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="engine")
+
+    @field_validator("provenance_exports")
+    @classmethod
+    def _validate_provenance_exports(cls, value: list[str]) -> list[str]:
+        return [_normalize_relative_path(item) for item in value]
+
+
+class ExtractedClaim(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    statement: str
+    confidence: ConfidenceLevel
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="id")
+
+    @field_validator("statement")
+    @classmethod
+    def _validate_statement(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="statement")
+
+
+class EntityTag(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    entity_type: str
+    identifier: str | None = None
+
+    @field_validator("label")
+    @classmethod
+    def _validate_label(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="label")
+
+    @field_validator("entity_type")
+    @classmethod
+    def _validate_entity_type(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="entity_type")
+
+
+class EvidenceCard(ArtifactDocument):
+    artifact_type: Literal["evidence_card"] = "evidence_card"
+    source_database: EvidenceSourceDatabase
+    stable_identifier: str
+    title: str
+    study_type: str | None = None
+    claims: list[ExtractedClaim] = Field(min_length=1)
+    confidence: ConfidenceLevel
+    limitations: list[str] = Field(min_length=1)
+    entity_tags: list[EntityTag] = Field(default_factory=list)
+    cached_raw_payload_path: str
+
+    @field_validator("stable_identifier")
+    @classmethod
+    def _validate_stable_identifier(cls, value: str) -> str:
+        return _require_prefixed_identifier(value, field_name="stable_identifier")
+
+    @field_validator("title")
+    @classmethod
+    def _validate_title(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="title")
+
+    @field_validator("study_type")
+    @classmethod
+    def _validate_study_type(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_normalized_identifier(value, field_name="study_type")
+
+    @field_validator("cached_raw_payload_path")
+    @classmethod
+    def _validate_cached_raw_payload_path(cls, value: str) -> str:
+        return _normalize_relative_path(value)
+
+
+class ComplianceRuleHit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    category: RiskCategory
+    trigger_text: str
+    severity: ComplianceSeverity
+    recommended_action: ComplianceDisposition
+
+    @field_validator("rule_id")
+    @classmethod
+    def _validate_rule_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="rule_id")
+
+    @field_validator("trigger_text")
+    @classmethod
+    def _validate_trigger_text(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="trigger_text")
+
+
+class ComplianceReport(ArtifactDocument):
+    artifact_type: Literal["compliance_report"] = "compliance_report"
+    risk_category: RiskCategory
+    triggered_rules: list[ComplianceRuleHit]
+    block_status: ComplianceBlockStatus
+    human_approval_required: bool
+    final_disposition: ComplianceDisposition
+
+    @model_validator(mode="after")
+    def _validate_consistency(self) -> "ComplianceReport":
+        if self.risk_category == "none" and self.triggered_rules:
+            raise ValueError("risk_category 'none' cannot include triggered_rules.")
+        if self.risk_category != "none" and not self.triggered_rules:
+            raise ValueError("Triggered rules are required when risk_category is not 'none'.")
+        if self.final_disposition == "block" and self.block_status != "blocked":
+            raise ValueError("Blocked reports must set block_status to 'blocked'.")
+        if self.final_disposition != "block" and self.block_status == "blocked":
+            raise ValueError("Only blocked reports may use block_status 'blocked'.")
+        if self.final_disposition == "require_approval" and not self.human_approval_required:
+            raise ValueError("require_approval reports must set human_approval_required to true.")
+        return self
+
+
+class MaterialRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    quantity: str | None = None
+    unit: str | None = None
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="id")
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="name")
+
+
+class ReagentLotRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reagent_name: str
+    lot_id: str
+    vendor: str | None = None
+    expiry_date: str | None = None
+
+    @field_validator("reagent_name", "lot_id")
+    @classmethod
+    def _validate_required_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class EquipmentRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    asset_id: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="name")
+
+
+class DeviationRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    step_id: str
+    severity: DeviationSeverity
+    description: str
+    logged_at: datetime
+
+    @field_validator("step_id")
+    @classmethod
+    def _validate_step_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="step_id")
+
+    @field_validator("description")
+    @classmethod
+    def _validate_description(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="description")
+
+    @field_validator("logged_at")
+    @classmethod
+    def _validate_logged_at(cls, value: datetime) -> datetime:
+        return _normalize_timestamp(value, field_name="logged_at")
+
+
+class ProtocolRun(ArtifactDocument):
+    artifact_type: Literal["protocol_run"] = "protocol_run"
+    protocol_source: ArtifactReference
+    operator: str
+    sample_ids: list[str] = Field(min_length=1)
+    materials: list[MaterialRecord] = Field(default_factory=list)
+    reagent_lots: list[ReagentLotRecord] = Field(default_factory=list)
+    equipment: list[EquipmentRecord] = Field(default_factory=list)
+    started_at: datetime
+    completed_at: datetime | None = None
+    completion_state: ProtocolCompletionState
+    deviations: list[DeviationRecord] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+
+    @field_validator("operator")
+    @classmethod
+    def _validate_operator(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="operator")
+
+    @field_validator("sample_ids")
+    @classmethod
+    def _validate_sample_ids(cls, value: list[str]) -> list[str]:
+        return [_require_normalized_identifier(item, field_name="sample_id") for item in value]
+
+    @field_validator("started_at", "completed_at")
+    @classmethod
+    def _validate_times(cls, value: datetime | None, info) -> datetime | None:
+        if value is None:
+            return None
+        return _normalize_timestamp(value, field_name=info.field_name)
+
+    @model_validator(mode="after")
+    def _validate_completion_state(self) -> "ProtocolRun":
+        if self.completion_state == "completed" and self.completed_at is None:
+            raise ValueError("Completed protocol runs must include completed_at.")
+        if self.completed_at and self.completed_at < self.started_at:
+            raise ValueError("completed_at must be on or after started_at.")
+        return self
+
+
+class QACheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    description: str
+    severity: QACheckSeverity
+    artifact_type: str | None = None
+    remediation: str | None = None
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="id")
+
+    @field_validator("description")
+    @classmethod
+    def _validate_description(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="description")
+
+    @field_validator("artifact_type")
+    @classmethod
+    def _validate_artifact_type(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_normalized_identifier(value, field_name="artifact_type")
+
+
+class MissingArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_type: str
+    expected_path: str | None = None
+    rationale: str | None = None
+
+    @field_validator("artifact_type")
+    @classmethod
+    def _validate_artifact_type(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="artifact_type")
+
+    @field_validator("expected_path")
+    @classmethod
+    def _validate_expected_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_relative_path(value)
+
+    @model_validator(mode="after")
+    def _validate_pointer(self) -> "MissingArtifact":
+        if self.expected_path is None and not self.rationale:
+            raise ValueError("Missing artifacts must include expected_path or rationale.")
+        return self
+
+
+class QAReport(ArtifactDocument):
+    artifact_type: Literal["qa_report"] = "qa_report"
+    overall_status: QAOverallStatus
+    failed_checks: list[QACheck] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    missing_artifacts: list[MissingArtifact] = Field(default_factory=list)
+    recommended_remediation: list[str] = Field(default_factory=list)
+    checklist_artifacts: list[ArtifactReference] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_failure_context(self) -> "QAReport":
+        if self.overall_status in {"failed", "blocked"} and not (
+            self.failed_checks or self.missing_artifacts
+        ):
+            raise ValueError("Failed or blocked QA reports must include failed_checks or missing_artifacts.")
+        return self
+
+
+ArtifactModel = DatasetManifest | WorkflowRun | EvidenceCard | ComplianceReport | ProtocolRun | QAReport
+
+_ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
+    "dataset_manifest": DatasetManifest,
+    "workflow_run": WorkflowRun,
+    "evidence_card": EvidenceCard,
+    "compliance_report": ComplianceReport,
+    "protocol_run": ProtocolRun,
+    "qa_report": QAReport,
+}
+
+
+def artifact_model_for_type(artifact_type: str) -> type[ArtifactDocument]:
+    normalized = _require_normalized_identifier(artifact_type, field_name="artifact_type")
+    try:
+        return _ARTIFACT_MODELS[normalized]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported artifact type: {artifact_type!r}") from exc
+
+
+def schema_format_for_artifact(artifact_type: str) -> ArtifactFormat:
+    normalized = _require_normalized_identifier(artifact_type, field_name="artifact_type")
+    try:
+        return ARTIFACT_FORMATS[normalized]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported artifact type: {artifact_type!r}") from exc
+
+
+def validate_artifact_payload(payload: dict[str, Any]) -> ArtifactModel:
+    raw_artifact_type = payload.get("artifact_type")
+    if not isinstance(raw_artifact_type, str):
+        raise ValueError("Artifact payload must include string field 'artifact_type'.")
+    model = artifact_model_for_type(raw_artifact_type)
+    return model.model_validate(payload)
+
+
+def load_artifact_document(path: str | Path) -> ArtifactModel:
+    artifact_path = Path(path)
+    raw_text = artifact_path.read_text(encoding="utf-8")
+    if artifact_path.suffix == ".json":
+        payload = json.loads(raw_text)
+        actual_format: ArtifactFormat = "json"
+    elif artifact_path.suffix in {".yaml", ".yml"}:
+        payload = yaml.safe_load(raw_text)
+        actual_format = "yaml"
+    else:
+        raise ValueError(f"Unsupported artifact file extension: {artifact_path.suffix!r}")
+
+    if not isinstance(payload, dict):
+        raise ValueError("Artifact documents must deserialize to a mapping.")
+
+    artifact = validate_artifact_payload(payload)
+    expected_format = schema_format_for_artifact(artifact.artifact_type)
+    if actual_format != expected_format:
+        raise ValueError(
+            f"{artifact.artifact_type} expects {expected_format!r} documents, got {actual_format!r}."
+        )
+    return artifact

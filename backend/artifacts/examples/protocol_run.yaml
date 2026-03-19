@@ -1,0 +1,49 @@
+schema_version: "1.0.0"
+artifact_type: protocol_run
+id: protocol-run-rna-extraction-20260318
+run_id: run-20260318T193000Z-deadbeef
+created_at: 2026-03-18T19:30:00Z
+source_workflow: protocol-executor
+source_agent: protocol-executor
+related_artifacts:
+  - artifact_type: compliance_report
+    path: artifacts/rna-extraction/2026-03-18/run-20260318T193000Z-deadbeef/compliance_report.json
+    id: compliance-rna-extraction-20260318
+    run_id: run-20260318T193000Z-deadbeef
+protocol_source:
+  artifact_type: protocol_document
+  path: backend/knowledge/protocols/rna_extraction.md
+  id: rna-extraction-standard-v1
+operator: wetlab-operator-01
+sample_ids:
+  - sample-001
+  - sample-002
+materials:
+  - id: lysis-buffer
+    name: Lysis Buffer
+    quantity: "10"
+    unit: mL
+  - id: collection-tube
+    name: 2 mL Collection Tube
+    quantity: "4"
+    unit: count
+reagent_lots:
+  - reagent_name: Proteinase K
+    lot_id: PK-24-103A
+    vendor: Sigma
+    expiry_date: "2026-12-31"
+equipment:
+  - name: Benchtop Centrifuge
+    asset_id: centrifuge-07
+  - name: Thermal Mixer
+    asset_id: thermomixer-02
+started_at: 2026-03-18T19:31:00Z
+completed_at: 2026-03-18T20:05:00Z
+completion_state: completed
+deviations:
+  - step_id: wash-step
+    severity: minor
+    description: Extended wash step by 2 minutes to clarify pellet carryover.
+    logged_at: 2026-03-18T19:48:00Z
+assumptions:
+  - Sample accession labels were reconciled against the manifest before extraction started.

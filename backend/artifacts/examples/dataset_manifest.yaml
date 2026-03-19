@@ -1,0 +1,28 @@
+schema_version: "1.0.0"
+artifact_type: dataset_manifest
+id: ds-norman-perturb-seq-v1
+run_id: run-20260318T193000Z-deadbeef
+created_at: 2026-03-18T19:30:00Z
+source_workflow: dataset-intake
+related_artifacts:
+  - artifact_type: workflow_run
+    path: artifacts/dataset-intake/2026-03-18/run-20260318T193000Z-deadbeef/run.json
+    id: workflow-run-dataset-intake-v1
+    run_id: run-20260318T193000Z-deadbeef
+assay_type: perturb_seq
+organism: homo_sapiens
+reference_build: grch38
+privacy_classification: controlled
+design:
+  study_name: norman-perturb-seq-pilot
+  experiment_type: perturb_seq
+  condition_summary: CRISPRi perturb-seq pilot with non-targeting controls and donor replicates.
+  replicate_structure: 3 donors x 2 batches
+  timepoints:
+    - day_7
+  factors:
+    - perturbation
+    - donor
+source_files:
+  - data/norman/counts.h5ad
+  - data/norman/metadata.tsv

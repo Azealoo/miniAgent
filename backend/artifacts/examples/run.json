@@ -1,0 +1,102 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "workflow_run",
+  "id": "workflow-run-rna-seq-qc-20260318",
+  "run_id": "run-20260318T193000Z-deadbeef",
+  "created_at": "2026-03-18T19:30:00Z",
+  "source_workflow": "internal-dag-runner",
+  "related_artifacts": [
+    {
+      "artifact_type": "dataset_manifest",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+      "id": "ds-norman-perturb-seq-v1",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "workflow": {
+    "name": "RNA Seq QC",
+    "slug": "rna-seq-qc"
+  },
+  "lifecycle_status": "completed",
+  "qc_status": "warning",
+  "engine": "internal_dag_runner_v1",
+  "parameters": {
+    "min_genes": 200,
+    "doublet_method": "scrublet"
+  },
+  "environment": {
+    "conda_env": "miniAgent",
+    "python_version": "3.11",
+    "platform": "linux"
+  },
+  "inputs": [
+    {
+      "artifact_type": "dataset_manifest",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+      "id": "ds-norman-perturb-seq-v1",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "outputs": [
+    {
+      "artifact_type": "qa_report",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/qa_report.json",
+      "id": "qa-rna-seq-qc-20260318",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "steps": [
+    {
+      "id": "preflight-check",
+      "name": "Preflight Check",
+      "status": "preflight_checked",
+      "start_time": "2026-03-18T19:30:00Z",
+      "end_time": "2026-03-18T19:31:00Z",
+      "inputs_resolved": [
+        {
+          "artifact_type": "dataset_manifest",
+          "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+          "id": "ds-norman-perturb-seq-v1",
+          "run_id": "run-20260318T193000Z-deadbeef"
+        }
+      ],
+      "outputs_produced": [],
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "id": "qc-summary",
+      "name": "QC Summary",
+      "status": "completed",
+      "start_time": "2026-03-18T19:31:00Z",
+      "end_time": "2026-03-18T19:36:00Z",
+      "inputs_resolved": [
+        {
+          "artifact_type": "dataset_manifest",
+          "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+          "id": "ds-norman-perturb-seq-v1",
+          "run_id": "run-20260318T193000Z-deadbeef"
+        }
+      ],
+      "outputs_produced": [
+        {
+          "artifact_type": "qa_report",
+          "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/qa_report.json",
+          "id": "qa-rna-seq-qc-20260318",
+          "run_id": "run-20260318T193000Z-deadbeef"
+        }
+      ],
+      "warnings": [
+        "median UMI count trended below reference baseline"
+      ],
+      "errors": []
+    }
+  ],
+  "provenance_exports": [
+    "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/prov.json",
+    "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/ro-crate/ro-crate-metadata.json"
+  ],
+  "warnings": [
+    "qc warning threshold exceeded for one donor replicate"
+  ]
+}
