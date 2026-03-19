@@ -10,9 +10,9 @@
    - change Status back to `Not Started`
    - clear Goals and Notes
    - keep History intact
-5. Do not commit, push, or merge automatically unless the user explicitly asks
-6. If the user asks to commit:
+5. Commit the completed feature by default:
    - stage only the intended files
    - use a focused conventional commit message
    - verify before committing if not already done
-7. If the user asks to push or merge, do that as a separate explicit step
+6. Push the current branch to origin by default after the commit succeeds
+7. Only merge as a separate explicit step if the user asks for it
