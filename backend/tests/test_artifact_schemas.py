@@ -118,6 +118,11 @@ class TestArtifactSchemas:
             "created_at": "2026-03-18T19:30:00Z",
             "source_tool": "guide_risk_precheck",
             "related_artifacts": [],
+            "request_context": {
+                "user_message": "Review the patient sheet before analysis.",
+                "attached_identifiers": ["patient_sheet.csv"],
+                "selected_workflow": "scrna-seq-qc",
+            },
             "risk_category": "privacy",
             "triggered_rules": [
                 {
@@ -128,12 +133,53 @@ class TestArtifactSchemas:
                     "recommended_action": "block",
                 }
             ],
+            "runtime_state": "blocked",
+            "decision_source": "deterministic_rules",
+            "preflight_disposition": "block",
             "block_status": "not_blocked",
-            "human_approval_required": True,
+            "human_approval_required": False,
             "final_disposition": "block",
         }
 
         with pytest.raises(ValueError, match="block_status"):
+            ComplianceReport.model_validate(payload)
+
+    def test_compliance_reports_require_approval_record_for_approved_override(self):
+        payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "compliance_report",
+            "id": "compliance-test-approved-override-v1",
+            "run_id": "run-20260318T193000Z-deadbeef",
+            "created_at": "2026-03-18T19:30:00Z",
+            "source_tool": "guide_risk_precheck",
+            "related_artifacts": [],
+            "request_context": {
+                "user_message": "Review the patient sheet before analysis.",
+                "attached_identifiers": ["patient_sheet.csv"],
+                "selected_workflow": "scrna-seq-qc",
+                "session_id": "session-approved-override",
+            },
+            "risk_category": "privacy",
+            "triggered_rules": [
+                {
+                    "rule_id": "privacy-sample-sheet",
+                    "category": "privacy",
+                    "trigger_text": "patient_sheet.csv",
+                    "severity": "high",
+                    "recommended_action": "require_approval",
+                }
+            ],
+            "runtime_state": "approved_override",
+            "decision_source": "human_override",
+            "preflight_disposition": "require_approval",
+            "block_status": "not_blocked",
+            "human_approval_required": True,
+            "approval_scope": "message",
+            "approval": None,
+            "final_disposition": "allow",
+        }
+
+        with pytest.raises(ValueError, match="approval record"):
             ComplianceReport.model_validate(payload)
 
     def test_protocol_runs_require_completed_at_when_completed(self):

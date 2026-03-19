@@ -43,6 +43,61 @@ export interface ToolResultEnvelope {
   source_payload?: JsonValue;
 }
 
+export type ComplianceDisposition =
+  | "allow"
+  | "allow_with_warning"
+  | "require_approval"
+  | "block";
+
+export type ComplianceRuntimeState =
+  | "preflight_pending"
+  | "allowed"
+  | "warning_issued"
+  | "blocked"
+  | "approval_required"
+  | "approved_override";
+
+export type ComplianceApprovalScope = "message" | "workflow" | "run";
+
+export interface ComplianceRequestContext {
+  user_message: string;
+  attached_identifiers: string[];
+  selected_workflow?: string | null;
+  session_id?: string | null;
+}
+
+export interface ComplianceApprovalRecord {
+  approved_by: string;
+  approval_scope: ComplianceApprovalScope;
+  approved_at: string;
+  override_for_disposition: ComplianceDisposition;
+  rationale?: string | null;
+}
+
+export interface ComplianceReportArtifact {
+  artifact_type: "compliance_report";
+  id: string;
+  run_id: string;
+  created_at: string;
+  risk_category: string;
+  request_context: ComplianceRequestContext;
+  triggered_rules: Array<{
+    rule_id: string;
+    category: string;
+    trigger_text: string;
+    severity: string;
+    recommended_action: ComplianceDisposition;
+  }>;
+  runtime_state: ComplianceRuntimeState;
+  decision_source: string;
+  preflight_disposition: ComplianceDisposition;
+  block_status: "blocked" | "not_blocked";
+  human_approval_required: boolean;
+  approval_scope?: ComplianceApprovalScope | null;
+  approval?: ComplianceApprovalRecord | null;
+  final_disposition: ComplianceDisposition;
+}
+
 export interface ToolCall {
   tool: string;
   input: string;

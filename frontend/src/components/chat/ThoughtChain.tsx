@@ -3,7 +3,12 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Terminal, Code2, Globe, FileText, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { JsonValue, ToolCall, ToolResultEnvelope } from "@/lib/types";
+import type {
+  ComplianceReportArtifact,
+  JsonValue,
+  ToolCall,
+  ToolResultEnvelope,
+} from "@/lib/types";
 
 const TOOL_ICONS: Record<string, React.ReactNode> = {
   compliance_preflight: <FileText size={12} />,
@@ -30,8 +35,35 @@ function formatJsonValue(value: JsonValue | undefined): string {
   return `${rendered.slice(0, MAX_RENDERED_JSON_CHARS)}\n...[display truncated]`;
 }
 
+function humanizeUnderscoreValue(value?: string | null): string {
+  if (!value) return "unknown";
+  return value.replaceAll("_", " ");
+}
+
+function complianceRuntimeState(report: ComplianceReportArtifact | null): string | null {
+  return typeof report?.runtime_state === "string" ? report.runtime_state : null;
+}
+
+function compliancePreflightDisposition(report: ComplianceReportArtifact | null): string | null {
+  return typeof report?.preflight_disposition === "string"
+    ? report.preflight_disposition
+    : null;
+}
+
+function complianceFinalDisposition(report: ComplianceReportArtifact | null): string | null {
+  return typeof report?.final_disposition === "string"
+    ? report.final_disposition
+    : null;
+}
+
 function outcomeBadgeClass(result?: ToolResultEnvelope): string {
   if (!result) return "bg-gray-100 text-gray-500";
+  const complianceReport = getComplianceReport(result);
+  const runtimeState = complianceRuntimeState(complianceReport);
+  if (runtimeState === "approved_override") return "bg-sky-100 text-sky-700";
+  if (runtimeState === "approval_required") return "bg-amber-100 text-amber-700";
+  if (runtimeState === "blocked") return "bg-red-100 text-red-700";
+  if (runtimeState === "warning_issued") return "bg-amber-100 text-amber-700";
   if (result.warnings.includes("approval_required")) return "bg-amber-100 text-amber-700";
   if (result.warnings.includes("blocked_by_compliance")) return "bg-red-100 text-red-700";
   if (result.warnings.includes("compliance_warning")) return "bg-amber-100 text-amber-700";
@@ -43,12 +75,47 @@ function outcomeBadgeClass(result?: ToolResultEnvelope): string {
 function outcomeBadgeText(call: ToolCall): string {
   const result = call.result;
   if (!result) return "";
+  const complianceReport = getComplianceReport(result);
+  const runtimeState = complianceRuntimeState(complianceReport);
+  if (runtimeState) {
+    return humanizeUnderscoreValue(runtimeState);
+  }
+  const finalDisposition = complianceFinalDisposition(complianceReport);
+  if (finalDisposition) {
+    return humanizeUnderscoreValue(finalDisposition);
+  }
   if (call.tool === "compliance_preflight") {
     if (result.warnings.includes("approval_required")) return "approval required";
     if (result.warnings.includes("blocked_by_compliance")) return "blocked";
     if (result.warnings.includes("compliance_warning")) return "warning";
   }
   return result.outcome.replaceAll("_", " ");
+}
+
+function getComplianceReport(
+  result?: ToolResultEnvelope
+): ComplianceReportArtifact | null {
+  const payload = result?.structured_payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const report = (payload as Record<string, JsonValue>).report;
+  if (!report || typeof report !== "object" || Array.isArray(report)) {
+    return null;
+  }
+  if ((report as Record<string, JsonValue>).artifact_type !== "compliance_report") {
+    return null;
+  }
+  return report as unknown as ComplianceReportArtifact;
+}
+
+function getAuditLogPath(result?: ToolResultEnvelope): string | null {
+  const payload = result?.structured_payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const auditLogPath = (payload as Record<string, JsonValue>).audit_log_path;
+  return typeof auditLogPath === "string" ? auditLogPath : null;
 }
 
 function ToolIcon({ name }: { name: string }) {
@@ -69,6 +136,8 @@ function SingleCall({ call }: SingleCallProps) {
   const artifactRefs = call.result?.artifact_refs ?? [];
   const warnings = call.result?.warnings ?? [];
   const sourcePayload = call.result?.source_payload;
+  const complianceReport = getComplianceReport(call.result);
+  const auditLogPath = getAuditLogPath(call.result);
 
   return (
     <div className="border border-gray-200 rounded-lg overflow-hidden">
@@ -128,6 +197,59 @@ function SingleCall({ call }: SingleCallProps) {
               <pre className="text-xs font-mono text-red-700 whitespace-pre-wrap break-all bg-red-50 p-2 rounded">
                 {call.result.error.code}: {call.result.error.message}
               </pre>
+            </div>
+          )}
+          {complianceReport && (
+            <div className="px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
+                Compliance Decision
+              </p>
+              <div className="bg-slate-50 rounded p-2 text-xs text-gray-700 space-y-1">
+                <div>
+                  <span className="text-gray-400">State:</span>{" "}
+                  {humanizeUnderscoreValue(complianceRuntimeState(complianceReport))}
+                </div>
+                <div>
+                  <span className="text-gray-400">Preflight:</span>{" "}
+                  {humanizeUnderscoreValue(
+                    compliancePreflightDisposition(complianceReport)
+                  )}
+                </div>
+                <div>
+                  <span className="text-gray-400">Final:</span>{" "}
+                  {humanizeUnderscoreValue(
+                    complianceFinalDisposition(complianceReport)
+                  )}
+                </div>
+                <div>
+                  <span className="text-gray-400">Rules hit:</span>{" "}
+                  {complianceReport.triggered_rules.length}
+                </div>
+                {complianceReport.approval_scope && (
+                  <div>
+                    <span className="text-gray-400">Approval scope:</span>{" "}
+                    {complianceReport.approval_scope}
+                  </div>
+                )}
+                {complianceReport.approval && (
+                  <div>
+                    <span className="text-gray-400">Approved by:</span>{" "}
+                    {complianceReport.approval.approved_by}
+                  </div>
+                )}
+                {complianceReport.approval?.rationale && (
+                  <div>
+                    <span className="text-gray-400">Rationale:</span>{" "}
+                    {complianceReport.approval.rationale}
+                  </div>
+                )}
+                {auditLogPath && (
+                  <div>
+                    <span className="text-gray-400">Audit log:</span>{" "}
+                    {auditLogPath}
+                  </div>
+                )}
+              </div>
             </div>
           )}
           {warnings.length > 0 && (

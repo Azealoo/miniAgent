@@ -15,14 +15,19 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from artifacts.naming import build_content_hash_manifest, stable_artifact_name
 from artifacts.schemas import (
     SCHEMA_PACK_VERSION,
+    ComplianceApprovalRecord,
+    ComplianceApprovalScope,
+    ComplianceDecisionSource,
     ComplianceDisposition,
     ComplianceReport,
     ComplianceRuleHit,
+    ComplianceRuntimeState,
     ComplianceSeverity,
     RiskCategory,
     normalize_identifier,
 )
 from artifacts import prepare_run_directory
+from compliance.audit import append_compliance_audit_record
 from tools.contracts import ToolResultError, artifact_ref, build_tool_result, success_result
 
 COMPLIANCE_PREFLIGHT_TOOL_NAME = "compliance_preflight"
@@ -41,6 +46,7 @@ _SEVERITY_RANK: dict[ComplianceSeverity, int] = {
     "critical": 3,
 }
 _MAX_TRIGGER_TEXT = 160
+_DEFAULT_APPROVAL_SCOPE: ComplianceApprovalScope = "message"
 
 
 class CompliancePreflightInput(BaseModel):
@@ -49,6 +55,8 @@ class CompliancePreflightInput(BaseModel):
     user_message: str
     attached_identifiers: list[str] = Field(default_factory=list)
     selected_workflow: str | None = None
+    session_id: str | None = None
+    approval_override: "ComplianceOverrideInput | None" = None
 
     @field_validator("user_message")
     @classmethod
@@ -68,13 +76,47 @@ class CompliancePreflightInput(BaseModel):
                 cleaned.append(normalized)
         return cleaned
 
-    @field_validator("selected_workflow")
+    @field_validator("selected_workflow", "session_id")
     @classmethod
-    def _validate_selected_workflow(cls, value: str | None) -> str | None:
+    def _validate_optional_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
         cleaned = value.strip()
         return cleaned or None
+
+
+class ComplianceOverrideInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approved_by: str
+    approval_scope: ComplianceApprovalScope = _DEFAULT_APPROVAL_SCOPE
+    rationale: str | None = None
+
+    @field_validator("approved_by")
+    @classmethod
+    def _validate_approved_by(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("approved_by must not be empty.")
+        return cleaned
+
+    @field_validator("approval_scope")
+    @classmethod
+    def _validate_approval_scope(cls, value: ComplianceApprovalScope) -> ComplianceApprovalScope:
+        if value != _DEFAULT_APPROVAL_SCOPE:
+            raise ValueError("Only message-scoped compliance overrides are currently supported.")
+        return value
+
+    @field_validator("rationale")
+    @classmethod
+    def _validate_rationale(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+
+CompliancePreflightInput.model_rebuild()
 
 
 class ComplianceRuleDefinition(BaseModel):
@@ -113,6 +155,17 @@ class CompliancePreflightResult:
     should_continue: bool
 
 
+@dataclass(frozen=True)
+class ComplianceDecision:
+    runtime_state: ComplianceRuntimeState
+    decision_source: ComplianceDecisionSource
+    preflight_disposition: ComplianceDisposition
+    final_disposition: ComplianceDisposition
+    human_approval_required: bool
+    approval_scope: ComplianceApprovalScope | None
+    approval: ComplianceApprovalRecord | None
+
+
 def run_compliance_preflight(
     base_dir: Path | str,
     payload: CompliancePreflightInput,
@@ -123,25 +176,47 @@ def run_compliance_preflight(
     try:
         ruleset = _load_ruleset()
         hits = _evaluate_rules(ruleset, payload)
-        disposition = _choose_disposition(hits)
+        preflight_disposition = _choose_disposition(hits)
         dominant_hit = _dominant_hit(hits)
         risk_category: RiskCategory = dominant_hit.category if dominant_hit else "none"
+        decision = _resolve_decision(preflight_disposition, payload, timestamp)
         layout = prepare_run_directory(base_path, COMPLIANCE_WORKFLOW_NAME, created_at=timestamp)
-        report = _build_report(layout.run_id, layout.created_at, hits, disposition, risk_category)
+        report = _build_report(
+            layout.run_id,
+            layout.created_at,
+            payload,
+            hits,
+            risk_category,
+            decision,
+        )
         artifact_path, artifact_relpath = _persist_report(layout, report)
+        audit_log_path = append_compliance_audit_record(base_path, report, artifact_relpath)
+        audit_log_relpath = audit_log_path.relative_to(base_path).as_posix()
         tool_summary = _build_tool_summary(report)
         warning_text = _build_warning_text(report)
         response_text = _build_response_text(report)
     except Exception as exc:
         layout = prepare_run_directory(base_path, COMPLIANCE_WORKFLOW_NAME, created_at=timestamp)
+        decision = ComplianceDecision(
+            runtime_state="approval_required",
+            decision_source="safe_fallback",
+            preflight_disposition="require_approval",
+            final_disposition="require_approval",
+            human_approval_required=True,
+            approval_scope=_DEFAULT_APPROVAL_SCOPE,
+            approval=None,
+        )
         report = _build_report(
             layout.run_id,
             layout.created_at,
+            payload,
             [],
-            "require_approval",
             "none",
+            decision,
         )
         artifact_path, artifact_relpath = _persist_report(layout, report)
+        audit_log_path = append_compliance_audit_record(base_path, report, artifact_relpath)
+        audit_log_relpath = audit_log_path.relative_to(base_path).as_posix()
         tool_summary = "Compliance preflight failed safely and requires approval before execution can continue."
         warning_text = None
         response_text = (
@@ -155,10 +230,12 @@ def run_compliance_preflight(
         "structured_payload": {
             "report": report.model_dump(mode="json"),
             "artifact_path": artifact_relpath,
+            "audit_log_path": audit_log_relpath,
             "inspected_inputs": {
                 "user_message": payload.user_message,
                 "attached_identifiers": payload.attached_identifiers,
                 "selected_workflow": payload.selected_workflow,
+                "session_id": payload.session_id,
             },
         },
         "artifact_refs": [
@@ -171,10 +248,16 @@ def run_compliance_preflight(
         ],
         "warnings": _result_warnings(report),
         "metadata": {
+            "runtime_state": report.runtime_state,
+            "preflight_disposition": report.preflight_disposition,
             "final_disposition": report.final_disposition,
+            "decision_source": report.decision_source,
             "risk_category": report.risk_category,
             "rule_hits": len(report.triggered_rules),
             "artifact_path": artifact_relpath,
+            "audit_log_path": audit_log_relpath,
+            "approval_scope": report.approval_scope,
+            "approved_by": report.approval.approved_by if report.approval else None,
         },
     }
 
@@ -291,12 +374,61 @@ def _choose_disposition(hits: list[ComplianceRuleHit]) -> ComplianceDisposition:
     return dominant_hit.recommended_action
 
 
+def _runtime_state_for_disposition(
+    disposition: ComplianceDisposition,
+) -> ComplianceRuntimeState:
+    return {
+        "allow": "allowed",
+        "allow_with_warning": "warning_issued",
+        "require_approval": "approval_required",
+        "block": "blocked",
+    }[disposition]
+
+
+def _resolve_decision(
+    preflight_disposition: ComplianceDisposition,
+    payload: CompliancePreflightInput,
+    timestamp: datetime,
+) -> ComplianceDecision:
+    approval_scope = (
+        _DEFAULT_APPROVAL_SCOPE if preflight_disposition == "require_approval" else None
+    )
+    if payload.approval_override and preflight_disposition == "require_approval":
+        approval = ComplianceApprovalRecord(
+            approved_by=payload.approval_override.approved_by,
+            approval_scope=payload.approval_override.approval_scope,
+            approved_at=timestamp,
+            override_for_disposition=preflight_disposition,
+            rationale=payload.approval_override.rationale,
+        )
+        return ComplianceDecision(
+            runtime_state="approved_override",
+            decision_source="human_override",
+            preflight_disposition=preflight_disposition,
+            final_disposition="allow",
+            human_approval_required=True,
+            approval_scope=payload.approval_override.approval_scope,
+            approval=approval,
+        )
+
+    return ComplianceDecision(
+        runtime_state=_runtime_state_for_disposition(preflight_disposition),
+        decision_source="deterministic_rules",
+        preflight_disposition=preflight_disposition,
+        final_disposition=preflight_disposition,
+        human_approval_required=preflight_disposition == "require_approval",
+        approval_scope=approval_scope,
+        approval=None,
+    )
+
+
 def _build_report(
     run_id: str,
     created_at: datetime,
+    payload: CompliancePreflightInput,
     hits: list[ComplianceRuleHit],
-    disposition: ComplianceDisposition,
     risk_category: RiskCategory,
+    decision: ComplianceDecision,
 ) -> ComplianceReport:
     report_id = f"compliance-preflight-{run_id.lower()}".replace("_", "-")
     return ComplianceReport.model_validate(
@@ -308,11 +440,22 @@ def _build_report(
             "created_at": created_at,
             "source_workflow": COMPLIANCE_WORKFLOW_NAME,
             "related_artifacts": [],
+            "request_context": {
+                "user_message": payload.user_message,
+                "attached_identifiers": payload.attached_identifiers,
+                "selected_workflow": payload.selected_workflow,
+                "session_id": payload.session_id,
+            },
             "risk_category": risk_category,
             "triggered_rules": [hit.model_dump(mode="json") for hit in hits],
-            "block_status": "blocked" if disposition == "block" else "not_blocked",
-            "human_approval_required": disposition == "require_approval",
-            "final_disposition": disposition,
+            "runtime_state": decision.runtime_state,
+            "decision_source": decision.decision_source,
+            "preflight_disposition": decision.preflight_disposition,
+            "block_status": "blocked" if decision.final_disposition == "block" else "not_blocked",
+            "human_approval_required": decision.human_approval_required,
+            "approval_scope": decision.approval_scope,
+            "approval": decision.approval.model_dump(mode="json") if decision.approval else None,
+            "final_disposition": decision.final_disposition,
         }
     )
 
@@ -346,14 +489,24 @@ def _build_tool_input(payload: CompliancePreflightInput) -> str:
         parts.append(f"attachments={', '.join(payload.attached_identifiers)}")
     if payload.selected_workflow:
         parts.append(f"workflow={payload.selected_workflow}")
+    if payload.approval_override:
+        parts.append(
+            "approval_override="
+            f"{payload.approval_override.approval_scope}:{payload.approval_override.approved_by}"
+        )
     return "\n".join(parts)
 
 
 def _build_tool_summary(report: ComplianceReport) -> str:
-    if report.final_disposition == "block":
+    if report.runtime_state == "blocked":
         return "Compliance preflight blocked this request before execution."
-    if report.final_disposition == "require_approval":
+    if report.runtime_state == "approval_required":
         return "Compliance preflight requires approval before execution can continue."
+    if report.runtime_state == "approved_override" and report.approval is not None:
+        return (
+            "Compliance preflight required approval and recorded a "
+            f"{report.approval.approval_scope}-scoped override by {report.approval.approved_by}."
+        )
     if not report.triggered_rules:
         return "Compliance preflight completed with disposition allow and no deterministic rule hits."
     return (
@@ -364,12 +517,18 @@ def _build_tool_summary(report: ComplianceReport) -> str:
 
 
 def _build_warning_text(report: ComplianceReport) -> str | None:
-    if report.final_disposition != "allow_with_warning":
-        return None
-    return (
-        "Compliance warning: this request references privacy-sensitive human-data context. "
-        "Continue only with de-identified inputs and preserve the dataset privacy classification."
-    )
+    if report.runtime_state == "warning_issued":
+        return (
+            "Compliance warning: this request references privacy-sensitive human-data context. "
+            "Continue only with de-identified inputs and preserve the dataset privacy classification."
+        )
+    if report.runtime_state == "approved_override" and report.approval is not None:
+        return (
+            "Compliance approval override recorded: "
+            f"{report.approval.approved_by} approved this {report.approval.approval_scope}-scoped "
+            "request, and execution may continue under audit."
+        )
+    return None
 
 
 def _build_response_text(report: ComplianceReport) -> str | None:
@@ -399,10 +558,12 @@ def _build_response_text(report: ComplianceReport) -> str | None:
 
 def _result_warnings(report: ComplianceReport) -> list[str]:
     warnings: list[str] = []
-    if report.final_disposition == "allow_with_warning":
+    if report.runtime_state == "warning_issued":
         warnings.append("compliance_warning")
-    if report.final_disposition == "require_approval":
+    if report.runtime_state == "approval_required":
         warnings.append("approval_required")
-    if report.final_disposition == "block":
+    if report.runtime_state == "blocked":
         warnings.append("blocked_by_compliance")
+    if report.runtime_state == "approved_override":
+        warnings.append("approved_override")
     return warnings

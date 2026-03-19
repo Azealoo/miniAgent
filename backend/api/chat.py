@@ -4,8 +4,8 @@ POST /api/chat — SSE streaming conversation endpoint.
 SSE event types emitted:
   retrieval    {type, query, results}
   token        {type, content}
-  tool_start   {type, tool, input, run_id}
-  tool_end     {type, tool, output, result, run_id}
+  tool_start   {type, tool, input, run_id, compliance_state?}
+  tool_end     {type, tool, output, result, run_id, compliance_state?}
   new_response {type}
   done         {type, content, session_id}
   title        {type, session_id, title}   (first message only)
@@ -183,6 +183,7 @@ async def chat(request: ChatRequest):
                     user_message=request.message,
                     attached_identifiers=request.attached_identifiers,
                     selected_workflow=request.selected_workflow,
+                    session_id=request.session_id,
                 ),
             )
             preflight_run_id = preflight.report.run_id
@@ -196,6 +197,7 @@ async def chat(request: ChatRequest):
                     "tool": "compliance_preflight",
                     "input": preflight.tool_input,
                     "run_id": preflight_run_id,
+                    "compliance_state": "preflight_pending",
                 }
             )
 
@@ -217,6 +219,7 @@ async def chat(request: ChatRequest):
                     "tool": "compliance_preflight",
                     "output": preflight.tool_summary,
                     "run_id": preflight_run_id,
+                    "compliance_state": preflight.report.runtime_state,
                     "result": preflight.tool_result,
                 }
             )

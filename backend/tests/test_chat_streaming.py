@@ -111,6 +111,10 @@ async def test_chat_stream_includes_structured_tool_result_and_persists_it(isola
     assert tool_end["result"]["tool_name"] == "read_file"
     assert tool_end["result"]["structured_payload"]["path"] == "memory/MEMORY.md"
     assert preflight_end["result"]["structured_payload"]["report"]["final_disposition"] == "allow"
+    assert preflight_end["result"]["structured_payload"]["report"]["runtime_state"] == "allowed"
+    assert preflight_end["result"]["structured_payload"]["audit_log_path"].endswith(
+        "storage/compliance_audit/compliance_decisions.jsonl"
+    )
 
     history = agent_manager.session_manager.load_session(session_id)
     assistant_messages = [msg for msg in history if msg["role"] == "assistant"]

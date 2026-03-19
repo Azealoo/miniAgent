@@ -13,6 +13,14 @@
       "run_id": "run-20260318T193000Z-deadbeef"
     }
   ],
+  "request_context": {
+    "user_message": "Review the attached patient sheet before downstream analysis.",
+    "attached_identifiers": [
+      "patient_sheet.csv"
+    ],
+    "selected_workflow": "scrna-seq-qc",
+    "session_id": "session-compliance-demo"
+  },
   "risk_category": "privacy",
   "triggered_rules": [
     {
@@ -23,7 +31,12 @@
       "recommended_action": "require_approval"
     }
   ],
+  "runtime_state": "approval_required",
+  "decision_source": "deterministic_rules",
+  "preflight_disposition": "require_approval",
   "block_status": "not_blocked",
   "human_approval_required": true,
+  "approval_scope": "message",
+  "approval": null,
   "final_disposition": "require_approval"
 }

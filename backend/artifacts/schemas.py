@@ -49,6 +49,16 @@ WorkflowLifecycleStatus = Literal[
 WorkflowQCStatus = Literal["pending", "passed", "warning", "failed", "not_applicable"]
 ConfidenceLevel = Literal["low", "medium", "high"]
 ComplianceDisposition = Literal["allow", "allow_with_warning", "require_approval", "block"]
+ComplianceRuntimeState = Literal[
+    "preflight_pending",
+    "allowed",
+    "warning_issued",
+    "blocked",
+    "approval_required",
+    "approved_override",
+]
+ComplianceApprovalScope = Literal["message", "workflow", "run"]
+ComplianceDecisionSource = Literal["deterministic_rules", "safe_fallback", "human_override"]
 ComplianceBlockStatus = Literal["not_blocked", "blocked"]
 ComplianceSeverity = Literal["low", "medium", "high", "critical"]
 ProtocolCompletionState = Literal["not_started", "in_progress", "completed", "blocked", "aborted"]
@@ -439,12 +449,71 @@ class ComplianceRuleHit(BaseModel):
         return _require_non_empty(value, field_name="trigger_text")
 
 
+class ComplianceRequestContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_message: str
+    attached_identifiers: list[str] = Field(default_factory=list)
+    selected_workflow: str | None = None
+    session_id: str | None = None
+
+    @field_validator("user_message")
+    @classmethod
+    def _validate_user_message(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="user_message")
+
+    @field_validator("attached_identifiers")
+    @classmethod
+    def _validate_attached_identifiers(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="attached_identifier") for item in value]
+
+    @field_validator("selected_workflow", "session_id")
+    @classmethod
+    def _validate_optional_text(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class ComplianceApprovalRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approved_by: str
+    approval_scope: ComplianceApprovalScope
+    approved_at: datetime
+    override_for_disposition: ComplianceDisposition
+    rationale: str | None = None
+
+    @field_validator("approved_by")
+    @classmethod
+    def _validate_approved_by(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="approved_by")
+
+    @field_validator("approved_at")
+    @classmethod
+    def _validate_approved_at(cls, value: datetime) -> datetime:
+        return _normalize_timestamp(value, field_name="approved_at")
+
+    @field_validator("rationale")
+    @classmethod
+    def _validate_rationale(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="rationale")
+
+
 class ComplianceReport(ArtifactDocument):
     artifact_type: Literal["compliance_report"] = "compliance_report"
+    request_context: ComplianceRequestContext
     risk_category: RiskCategory
     triggered_rules: list[ComplianceRuleHit]
+    runtime_state: ComplianceRuntimeState
+    decision_source: ComplianceDecisionSource
+    preflight_disposition: ComplianceDisposition
     block_status: ComplianceBlockStatus
     human_approval_required: bool
+    approval_scope: ComplianceApprovalScope | None = None
+    approval: ComplianceApprovalRecord | None = None
     final_disposition: ComplianceDisposition
 
     @model_validator(mode="after")
@@ -453,12 +522,57 @@ class ComplianceReport(ArtifactDocument):
             raise ValueError("risk_category 'none' cannot include triggered_rules.")
         if self.risk_category != "none" and not self.triggered_rules:
             raise ValueError("Triggered rules are required when risk_category is not 'none'.")
+        if self.runtime_state == "preflight_pending":
+            raise ValueError("Persisted compliance reports must use a terminal runtime_state.")
         if self.final_disposition == "block" and self.block_status != "blocked":
             raise ValueError("Blocked reports must set block_status to 'blocked'.")
         if self.final_disposition != "block" and self.block_status == "blocked":
             raise ValueError("Only blocked reports may use block_status 'blocked'.")
         if self.final_disposition == "require_approval" and not self.human_approval_required:
             raise ValueError("require_approval reports must set human_approval_required to true.")
+        if self.human_approval_required and self.preflight_disposition != "require_approval":
+            raise ValueError(
+                "human_approval_required may only be true when preflight_disposition is require_approval."
+            )
+        if self.human_approval_required and self.approval_scope is None:
+            raise ValueError("Reports that require approval must record an approval_scope.")
+        if not self.human_approval_required and self.approval_scope is not None:
+            raise ValueError("approval_scope may only be set when human_approval_required is true.")
+        if self.approval is not None and self.approval.approval_scope != self.approval_scope:
+            raise ValueError("approval.approval_scope must match approval_scope.")
+        if self.runtime_state == "allowed" and self.final_disposition != "allow":
+            raise ValueError("allowed runtime_state must end with final_disposition 'allow'.")
+        if self.runtime_state == "warning_issued" and self.final_disposition != "allow_with_warning":
+            raise ValueError(
+                "warning_issued runtime_state must end with final_disposition 'allow_with_warning'."
+            )
+        if self.runtime_state == "blocked" and self.final_disposition != "block":
+            raise ValueError("blocked runtime_state must end with final_disposition 'block'.")
+        if self.runtime_state == "approval_required" and self.final_disposition != "require_approval":
+            raise ValueError(
+                "approval_required runtime_state must end with final_disposition 'require_approval'."
+            )
+        if self.runtime_state == "approved_override":
+            if self.approval is None:
+                raise ValueError("approved_override runtime_state requires an approval record.")
+            if self.preflight_disposition != "require_approval":
+                raise ValueError(
+                    "approved_override runtime_state requires preflight_disposition 'require_approval'."
+                )
+            if self.final_disposition not in {"allow", "allow_with_warning"}:
+                raise ValueError(
+                    "approved_override runtime_state must resolve to allow or allow_with_warning."
+                )
+            if self.decision_source != "human_override":
+                raise ValueError(
+                    "approved_override runtime_state must use decision_source 'human_override'."
+                )
+        elif self.approval is not None:
+            raise ValueError("approval records are only valid for approved_override runtime_state.")
+        if self.decision_source == "safe_fallback" and self.preflight_disposition != "require_approval":
+            raise ValueError(
+                "safe_fallback decision_source must resolve to preflight_disposition 'require_approval'."
+            )
         return self
 
 
