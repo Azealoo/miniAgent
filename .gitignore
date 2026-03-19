@@ -27,6 +27,8 @@ backend/SKILLS_SNAPSHOT.md
 # ── Node ──────────────────────────────────────────────
 node_modules/
 frontend/.next/
+frontend/.next-build/
+frontend/.next-dev/
 frontend/out/
 
 # ── macOS ─────────────────────────────────────────────

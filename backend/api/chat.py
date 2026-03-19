@@ -16,7 +16,7 @@ import json
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from graph.session_manager import _validate_session_id
 
@@ -42,6 +42,8 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str
     stream: bool = True
+    attached_identifiers: list[str] = Field(default_factory=list)
+    selected_workflow: str | None = None
 
     @field_validator("message")
     @classmethod
@@ -79,6 +81,11 @@ async def chat(request: ChatRequest):
     history = session_manager.load_session_for_agent(request.session_id)  # type: ignore[union-attr]
 
     async def event_generator():
+        from compliance.preflight import (
+            CompliancePreflightInput,
+            run_compliance_preflight,
+        )
+
         # Per-request accumulators
         segments: list[dict] = []          # [{content, tool_calls}]
         current_content: list[str] = []
@@ -106,7 +113,128 @@ async def chat(request: ChatRequest):
                 )
                 user_msg_saved = True
 
+        async def _finalize_turn() -> list[str]:
+            _flush_segment()
+
+            # Persist user message + each assistant segment to session
+            _save_user_message()
+            for seg in segments:
+                session_manager.save_message(
+                    request.session_id,
+                    "assistant",
+                    seg["content"],
+                    seg["tool_calls"] or None,
+                )
+
+            final_content = " ".join(s["content"] for s in segments if s["content"])
+            payloads = [
+                _sse(
+                    {
+                        "type": "done",
+                        "content": final_content,
+                        "session_id": request.session_id,
+                    }
+                )
+            ]
+
+            if is_first_message and final_content:
+                _sid = request.session_id
+                title_task = asyncio.create_task(
+                    _generate_title_only(agent_manager, request.message)
+                )
+                _background_tasks.add(title_task)
+                title_task.add_done_callback(_background_tasks.discard)
+
+                def _persist_title(task: asyncio.Task) -> None:
+                    try:
+                        title = task.result()
+                        if title:
+                            session_manager.rename_session(_sid, title)
+                    except Exception:
+                        pass
+
+                title_task.add_done_callback(_persist_title)
+
+                try:
+                    title = await asyncio.wait_for(
+                        asyncio.shield(title_task), timeout=12.0
+                    )
+                    if title:
+                        payloads.append(
+                            _sse(
+                                {
+                                    "type": "title",
+                                    "session_id": _sid,
+                                    "title": title,
+                                }
+                            )
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except (asyncio.TimeoutError, Exception):
+                    pass
+
+            return payloads
+
         try:
+            preflight = run_compliance_preflight(
+                agent_manager.base_dir,
+                CompliancePreflightInput(
+                    user_message=request.message,
+                    attached_identifiers=request.attached_identifiers,
+                    selected_workflow=request.selected_workflow,
+                ),
+            )
+            preflight_run_id = preflight.report.run_id
+            pending_tools[preflight_run_id] = {
+                "tool": "compliance_preflight",
+                "input": preflight.tool_input,
+            }
+            yield _sse(
+                {
+                    "type": "tool_start",
+                    "tool": "compliance_preflight",
+                    "input": preflight.tool_input,
+                    "run_id": preflight_run_id,
+                }
+            )
+
+            started = pending_tools.pop(
+                preflight_run_id,
+                {"tool": "compliance_preflight", "input": preflight.tool_input},
+            )
+            preflight_call = {
+                "tool": started["tool"],
+                "input": started["input"],
+                "output": preflight.tool_summary,
+                "run_id": preflight_run_id,
+                "result": preflight.tool_result,
+            }
+            current_tool_calls.append(preflight_call)
+            yield _sse(
+                {
+                    "type": "tool_end",
+                    "tool": "compliance_preflight",
+                    "output": preflight.tool_summary,
+                    "run_id": preflight_run_id,
+                    "result": preflight.tool_result,
+                }
+            )
+
+            if preflight.warning_text:
+                current_content.append(preflight.warning_text)
+                yield _sse({"type": "token", "content": preflight.warning_text})
+                _flush_segment()
+                yield _sse({"type": "new_response"})
+
+            if not preflight.should_continue:
+                if preflight.response_text:
+                    current_content.append(preflight.response_text)
+                    yield _sse({"type": "token", "content": preflight.response_text})
+                for payload in await _finalize_turn():
+                    yield payload
+                return
+
             async for ev in agent_manager.astream(request.message, history):
                 t = ev["type"]
 
@@ -162,76 +290,8 @@ async def chat(request: ChatRequest):
                     yield _sse({"type": "new_response"})
 
                 elif t == "done":
-                    _flush_segment()
-
-                    # Persist user message + each assistant segment to session
-                    _save_user_message()
-                    for seg in segments:
-                        session_manager.save_message(
-                            request.session_id,
-                            "assistant",
-                            seg["content"],
-                            seg["tool_calls"] or None,
-                        )
-
-                    final_content = " ".join(
-                        s["content"] for s in segments if s["content"]
-                    )
-                    yield _sse(
-                        {
-                            "type": "done",
-                            "content": final_content,
-                            "session_id": request.session_id,
-                        }
-                    )
-
-                    # Auto-generate title on first successful response.
-                    #
-                    # Strategy: create an asyncio.Task held in _background_tasks
-                    # (prevents GC). Register a done-callback so the title is
-                    # always saved to disk — even if the client disconnects.
-                    # Then await the task via asyncio.shield():
-                    #   • client still connected → shield resolves → yield "title" SSE
-                    #   • client disconnects    → shield raises CancelledError here,
-                    #     but the inner task continues running (shield semantics) and
-                    #     saves the title via the done-callback.
-                    if is_first_message and final_content:
-                        _sid = request.session_id
-                        title_task = asyncio.create_task(
-                            _generate_title_only(agent_manager, request.message)
-                        )
-                        _background_tasks.add(title_task)
-                        title_task.add_done_callback(_background_tasks.discard)
-
-                        def _persist_title(task: asyncio.Task) -> None:
-                            try:
-                                t = task.result()
-                                if t:
-                                    session_manager.rename_session(_sid, t)
-                            except Exception:
-                                pass
-
-                        title_task.add_done_callback(_persist_title)
-
-                        try:
-                            title = await asyncio.wait_for(
-                                asyncio.shield(title_task), timeout=12.0
-                            )
-                            if title:
-                                # Title already persisted by done-callback; just send SSE.
-                                yield _sse(
-                                    {
-                                        "type": "title",
-                                        "session_id": _sid,
-                                        "title": title,
-                                    }
-                                )
-                        except asyncio.CancelledError:
-                            # Client disconnected; inner task still runs via shield.
-                            raise
-                        except (asyncio.TimeoutError, Exception):
-                            # Timed out or LLM error; title saves via callback when ready.
-                            pass
+                    for payload in await _finalize_turn():
+                        yield payload
 
                 elif t == "error":
                     # Persist the user message even when the agent fails so the

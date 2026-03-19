@@ -114,15 +114,27 @@ export interface StreamCallbacks {
   onError: (error: string) => void;
 }
 
+export interface ChatRequestContext {
+  attachedIdentifiers?: string[];
+  selectedWorkflow?: string | null;
+}
+
 export async function streamChat(
   message: string,
   sessionId: string,
-  callbacks: StreamCallbacks
+  callbacks: StreamCallbacks,
+  context?: ChatRequestContext
 ): Promise<void> {
   const response = await fetch(`${getBase()}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, session_id: sessionId, stream: true }),
+    body: JSON.stringify({
+      message,
+      session_id: sessionId,
+      stream: true,
+      attached_identifiers: context?.attachedIdentifiers ?? [],
+      selected_workflow: context?.selectedWorkflow ?? null,
+    }),
   });
 
   if (!response.ok || !response.body) {

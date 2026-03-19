@@ -29,7 +29,7 @@ interface AppContextValue {
   selectSession: (id: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (content: string, context?: api.ChatRequestContext) => Promise<void>;
   setRagMode: (enabled: boolean) => Promise<void>;
   compressSession: () => Promise<void>;
 }
@@ -136,7 +136,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // ── Send message ─────────────────────────────────────────────
 
   const sendMessage = useCallback(
-    async (content: string) => {
+    async (content: string, context?: api.ChatRequestContext) => {
       if (isStreaming) return;
 
       // Auto-create session if none is selected
@@ -278,7 +278,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           streamingIdRef.current = null;
           setIsStreaming(false);
         },
-      });
+      }, context);
     },
     [currentSessionId, isStreaming, refreshSessions]
   );

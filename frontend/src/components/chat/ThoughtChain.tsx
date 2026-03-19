@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import type { JsonValue, ToolCall, ToolResultEnvelope } from "@/lib/types";
 
 const TOOL_ICONS: Record<string, React.ReactNode> = {
+  compliance_preflight: <FileText size={12} />,
   terminal: <Terminal size={12} />,
   python_repl: <Code2 size={12} />,
   fetch_url: <Globe size={12} />,
@@ -31,9 +32,23 @@ function formatJsonValue(value: JsonValue | undefined): string {
 
 function outcomeBadgeClass(result?: ToolResultEnvelope): string {
   if (!result) return "bg-gray-100 text-gray-500";
+  if (result.warnings.includes("approval_required")) return "bg-amber-100 text-amber-700";
+  if (result.warnings.includes("blocked_by_compliance")) return "bg-red-100 text-red-700";
+  if (result.warnings.includes("compliance_warning")) return "bg-amber-100 text-amber-700";
   if (result.status === "error") return "bg-red-100 text-red-700";
   if (result.outcome === "success_empty") return "bg-amber-100 text-amber-700";
   return "bg-emerald-100 text-emerald-700";
+}
+
+function outcomeBadgeText(call: ToolCall): string {
+  const result = call.result;
+  if (!result) return "";
+  if (call.tool === "compliance_preflight") {
+    if (result.warnings.includes("approval_required")) return "approval required";
+    if (result.warnings.includes("blocked_by_compliance")) return "blocked";
+    if (result.warnings.includes("compliance_warning")) return "warning";
+  }
+  return result.outcome.replaceAll("_", " ");
 }
 
 function ToolIcon({ name }: { name: string }) {
@@ -76,7 +91,7 @@ function SingleCall({ call }: SingleCallProps) {
               outcomeBadgeClass(call.result)
             )}
           >
-            {call.result.outcome.replace("_", " ")}
+            {outcomeBadgeText(call)}
           </span>
         )}
         {open ? (

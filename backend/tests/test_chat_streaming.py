@@ -90,16 +90,32 @@ async def test_chat_stream_includes_structured_tool_result_and_persists_it(isola
         )
         payloads = await _collect_sse_payloads(response)
 
-    tool_start = next(item for item in payloads if item["type"] == "tool_start")
-    tool_end = next(item for item in payloads if item["type"] == "tool_end")
+    preflight_end = next(
+        item
+        for item in payloads
+        if item["type"] == "tool_end" and item["tool"] == "compliance_preflight"
+    )
+    tool_start = next(
+        item
+        for item in payloads
+        if item["type"] == "tool_start" and item["tool"] == "read_file"
+    )
+    tool_end = next(
+        item
+        for item in payloads
+        if item["type"] == "tool_end" and item["tool"] == "read_file"
+    )
 
     assert tool_start["run_id"] == "tool-run-1"
     assert tool_end["run_id"] == "tool-run-1"
     assert tool_end["result"]["tool_name"] == "read_file"
     assert tool_end["result"]["structured_payload"]["path"] == "memory/MEMORY.md"
+    assert preflight_end["result"]["structured_payload"]["report"]["final_disposition"] == "allow"
 
     history = agent_manager.session_manager.load_session(session_id)
     assistant_messages = [msg for msg in history if msg["role"] == "assistant"]
     assert assistant_messages
-    assert assistant_messages[0]["tool_calls"][0]["run_id"] == "tool-run-1"
-    assert assistant_messages[0]["tool_calls"][0]["result"]["tool_name"] == "read_file"
+    tool_calls = assistant_messages[0]["tool_calls"]
+    assert tool_calls[0]["tool"] == "compliance_preflight"
+    assert tool_calls[1]["run_id"] == "tool-run-1"
+    assert tool_calls[1]["result"]["tool_name"] == "read_file"
