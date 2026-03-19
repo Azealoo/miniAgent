@@ -1,0 +1,177 @@
+schema_version: "1.0.0"
+kind: workflow_spec
+workflow_id: perturb-seq-nextflow
+version: "1.0.0"
+name: Perturb-seq Nextflow
+purpose: Define an external-engine-backed perturb-seq workflow that still preserves explicit inputs, outputs, QC gates, and compliance hooks.
+engine: external_workflow_adapter_v1
+required_inputs:
+  - name: dataset_manifest
+    kind: artifact
+    artifact_type: dataset_manifest
+    schema_ref: artifact_schema:dataset_manifest@1.0.0
+    description: Dataset intake artifact for the perturb-seq run.
+  - name: reference_build
+    kind: metadata
+    data_type: string
+    description: Reference build identifier forwarded to the external engine launch step.
+optional_inputs:
+  - name: qc_summary_template
+    kind: template
+    template_path: workflows/report_templates/rna_seq_qc_summary.md.j2
+    description: Optional template for a downstream summary report.
+runtime:
+  provided_inputs:
+    - dataset_manifest
+    - reference_build
+    - qc_summary_template
+  allowed_parameter_overrides: []
+  generated_state:
+    - run_id
+    - created_at
+    - submitted_job_id
+    - step_statuses
+    - artifact_paths
+    - warnings
+  state_artifact: workflow_run
+  artifact_root_template: artifacts/{workflow_id}/{date}/{run_id}
+outputs:
+  - name: qa_report
+    kind: artifact
+    artifact_type: qa_report
+    schema_ref: artifact_schema:qa_report@1.0.0
+    description: Structured QA summary for the external perturb-seq execution.
+    source:
+      step_id: summarize_external_results
+      output_name: qa_report
+    report_template_path: workflows/report_templates/rna_seq_qc_summary.md.j2
+qc_gates:
+  - id: dataset-manifest-reviewed
+    label: Dataset manifest must be available before launch
+    when: before_execution
+    target:
+      source_type: workflow_input
+      input_name: dataset_manifest
+    failure_policy: block
+    description: Stop the workflow before any external engine submission when inputs are incomplete.
+  - id: external-outputs-materialized
+    label: External engine outputs must be declared before summary generation
+    when: after_step
+    target:
+      source_type: step_output
+      step_id: launch_nextflow
+      output_name: external_outputs_bundle
+    failure_policy: block
+    description: QA summarization can only run after the external engine step emits a named output bundle.
+compliance_hooks:
+  - id: privacy-preflight
+    stage: before_execution
+    tool: compliance_preflight
+    required: true
+    inputs:
+      - name: dataset_manifest
+        source:
+          source_type: workflow_input
+          input_name: dataset_manifest
+      - name: reference_build
+        source:
+          source_type: workflow_input
+          input_name: reference_build
+    description: Run deterministic compliance screening before any external launch occurs.
+  - id: publish-review
+    stage: before_publish
+    tool: compliance_preflight
+    required: true
+    inputs:
+      - name: dataset_manifest
+        source:
+          source_type: workflow_input
+          input_name: dataset_manifest
+      - name: qa_report
+        source:
+          source_type: step_output
+          step_id: summarize_external_results
+          output_name: qa_report
+    description: Re-check workflow outputs before publication or report export.
+steps:
+  - id: preflight_check
+    label: Validate perturb-seq workflow inputs
+    executor:
+      executor_type: python
+      module: workflows.runners.perturb_seq
+      function: validate_inputs
+    inputs:
+      - name: dataset_manifest
+        source:
+          source_type: workflow_input
+          input_name: dataset_manifest
+      - name: reference_build
+        source:
+          source_type: workflow_input
+          input_name: reference_build
+    outputs:
+      - name: validated_manifest
+        kind: artifact
+        artifact_type: dataset_manifest
+        schema_ref: artifact_schema:dataset_manifest@1.0.0
+        description: Validated dataset intake artifact passed into the external engine launch.
+    prerequisites: []
+    retry_policy:
+      max_attempts: 1
+      backoff_seconds: 0
+    failure_policy: fail_workflow
+  - id: launch_nextflow
+    label: Launch perturb-seq pipeline in Nextflow
+    executor:
+      executor_type: external_engine
+      engine_name: nextflow
+      entrypoint: workflows/engines/perturb_seq/main.nf
+      command: nextflow run workflows/engines/perturb_seq/main.nf -profile slurm
+    inputs:
+      - name: dataset_manifest
+        source:
+          source_type: step_output
+          step_id: preflight_check
+          output_name: validated_manifest
+      - name: reference_build
+        source:
+          source_type: workflow_input
+          input_name: reference_build
+    outputs:
+      - name: external_outputs_bundle
+        kind: value
+        description: Handle to the external engine output bundle for later ingestion and QA review.
+    prerequisites:
+      - preflight_check
+    retry_policy:
+      max_attempts: 1
+      backoff_seconds: 0
+    failure_policy: block_workflow
+  - id: summarize_external_results
+    label: Summarize external workflow outputs
+    executor:
+      executor_type: python
+      module: workflows.runners.perturb_seq
+      function: summarize_outputs
+    inputs:
+      - name: external_outputs_bundle
+        source:
+          source_type: step_output
+          step_id: launch_nextflow
+          output_name: external_outputs_bundle
+      - name: qc_summary_template
+        source:
+          source_type: workflow_input
+          input_name: qc_summary_template
+    outputs:
+      - name: qa_report
+        kind: artifact
+        artifact_type: qa_report
+        schema_ref: artifact_schema:qa_report@1.0.0
+        description: Structured QA report emitted after external outputs are summarized.
+    prerequisites:
+      - launch_nextflow
+    retry_policy:
+      max_attempts: 2
+      backoff_seconds: 60
+    failure_policy: fail_workflow
