@@ -6,6 +6,12 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from graph.session_summary import (
+    append_compressed_summary,
+    generate_structured_summary,
+    parse_compressed_context,
+)
+
 # Per-session locks prevent two concurrent requests from compressing the same
 # session simultaneously (which would double-archive messages).
 _compress_locks: dict[str, asyncio.Lock] = {}
@@ -124,7 +130,7 @@ class SessionManager:
         """
         Return history optimised for the LLM:
         - Consecutive assistant messages are merged into one.
-        - If compressed_context exists, a synthetic assistant message is
+        - If compressed_context exists, a synthetic system message is
           prepended containing the summary.
         """
         data = self._read(session_id)
@@ -212,7 +218,7 @@ class SessionManager:
 
         # Append to compressed_context (multiple compressions separated by ---)
         existing = data.get("compressed_context", "").strip()
-        data["compressed_context"] = (existing + "\n---\n" + summary) if existing else summary
+        data["compressed_context"] = append_compressed_summary(existing, summary)
         data["messages"] = remaining
         self._write(session_id, data)
 
@@ -220,6 +226,21 @@ class SessionManager:
 
     def get_compressed_context(self, session_id: str) -> str:
         return self._read(session_id).get("compressed_context", "")
+
+    def get_compressed_summaries(self, session_id: str) -> list[dict]:
+        summaries = parse_compressed_context(self.get_compressed_context(session_id))
+        return [
+            {
+                "source_format": summary.source_format,
+                "legacy_summary": summary.legacy_summary,
+                "decisions_and_rationale": summary.decisions_and_rationale,
+                "results_register": summary.results_register,
+                "evidence_register": summary.evidence_register,
+                "compliance_register": summary.compliance_register,
+                "open_questions_and_next_actions": summary.open_questions_and_next_actions,
+            }
+            for summary in summaries
+        ]
 
     async def auto_compress_if_needed(
         self, session_id: str, llm, threshold: int = 40
@@ -233,8 +254,6 @@ class SessionManager:
         A per-session asyncio.Lock prevents concurrent requests from compressing
         the same session simultaneously (which would double-archive messages).
         """
-        from langchain_core.messages import HumanMessage, SystemMessage
-
         async with self.get_or_create_compress_lock(session_id):
             return await self._do_compress_if_needed(session_id, llm, threshold)
 
@@ -242,8 +261,6 @@ class SessionManager:
         self, session_id: str, llm, threshold: int
     ) -> bool:
         """Inner compress logic — must be called with the session lock held."""
-        from langchain_core.messages import HumanMessage, SystemMessage
-
         data = self._read(session_id)
         messages = data["messages"]
 
@@ -253,27 +270,8 @@ class SessionManager:
         n = max(4, len(messages) // 2)
         to_compress = messages[:n]
 
-        conversation = "\n".join(
-            f"{m['role'].upper()}: {m.get('content', '')}" for m in to_compress
-        )
-
         try:
-            summary_llm = llm.bind(temperature=0.3)
-            resp = await summary_llm.ainvoke(
-                [
-                    SystemMessage(
-                        content=(
-                            "You are a helpful assistant that summarises conversations concisely. "
-                            "Reply in English. Keep the summary under 2000 characters. "
-                            "Preserve key facts: gene names, PMIDs, decisions, file paths, and conclusions."
-                        )
-                    ),
-                    HumanMessage(
-                        content=f"Please summarise the following conversation:\n\n{conversation}"
-                    ),
-                ]
-            )
-            summary = resp.content.strip()[:2000]
+            summary = await generate_structured_summary(to_compress, llm)
         except Exception:
             return False  # non-fatal — skip compression this turn
 

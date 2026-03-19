@@ -4,12 +4,12 @@ POST /api/sessions/{id}/compress
 Compresses the oldest 50% of messages in a session:
 1. Validates that ≥ 4 messages exist.
 2. Takes the first 50% (min 4).
-3. Calls DeepSeek to generate a concise English summary (≤ 500 chars).
+3. Generates a structured scientific continuity summary.
 4. Archives the messages + stores the summary in compressed_context.
 """
 from fastapi import APIRouter, HTTPException
-from langchain_core.messages import HumanMessage, SystemMessage
 
+from graph.session_summary import generate_structured_summary
 from graph.session_manager import _validate_session_id
 
 router = APIRouter()
@@ -37,29 +37,10 @@ async def compress(session_id: str):
         n = max(4, len(messages) // 2)
         to_compress = messages[:n]
 
-        # Format conversation for summarisation
-        conversation = "\n".join(
-            f"{m['role'].upper()}: {m.get('content', '')}" for m in to_compress
-        )
-
         try:
-            # Use a lower-temperature variant for consistent summaries
-            summary_llm = agent_manager.llm.bind(temperature=0.3)  # type: ignore[union-attr]
-            resp = await summary_llm.ainvoke(
-                [
-                    SystemMessage(
-                        content=(
-                            "You are a helpful assistant that summarises conversations concisely. "
-                            "Reply in English. Keep the summary under 2000 characters. "
-                            "Preserve key facts: gene names, PMIDs, decisions, file paths, and conclusions."
-                        )
-                    ),
-                    HumanMessage(
-                        content=f"Please summarise the following conversation:\n\n{conversation}"
-                    ),
-                ]
+            summary = await generate_structured_summary(
+                to_compress, agent_manager.llm  # type: ignore[union-attr]
             )
-            summary = resp.content.strip()[:2000]
         except Exception as exc:
             raise HTTPException(500, f"Summary generation failed: {exc}")
 

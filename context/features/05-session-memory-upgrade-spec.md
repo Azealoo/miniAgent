@@ -38,3 +38,17 @@ Upgrade session compression from a generic summary into a scientific continuity 
 - @context/features/03-core-schema-pack-v1-spec.md
 - @context/features/18-report-bundle-v1-spec.md
 - @context/features/21-evidence-retrieval-mvp-spec.md
+
+## Implementation Notes
+
+- Structured summaries serialize into the existing `compressed_context` string as readable sectioned text blocks headed by `[Scientific Continuity Summary v1]`.
+- Multiple compression passes continue to append into `compressed_context` using the current `---` block separator so existing session loading behavior remains compatible.
+- Manual and automatic compression share the same structured-summary prompt and normalization logic.
+- Compression input now includes archived assistant `tool_calls` so important tool-derived results can survive summarization.
+- Normalized summaries enforce a hard 2000-character ceiling while preserving the sectioned continuity format.
+- Long archived messages are condensed with head-and-tail preservation plus extracted salient references (for example PMIDs, file paths, run IDs, URLs, and blocked/approved action lines) before they are sent to the summarization model.
+- Structured summary parsing accepts common section-heading variants so code can recover sections even when the model uses slightly different labels.
+
+## Deferred Decision
+
+- Do not emit a separate artifact for compression summaries in this phase. Revisit once artifact schemas exist for durable high-value memory summaries.

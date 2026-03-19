@@ -6,7 +6,7 @@ in-process ASGI client, which currently hangs in this environment.
 """
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -122,6 +122,51 @@ class TestSessionsEndpoints:
 
         sid = create_session()["id"]
         assert get_history(sid) == []
+
+
+class TestCompressionEndpoint:
+    @pytest.mark.asyncio
+    async def test_compress_returns_structured_summary(self, isolated_api_state):
+        from api.compress import compress
+        from api.sessions import create_session
+        from graph.agent import agent_manager
+        from graph.session_summary import MAX_SUMMARY_CHARS, STRUCTURED_SUMMARY_HEADER
+
+        sid = create_session()["id"]
+        for i in range(6):
+            agent_manager.session_manager.save_message(
+                sid,
+                "user" if i % 2 == 0 else "assistant",
+                f"msg-{i}",
+            )
+
+        mock_llm = MagicMock()
+        mock_llm.bind = MagicMock(return_value=mock_llm)
+
+        async def fake_ainvoke(_msgs):
+            mock_resp = MagicMock()
+            mock_resp.content = (
+                "Legacy free-text summary with PMID:12345 and /tmp/run-1/result.txt "
+                + ("extra detail " * 400)
+            )
+            return mock_resp
+
+        mock_llm.ainvoke = fake_ainvoke
+        mock_llm.bind.return_value.ainvoke = fake_ainvoke
+        original_llm = agent_manager.llm
+        agent_manager.llm = mock_llm
+
+        try:
+            resp = await compress(sid)
+        finally:
+            agent_manager.llm = original_llm
+
+        assert resp["archived_count"] == 4
+        assert resp["remaining_count"] == 2
+        assert STRUCTURED_SUMMARY_HEADER in resp["summary"]
+        assert "Results register:" in resp["summary"]
+        assert "Legacy free-text summary with PMID:12345" in resp["summary"]
+        assert len(resp["summary"]) <= MAX_SUMMARY_CHARS
 
 
 class TestFilesEndpoints:
