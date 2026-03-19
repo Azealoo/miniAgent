@@ -1,27 +1,18 @@
 # Complete Action
 
 1. Run a final review to ensure everything is complete
-2. Stage all changes
-3. Commit with a descriptive message based on the feature
-4. Push the branch to origin
-5. Merge into main
-6. Switch back to main branch
-7. Reset current-feature.md:
-   - Change H1 back to `# Current Feature`
-   - Clear Goals and Notes sections
-   - Set Status to "Not Started"
-8. Add feature summary to the END of History
-```
-
----
-
-## Directory Structure
-```
-.claude/skills/feature/
-├── SKILL.md
-└── actions/
-    ├── load.md
-    ├── start.md
-    ├── review.md
-    ├── explain.md
-    └── complete.md
+2. Confirm the feature status should move to `Completed`
+3. Update `current-feature.md`:
+   - set Status to `Completed`
+   - make sure Goals and Notes reflect the finished implementation state
+   - add a concise entry to `## History`
+4. Reset `current-feature.md` for the next task as part of completion:
+   - change Status back to `Not Started`
+   - clear Goals and Notes
+   - keep History intact
+5. Do not commit, push, or merge automatically unless the user explicitly asks
+6. If the user asks to commit:
+   - stage only the intended files
+   - use a focused conventional commit message
+   - verify before committing if not already done
+7. If the user asks to push or merge, do that as a separate explicit step
