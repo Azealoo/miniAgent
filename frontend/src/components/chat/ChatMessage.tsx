@@ -41,9 +41,11 @@ export default function ChatMessage({ message }: ChatMessageProps) {
 
         {/* Tool calls (thought chain) */}
         {((message.tool_calls && message.tool_calls.length > 0) ||
+          (message.workflow_events && message.workflow_events.length > 0) ||
           message.pendingTool) && (
           <ThoughtChain
             toolCalls={message.tool_calls ?? []}
+            workflowEvents={message.workflow_events ?? []}
             pendingTool={message.pendingTool}
           />
         )}

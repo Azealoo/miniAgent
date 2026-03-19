@@ -197,6 +197,139 @@ def summarize(inputs, context):
         assert (result.run_dir / "outputs" / "generated" / "summarize" / "resolved_outputs.json").exists()
         assert (result.run_dir / "qa_report.json").exists()
 
+    def test_runner_emits_structured_workflow_events_for_successful_run(self, tmp_path):
+        module_name = _write_runner_module(
+            tmp_path,
+            "stream_demo",
+            """
+def prepare(inputs, _context):
+    return {"prepared_value": {"seed": inputs["seed"], "doubled": inputs["seed"] * 2}}
+
+
+def summarize(inputs, _context):
+    return {
+        "qa_report": {
+            "overall_status": "passed",
+            "failed_checks": [],
+            "warnings": [f"doubled={inputs['prepared_value']['doubled']}"],
+            "missing_artifacts": [],
+            "recommended_remediation": [],
+            "checklist_artifacts": [],
+        }
+    }
+""",
+        )
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "runner-stream-demo",
+                "version": "1.0.0",
+                "name": "Runner Stream Demo",
+                "purpose": "Verify workflow lifecycle event emission for successful runs.",
+                "engine": "internal_dag_runner_v1",
+                "required_inputs": [
+                    {
+                        "name": "seed",
+                        "kind": "parameter",
+                        "data_type": "integer",
+                        "description": "Seed integer for the test workflow.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": _runtime_contract(["seed"]),
+                "outputs": [_qa_report_output("summarize", "qa_report")],
+                "qc_gates": [],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "prepare",
+                        "label": "Prepare Values",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "prepare",
+                        },
+                        "inputs": [
+                            {
+                                "name": "seed",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "seed",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "prepared_value",
+                                "kind": "value",
+                                "description": "Prepared numeric payload.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    },
+                    {
+                        "id": "summarize",
+                        "label": "Summarize Results",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "summarize",
+                        },
+                        "inputs": [
+                            {
+                                "name": "prepared_value",
+                                "source": {
+                                    "source_type": "step_output",
+                                    "step_id": "prepare",
+                                    "output_name": "prepared_value",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "qa_report",
+                                "kind": "artifact",
+                                "artifact_type": "qa_report",
+                                "schema_ref": "artifact_schema:qa_report@1.0.0",
+                                "description": "QA artifact emitted by the workflow.",
+                            }
+                        ],
+                        "prerequisites": ["prepare"],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    },
+                ],
+            }
+        )
+
+        events: list[dict] = []
+        result = InternalDAGRunner(tmp_path).run(spec, {"seed": 11}, event_callback=events.append)
+
+        assert result.run.lifecycle_status == "completed"
+        assert [event["type"] for event in events] == [
+            "workflow_start",
+            "workflow_artifact",
+            "workflow_step_start",
+            "workflow_artifact",
+            "workflow_step_end",
+            "workflow_step_start",
+            "workflow_artifact",
+            "workflow_step_end",
+            "workflow_artifact",
+            "workflow_done",
+        ]
+        assert events[0]["contract_version"] == "workflow_event.v1"
+        assert events[1]["scope"] == "run_record"
+        assert events[3]["artifact"]["artifact_type"] == "workflow_value"
+        assert events[6]["artifact"]["artifact_type"] == "qa_report"
+        assert events[8]["scope"] == "workflow_output"
+        assert events[-1]["lifecycle_status"] == "completed"
+        assert events[-1]["completed_steps"] == 2
+        assert events[-1]["total_steps"] == 2
+
     def test_runner_propagates_failures_to_descendants(self, tmp_path):
         module_name = _write_runner_module(
             tmp_path,
@@ -801,6 +934,124 @@ def launch(_inputs, context):
         assert not (tmp_path / "execution_log.json").exists()
         assert any(ref.artifact_type == "compliance_report" for ref in result.run.related_artifacts)
         assert "Compliance hook privacy-preflight blocked execution" in result.run.warnings[0]
+
+    def test_runner_emits_blocked_and_done_events_for_blocked_preflight(self, tmp_path):
+        module_name = _write_runner_module(
+            tmp_path,
+            "blocked_stream_demo",
+            """
+def launch(inputs, _context):
+    return {"submission_bundle": {"dataset_manifest": inputs["dataset_manifest"]}}
+""",
+        )
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "blocked-stream-demo",
+                "version": "1.0.0",
+                "name": "Blocked Stream Demo",
+                "purpose": "Verify blocked workflow event emission before step execution.",
+                "engine": "internal_dag_runner_v1",
+                "required_inputs": [
+                    {
+                        "name": "dataset_manifest",
+                        "kind": "artifact",
+                        "artifact_type": "dataset_manifest",
+                        "schema_ref": "artifact_schema:dataset_manifest@1.0.0",
+                        "description": "Manifest required by the gate.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": {
+                    "provided_inputs": ["dataset_manifest"],
+                    "allowed_parameter_overrides": [],
+                    "generated_state": [
+                        "run_id",
+                        "created_at",
+                        "resolved_input_paths",
+                        "step_statuses",
+                        "artifact_paths",
+                    ],
+                    "state_artifact": "workflow_run",
+                    "artifact_root_template": "artifacts/{workflow_id}/{date}/{run_id}",
+                },
+                "outputs": [
+                    {
+                        "name": "submission_bundle",
+                        "kind": "value",
+                        "description": "Submission result.",
+                        "source": {
+                            "step_id": "launch",
+                            "output_name": "submission_bundle",
+                        },
+                    }
+                ],
+                "qc_gates": [
+                    {
+                        "id": "dataset-manifest-required",
+                        "label": "Dataset manifest required",
+                        "when": "before_execution",
+                        "target": {
+                            "source_type": "workflow_input",
+                            "input_name": "dataset_manifest",
+                        },
+                        "failure_policy": "block",
+                        "description": "Block execution while required manifest info is missing.",
+                    }
+                ],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "launch",
+                        "label": "Launch",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "launch",
+                        },
+                        "inputs": [
+                            {
+                                "name": "dataset_manifest",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "dataset_manifest",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "submission_bundle",
+                                "kind": "value",
+                                "description": "Submission result.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    }
+                ],
+            }
+        )
+
+        events: list[dict] = []
+        result = InternalDAGRunner(tmp_path).run(
+            spec,
+            {"dataset_manifest": "manifests/missing-dataset-manifest.yaml"},
+            event_callback=events.append,
+        )
+
+        assert result.run.lifecycle_status == "blocked"
+        assert [event["type"] for event in events] == [
+            "workflow_start",
+            "workflow_artifact",
+            "workflow_blocked",
+            "workflow_done",
+        ]
+        assert events[2]["blocking_source"] == "qc_gate"
+        assert events[2]["stage"] == "before_execution"
+        assert "dataset-manifest-required" in events[2]["reason"]
+        assert events[3]["lifecycle_status"] == "blocked"
 
     def test_runner_uses_slugified_workflow_identity_in_workflow_run_artifact(self, tmp_path):
         module_name = _write_runner_module(

@@ -1,4 +1,10 @@
-import type { Session, Skill, TokenStats, ToolResultEnvelope } from "./types";
+import type {
+  Session,
+  Skill,
+  TokenStats,
+  ToolResultEnvelope,
+  WorkflowStreamEvent,
+} from "./types";
 
 function getBase(): string {
   if (typeof window === "undefined") return "http://localhost:8002";
@@ -108,6 +114,7 @@ export interface StreamCallbacks {
     runId: string,
     result?: ToolResultEnvelope
   ) => void;
+  onWorkflowEvent: (event: WorkflowStreamEvent) => void;
   onNewResponse: () => void;
   onDone: (content: string) => void;
   onTitle: (title: string) => void;
@@ -179,6 +186,14 @@ export async function streamChat(
                   data.run_id ?? data.tool,
                   data.result
                 );
+                break;
+              case "workflow_start":
+              case "workflow_step_start":
+              case "workflow_step_end":
+              case "workflow_blocked":
+              case "workflow_artifact":
+              case "workflow_done":
+                callbacks.onWorkflowEvent(data as WorkflowStreamEvent);
                 break;
               case "new_response":
                 callbacks.onNewResponse();

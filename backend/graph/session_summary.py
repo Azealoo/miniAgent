@@ -181,6 +181,62 @@ def format_messages_for_summary(messages: Sequence[dict]) -> str:
             if tool_output:
                 parts.append(f"Tool output: {tool_output}")
 
+        workflow_events = message.get("workflow_events") or []
+        for workflow_index, event in enumerate(workflow_events, start=1):
+            event_type = str(event.get("type", "workflow_event")).strip() or "workflow_event"
+            parts.append(f"Workflow event {workflow_index}: {event_type}")
+
+            workflow_id = _prepare_message_text(
+                str(event.get("workflow_id", "")).strip(),
+                limit=200,
+            )
+            if workflow_id:
+                parts.append(f"Workflow ID: {workflow_id}")
+
+            run_id = _prepare_message_text(str(event.get("run_id", "")).strip(), limit=200)
+            if run_id:
+                parts.append(f"Workflow run: {run_id}")
+
+            step_id = _prepare_message_text(str(event.get("step_id", "")).strip(), limit=200)
+            if step_id:
+                parts.append(f"Workflow step: {step_id}")
+
+            status = _prepare_message_text(
+                str(event.get("lifecycle_status") or event.get("status") or "").strip(),
+                limit=200,
+            )
+            if status:
+                parts.append(f"Workflow status: {status}")
+
+            reason = _prepare_message_text(str(event.get("reason", "")).strip(), limit=800)
+            if reason:
+                parts.append(f"Workflow reason: {reason}")
+
+            artifact = event.get("artifact")
+            if isinstance(artifact, dict):
+                artifact_path = _prepare_message_text(str(artifact.get("path", "")).strip(), limit=600)
+                if artifact_path:
+                    parts.append(f"Workflow artifact: {artifact_path}")
+
+            artifact_refs = event.get("artifact_refs")
+            if isinstance(artifact_refs, list):
+                for artifact_ref in artifact_refs:
+                    if not isinstance(artifact_ref, dict):
+                        continue
+                    artifact_ref_path = _prepare_message_text(
+                        str(artifact_ref.get("path", "")).strip(),
+                        limit=600,
+                    )
+                    if artifact_ref_path:
+                        parts.append(f"Workflow artifact: {artifact_ref_path}")
+
+            run_record_path = _prepare_message_text(
+                str(event.get("run_record_path", "")).strip(),
+                limit=600,
+            )
+            if run_record_path:
+                parts.append(f"Workflow run record: {run_record_path}")
+
         chunks.append("\n".join(parts))
 
     return "\n\n".join(chunks).strip()

@@ -16,6 +16,7 @@ from graph.session_summary import (
     MAX_SUMMARY_CHARS,
     STRUCTURED_SUMMARY_HEADER,
     build_summary_prompt,
+    format_messages_for_summary,
     normalize_generated_summary,
     parse_summary_block,
 )
@@ -106,6 +107,74 @@ class TestSessionSummaryHelpers:
         assert "/tmp/output/report.txt" in human_prompt
         assert "blocked risky action pending review" in human_prompt
 
+    def test_format_messages_for_summary_includes_workflow_event_context(self):
+        rendered = format_messages_for_summary(
+            [
+                {
+                    "role": "assistant",
+                    "content": "Workflow requires manual review before publishing.",
+                    "workflow_events": [
+                        {
+                            "type": "workflow_start",
+                            "run_id": "run-20260319T120000Z-demo1234",
+                            "workflow_id": "rna-seq-qc",
+                            "lifecycle_status": "created",
+                            "run_record_path": (
+                                "artifacts/rna-seq-qc/2026-03-19/"
+                                "run-20260319T120000Z-demo1234/run.json"
+                            ),
+                        },
+                        {
+                            "type": "workflow_artifact",
+                            "run_id": "run-20260319T120000Z-demo1234",
+                            "workflow_id": "rna-seq-qc",
+                            "artifact": {
+                                "artifact_type": "qa_report",
+                                "path": (
+                                    "artifacts/rna-seq-qc/2026-03-19/"
+                                    "run-20260319T120000Z-demo1234/qa_report.json"
+                                ),
+                            },
+                        },
+                        {
+                            "type": "workflow_blocked",
+                            "run_id": "run-20260319T120000Z-demo1234",
+                            "workflow_id": "rna-seq-qc",
+                            "lifecycle_status": "blocked",
+                            "reason": "approval required before publish",
+                            "step_id": "publish",
+                        },
+                        {
+                            "type": "workflow_step_end",
+                            "run_id": "run-20260319T120000Z-demo1234",
+                            "workflow_id": "rna-seq-qc",
+                            "step_id": "summarize_qc",
+                            "status": "completed",
+                            "artifact_refs": [
+                                {
+                                    "artifact_type": "qa_report",
+                                    "path": (
+                                        "artifacts/rna-seq-qc/2026-03-19/"
+                                        "run-20260319T120000Z-demo1234/"
+                                        "outputs/generated/summarize_qc/qa_report.json"
+                                    ),
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ]
+        )
+
+        assert "Workflow event 1: workflow_start" in rendered
+        assert "Workflow run: run-20260319T120000Z-demo1234" in rendered
+        assert "Workflow run record: artifacts/rna-seq-qc/2026-03-19/" in rendered
+        assert "Workflow event 2: workflow_artifact" in rendered
+        assert "Workflow artifact: artifacts/rna-seq-qc/2026-03-19/" in rendered
+        assert "Workflow step: publish" in rendered
+        assert "Workflow reason: approval required before publish" in rendered
+        assert "outputs/generated/summarize_qc/qa_report.json" in rendered
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # create / basic CRUD
@@ -165,6 +234,24 @@ class TestSaveAndLoad:
         sm.save_message(sid, "assistant", "Done", tool_calls)
         msgs = sm.load_session(sid)
         assert msgs[0]["tool_calls"] == tool_calls
+
+    def test_save_message_with_workflow_events(self, sm):
+        sid = sm.create_session()
+        workflow_events = [
+            {
+                "contract_version": "workflow_event.v1",
+                "type": "workflow_start",
+                "run_id": "run-20260319T120000Z-demo1234",
+                "workflow_id": "rna-seq-qc",
+                "workflow_name": "RNA-seq QC",
+                "lifecycle_status": "created",
+                "resumed": False,
+                "run_record_path": "artifacts/rna-seq-qc/2026-03-19/run-20260319T120000Z-demo1234/run.json",
+            }
+        ]
+        sm.save_message(sid, "assistant", "", workflow_events=workflow_events)
+        msgs = sm.load_session(sid)
+        assert msgs[0]["workflow_events"] == workflow_events
 
     def test_no_tool_calls_key_when_none(self, sm):
         sid = sm.create_session()

@@ -10,7 +10,13 @@ import React, {
 } from "react";
 import * as api from "./api";
 import { uid } from "./utils";
-import type { Message, RetrievalResult, Session, ToolCall } from "./types";
+import type {
+  Message,
+  RetrievalResult,
+  Session,
+  ToolCall,
+  WorkflowStreamEvent,
+} from "./types";
 
 // ────────────────────────────────────────────────────────────────
 // Context shape
@@ -156,6 +162,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         content: "",
         isStreaming: true,
         tool_calls: [],
+        workflow_events: [],
       };
       streamingIdRef.current = assistantMsg.id;
 
@@ -220,6 +227,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           );
         },
 
+        onWorkflowEvent: (event) => {
+          const id = streamingIdRef.current;
+          if (!id) return;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === id
+                ? {
+                    ...m,
+                    workflow_events: [...(m.workflow_events ?? []), event],
+                  }
+                : m
+            )
+          );
+        },
+
         onNewResponse: () => {
           // Capture old ID before updating ref so the map can still find it
           const oldId = streamingIdRef.current;
@@ -229,6 +251,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             content: "",
             isStreaming: true,
             tool_calls: [],
+            workflow_events: [],
           };
           // Update ref synchronously so subsequent onToken calls use the new ID
           streamingIdRef.current = newMsg.id;
@@ -314,6 +337,7 @@ interface RawMessage {
   role: string;
   content: string;
   tool_calls?: ToolCall[];
+  workflow_events?: WorkflowStreamEvent[];
 }
 
 function _historyToMessages(raw: RawMessage[]): Message[] {
@@ -324,6 +348,7 @@ function _historyToMessages(raw: RawMessage[]): Message[] {
       role: m.role as "user" | "assistant",
       content: m.content ?? "",
       tool_calls: m.tool_calls ?? [],
+      workflow_events: m.workflow_events ?? [],
     }));
 }
 

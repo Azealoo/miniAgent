@@ -1,16 +1,31 @@
 "use client";
 
-import { useState } from "react";
-import { ChevronDown, ChevronRight, Terminal, Code2, Globe, FileText, Search } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import {
+  ChevronDown,
+  ChevronRight,
+  CircleCheck,
+  Code2,
+  FileText,
+  GitBranch,
+  Globe,
+  Package,
+  Search,
+  ShieldAlert,
+  Terminal,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import type {
   ComplianceReportArtifact,
   JsonValue,
   ToolCall,
   ToolResultEnvelope,
+  WorkflowArtifactEvent,
+  WorkflowArtifactRef,
+  WorkflowStreamEvent,
 } from "@/lib/types";
 
-const TOOL_ICONS: Record<string, React.ReactNode> = {
+const TOOL_ICONS: Record<string, ReactNode> = {
   compliance_preflight: <FileText size={12} />,
   terminal: <Terminal size={12} />,
   python_repl: <Code2 size={12} />,
@@ -28,7 +43,8 @@ const MAX_RENDERED_JSON_CHARS = 8_000;
 
 function formatJsonValue(value: JsonValue | undefined): string {
   if (value === undefined) return "";
-  const rendered = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  const rendered =
+    typeof value === "string" ? value : JSON.stringify(value, null, 2);
   if (rendered.length <= MAX_RENDERED_JSON_CHARS) {
     return rendered;
   }
@@ -44,7 +60,9 @@ function complianceRuntimeState(report: ComplianceReportArtifact | null): string
   return typeof report?.runtime_state === "string" ? report.runtime_state : null;
 }
 
-function compliancePreflightDisposition(report: ComplianceReportArtifact | null): string | null {
+function compliancePreflightDisposition(
+  report: ComplianceReportArtifact | null
+): string | null {
   return typeof report?.preflight_disposition === "string"
     ? report.preflight_disposition
     : null;
@@ -92,9 +110,7 @@ function outcomeBadgeText(call: ToolCall): string {
   return result.outcome.replaceAll("_", " ");
 }
 
-function getComplianceReport(
-  result?: ToolResultEnvelope
-): ComplianceReportArtifact | null {
+function getComplianceReport(result?: ToolResultEnvelope): ComplianceReportArtifact | null {
   const payload = result?.structured_payload;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return null;
@@ -141,7 +157,6 @@ function SingleCall({ call }: SingleCallProps) {
 
   return (
     <div className="border border-gray-200 rounded-lg overflow-hidden">
-      {/* Header */}
       <button
         onClick={() => setOpen((v) => !v)}
         className="w-full flex items-center gap-2 px-3 py-2 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
@@ -150,9 +165,7 @@ function SingleCall({ call }: SingleCallProps) {
         <span className="text-xs font-medium text-gray-700 font-mono">
           {call.tool}
         </span>
-        <span className="flex-1 text-xs text-gray-400 truncate">
-          {call.input}
-        </span>
+        <span className="flex-1 text-xs text-gray-400 truncate">{call.input}</span>
         {call.result && (
           <span
             className={cn(
@@ -170,7 +183,6 @@ function SingleCall({ call }: SingleCallProps) {
         )}
       </button>
 
-      {/* Body */}
       {open && (
         <div className="divide-y divide-gray-200">
           <div className="px-3 py-2">
@@ -300,20 +312,395 @@ function SingleCall({ call }: SingleCallProps) {
   );
 }
 
+interface WorkflowArtifactTrace {
+  artifact: WorkflowArtifactRef;
+  scope: WorkflowArtifactEvent["scope"];
+  stepId?: string | null;
+  outputName?: string | null;
+}
+
+interface WorkflowStepTrace {
+  stepId: string;
+  stepLabel: string;
+  status: string;
+  executorType?: string;
+  engineName?: string | null;
+  prerequisiteStepIds: string[];
+  artifacts: WorkflowArtifactRef[];
+  warnings: string[];
+  errors: string[];
+}
+
+interface WorkflowRunTrace {
+  runId: string;
+  workflowId: string;
+  workflowName: string;
+  status: string;
+  resumed: boolean;
+  runRecordPath?: string;
+  blockedReason?: string;
+  blockedStage?: string;
+  blockingSource?: string;
+  completedSteps?: number;
+  totalSteps?: number;
+  warningCount?: number;
+  steps: WorkflowStepTrace[];
+  artifacts: WorkflowArtifactTrace[];
+}
+
+function pushUniqueArtifact(
+  current: WorkflowArtifactRef[],
+  artifact: WorkflowArtifactRef
+): WorkflowArtifactRef[] {
+  if (
+    current.some(
+      (existing) =>
+        existing.path === artifact.path &&
+        existing.artifact_type === artifact.artifact_type
+    )
+  ) {
+    return current;
+  }
+  return [...current, artifact];
+}
+
+function buildWorkflowRuns(events: WorkflowStreamEvent[]): WorkflowRunTrace[] {
+  const runs = new Map<string, WorkflowRunTrace>();
+  const steps = new Map<string, Map<string, WorkflowStepTrace>>();
+  const order: string[] = [];
+
+  function ensureRun(event: WorkflowStreamEvent): WorkflowRunTrace {
+    const existing = runs.get(event.run_id);
+    if (existing) return existing;
+    const created: WorkflowRunTrace = {
+      runId: event.run_id,
+      workflowId: event.workflow_id,
+      workflowName: event.workflow_id,
+      status: "created",
+      resumed: false,
+      steps: [],
+      artifacts: [],
+    };
+    runs.set(event.run_id, created);
+    steps.set(event.run_id, new Map());
+    order.push(event.run_id);
+    return created;
+  }
+
+  function ensureStep(
+    run: WorkflowRunTrace,
+    stepId: string,
+    stepLabel: string
+  ): WorkflowStepTrace {
+    const runSteps = steps.get(run.runId) ?? new Map<string, WorkflowStepTrace>();
+    steps.set(run.runId, runSteps);
+    const existing = runSteps.get(stepId);
+    if (existing) {
+      existing.stepLabel = stepLabel;
+      return existing;
+    }
+    const created: WorkflowStepTrace = {
+      stepId,
+      stepLabel,
+      status: "created",
+      prerequisiteStepIds: [],
+      artifacts: [],
+      warnings: [],
+      errors: [],
+    };
+    runSteps.set(stepId, created);
+    run.steps.push(created);
+    return created;
+  }
+
+  for (const event of events) {
+    const run = ensureRun(event);
+
+    switch (event.type) {
+      case "workflow_start":
+        run.workflowName = event.workflow_name;
+        run.status = event.lifecycle_status;
+        run.resumed = event.resumed;
+        run.runRecordPath = event.run_record_path;
+        break;
+      case "workflow_step_start": {
+        const step = ensureStep(run, event.step_id, event.step_label);
+        step.status = event.status;
+        step.executorType = event.executor_type;
+        step.engineName = event.engine_name ?? null;
+        step.prerequisiteStepIds = event.prerequisite_step_ids;
+        break;
+      }
+      case "workflow_artifact": {
+        if (
+          !run.artifacts.some(
+            (existing) =>
+              existing.scope === event.scope &&
+              existing.stepId === event.step_id &&
+              existing.outputName === event.output_name &&
+              existing.artifact.path === event.artifact.path
+          )
+        ) {
+          run.artifacts.push({
+            artifact: event.artifact,
+            scope: event.scope,
+            stepId: event.step_id,
+            outputName: event.output_name,
+          });
+        }
+        if (event.step_id && event.step_label) {
+          const step = ensureStep(run, event.step_id, event.step_label);
+          step.artifacts = pushUniqueArtifact(step.artifacts, event.artifact);
+        }
+        break;
+      }
+      case "workflow_step_end": {
+        const step = ensureStep(run, event.step_id, event.step_label);
+        if (step.status !== "blocked") {
+          step.status = event.status;
+        }
+        step.warnings = Array.from(new Set([...step.warnings, ...event.warnings]));
+        step.errors = Array.from(new Set([...step.errors, ...event.errors]));
+        for (const artifact of event.artifact_refs) {
+          step.artifacts = pushUniqueArtifact(step.artifacts, artifact);
+        }
+        break;
+      }
+      case "workflow_blocked":
+        run.status = event.lifecycle_status;
+        run.blockedReason = event.reason;
+        run.blockedStage = event.stage;
+        run.blockingSource = event.blocking_source;
+        if (event.step_id && event.step_label) {
+          const step = ensureStep(run, event.step_id, event.step_label);
+          step.status = "blocked";
+          if (!step.errors.includes(event.reason)) {
+            step.errors = [...step.errors, event.reason];
+          }
+        }
+        break;
+      case "workflow_done":
+        run.status = event.lifecycle_status;
+        run.runRecordPath = event.run_record_path;
+        run.completedSteps = event.completed_steps;
+        run.totalSteps = event.total_steps;
+        run.warningCount = event.warning_count;
+        break;
+    }
+  }
+
+  return order.map((runId) => runs.get(runId)).filter(Boolean) as WorkflowRunTrace[];
+}
+
+function workflowStatusBadgeClass(status: string): string {
+  if (status === "completed") return "bg-emerald-100 text-emerald-700";
+  if (status === "blocked" || status === "failed") return "bg-red-100 text-red-700";
+  if (status === "running" || status === "preflight_checked") return "bg-sky-100 text-sky-700";
+  if (status === "waiting") return "bg-amber-100 text-amber-700";
+  return "bg-slate-100 text-slate-600";
+}
+
+function WorkflowStatusIcon({ status }: { status: string }) {
+  if (status === "completed") {
+    return <CircleCheck size={14} className="text-emerald-600" />;
+  }
+  if (status === "blocked" || status === "failed") {
+    return <ShieldAlert size={14} className="text-red-600" />;
+  }
+  return <GitBranch size={14} className="text-sky-700" />;
+}
+
+function formatWorkflowArtifact(artifact: WorkflowArtifactRef): string {
+  return `${artifact.artifact_type} - ${artifact.path}`;
+}
+
+function WorkflowRunCard({ run }: { run: WorkflowRunTrace }) {
+  const runArtifacts = run.artifacts.filter((artifact) => !artifact.stepId);
+
+  return (
+    <div className="border border-slate-200 rounded-lg overflow-hidden bg-white">
+      <div className="px-3 py-2 bg-slate-50 border-b border-slate-200">
+        <div className="flex items-start gap-2">
+          <span className="mt-0.5">
+            <WorkflowStatusIcon status={run.status} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs font-medium text-slate-700">
+                {run.workflowName}
+              </span>
+              <span
+                className={cn(
+                  "rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+                  workflowStatusBadgeClass(run.status)
+                )}
+              >
+                {humanizeUnderscoreValue(run.status)}
+              </span>
+              {run.resumed && (
+                <span className="rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-slate-100 text-slate-600">
+                  resumed
+                </span>
+              )}
+            </div>
+            <div className="mt-1 text-[11px] text-slate-500 font-mono break-all">
+              {run.runId}
+            </div>
+            {run.runRecordPath && (
+              <div className="text-[11px] text-slate-500 break-all">
+                run record: {run.runRecordPath}
+              </div>
+            )}
+            {typeof run.completedSteps === "number" &&
+              typeof run.totalSteps === "number" && (
+                <div className="text-[11px] text-slate-500">
+                  steps: {run.completedSteps}/{run.totalSteps} completed
+                  {typeof run.warningCount === "number"
+                    ? ` - ${run.warningCount} warning${run.warningCount === 1 ? "" : "s"}`
+                    : ""}
+                </div>
+              )}
+            {run.blockedReason && (
+              <div className="mt-1 text-xs text-red-700">
+                {run.blockedReason}
+                {run.blockedStage
+                  ? ` (${humanizeUnderscoreValue(run.blockedStage)} via ${humanizeUnderscoreValue(
+                      run.blockingSource
+                    )})`
+                  : ""}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="px-3 py-2 space-y-2">
+        {run.steps.map((step) => (
+          <div
+            key={step.stepId}
+            className="rounded-md border border-slate-200 bg-white px-2.5 py-2"
+          >
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs font-medium text-slate-700">
+                {step.stepLabel}
+              </span>
+              <span
+                className={cn(
+                  "rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+                  workflowStatusBadgeClass(step.status)
+                )}
+              >
+                {humanizeUnderscoreValue(step.status)}
+              </span>
+              {step.engineName && (
+                <span className="rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-slate-100 text-slate-600">
+                  {step.engineName}
+                </span>
+              )}
+              {!step.engineName && step.executorType && (
+                <span className="rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-slate-100 text-slate-600">
+                  {step.executorType}
+                </span>
+              )}
+              {step.status === "running" && (
+                <span className="ml-auto flex gap-0.5">
+                  {[0, 1, 2].map((index) => (
+                    <span
+                      key={index}
+                      className="inline-block w-1 h-1 bg-[#002FA7] rounded-full animate-bounce"
+                      style={{ animationDelay: `${index * 150}ms` }}
+                    />
+                  ))}
+                </span>
+              )}
+            </div>
+
+            {step.prerequisiteStepIds.length > 0 && (
+              <div className="mt-1 text-[11px] text-slate-500">
+                after: {step.prerequisiteStepIds.join(", ")}
+              </div>
+            )}
+
+            {step.artifacts.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {step.artifacts.map((artifact, index) => (
+                  <div
+                    key={`${artifact.path}-${index}`}
+                    className="flex items-start gap-2 rounded bg-slate-50 px-2 py-1.5"
+                  >
+                    <Package size={12} className="text-slate-500 mt-0.5 flex-shrink-0" />
+                    <span className="text-[11px] text-slate-600 break-all">
+                      {formatWorkflowArtifact(artifact)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {step.warnings.length > 0 && (
+              <pre className="mt-2 text-xs font-mono text-amber-700 whitespace-pre-wrap break-all bg-amber-50 p-2 rounded">
+                {step.warnings.join("\n")}
+              </pre>
+            )}
+
+            {step.errors.length > 0 && (
+              <pre className="mt-2 text-xs font-mono text-red-700 whitespace-pre-wrap break-all bg-red-50 p-2 rounded">
+                {step.errors.join("\n")}
+              </pre>
+            )}
+          </div>
+        ))}
+
+        {runArtifacts.length > 0 && (
+          <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-2">
+            <p className="text-[10px] uppercase tracking-wide text-slate-400 mb-2">
+              Run Artifacts
+            </p>
+            <div className="space-y-1">
+              {runArtifacts.map((artifact, index) => (
+                <div
+                  key={`${artifact.artifact.path}-${artifact.scope}-${index}`}
+                  className="flex items-start gap-2"
+                >
+                  <Package size={12} className="text-slate-500 mt-0.5 flex-shrink-0" />
+                  <div className="min-w-0">
+                    <div className="text-[10px] uppercase tracking-wide text-slate-400">
+                      {humanizeUnderscoreValue(artifact.scope)}
+                    </div>
+                    <div className="text-[11px] text-slate-600 break-all">
+                      {formatWorkflowArtifact(artifact.artifact)}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 interface ThoughtChainProps {
   toolCalls: ToolCall[];
+  workflowEvents?: WorkflowStreamEvent[];
   pendingTool?: { tool: string; input: string } | null;
 }
 
-export default function ThoughtChain({ toolCalls, pendingTool }: ThoughtChainProps) {
+export default function ThoughtChain({
+  toolCalls,
+  workflowEvents = [],
+  pendingTool,
+}: ThoughtChainProps) {
   const [collapsed, setCollapsed] = useState(false);
+  const workflowRuns = buildWorkflowRuns(workflowEvents);
+  const toolCount = toolCalls.length + (pendingTool ? 1 : 0);
 
-  const hasItems = toolCalls.length > 0 || !!pendingTool;
+  const hasItems = workflowRuns.length > 0 || toolCalls.length > 0 || !!pendingTool;
   if (!hasItems) return null;
 
   return (
     <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden bg-white">
-      {/* Section header */}
       <button
         onClick={() => setCollapsed((v) => !v)}
         className="w-full flex items-center gap-2 px-3 py-2 bg-gray-50/80 text-left hover:bg-gray-100 transition-colors"
@@ -323,36 +710,55 @@ export default function ThoughtChain({ toolCalls, pendingTool }: ThoughtChainPro
         ) : (
           <ChevronDown size={13} className="text-gray-400" />
         )}
-        <span className="text-xs font-medium text-gray-500">
-          Tool calls ({toolCalls.length + (pendingTool ? 1 : 0)})
+        <span className="text-xs font-medium text-gray-500">Execution trace</span>
+        <span className="text-[11px] text-gray-400">
+          {workflowRuns.length} workflow{workflowRuns.length === 1 ? "" : "s"} · {toolCount} tool
+          {toolCount === 1 ? "" : "s"}
         </span>
       </button>
 
       {!collapsed && (
-        <div className="px-3 pb-3 pt-1 space-y-2">
-          {toolCalls.map((call, i) => (
-            <SingleCall key={call.run_id ?? `${call.tool}-${i}`} call={call} />
-          ))}
+        <div className="px-3 pb-3 pt-1 space-y-3">
+          {workflowRuns.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] uppercase tracking-wide text-gray-400">
+                Workflow Runs
+              </p>
+              {workflowRuns.map((run) => (
+                <WorkflowRunCard key={run.runId} run={run} />
+              ))}
+            </div>
+          )}
 
-          {/* Pending / in-progress tool */}
-          {pendingTool && (
-            <div className="border border-dashed border-[#002FA7]/40 rounded-lg px-3 py-2 flex items-center gap-2">
-              <ToolIcon name={pendingTool.tool} />
-              <span className="text-xs font-mono text-[#002FA7]">
-                {pendingTool.tool}
-              </span>
-              <span className="text-xs text-gray-400 truncate">
-                {pendingTool.input}
-              </span>
-              <span className="ml-auto flex gap-0.5">
-                {[0, 1, 2].map((i) => (
-                  <span
-                    key={i}
-                    className="inline-block w-1 h-1 bg-[#002FA7] rounded-full animate-bounce"
-                    style={{ animationDelay: `${i * 150}ms` }}
-                  />
-                ))}
-              </span>
+          {(toolCalls.length > 0 || pendingTool) && (
+            <div className="space-y-2">
+              <p className="text-[10px] uppercase tracking-wide text-gray-400">
+                Tool Calls
+              </p>
+              {toolCalls.map((call, index) => (
+                <SingleCall key={call.run_id ?? `${call.tool}-${index}`} call={call} />
+              ))}
+
+              {pendingTool && (
+                <div className="border border-dashed border-[#002FA7]/40 rounded-lg px-3 py-2 flex items-center gap-2">
+                  <ToolIcon name={pendingTool.tool} />
+                  <span className="text-xs font-mono text-[#002FA7]">
+                    {pendingTool.tool}
+                  </span>
+                  <span className="text-xs text-gray-400 truncate">
+                    {pendingTool.input}
+                  </span>
+                  <span className="ml-auto flex gap-0.5">
+                    {[0, 1, 2].map((index) => (
+                      <span
+                        key={index}
+                        className="inline-block w-1 h-1 bg-[#002FA7] rounded-full animate-bounce"
+                        style={{ animationDelay: `${index * 150}ms` }}
+                      />
+                    ))}
+                  </span>
+                </div>
+              )}
             </div>
           )}
         </div>

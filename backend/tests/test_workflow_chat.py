@@ -1,0 +1,76 @@
+import shutil
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _stage_selected_workflow(base_dir: Path, *, include_manifest: bool = True) -> str | None:
+    workflows_dir = base_dir / "workflows"
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(REPO_ROOT / "workflows" / "rna-seq-qc.yaml", workflows_dir / "rna-seq-qc.yaml")
+
+    if not include_manifest:
+        return None
+
+    manifest_relpath = "manifests/dataset_manifest.yaml"
+    manifest_path = base_dir / manifest_relpath
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(
+        REPO_ROOT / "backend" / "artifacts" / "examples" / "dataset_manifest.yaml",
+        manifest_path,
+    )
+    return manifest_relpath
+
+
+def test_prepare_selected_workflow_run_supports_named_attachment_binding(tmp_path):
+    from workflow_chat import prepare_selected_workflow_run
+
+    manifest_relpath = _stage_selected_workflow(tmp_path)
+    assert manifest_relpath is not None
+
+    prepared = prepare_selected_workflow_run(
+        tmp_path,
+        "rna-seq-qc",
+        message="Run the RNA-seq QC workflow with min_genes=250",
+        attached_identifiers=[
+            "qc_summary_template=workflows/report_templates/rna_seq_qc_summary.md.j2",
+            f"dataset_manifest={manifest_relpath}",
+        ],
+    )
+
+    assert prepared.blocking_reason is None
+    assert prepared.inputs["dataset_manifest"] == manifest_relpath
+    assert prepared.inputs["qc_summary_template"] == "workflows/report_templates/rna_seq_qc_summary.md.j2"
+    assert prepared.inputs["min_genes"] == 250
+
+
+def test_materialize_blocked_workflow_run_persists_run_record(tmp_path):
+    from artifacts import load_artifact_document
+    from workflow_chat import materialize_blocked_workflow_run, prepare_selected_workflow_run
+
+    _stage_selected_workflow(tmp_path, include_manifest=False)
+    prepared = prepare_selected_workflow_run(
+        tmp_path,
+        "rna-seq-qc",
+        message="Run the RNA-seq QC workflow",
+        attached_identifiers=[],
+    )
+
+    assert prepared.blocking_reason is not None
+    blocked = materialize_blocked_workflow_run(
+        tmp_path,
+        prepared,
+        reason=prepared.blocking_reason,
+    )
+
+    assert blocked.result.artifact_path.exists()
+    assert blocked.workflow_events[0]["run_record_path"] == blocked.result.artifact_relpath
+    assert (tmp_path / blocked.result.artifact_relpath).exists()
+
+    run_document = load_artifact_document(blocked.result.artifact_path)
+    assert run_document.lifecycle_status == "blocked"
+    assert run_document.warnings == [prepared.blocking_reason]
+    assert any(ref.artifact_type == "workflow_input_bundle" for ref in run_document.related_artifacts)

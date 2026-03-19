@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from string import Formatter
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import yaml
 
@@ -50,6 +50,7 @@ from workflow_specs import (
     WorkflowStepDefinition,
     load_workflow_spec,
 )
+from workflow_streaming import WORKFLOW_EVENT_CONTRACT_VERSION, normalize_workflow_stream_event
 
 _RUN_FINAL_STATUSES = {"completed", "failed", "blocked"}
 _STEP_READY_STATUS = {"created", "waiting"}
@@ -124,6 +125,142 @@ class WorkflowRunResult:
     resumed: bool = False
 
 
+WorkflowEventCallback = Callable[[dict[str, Any]], None]
+
+
+def _workflow_artifact_payload(ref: ArtifactReference) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "artifact_type": ref.artifact_type,
+        "path": ref.path,
+    }
+    if ref.id is not None:
+        payload["id"] = ref.id
+    if ref.run_id is not None:
+        payload["run_id"] = ref.run_id
+    return payload
+
+
+@dataclass(frozen=True)
+class _WorkflowRunStreamEmitter:
+    spec: WorkflowSpec
+    layout: RunLayout
+    callback: WorkflowEventCallback | None = None
+
+    def _emit(self, payload: dict[str, Any]) -> None:
+        if self.callback is None:
+            return
+        self.callback(normalize_workflow_stream_event(payload))
+
+    def start(self, *, resumed: bool, lifecycle_status: str) -> None:
+        self._emit(
+            {
+                "contract_version": WORKFLOW_EVENT_CONTRACT_VERSION,
+                "type": "workflow_start",
+                "run_id": self.layout.run_id,
+                "workflow_id": self.spec.workflow_id,
+                "workflow_name": self.spec.name,
+                "lifecycle_status": lifecycle_status,
+                "resumed": resumed,
+                "run_record_path": self.layout.run_record_relpath.as_posix(),
+            }
+        )
+
+    def step_start(self, step: WorkflowStepDefinition) -> None:
+        engine_name = step.executor.engine_name if isinstance(step.executor, ExternalEngineExecutor) else None
+        self._emit(
+            {
+                "contract_version": WORKFLOW_EVENT_CONTRACT_VERSION,
+                "type": "workflow_step_start",
+                "run_id": self.layout.run_id,
+                "workflow_id": self.spec.workflow_id,
+                "step_id": step.id,
+                "step_label": step.label,
+                "status": "running",
+                "executor_type": step.executor.executor_type,
+                "prerequisite_step_ids": list(step.prerequisites),
+                "engine_name": engine_name,
+            }
+        )
+
+    def step_end(self, step: WorkflowStepDefinition, record: WorkflowStepRecord) -> None:
+        self._emit(
+            {
+                "contract_version": WORKFLOW_EVENT_CONTRACT_VERSION,
+                "type": "workflow_step_end",
+                "run_id": self.layout.run_id,
+                "workflow_id": self.spec.workflow_id,
+                "step_id": step.id,
+                "step_label": step.label,
+                "status": record.status,
+                "artifact_refs": [_workflow_artifact_payload(ref) for ref in record.outputs_produced],
+                "warnings": list(record.warnings),
+                "errors": list(record.errors),
+            }
+        )
+
+    def blocked(
+        self,
+        *,
+        reason: str,
+        stage: str,
+        blocking_source: str,
+        step: WorkflowStepDefinition | None,
+    ) -> None:
+        self._emit(
+            {
+                "contract_version": WORKFLOW_EVENT_CONTRACT_VERSION,
+                "type": "workflow_blocked",
+                "run_id": self.layout.run_id,
+                "workflow_id": self.spec.workflow_id,
+                "lifecycle_status": "blocked",
+                "reason": reason,
+                "stage": stage,
+                "blocking_source": blocking_source,
+                "step_id": step.id if step is not None else None,
+                "step_label": step.label if step is not None else None,
+            }
+        )
+
+    def artifact(
+        self,
+        ref: ArtifactReference,
+        *,
+        scope: str,
+        step: WorkflowStepDefinition | None = None,
+        output_name: str | None = None,
+    ) -> None:
+        self._emit(
+            {
+                "contract_version": WORKFLOW_EVENT_CONTRACT_VERSION,
+                "type": "workflow_artifact",
+                "run_id": self.layout.run_id,
+                "workflow_id": self.spec.workflow_id,
+                "artifact": _workflow_artifact_payload(ref),
+                "scope": scope,
+                "step_id": step.id if step is not None else None,
+                "step_label": step.label if step is not None else None,
+                "output_name": output_name,
+            }
+        )
+
+    def done(self, run_document: WorkflowRun) -> None:
+        completed_steps = sum(1 for record in run_document.steps if record.status == "completed")
+        warning_count = len(run_document.warnings) + sum(len(record.warnings) for record in run_document.steps)
+        self._emit(
+            {
+                "contract_version": WORKFLOW_EVENT_CONTRACT_VERSION,
+                "type": "workflow_done",
+                "run_id": self.layout.run_id,
+                "workflow_id": self.spec.workflow_id,
+                "lifecycle_status": run_document.lifecycle_status,
+                "run_record_path": self.layout.run_record_relpath.as_posix(),
+                "completed_steps": completed_steps,
+                "total_steps": len(run_document.steps),
+                "warning_count": warning_count,
+            }
+        )
+
+
 class InternalDAGRunner:
     """Execute explicit workflow DAGs without hidden in-memory state."""
 
@@ -138,6 +275,7 @@ class InternalDAGRunner:
         run_dir: Path | str | None = None,
         step_limit: int | None = None,
         created_at: datetime | None = None,
+        event_callback: WorkflowEventCallback | None = None,
     ) -> WorkflowRunResult:
         if step_limit is not None and step_limit < 1:
             raise ValueError("step_limit must be at least 1 when provided.")
@@ -179,7 +317,12 @@ class InternalDAGRunner:
             run_document = self._persist_run_document(layout, run_document)
             resumed = True
 
+        emitter = _WorkflowRunStreamEmitter(spec=spec, layout=layout, callback=event_callback)
+        emitter.start(resumed=resumed, lifecycle_status=run_document.lifecycle_status)
+        emitter.artifact(self._run_record_ref(layout), scope="run_record")
+
         if run_document.lifecycle_status in _RUN_FINAL_STATUSES:
+            emitter.done(run_document)
             return self._build_result(layout, run_document, resumed=resumed)
 
         step_output_values, step_output_refs = self._load_completed_step_outputs(layout, spec, run_document)
@@ -192,11 +335,13 @@ class InternalDAGRunner:
             step_output_refs=step_output_refs,
             stage="before_execution",
             current_step=None,
+            emitter=emitter,
         )
         if run_document.lifecycle_status in _RUN_FINAL_STATUSES:
             run_document = self._sync_related_artifacts(run_document, workflow_inputs_ref)
             run_document = self._sync_qc_status(run_document)
             run_document = self._persist_run_document(layout, run_document)
+            emitter.done(run_document)
             return self._build_result(layout, run_document, resumed=resumed)
 
         run_document.lifecycle_status = "preflight_checked"
@@ -206,6 +351,7 @@ class InternalDAGRunner:
             run_document,
             step_output_refs,
             materialize_final_artifacts=False,
+            emitter=None,
         )
         run_document = self._sync_related_artifacts(run_document, workflow_inputs_ref)
         run_document = self._sync_qc_status(run_document)
@@ -233,6 +379,7 @@ class InternalDAGRunner:
                 step=step,
                 step_output_values=step_output_values,
                 step_output_refs=step_output_refs,
+                emitter=emitter,
             )
             run_document = self._sync_workflow_outputs(
                 layout,
@@ -240,6 +387,7 @@ class InternalDAGRunner:
                 run_document,
                 step_output_refs,
                 materialize_final_artifacts=False,
+                emitter=None,
             )
             run_document = self._sync_related_artifacts(run_document, workflow_inputs_ref)
             run_document = self._sync_qc_status(run_document)
@@ -260,6 +408,7 @@ class InternalDAGRunner:
                     step_output_refs=step_output_refs,
                     stage="before_publish",
                     current_step=None,
+                    emitter=emitter,
                 )
                 if run_document.lifecycle_status not in _RUN_FINAL_STATUSES:
                     run_document = self._sync_workflow_outputs(
@@ -268,6 +417,7 @@ class InternalDAGRunner:
                         run_document,
                         step_output_refs,
                         materialize_final_artifacts=True,
+                        emitter=emitter,
                     )
                     run_document = self._sync_related_artifacts(run_document, workflow_inputs_ref)
                     run_document.lifecycle_status = "completed"
@@ -276,6 +426,7 @@ class InternalDAGRunner:
             run_document = self._sync_qc_status(run_document)
             run_document = self._persist_run_document(layout, run_document)
 
+        emitter.done(run_document)
         return self._build_result(layout, run_document, resumed=resumed)
 
     def _load_workflow_spec(self, workflow: WorkflowSpec | Path | str) -> WorkflowSpec:
@@ -584,11 +735,14 @@ class InternalDAGRunner:
         step: WorkflowStepDefinition,
         step_output_values: dict[tuple[str, str], Any],
         step_output_refs: dict[tuple[str, str], ArtifactReference],
+        emitter: _WorkflowRunStreamEmitter | None,
     ) -> WorkflowRun:
         record = self._step_record(run_document, step.id)
         record.status = "running"
         record.start_time = _utcnow()
         record.end_time = None
+        if emitter is not None:
+            emitter.step_start(step)
 
         context = StepExecutionContext(
             base_dir=self.base_dir,
@@ -615,13 +769,17 @@ class InternalDAGRunner:
                 step_output_refs=step_output_refs,
                 stage="before_step",
                 current_step=step,
+                emitter=emitter,
             )
             if run_document.lifecycle_status in _RUN_FINAL_STATUSES:
                 record.end_time = _utcnow()
+                if emitter is not None:
+                    emitter.step_end(step, record)
                 return run_document
             raw_outputs = self._run_step_executor(step, step_inputs, context)
             output_values = self._normalize_executor_outputs(step, raw_outputs)
             output_refs: list[ArtifactReference] = []
+            emitted_outputs: list[tuple[str, ArtifactReference]] = []
             snapshot_payload: dict[str, Any] = {}
             for output in step.outputs:
                 ref, persisted_value = self._persist_step_output(
@@ -636,11 +794,15 @@ class InternalDAGRunner:
                 step_output_values[(step.id, output.name)] = persisted_value
                 step_output_refs[(step.id, output.name)] = ref
                 output_refs.append(ref)
+                emitted_outputs.append((output.name, ref))
                 snapshot_payload[output.name] = ref.model_dump(mode="json")
             self._persist_step_output_snapshot(layout, step.id, snapshot_payload)
             record.outputs_produced = output_refs
             record.status = _STEP_COMPLETE_STATUS
             record.end_time = _utcnow()
+            if emitter is not None:
+                for output_name, ref in emitted_outputs:
+                    emitter.artifact(ref, scope="step_output", step=step, output_name=output_name)
             run_document = self._apply_stage_policies(
                 layout=layout,
                 spec=spec,
@@ -650,7 +812,10 @@ class InternalDAGRunner:
                 step_output_refs=step_output_refs,
                 stage="after_step",
                 current_step=step,
+                emitter=emitter,
             )
+            if emitter is not None:
+                emitter.step_end(step, record)
         except Exception as exc:
             error_message = str(exc) or exc.__class__.__name__
             record.errors.append(error_message)
@@ -666,6 +831,15 @@ class InternalDAGRunner:
                 record.status = terminal_status
                 run_document.lifecycle_status = terminal_status
                 self._block_descendants(spec, run_document, failed_step_id=step.id, reason=error_message)
+                if emitter is not None and terminal_status == "blocked":
+                    emitter.blocked(
+                        reason=error_message,
+                        stage="after_step",
+                        blocking_source="step_failure",
+                        step=step,
+                    )
+            if emitter is not None:
+                emitter.step_end(step, record)
         return run_document
 
     def _resolve_step_inputs(
@@ -984,6 +1158,7 @@ class InternalDAGRunner:
         step_output_refs: Mapping[tuple[str, str], ArtifactReference],
         *,
         materialize_final_artifacts: bool,
+        emitter: _WorkflowRunStreamEmitter | None,
     ) -> WorkflowRun:
         outputs: list[ArtifactReference] = []
         for workflow_output in spec.outputs:
@@ -993,6 +1168,8 @@ class InternalDAGRunner:
                 continue
             if workflow_output.kind == "artifact" and materialize_final_artifacts:
                 ref = self._materialize_final_artifact(layout, workflow_output, ref)
+                if emitter is not None:
+                    emitter.artifact(ref, scope="workflow_output", output_name=workflow_output.name)
             outputs.append(ref)
         run_document.outputs = self._dedupe_refs(outputs)
         return run_document
@@ -1031,6 +1208,7 @@ class InternalDAGRunner:
         step_output_refs: Mapping[tuple[str, str], ArtifactReference],
         stage: str,
         current_step: WorkflowStepDefinition | None,
+        emitter: _WorkflowRunStreamEmitter | None,
     ) -> WorkflowRun:
         for gate in spec.qc_gates:
             if gate.when != stage:
@@ -1045,6 +1223,7 @@ class InternalDAGRunner:
                 stage=stage,
                 current_step=current_step,
                 gate=gate,
+                emitter=emitter,
             )
             if run_document.lifecycle_status in _RUN_FINAL_STATUSES:
                 return run_document
@@ -1062,6 +1241,7 @@ class InternalDAGRunner:
                 step_output_values=step_output_values,
                 current_step=current_step,
                 hook=hook,
+                emitter=emitter,
             )
             if run_document.lifecycle_status in _RUN_FINAL_STATUSES:
                 return run_document
@@ -1101,6 +1281,7 @@ class InternalDAGRunner:
         stage: str,
         current_step: WorkflowStepDefinition | None,
         gate,
+        emitter: _WorkflowRunStreamEmitter | None,
     ) -> WorkflowRun:
         try:
             value = self._resolve_binding_value(gate.target, resolved_inputs, step_output_values)
@@ -1115,6 +1296,8 @@ class InternalDAGRunner:
                 reason=reason,
                 stage=stage,
                 current_step=current_step,
+                blocking_source="qc_gate",
+                emitter=emitter,
             )
         return run_document
 
@@ -1128,6 +1311,7 @@ class InternalDAGRunner:
         step_output_values: Mapping[tuple[str, str], Any],
         current_step: WorkflowStepDefinition | None,
         hook,
+        emitter: _WorkflowRunStreamEmitter | None,
     ) -> WorkflowRun:
         try:
             hook_inputs = self._resolve_named_bindings(hook.inputs, resolved_inputs, step_output_values)
@@ -1143,9 +1327,12 @@ class InternalDAGRunner:
                 session_id=layout.run_id,
             )
             result = run_compliance_preflight(self.base_dir, payload)
+            compliance_ref = self._compliance_result_ref(result)
             run_document.related_artifacts = self._dedupe_refs(
-                [*run_document.related_artifacts, self._compliance_result_ref(result)]
+                [*run_document.related_artifacts, compliance_ref]
             )
+            if emitter is not None:
+                emitter.artifact(compliance_ref, scope="related_artifact", step=current_step)
             if result.warning_text:
                 run_document = self._record_policy_warning(
                     run_document,
@@ -1161,6 +1348,8 @@ class InternalDAGRunner:
                         reason=message,
                         stage=hook.stage,
                         current_step=current_step,
+                        blocking_source="compliance_hook",
+                        emitter=emitter,
                     )
                 return self._record_policy_warning(run_document, message, current_step=current_step)
         except Exception as exc:
@@ -1172,6 +1361,8 @@ class InternalDAGRunner:
                     reason=message,
                     stage=hook.stage,
                     current_step=current_step,
+                    blocking_source="compliance_hook",
+                    emitter=emitter,
                 )
             return self._record_policy_warning(run_document, message, current_step=current_step)
         return run_document
@@ -1297,6 +1488,8 @@ class InternalDAGRunner:
         reason: str,
         stage: str,
         current_step: WorkflowStepDefinition | None,
+        blocking_source: str,
+        emitter: _WorkflowRunStreamEmitter | None,
     ) -> WorkflowRun:
         run_document.lifecycle_status = "blocked"
         if reason not in run_document.warnings:
@@ -1310,6 +1503,14 @@ class InternalDAGRunner:
 
         if current_step is not None and stage in {"before_step", "after_step"}:
             self._block_descendants(spec, run_document, failed_step_id=current_step.id, reason=reason)
+
+        if emitter is not None:
+            emitter.blocked(
+                reason=reason,
+                stage=stage,
+                blocking_source=blocking_source,
+                step=current_step,
+            )
 
         return run_document
 

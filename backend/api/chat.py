@@ -6,6 +6,7 @@ SSE event types emitted:
   token        {type, content}
   tool_start   {type, tool, input, run_id, compliance_state?}
   tool_end     {type, tool, output, result, run_id, compliance_state?}
+  workflow_*   additive typed workflow lifecycle events
   new_response {type}
   done         {type, content, session_id}
   title        {type, session_id, title}   (first message only)
@@ -13,12 +14,21 @@ SSE event types emitted:
 """
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from graph.session_manager import _validate_session_id
+from workflow_chat import (
+    describe_blocked_workflow,
+    describe_workflow_result,
+    materialize_blocked_workflow_run,
+    prepare_selected_workflow_run,
+)
+from workflow_runner import InternalDAGRunner
+from workflow_streaming import is_workflow_stream_event_type, normalize_workflow_stream_event
 
 router = APIRouter()
 
@@ -87,20 +97,26 @@ async def chat(request: ChatRequest):
         )
 
         # Per-request accumulators
-        segments: list[dict] = []          # [{content, tool_calls}]
+        segments: list[dict] = []          # [{content, tool_calls, workflow_events}]
         current_content: list[str] = []
         current_tool_calls: list[dict] = []
+        current_workflow_events: list[dict] = []
         pending_tools: dict[str, dict] = {}  # run_id → {tool, input}
         user_msg_saved = False              # guard: save user message exactly once
 
         def _flush_segment() -> None:
             content = "".join(current_content)
-            if content or current_tool_calls:
+            if content or current_tool_calls or current_workflow_events:
                 segments.append(
-                    {"content": content, "tool_calls": list(current_tool_calls)}
+                    {
+                        "content": content,
+                        "tool_calls": list(current_tool_calls),
+                        "workflow_events": list(current_workflow_events),
+                    }
                 )
             current_content.clear()
             current_tool_calls.clear()
+            current_workflow_events.clear()
 
         def _sse(payload: dict) -> str:
             return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -124,6 +140,7 @@ async def chat(request: ChatRequest):
                     "assistant",
                     seg["content"],
                     seg["tool_calls"] or None,
+                    seg["workflow_events"] or None,
                 )
 
             final_content = " ".join(s["content"] for s in segments if s["content"])
@@ -238,6 +255,70 @@ async def chat(request: ChatRequest):
                     yield payload
                 return
 
+            if request.selected_workflow:
+                prepared_workflow = prepare_selected_workflow_run(
+                    agent_manager.base_dir,
+                    request.selected_workflow,
+                    message=request.message,
+                    attached_identifiers=request.attached_identifiers,
+                )
+
+                if prepared_workflow.blocking_reason:
+                    blocked_run = materialize_blocked_workflow_run(
+                        agent_manager.base_dir,
+                        prepared_workflow,
+                        reason=prepared_workflow.blocking_reason,
+                    )
+                    for workflow_event in blocked_run.workflow_events:
+                        current_workflow_events.append(workflow_event)
+                        yield _sse(workflow_event)
+
+                    workflow_summary = describe_blocked_workflow(
+                        prepared_workflow,
+                        prepared_workflow.blocking_reason,
+                    )
+                    current_content.append(workflow_summary)
+                    yield _sse({"type": "token", "content": workflow_summary})
+                    for payload in await _finalize_turn():
+                        yield payload
+                    return
+
+                workflow_queue: asyncio.Queue[dict] = asyncio.Queue()
+                loop = asyncio.get_running_loop()
+
+                def _on_workflow_event(event: dict) -> None:
+                    loop.call_soon_threadsafe(workflow_queue.put_nowait, event)
+
+                workflow_runner = InternalDAGRunner(agent_manager.base_dir)
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="workflow-chat") as executor:
+                    workflow_future = executor.submit(
+                        workflow_runner.run,
+                        prepared_workflow.spec_path,
+                        prepared_workflow.inputs,
+                        event_callback=_on_workflow_event,
+                    )
+
+                    while True:
+                        if workflow_future.done() and workflow_queue.empty():
+                            break
+                        try:
+                            workflow_event = await asyncio.wait_for(
+                                workflow_queue.get(),
+                                timeout=0.1,
+                            )
+                        except asyncio.TimeoutError:
+                            continue
+                        current_workflow_events.append(workflow_event)
+                        yield _sse(workflow_event)
+
+                    workflow_result = workflow_future.result()
+                workflow_summary = describe_workflow_result(prepared_workflow, workflow_result)
+                current_content.append(workflow_summary)
+                yield _sse({"type": "token", "content": workflow_summary})
+                for payload in await _finalize_turn():
+                    yield payload
+                return
+
             async for ev in agent_manager.astream(request.message, history):
                 t = ev["type"]
 
@@ -287,6 +368,11 @@ async def chat(request: ChatRequest):
                     if ev.get("result") is not None:
                         payload["result"] = ev["result"]
                     yield _sse(payload)
+
+                elif is_workflow_stream_event_type(t):
+                    workflow_event = normalize_workflow_stream_event(ev)
+                    current_workflow_events.append(workflow_event)
+                    yield _sse(workflow_event)
 
                 elif t == "new_response":
                     _flush_segment()

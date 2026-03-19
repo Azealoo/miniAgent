@@ -163,11 +163,14 @@ class SessionManager:
         role: str,
         content: str,
         tool_calls: Optional[list] = None,
+        workflow_events: Optional[list] = None,
     ) -> None:
         data = self._read(session_id)
         msg: dict = {"role": role, "content": content}
         if tool_calls:
             msg["tool_calls"] = tool_calls
+        if workflow_events:
+            msg["workflow_events"] = workflow_events
         data["messages"].append(msg)
         self._write(session_id, data)
 
