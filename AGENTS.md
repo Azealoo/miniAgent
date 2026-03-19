@@ -26,6 +26,8 @@ When working in this repo:
 
 ## Commands
 
+- Conda env name: `miniAgent`
+- Conda env path: `/gpfs/home/yininz6/.conda/envs/miniAgent`
 - Backend dev server: `./start-backend.sh`
 - Frontend dev server: `./start-frontend.sh`
 - Direct backend run: `cd backend && uvicorn app:app --port 8002 --host 0.0.0.0 --reload`

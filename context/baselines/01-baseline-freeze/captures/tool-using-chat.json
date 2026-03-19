@@ -1,0 +1,62 @@
+{
+  "scenario": "tool-using-chat",
+  "request": {
+    "message": "Read the current feature file and tell me its status.",
+    "session_id": "9b13bdc9-61f6-4661-bcc7-506970896422",
+    "stream": true
+  },
+  "sse_events": [
+    {
+      "type": "token",
+      "content": "Let me check that."
+    },
+    {
+      "type": "tool_start",
+      "tool": "read_file",
+      "input": "context/current-feature.md"
+    },
+    {
+      "type": "tool_end",
+      "tool": "read_file",
+      "output": "# Current Feature"
+    },
+    {
+      "type": "new_response"
+    },
+    {
+      "type": "token",
+      "content": "The current feature is in progress."
+    },
+    {
+      "type": "done",
+      "content": "Let me check that. The current feature is in progress.",
+      "session_id": "9b13bdc9-61f6-4661-bcc7-506970896422"
+    },
+    {
+      "type": "title",
+      "session_id": "9b13bdc9-61f6-4661-bcc7-506970896422",
+      "title": "Captured Baseline Title"
+    }
+  ],
+  "stored_history": [
+    {
+      "role": "user",
+      "content": "Read the current feature file and tell me its status."
+    },
+    {
+      "role": "assistant",
+      "content": "Let me check that.",
+      "tool_calls": [
+        {
+          "tool": "read_file",
+          "input": "context/current-feature.md",
+          "output": "# Current Feature"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "The current feature is in progress."
+    }
+  ]
+}

@@ -6,9 +6,15 @@
    - If empty: Error - "load" requires a spec filename or feature description
 
 2. Update current-feature.md:
-   - Update H1 heading to include feature name (e.g., `# Current Feature: Add Navbar`)
-   - Write goals as bullet points under ## Goals
-   - Write any additional notes/context under ## Notes
+   - Keep the H1 as `# Current Feature`
    - Set Status to "Not Started"
+   - Write goals as direct, implementation-oriented bullet points under `## Goals`
+   - Write implementation constraints, file paths, assumptions, and structure notes under `## Notes`
+   - If useful, include the feature name as the first note line rather than changing the H1
 
-3. Confirm spec loaded and show the feature summary
+3. The loaded feature should be specific enough that implementation can begin without guessing the logic.
+
+4. Confirm the spec loaded and show:
+   - feature name
+   - goals
+   - key notes or constraints

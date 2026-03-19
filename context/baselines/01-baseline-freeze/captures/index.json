@@ -1,0 +1,5 @@
+{
+  "normal-chat": "context/baselines/01-baseline-freeze/captures/normal-chat.json",
+  "tool-using-chat": "context/baselines/01-baseline-freeze/captures/tool-using-chat.json",
+  "rag-enabled-chat": "context/baselines/01-baseline-freeze/captures/rag-enabled-chat.json"
+}

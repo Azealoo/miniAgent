@@ -1,0 +1,38 @@
+{
+  "scenario": "normal-chat",
+  "request": {
+    "message": "Summarize the current feature status.",
+    "session_id": "c607559b-35f4-499c-839b-7d15ab25f21d",
+    "stream": true
+  },
+  "sse_events": [
+    {
+      "type": "token",
+      "content": "All "
+    },
+    {
+      "type": "token",
+      "content": "good."
+    },
+    {
+      "type": "done",
+      "content": "All good.",
+      "session_id": "c607559b-35f4-499c-839b-7d15ab25f21d"
+    },
+    {
+      "type": "title",
+      "session_id": "c607559b-35f4-499c-839b-7d15ab25f21d",
+      "title": "Captured Baseline Title"
+    }
+  ],
+  "stored_history": [
+    {
+      "role": "user",
+      "content": "Summarize the current feature status."
+    },
+    {
+      "role": "assistant",
+      "content": "All good."
+    }
+  ]
+}
