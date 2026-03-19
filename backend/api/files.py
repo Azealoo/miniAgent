@@ -1,7 +1,7 @@
 """
 File read/write endpoints with path whitelist protection.
 
-GET  /api/files?path=<relative>   — read file content
+GET  /api/files?path=<relative>   — read file content, including artifacts/
 POST /api/files                   — save file (Monaco editor)
 GET  /api/skills                  — list available skills
 """
@@ -13,7 +13,8 @@ from pydantic import BaseModel
 router = APIRouter()
 
 # Paths the API is allowed to serve (relative to base_dir)
-_ALLOWED_PREFIXES = ("workspace/", "memory/", "skills/", "knowledge/")
+_READ_ALLOWED_PREFIXES = ("workspace/", "memory/", "skills/", "knowledge/", "artifacts/")
+_WRITE_ALLOWED_PREFIXES = ("workspace/", "memory/", "skills/", "knowledge/")
 _ALLOWED_ROOT_FILES = {"SKILLS_SNAPSHOT.md"}
 _MAX_SAVE_BYTES = 500_000  # 500 KB limit for writes via the editor API
 
@@ -25,7 +26,7 @@ def _base_dir() -> Path:
     return agent_manager.base_dir
 
 
-def _check_path(relative_path: str) -> tuple[Path, str]:
+def _check_path(relative_path: str, *, write: bool = False) -> tuple[Path, str]:
     """Validate path against whitelist.
 
     Returns (resolved_absolute_path, normalized_relative_path).
@@ -49,13 +50,15 @@ def _check_path(relative_path: str) -> tuple[Path, str]:
         raise HTTPException(403, "Path is outside the project directory.")
 
     # Whitelist check
-    allowed = any(clean.startswith(p) for p in _ALLOWED_PREFIXES) or (
+    allowed_prefixes = _WRITE_ALLOWED_PREFIXES if write else _READ_ALLOWED_PREFIXES
+    allowed = any(clean.startswith(p) for p in allowed_prefixes) or (
         clean in _ALLOWED_ROOT_FILES
     )
     if not allowed:
+        mode = "write" if write else "read"
         raise HTTPException(
             403,
-            f"Access denied. Allowed: {list(_ALLOWED_PREFIXES)} + {list(_ALLOWED_ROOT_FILES)}",
+            f"Access denied for {mode}. Allowed: {list(allowed_prefixes)} + {list(_ALLOWED_ROOT_FILES)}",
         )
 
     return target, clean
@@ -68,7 +71,7 @@ def _check_path(relative_path: str) -> tuple[Path, str]:
 
 @router.get("/files")
 def read_file(path: str = Query(..., description="Relative file path")):
-    target, _ = _check_path(path)
+    target, _ = _check_path(path, write=False)
     if not target.exists():
         raise HTTPException(404, f"File not found: {path}")
     if not target.is_file():
@@ -95,7 +98,7 @@ def save_file(body: SaveRequest):
             400, f"Content too large: max {_MAX_SAVE_BYTES // 1000} KB."
         )
 
-    target, clean = _check_path(body.path)
+    target, clean = _check_path(body.path, write=True)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(body.content, encoding="utf-8")
 
