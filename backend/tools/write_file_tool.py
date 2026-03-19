@@ -8,6 +8,14 @@ from typing import Type
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from .contracts import (
+    artifact_ref,
+    blocked_result,
+    execution_error_result,
+    invalid_input_result,
+    success_result,
+)
+
 _ALLOWED_PREFIXES = ("memory/", "skills/", "knowledge/")
 _MAX_CONTENT = 50_000
 
@@ -30,20 +38,29 @@ class WriteFileTool(BaseTool):
         "Input: path (relative) and content (full file content)."
     )
     args_schema: Type[BaseModel] = WriteFileInput
+    response_format: str = "content_and_artifact"
     root_dir: str = ""
 
-    def _run(self, path: str, content: str) -> str:
+    def _run(self, path: str, content: str) -> tuple[str, dict]:
         try:
             root = Path(self.root_dir).resolve()
             path_clean = path.strip().lstrip("/").removeprefix("./")
 
             if ".." in path_clean.split("/"):
-                return "[BLOCKED] Path traversal (..) is not allowed."
+                return blocked_result(
+                    self.name,
+                    "Path traversal (..) is not allowed.",
+                    metadata={"requested_path": path, "sanitized_path": path_clean},
+                )
 
             if not any(path_clean.startswith(p) for p in _ALLOWED_PREFIXES):
-                return (
-                    f"[BLOCKED] Path must be under one of: {list(_ALLOWED_PREFIXES)}. "
-                    f"Got: {path_clean!r}"
+                return blocked_result(
+                    self.name,
+                    (
+                        f"Path must be under one of: {list(_ALLOWED_PREFIXES)}. "
+                        f"Got: {path_clean!r}"
+                    ),
+                    metadata={"requested_path": path, "sanitized_path": path_clean},
                 )
 
             target = (root / path_clean).resolve()
@@ -52,13 +69,23 @@ class WriteFileTool(BaseTool):
             try:
                 target.relative_to(root)
             except ValueError:
-                return "[BLOCKED] Resolved path is outside the project directory."
+                return blocked_result(
+                    self.name,
+                    "Resolved path is outside the project directory.",
+                    metadata={"requested_path": path, "resolved_path": str(target)},
+                )
 
             if len(content) > _MAX_CONTENT:
-                return f"[ERROR] Content exceeds maximum length ({_MAX_CONTENT} characters)."
+                return invalid_input_result(
+                    self.name,
+                    f"Content exceeds maximum length ({_MAX_CONTENT} characters).",
+                    metadata={"requested_path": path, "character_count": len(content)},
+                )
 
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+            memory_index_rebuilt = False
+            skills_rescanned = False
 
             if path_clean == "memory/MEMORY.md":
                 # Rebuild memory vector index so RAG retrieval sees the new content.
@@ -66,6 +93,7 @@ class WriteFileTool(BaseTool):
                     from graph.agent import agent_manager
                     if agent_manager.memory_indexer:
                         agent_manager.memory_indexer.rebuild_index()
+                        memory_index_rebuilt = True
                 except Exception:
                     pass
 
@@ -77,12 +105,30 @@ class WriteFileTool(BaseTool):
                     from graph.agent import agent_manager
                     if agent_manager.base_dir:
                         scan_skills(agent_manager.base_dir)
+                        skills_rescanned = True
                 except Exception:
                     pass
 
-            return f"Wrote {path_clean} ({len(content)} characters)."
+            return success_result(
+                self.name,
+                f"Wrote {path_clean} ({len(content)} characters).",
+                structured_payload={
+                    "path": path_clean,
+                    "resolved_path": str(target),
+                    "character_count": len(content),
+                    "byte_count": len(content.encode("utf-8")),
+                    "memory_index_rebuilt": memory_index_rebuilt,
+                    "skills_rescanned": skills_rescanned,
+                },
+                artifact_refs=[artifact_ref(path=str(target), label="written_file")],
+                metadata={"requested_path": path},
+            )
         except Exception as exc:
-            return f"[ERROR] {exc}"
+            return execution_error_result(
+                self.name,
+                str(exc),
+                metadata={"requested_path": path},
+            )
 
-    async def _arun(self, path: str, content: str) -> str:  # type: ignore[override]
+    async def _arun(self, path: str, content: str) -> tuple[str, dict]:  # type: ignore[override]
         return self._run(path, content)

@@ -6,6 +6,7 @@ Security: uses shlex.split + shell=False so semicolons, pipes, and other shell
 metacharacters in the command string are treated as literals and never interpreted
 by a shell.
 """
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -13,6 +14,17 @@ from typing import Type
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
+
+from .contracts import (
+    artifact_ref,
+    blocked_result,
+    empty_result,
+    execution_error_result,
+    invalid_input_result,
+    retriable_error_result,
+    success_result,
+    truncate_text,
+)
 
 _TIMEOUT = 15
 _MAX_OUTPUT = 8_000
@@ -33,21 +45,35 @@ class SlurmTool(BaseTool):
         "Use for submitting jobs and checking queue/accounting. Input: full command string."
     )
     args_schema: Type[BaseModel] = SlurmToolInput
+    response_format: str = "content_and_artifact"
     base_dir: str = ""
 
-    def _run(self, command: str) -> str:
+    def _run(self, command: str) -> tuple[str, dict]:
         # Parse with shlex so shell metacharacters (;, |, &&, $()) are never interpreted
         try:
             parts = shlex.split(command.strip())
         except ValueError as e:
-            return f"[ERROR] Invalid command syntax: {e}"
+            return invalid_input_result(
+                self.name,
+                f"Invalid command syntax: {e}",
+                metadata={"command": command},
+            )
 
         if not parts:
-            return "[ERROR] Empty command."
+            return invalid_input_result(
+                self.name,
+                "Empty command.",
+                metadata={"command": command},
+            )
         cmd_name = parts[0].lower()
         if cmd_name not in _ALLOWED:
-            return f"[BLOCKED] Only these Slurm commands are allowed: {sorted(_ALLOWED)}."
+            return blocked_result(
+                self.name,
+                f"Only these Slurm commands are allowed: {sorted(_ALLOWED)}.",
+                metadata={"command": command, "subcommand": cmd_name},
+            )
 
+        script_ref = None
         if cmd_name == "sbatch":
             # Find the script path: first non-flag, non-assignment token after 'sbatch'
             script_arg = next(
@@ -55,19 +81,51 @@ class SlurmTool(BaseTool):
                 None,
             )
             if script_arg is None:
-                return "[ERROR] sbatch requires a script path."
+                return invalid_input_result(
+                    self.name,
+                    "sbatch requires a script path.",
+                    metadata={"command": command, "subcommand": cmd_name},
+                )
             script = Path(script_arg)
             if not script.is_absolute():
                 script = (Path(self.base_dir) / script).resolve()
             if not script.exists():
-                return f"[ERROR] Script not found: {script_arg}"
+                return invalid_input_result(
+                    self.name,
+                    f"Script not found: {script_arg}",
+                    metadata={
+                        "command": command,
+                        "subcommand": cmd_name,
+                        "script_path": script_arg,
+                        "resolved_script_path": str(script),
+                    },
+                )
             base_resolved = Path(self.base_dir).resolve()
             try:
                 script.relative_to(base_resolved)
             except ValueError:
-                return "[BLOCKED] sbatch path must be under project directory."
+                return blocked_result(
+                    self.name,
+                    "sbatch path must be under project directory.",
+                    metadata={
+                        "command": command,
+                        "subcommand": cmd_name,
+                        "script_path": script_arg,
+                        "resolved_script_path": str(script),
+                    },
+                )
             if ".." in script_arg:
-                return "[BLOCKED] sbatch path must be under project directory."
+                return blocked_result(
+                    self.name,
+                    "sbatch path must be under project directory.",
+                    metadata={
+                        "command": command,
+                        "subcommand": cmd_name,
+                        "script_path": script_arg,
+                        "resolved_script_path": str(script),
+                    },
+                )
+            script_ref = artifact_ref(path=str(script), label="sbatch_script")
 
         try:
             cwd = Path(self.base_dir) if self.base_dir else None
@@ -79,18 +137,74 @@ class SlurmTool(BaseTool):
                 timeout=_TIMEOUT,
                 cwd=cwd,
             )
-            out = (result.stdout + result.stderr).strip()
-            if not out:
-                out = "(no output)"
-            if len(out) > _MAX_OUTPUT:
-                out = out[:_MAX_OUTPUT] + "\n...[truncated]"
-            if result.returncode != 0 and not out:
-                out = f"[exit {result.returncode}]"
-            return out
-        except subprocess.TimeoutExpired:
-            return "[ERROR] Command timed out."
-        except Exception as exc:
-            return f"[ERROR] {exc}"
+            stdout_text, stdout_truncated = truncate_text(result.stdout, _MAX_OUTPUT)
+            stderr_text, stderr_truncated = truncate_text(result.stderr, _MAX_OUTPUT)
+            combined = (result.stdout + result.stderr).strip()
+            summary, combined_truncated = truncate_text(combined or "(no output)", _MAX_OUTPUT)
+            warnings = []
+            if stdout_truncated or stderr_truncated or combined_truncated:
+                warnings.append("output_truncated")
 
-    async def _arun(self, command: str) -> str:
+            job_id = None
+            if cmd_name == "sbatch":
+                match = re.search(r"Submitted batch job (\d+)", result.stdout)
+                if match:
+                    job_id = match.group(1)
+
+            structured_payload = {
+                "command": command,
+                "argv": parts,
+                "subcommand": cmd_name,
+                "returncode": result.returncode,
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+                "job_id": job_id,
+            }
+            if script_ref:
+                structured_payload["script_path"] = script_ref.path
+
+            refs = [script_ref] if script_ref else []
+
+            if result.returncode != 0:
+                return execution_error_result(
+                    self.name,
+                    summary if summary.startswith("[ERROR]") else f"[ERROR] {summary}",
+                    structured_payload=structured_payload,
+                    artifact_refs=refs,
+                    warnings=warnings,
+                    metadata={"working_directory": str(cwd) if cwd else None},
+                )
+
+            if summary == "(no output)":
+                return empty_result(
+                    self.name,
+                    summary,
+                    structured_payload=structured_payload,
+                    artifact_refs=refs,
+                    warnings=warnings,
+                    metadata={"working_directory": str(cwd) if cwd else None},
+                )
+
+            return success_result(
+                self.name,
+                summary,
+                structured_payload=structured_payload,
+                artifact_refs=refs,
+                warnings=warnings,
+                metadata={"working_directory": str(cwd) if cwd else None},
+            )
+        except subprocess.TimeoutExpired:
+            return retriable_error_result(
+                self.name,
+                "Command timed out.",
+                metadata={"command": command, "subcommand": cmd_name},
+            )
+        except Exception as exc:
+            return execution_error_result(
+                self.name,
+                str(exc),
+                metadata={"command": command, "subcommand": cmd_name},
+            )
+
+    async def _arun(self, command: str) -> tuple[str, dict]:
         return self._run(command)

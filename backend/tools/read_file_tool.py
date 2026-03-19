@@ -9,6 +9,15 @@ from typing import Type
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from .contracts import (
+    artifact_ref,
+    blocked_result,
+    empty_result,
+    invalid_input_result,
+    success_result,
+    truncate_text,
+)
+
 _MAX_OUTPUT = 10_000
 
 # File name/extension patterns that must never be read (credential / secret files)
@@ -43,10 +52,11 @@ class ReadFileTool(BaseTool):
         "Use this to read SKILL.md files, config files, or any project document."
     )
     args_schema: Type[BaseModel] = ReadFileInput
+    response_format: str = "content_and_artifact"
     root_dir: str = ""
     extra_allowed_roots: list[str] = []
 
-    def _run(self, path: str) -> str:
+    def _run(self, path: str) -> tuple[str, dict]:
         try:
             root = Path(self.root_dir).resolve()
             path_str = path.strip()
@@ -66,24 +76,75 @@ class ReadFileTool(BaseTool):
                     return False
 
             if not any(_is_under(target, a) for a in allowed):
-                return "[BLOCKED] Access denied — path is outside allowed directories."
+                return blocked_result(
+                    self.name,
+                    "Access denied — path is outside allowed directories.",
+                    metadata={"requested_path": path, "resolved_path": str(target)},
+                )
 
             if _is_credential_file(target):
-                return "[BLOCKED] Reading credential / secret files is not allowed."
+                return blocked_result(
+                    self.name,
+                    "Reading credential / secret files is not allowed.",
+                    metadata={"requested_path": path, "resolved_path": str(target)},
+                )
 
             if not target.exists():
-                return f"[ERROR] File not found: {path}"
+                return invalid_input_result(
+                    self.name,
+                    f"File not found: {path}",
+                    metadata={"requested_path": path, "resolved_path": str(target)},
+                )
 
             if not target.is_file():
-                return f"[ERROR] Not a file: {path}"
+                return invalid_input_result(
+                    self.name,
+                    f"Not a file: {path}",
+                    metadata={"requested_path": path, "resolved_path": str(target)},
+                )
 
-            content = target.read_text(encoding="utf-8")
-            if len(content) > _MAX_OUTPUT:
-                content = content[:_MAX_OUTPUT] + "\n...[output truncated]"
-            return content
+            full_content = target.read_text(encoding="utf-8")
+            content, truncated = truncate_text(
+                full_content,
+                _MAX_OUTPUT,
+                marker="\n...[output truncated]",
+            )
+            structured_payload = {
+                "path": path,
+                "resolved_path": str(target),
+                "content": content,
+                "truncated": truncated,
+                "character_count": len(full_content),
+                "is_absolute_input": Path(path_str).is_absolute(),
+            }
+            warnings = ["output_truncated"] if truncated else []
+            refs = [artifact_ref(path=str(target), label="read_file_target")]
+
+            if not full_content:
+                return empty_result(
+                    self.name,
+                    "(empty file)",
+                    structured_payload=structured_payload,
+                    artifact_refs=refs,
+                    warnings=warnings,
+                    metadata={"requested_path": path},
+                )
+
+            return success_result(
+                self.name,
+                content,
+                structured_payload=structured_payload,
+                artifact_refs=refs,
+                warnings=warnings,
+                metadata={"requested_path": path},
+            )
 
         except Exception as exc:
-            return f"[ERROR] {exc}"
+            return invalid_input_result(
+                self.name,
+                str(exc),
+                metadata={"requested_path": path},
+            )
 
-    async def _arun(self, path: str) -> str:  # type: ignore[override]
+    async def _arun(self, path: str) -> tuple[str, dict]:  # type: ignore[override]
         return self._run(path)

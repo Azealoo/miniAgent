@@ -28,6 +28,35 @@ Standardize how tools return results so later workflow, provenance, evidence, an
 - Define a consistent error model so the agent and UI can distinguish blocked operations, retriable failures, malformed inputs, and successful empty results.
 - Add a migration note for frontend components that currently assume tool outputs are plain strings.
 
+## Implementation Notes
+
+- The initial implementation uses a hybrid transport:
+  - `tool_end.output` remains the human-readable string for backward compatibility.
+  - `tool_end.result` carries the structured `tool_result.v1` envelope.
+  - session history persists the same structured envelope under `tool_calls[].result`.
+- This phase does not persist standalone tool-output artifacts for every tool invocation. Instead, the envelope includes `artifact_refs` for file paths or external identifiers when available so later artifact-registry work can attach richer registry-backed references without breaking the SSE/UI contract.
+- The current envelope includes:
+  - `contract_version`
+  - `tool_name`
+  - `summary`
+  - `structured_payload`
+  - `artifact_refs`
+  - `warnings`
+  - `status`
+  - `outcome`
+  - `error`
+  - `metadata`
+  - `source_payload`
+- The first migration targets the current high-impact tools implemented in code as:
+  - `slurm_tool`
+  - `ncbi_eutils`
+  - `uniprot_api`
+  - `ensembl_api`
+  - `search_knowledge_base`
+  - `read_file`
+  - `write_file`
+- Frontend consumers must treat `tool_end.output` as the legacy display string and prefer `tool_end.result` when structured status, warnings, artifact references, or payload inspection is needed.
+
 ## References
 
 - @backend/graph/agent.py

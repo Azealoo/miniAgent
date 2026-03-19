@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Terminal, Code2, Globe, FileText, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { ToolCall } from "@/lib/types";
+import type { JsonValue, ToolCall, ToolResultEnvelope } from "@/lib/types";
 
 const TOOL_ICONS: Record<string, React.ReactNode> = {
   terminal: <Terminal size={12} />,
@@ -11,7 +11,30 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   fetch_url: <Globe size={12} />,
   read_file: <FileText size={12} />,
   search_knowledge_base: <Search size={12} />,
+  slurm_tool: <Terminal size={12} />,
+  ncbi_eutils: <Globe size={12} />,
+  uniprot_api: <Globe size={12} />,
+  ensembl_api: <Globe size={12} />,
+  write_file: <FileText size={12} />,
 };
+
+const MAX_RENDERED_JSON_CHARS = 8_000;
+
+function formatJsonValue(value: JsonValue | undefined): string {
+  if (value === undefined) return "";
+  const rendered = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  if (rendered.length <= MAX_RENDERED_JSON_CHARS) {
+    return rendered;
+  }
+  return `${rendered.slice(0, MAX_RENDERED_JSON_CHARS)}\n...[display truncated]`;
+}
+
+function outcomeBadgeClass(result?: ToolResultEnvelope): string {
+  if (!result) return "bg-gray-100 text-gray-500";
+  if (result.status === "error") return "bg-red-100 text-red-700";
+  if (result.outcome === "success_empty") return "bg-amber-100 text-amber-700";
+  return "bg-emerald-100 text-emerald-700";
+}
 
 function ToolIcon({ name }: { name: string }) {
   return (
@@ -23,11 +46,14 @@ function ToolIcon({ name }: { name: string }) {
 
 interface SingleCallProps {
   call: ToolCall;
-  index: number;
 }
 
-function SingleCall({ call, index }: SingleCallProps) {
+function SingleCall({ call }: SingleCallProps) {
   const [open, setOpen] = useState(false);
+  const structuredPayload = call.result?.structured_payload;
+  const artifactRefs = call.result?.artifact_refs ?? [];
+  const warnings = call.result?.warnings ?? [];
+  const sourcePayload = call.result?.source_payload;
 
   return (
     <div className="border border-gray-200 rounded-lg overflow-hidden">
@@ -43,6 +69,16 @@ function SingleCall({ call, index }: SingleCallProps) {
         <span className="flex-1 text-xs text-gray-400 truncate">
           {call.input}
         </span>
+        {call.result && (
+          <span
+            className={cn(
+              "rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+              outcomeBadgeClass(call.result)
+            )}
+          >
+            {call.result.outcome.replace("_", " ")}
+          </span>
+        )}
         {open ? (
           <ChevronDown size={12} className="text-gray-400 flex-shrink-0" />
         ) : (
@@ -69,6 +105,58 @@ function SingleCall({ call, index }: SingleCallProps) {
               {call.output || "(no output)"}
             </pre>
           </div>
+          {call.result?.error && (
+            <div className="px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
+                Error
+              </p>
+              <pre className="text-xs font-mono text-red-700 whitespace-pre-wrap break-all bg-red-50 p-2 rounded">
+                {call.result.error.code}: {call.result.error.message}
+              </pre>
+            </div>
+          )}
+          {warnings.length > 0 && (
+            <div className="px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
+                Warnings
+              </p>
+              <pre className="text-xs font-mono text-amber-700 whitespace-pre-wrap break-all bg-amber-50 p-2 rounded">
+                {warnings.join("\n")}
+              </pre>
+            </div>
+          )}
+          {artifactRefs.length > 0 && (
+            <div className="px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
+                Artifact Refs
+              </p>
+              <pre className="text-xs font-mono text-gray-700 whitespace-pre-wrap break-all bg-gray-50 p-2 rounded max-h-40 overflow-y-auto">
+                {artifactRefs
+                  .map((ref) => ref.path || ref.identifier || ref.label || "(unnamed ref)")
+                  .join("\n")}
+              </pre>
+            </div>
+          )}
+          {structuredPayload !== undefined && (
+            <div className="px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
+                Structured Payload
+              </p>
+              <pre className="text-xs font-mono text-gray-700 whitespace-pre-wrap break-all bg-gray-50 p-2 rounded max-h-56 overflow-y-auto">
+                {formatJsonValue(structuredPayload)}
+              </pre>
+            </div>
+          )}
+          {sourcePayload !== undefined && (
+            <div className="px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
+                Source Payload
+              </p>
+              <pre className="text-xs font-mono text-gray-700 whitespace-pre-wrap break-all bg-gray-50 p-2 rounded max-h-56 overflow-y-auto">
+                {formatJsonValue(sourcePayload)}
+              </pre>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -106,7 +194,7 @@ export default function ThoughtChain({ toolCalls, pendingTool }: ThoughtChainPro
       {!collapsed && (
         <div className="px-3 pb-3 pt-1 space-y-2">
           {toolCalls.map((call, i) => (
-            <SingleCall key={i} call={call} index={i} />
+            <SingleCall key={call.run_id ?? `${call.tool}-${i}`} call={call} />
           ))}
 
           {/* Pending / in-progress tool */}

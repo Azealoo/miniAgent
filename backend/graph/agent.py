@@ -14,6 +14,7 @@ from langchain_deepseek import ChatDeepSeek
 from .memory_indexer import MemoryIndexer
 from .prompt_builder import build_system_prompt
 from .session_manager import SessionManager
+from tools.contracts import normalize_tool_output
 
 
 class AgentManager:
@@ -86,7 +87,7 @@ class AgentManager:
           retrieval    — RAG results before the agent runs
           token        — streaming LLM text token
           tool_start   — agent is about to call a tool
-          tool_end     — tool finished
+          tool_end     — tool finished (legacy output string plus structured result)
           new_response — agent started a new text segment after tool use
           done         — agent finished the full turn
           error        — unhandled exception
@@ -163,16 +164,13 @@ class AgentManager:
                 elif kind == "on_tool_end":
                     run_id = event["run_id"]
                     raw_output = event["data"].get("output", "")
-                    # Output may be a ToolMessage object in some LangGraph versions
-                    if hasattr(raw_output, "content"):
-                        tool_output_str = raw_output.content
-                    else:
-                        tool_output_str = str(raw_output)
+                    result = normalize_tool_output(event["name"], raw_output)
 
                     yield {
                         "type": "tool_end",
                         "tool": event["name"],
-                        "output": tool_output_str,
+                        "output": result.summary,
+                        "result": result.model_dump(mode="json"),
                         "run_id": run_id,
                     }
                     after_tool = True

@@ -11,6 +11,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+def _tool_summary(result):
+    return result[0] if isinstance(result, tuple) else result
+
+
+def _tool_contract(result):
+    return result[1] if isinstance(result, tuple) else None
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # TerminalTool
 # ──────────────────────────────────────────────────────────────────────────────
@@ -148,23 +156,23 @@ class TestReadFileTool:
         self.tool = ReadFileTool(root_dir=str(self.root))
 
     def test_read_existing_file(self):
-        out = self.tool._run("memory/MEMORY.md")
+        out = _tool_summary(self.tool._run("memory/MEMORY.md"))
         assert "[ERROR]" not in out
 
     def test_read_skill_file(self):
-        out = self.tool._run("skills/get_weather/SKILL.md")
+        out = _tool_summary(self.tool._run("skills/get_weather/SKILL.md"))
         assert "weather" in out.lower()
 
     def test_file_not_found(self):
-        out = self.tool._run("nonexistent/file.txt")
+        out = _tool_summary(self.tool._run("nonexistent/file.txt"))
         assert "[ERROR]" in out and "not found" in out.lower()
 
     def test_path_traversal_blocked(self):
-        out = self.tool._run("../../../etc/passwd")
+        out = _tool_summary(self.tool._run("../../../etc/passwd"))
         assert "[BLOCKED]" in out
 
     def test_path_traversal_double_dot(self):
-        out = self.tool._run("memory/../../etc/passwd")
+        out = _tool_summary(self.tool._run("memory/../../etc/passwd"))
         assert "[BLOCKED]" in out
 
     def test_output_cap(self, tmp_path):
@@ -174,7 +182,7 @@ class TestReadFileTool:
         try:
             big_file.write_text("x" * (_MAX_OUTPUT + 1000), encoding="utf-8")
             tool = ReadFileTool(root_dir=str(self.root))
-            out = tool._run("memory/_test_large.tmp")
+            out = _tool_summary(tool._run("memory/_test_large.tmp"))
             assert "[output truncated]" in out
             assert len(out) <= _MAX_OUTPUT + len("\n...[output truncated]") + 10
         finally:
@@ -182,8 +190,16 @@ class TestReadFileTool:
                 big_file.unlink()
 
     def test_directory_not_a_file(self):
-        out = self.tool._run("memory")
+        out = _tool_summary(self.tool._run("memory"))
         assert "[ERROR]" in out and "not a file" in out.lower()
+
+    def test_read_file_returns_structured_contract(self):
+        result = self.tool._run("memory/MEMORY.md")
+        contract = _tool_contract(result)
+        assert contract is not None
+        assert contract["tool_name"] == "read_file"
+        assert contract["status"] == "success"
+        assert contract["artifact_refs"][0]["path"].endswith("memory/MEMORY.md")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -196,8 +212,20 @@ class TestFetchURLTool:
         self.tool = FetchURLTool()
 
     def test_fetch_json_endpoint(self):
-        """httpbin.org/get returns JSON with our User-Agent."""
-        out = self.tool._run("https://httpbin.org/get")
+        """JSON responses should be returned without an error."""
+        mock_resp = MagicMock()
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_resp.text = '{"ok": true, "user-agent": "miniOpenClaw"}'
+        mock_resp.raise_for_status = MagicMock()
+
+        with patch("tools.fetch_url_tool.httpx.Client") as MockClient:
+            ctx = MagicMock()
+            ctx.__enter__ = MagicMock(return_value=ctx)
+            ctx.__exit__ = MagicMock(return_value=False)
+            ctx.get = MagicMock(return_value=mock_resp)
+            MockClient.return_value = ctx
+
+            out = self.tool._run("https://httpbin.org/get")
         assert "[ERROR]" not in out
         assert "miniOpenClaw" in out or "user-agent" in out.lower()
 
@@ -222,11 +250,11 @@ class TestFetchURLTool:
 
     def test_fetch_invalid_url_scheme(self):
         out = self.tool._run("ftp://invalid.scheme")
-        assert "[ERROR]" in out
+        assert "[BLOCKED]" in out
 
     def test_fetch_connection_refused(self):
         out = self.tool._run("http://127.0.0.1:19999/nonexistent")
-        assert "[ERROR]" in out
+        assert "[BLOCKED]" in out
 
     def test_output_cap(self):
         """A large page should be truncated."""
@@ -287,7 +315,7 @@ class TestSearchKnowledgeBaseTool:
             knowledge_dir=str(tmp_path / "knowledge"),
             storage_dir=str(tmp_path / "storage"),
         )
-        out = tool._run("anything")
+        out = _tool_summary(tool._run("anything"))
         assert "empty" in out.lower() or "could not be loaded" in out.lower()
 
     def test_nonexistent_knowledge_dir(self, tmp_path):
@@ -296,7 +324,7 @@ class TestSearchKnowledgeBaseTool:
             knowledge_dir=str(tmp_path / "no_such_dir"),
             storage_dir=str(tmp_path / "storage"),
         )
-        out = tool._run("query")
+        out = _tool_summary(tool._run("query"))
         assert "empty" in out.lower() or "could not be loaded" in out.lower()
 
     def test_built_flag_set_after_first_call(self, tmp_path):
@@ -314,3 +342,17 @@ class TestSearchKnowledgeBaseTool:
         tool = SearchKnowledgeBaseTool(knowledge_dir="", storage_dir="")
         assert tool.name == "search_knowledge_base"
         assert "knowledge" in tool.description.lower()
+
+    def test_empty_knowledge_returns_structured_contract(self, tmp_path):
+        from tools.search_knowledge_tool import SearchKnowledgeBaseTool
+
+        tool = SearchKnowledgeBaseTool(
+            knowledge_dir=str(tmp_path / "knowledge"),
+            storage_dir=str(tmp_path / "storage"),
+        )
+        result = tool._run("anything")
+        contract = _tool_contract(result)
+
+        assert contract is not None
+        assert contract["tool_name"] == "search_knowledge_base"
+        assert contract["outcome"] == "success_empty"

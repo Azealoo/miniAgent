@@ -2,6 +2,7 @@
 NCBI E-utilities helper: esearch, efetch, esummary for PubMed, Gene, etc.
 Uses rate limit (no API key required; with API key can increase rate).
 """
+import json
 import threading
 import time
 import urllib.parse
@@ -9,6 +10,16 @@ from typing import Optional, Type
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
+
+from .contracts import (
+    empty_result,
+    execution_error_result,
+    invalid_input_result,
+    json_to_pretty_text,
+    retriable_error_result,
+    success_result,
+    truncate_text,
+)
 
 _BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 _LAST_CALL = [0.0]
@@ -44,6 +55,7 @@ class NcbiEutilsTool(BaseTool):
         "Input: operation, db, and either term (esearch) or id (efetch/esummary)."
     )
     args_schema: Type[BaseModel] = NcbiEutilsInput
+    response_format: str = "content_and_artifact"
 
     def _run(
         self,
@@ -53,14 +65,26 @@ class NcbiEutilsTool(BaseTool):
         id: Optional[str] = None,
         retmax: Optional[int] = 20,
         retmode: str = "json",
-    ) -> str:
+    ) -> tuple[str, dict]:
         operation = operation.lower().strip()
         if operation not in ("esearch", "efetch", "esummary"):
-            return "[ERROR] operation must be esearch, efetch, or esummary."
+            return invalid_input_result(
+                self.name,
+                "operation must be esearch, efetch, or esummary.",
+                metadata={"operation": operation, "db": db, "retmode": retmode},
+            )
         if operation == "esearch" and not term:
-            return "[ERROR] term is required for esearch."
+            return invalid_input_result(
+                self.name,
+                "term is required for esearch.",
+                metadata={"operation": operation, "db": db, "retmode": retmode},
+            )
         if operation in ("efetch", "esummary") and not id:
-            return "[ERROR] id is required for efetch and esummary."
+            return invalid_input_result(
+                self.name,
+                "id is required for efetch and esummary.",
+                metadata={"operation": operation, "db": db, "retmode": retmode},
+            )
 
         params = {"db": db, "retmode": retmode}
         if operation == "esearch":
@@ -77,11 +101,88 @@ class NcbiEutilsTool(BaseTool):
             r = httpx.get(url, timeout=30)
             r.raise_for_status()
             text = r.text
-            if len(text) > 80_000:
-                text = text[:80_000] + "\n...[truncated]"
-            return text
+            source_payload = None
+            warnings: list[str] = []
+            structured_payload: object
+            summary: str
+
+            if retmode == "json":
+                try:
+                    parsed = r.json()
+                    summary, truncated = json_to_pretty_text(parsed, 80_000)
+                    if truncated:
+                        warnings.append("output_truncated")
+                    structured_payload = parsed
+                except (json.JSONDecodeError, ValueError):
+                    summary, truncated = truncate_text(text, 80_000)
+                    if truncated:
+                        warnings.append("output_truncated")
+                    structured_payload = {"raw_text": summary, "retmode": retmode}
+                    source_payload = summary
+            else:
+                summary, truncated = truncate_text(text, 80_000)
+                if truncated:
+                    warnings.append("output_truncated")
+                structured_payload = {"retmode": retmode}
+                source_payload = summary
+
+            metadata = {
+                "operation": operation,
+                "db": db,
+                "retmax": min(retmax or 20, 100) if operation == "esearch" else None,
+                "retmode": retmode,
+                "request_url": url,
+                "http_status": r.status_code,
+            }
+            result_count = _extract_ncbi_result_count(operation, structured_payload)
+            if result_count is not None:
+                metadata["result_count"] = result_count
+
+            if _is_ncbi_empty_response(operation, structured_payload, summary):
+                return empty_result(
+                    self.name,
+                    summary or "No NCBI results returned.",
+                    structured_payload=structured_payload,
+                    warnings=warnings,
+                    metadata=metadata,
+                    source_payload=source_payload,
+                )
+
+            return success_result(
+                self.name,
+                summary,
+                structured_payload=structured_payload,
+                warnings=warnings,
+                metadata=metadata,
+                source_payload=source_payload,
+            )
+        except httpx.TimeoutException:
+            return retriable_error_result(
+                self.name,
+                "NCBI request timed out.",
+                metadata={"operation": operation, "db": db, "request_url": url},
+            )
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            message = f"HTTP {status_code}: {exc.response.reason_phrase}"
+            metadata = {"operation": operation, "db": db, "request_url": url, "http_status": status_code}
+            if status_code == 429 or status_code >= 500:
+                return retriable_error_result(self.name, message, metadata=metadata)
+            if 400 <= status_code < 500:
+                return invalid_input_result(self.name, message, metadata=metadata)
+            return execution_error_result(self.name, message, metadata=metadata)
+        except httpx.RequestError as exc:
+            return retriable_error_result(
+                self.name,
+                f"NCBI request failed: {exc}",
+                metadata={"operation": operation, "db": db, "request_url": url},
+            )
         except Exception as exc:
-            return f"[ERROR] {exc}"
+            return execution_error_result(
+                self.name,
+                str(exc),
+                metadata={"operation": operation, "db": db, "request_url": url},
+            )
 
     async def _arun(
         self,
@@ -91,7 +192,7 @@ class NcbiEutilsTool(BaseTool):
         id: Optional[str] = None,
         retmax: Optional[int] = 20,
         retmode: str = "json",
-    ) -> str:
+    ) -> tuple[str, dict]:
         import asyncio
         import functools
 
@@ -108,3 +209,34 @@ class NcbiEutilsTool(BaseTool):
                 retmode=retmode,
             ),
         )
+
+
+def _extract_ncbi_result_count(operation: str, structured_payload: object) -> int | None:
+    if not isinstance(structured_payload, dict):
+        return None
+
+    if operation == "esearch":
+        result = structured_payload.get("esearchresult")
+        if isinstance(result, dict):
+            try:
+                return int(result.get("count", 0))
+            except (TypeError, ValueError):
+                id_list = result.get("idlist")
+                if isinstance(id_list, list):
+                    return len(id_list)
+
+    if operation == "esummary":
+        result = structured_payload.get("result")
+        if isinstance(result, dict):
+            uids = result.get("uids")
+            if isinstance(uids, list):
+                return len(uids)
+
+    return None
+
+
+def _is_ncbi_empty_response(operation: str, structured_payload: object, summary: str) -> bool:
+    count = _extract_ncbi_result_count(operation, structured_payload)
+    if count is not None:
+        return count == 0
+    return not summary.strip()

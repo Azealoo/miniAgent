@@ -197,14 +197,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           );
         },
 
-        onToolEnd: (tool, output, runId) => {
+        onToolEnd: (tool, output, runId, result) => {
           const id = streamingIdRef.current;
           if (!id) return;
-          const call: ToolCall = {
-            tool,
-            input: "",   // filled in below from pendingTool
-            output,
-          };
           setMessages((prev) =>
             prev.map((m) => {
               if (m.id !== id) return m;
@@ -213,6 +208,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 tool: pending?.tool ?? tool,
                 input: pending?.input ?? "",
                 output,
+                run_id: runId,
+                result,
               };
               return {
                 ...m,

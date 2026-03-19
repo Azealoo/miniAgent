@@ -1,4 +1,4 @@
-import type { Session, Skill, TokenStats } from "./types";
+import type { Session, Skill, TokenStats, ToolResultEnvelope } from "./types";
 
 function getBase(): string {
   if (typeof window === "undefined") return "http://localhost:8002";
@@ -102,7 +102,12 @@ export interface StreamCallbacks {
   onRetrieval: (query: string, results: object[]) => void;
   onToken: (content: string) => void;
   onToolStart: (tool: string, input: string, runId: string) => void;
-  onToolEnd: (tool: string, output: string, runId: string) => void;
+  onToolEnd: (
+    tool: string,
+    output: string,
+    runId: string,
+    result?: ToolResultEnvelope
+  ) => void;
   onNewResponse: () => void;
   onDone: (content: string) => void;
   onTitle: (title: string) => void;
@@ -156,7 +161,12 @@ export async function streamChat(
                 callbacks.onToolStart(data.tool, data.input, data.run_id ?? data.tool);
                 break;
               case "tool_end":
-                callbacks.onToolEnd(data.tool, data.output, data.run_id ?? data.tool);
+                callbacks.onToolEnd(
+                  data.tool,
+                  data.output,
+                  data.run_id ?? data.tool,
+                  data.result
+                );
                 break;
               case "new_response":
                 callbacks.onNewResponse();

@@ -8,6 +8,8 @@ from typing import Any, Optional, Type
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr
 
+from .contracts import empty_result, success_result
+
 _TOP_K = 3
 
 
@@ -24,6 +26,7 @@ class SearchKnowledgeBaseTool(BaseTool):
         "Input: a search query string."
     )
     args_schema: Type[BaseModel] = SearchKnowledgeInput
+    response_format: str = "content_and_artifact"
     knowledge_dir: str = ""
     storage_dir: str = ""
 
@@ -137,14 +140,23 @@ class SearchKnowledgeBaseTool(BaseTool):
             self._index = None
             self._nodes = []
 
-    def _run(self, query: str) -> str:
+    def _run(self, query: str) -> tuple[str, dict]:
         self._ensure_index()
 
         if self._index is None:
-            return "The knowledge base is empty or could not be loaded."
+            return empty_result(
+                self.name,
+                "The knowledge base is empty or could not be loaded.",
+                structured_payload={"query": query, "results": []},
+                metadata={
+                    "knowledge_dir": self.knowledge_dir,
+                    "storage_dir": self.storage_dir,
+                    "index_status": "empty_or_unavailable",
+                },
+            )
 
         seen: set[str] = set()
-        results: list[str] = []
+        results: list[dict[str, str]] = []
 
         # Vector retrieval
         try:
@@ -154,7 +166,14 @@ class SearchKnowledgeBaseTool(BaseTool):
                 if nid not in seen:
                     seen.add(nid)
                     src = node.metadata.get("file_name", "document")
-                    results.append(f"[Source: {src}]\n{node.text}")
+                    results.append(
+                        {
+                            "source": src,
+                            "text": node.text,
+                            "retrieval_mode": "vector",
+                            "node_id": nid,
+                        }
+                    )
         except Exception:
             pass
 
@@ -171,15 +190,45 @@ class SearchKnowledgeBaseTool(BaseTool):
                     if nid not in seen:
                         seen.add(nid)
                         src = node.metadata.get("file_name", "document")
-                        results.append(f"[Source: {src}]\n{node.text}")
+                        results.append(
+                            {
+                                "source": src,
+                                "text": node.text,
+                                "retrieval_mode": "bm25",
+                                "node_id": nid,
+                            }
+                        )
         except Exception:
             pass
 
         if not results:
-            return "No relevant results found in the knowledge base."
+            return empty_result(
+                self.name,
+                "No relevant results found in the knowledge base.",
+                structured_payload={"query": query, "results": []},
+                metadata={
+                    "knowledge_dir": self.knowledge_dir,
+                    "storage_dir": self.storage_dir,
+                    "index_status": "ready",
+                },
+            )
 
-        output = "\n\n---\n\n".join(results[:_TOP_K])
-        return output
+        top_results = results[:_TOP_K]
+        output = "\n\n---\n\n".join(
+            f"[Source: {result['source']}]\n{result['text']}"
+            for result in top_results
+        )
+        return success_result(
+            self.name,
+            output,
+            structured_payload={"query": query, "results": top_results},
+            metadata={
+                "knowledge_dir": self.knowledge_dir,
+                "storage_dir": self.storage_dir,
+                "index_status": "ready",
+                "result_count": len(top_results),
+            },
+        )
 
-    async def _arun(self, query: str) -> str:  # type: ignore[override]
+    async def _arun(self, query: str) -> tuple[str, dict]:  # type: ignore[override]
         return self._run(query)

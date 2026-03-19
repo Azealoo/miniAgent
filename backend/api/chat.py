@@ -4,8 +4,8 @@ POST /api/chat — SSE streaming conversation endpoint.
 SSE event types emitted:
   retrieval    {type, query, results}
   token        {type, content}
-  tool_start   {type, tool, input}
-  tool_end     {type, tool, output}
+  tool_start   {type, tool, input, run_id}
+  tool_end     {type, tool, output, result, run_id}
   new_response {type}
   done         {type, content, session_id}
   title        {type, session_id, title}   (first message only)
@@ -127,7 +127,12 @@ async def chat(request: ChatRequest):
                     run_id = ev.get("run_id", ev["tool"])
                     pending_tools[run_id] = {"tool": ev["tool"], "input": ev["input"]}
                     yield _sse(
-                        {"type": "tool_start", "tool": ev["tool"], "input": ev["input"]}
+                        {
+                            "type": "tool_start",
+                            "tool": ev["tool"],
+                            "input": ev["input"],
+                            "run_id": run_id,
+                        }
                     )
 
                 elif t == "tool_end":
@@ -137,9 +142,20 @@ async def chat(request: ChatRequest):
                         "tool": started["tool"],
                         "input": started["input"],
                         "output": ev["output"],
+                        "run_id": run_id,
                     }
+                    if ev.get("result") is not None:
+                        call["result"] = ev["result"]
                     current_tool_calls.append(call)
-                    yield _sse({"type": "tool_end", "tool": ev["tool"], "output": ev["output"]})
+                    payload = {
+                        "type": "tool_end",
+                        "tool": ev["tool"],
+                        "output": ev["output"],
+                        "run_id": run_id,
+                    }
+                    if ev.get("result") is not None:
+                        payload["result"] = ev["result"]
+                    yield _sse(payload)
 
                 elif t == "new_response":
                     _flush_segment()

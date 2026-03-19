@@ -1,11 +1,22 @@
 """
 UniProt REST API helper: search and fetch protein entries by gene or ID.
 """
+import json
 import urllib.parse
 from typing import Optional, Type
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
+
+from .contracts import (
+    empty_result,
+    execution_error_result,
+    invalid_input_result,
+    json_to_pretty_text,
+    retriable_error_result,
+    success_result,
+    truncate_text,
+)
 
 _BASE = "https://rest.uniprot.org"
 _MAX = 50_000
@@ -28,32 +39,134 @@ class UniprotApiTool(BaseTool):
         "Input: query, optional fields and format."
     )
     args_schema: Type[BaseModel] = UniprotApiInput
+    response_format: str = "content_and_artifact"
 
     def _run(
         self,
         query: str = "",
         fields: Optional[str] = None,
         format: str = "json",
-    ) -> str:
+    ) -> tuple[str, dict]:
         if not query.strip():
-            return "[ERROR] query is required."
+            return invalid_input_result(
+                self.name,
+                "query is required.",
+                metadata={"format": format},
+            )
         fields = fields or "accession,gene_names,protein_name,organism_name,function"
+        url = (
+            f"{_BASE}/uniprotkb/search?query={urllib.parse.quote(query)}"
+            f"&fields={urllib.parse.quote(fields)}&format={format}&size=5"
+        )
         try:
             import httpx
-            url = f"{_BASE}/uniprotkb/search?query={urllib.parse.quote(query)}&fields={urllib.parse.quote(fields)}&format={format}&size=5"
             r = httpx.get(url, timeout=25)
             r.raise_for_status()
             text = r.text
-            if len(text) > _MAX:
-                text = text[:_MAX] + "\n...[truncated]"
-            return text
+            source_payload = None
+            warnings: list[str] = []
+
+            if format == "json":
+                try:
+                    parsed = r.json()
+                    summary, truncated = json_to_pretty_text(parsed, _MAX)
+                    if truncated:
+                        warnings.append("output_truncated")
+                    structured_payload = parsed
+                    result_count = len(parsed.get("results", [])) if isinstance(parsed, dict) else None
+                except (json.JSONDecodeError, ValueError):
+                    summary, truncated = truncate_text(text, _MAX)
+                    if truncated:
+                        warnings.append("output_truncated")
+                    structured_payload = {"raw_text": summary, "format": format}
+                    source_payload = summary
+                    result_count = None
+            elif format == "list":
+                summary, truncated = truncate_text(text, _MAX)
+                if truncated:
+                    warnings.append("output_truncated")
+                entries = [line for line in summary.splitlines() if line.strip()]
+                structured_payload = {"entries": entries, "format": format}
+                result_count = len(entries)
+            else:
+                summary, truncated = truncate_text(text, _MAX)
+                if truncated:
+                    warnings.append("output_truncated")
+                structured_payload = {"format": format}
+                source_payload = summary
+                result_count = None
+
+            metadata = {
+                "query": query,
+                "fields": fields,
+                "format": format,
+                "request_url": url,
+                "http_status": r.status_code,
+            }
+            if result_count is not None:
+                metadata["result_count"] = result_count
+
+            if _is_uniprot_empty(structured_payload, summary):
+                return empty_result(
+                    self.name,
+                    summary or "No UniProt results returned.",
+                    structured_payload=structured_payload,
+                    warnings=warnings,
+                    metadata=metadata,
+                    source_payload=source_payload,
+                )
+
+            return success_result(
+                self.name,
+                summary,
+                structured_payload=structured_payload,
+                warnings=warnings,
+                metadata=metadata,
+                source_payload=source_payload,
+            )
+        except httpx.TimeoutException:
+            return retriable_error_result(
+                self.name,
+                "UniProt request timed out.",
+                metadata={"query": query, "format": format, "request_url": url},
+            )
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            message = f"HTTP {status_code}: {exc.response.reason_phrase}"
+            metadata = {"query": query, "format": format, "request_url": url, "http_status": status_code}
+            if status_code == 429 or status_code >= 500:
+                return retriable_error_result(self.name, message, metadata=metadata)
+            if 400 <= status_code < 500:
+                return invalid_input_result(self.name, message, metadata=metadata)
+            return execution_error_result(self.name, message, metadata=metadata)
+        except httpx.RequestError as exc:
+            return retriable_error_result(
+                self.name,
+                f"UniProt request failed: {exc}",
+                metadata={"query": query, "format": format, "request_url": url},
+            )
         except Exception as exc:
-            return f"[ERROR] {exc}"
+            return execution_error_result(
+                self.name,
+                str(exc),
+                metadata={"query": query, "format": format, "request_url": url},
+            )
 
     async def _arun(
         self,
         query: str = "",
         fields: Optional[str] = None,
         format: str = "json",
-    ) -> str:
+    ) -> tuple[str, dict]:
         return self._run(query=query, fields=fields, format=format)
+
+
+def _is_uniprot_empty(structured_payload: object, summary: str) -> bool:
+    if isinstance(structured_payload, dict):
+        results = structured_payload.get("results")
+        if isinstance(results, list):
+            return len(results) == 0
+        entries = structured_payload.get("entries")
+        if isinstance(entries, list):
+            return len(entries) == 0
+    return not summary.strip()
