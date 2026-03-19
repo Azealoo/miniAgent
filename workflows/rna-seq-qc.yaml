@@ -103,8 +103,9 @@ steps:
   - id: summarize_qc
     label: Summarize QC metrics
     executor:
-      executor_type: tool
-      tool_name: slurm_tool
+      executor_type: python
+      module: workflows.runners.rna_seq_qc
+      function: summarize_qc
     inputs:
       - name: dataset_manifest
         source:

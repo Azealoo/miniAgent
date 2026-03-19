@@ -126,7 +126,7 @@ steps:
       executor_type: external_engine
       engine_name: nextflow
       entrypoint: workflows/engines/perturb_seq/main.nf
-      command: nextflow run workflows/engines/perturb_seq/main.nf -profile slurm
+      command: nextflow run workflows/engines/perturb_seq/main.nf -profile slurm --dataset_manifest {dataset_manifest} --reference_build {reference_build}
     inputs:
       - name: dataset_manifest
         source:

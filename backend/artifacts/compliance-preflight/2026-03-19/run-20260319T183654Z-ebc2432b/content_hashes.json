@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "content_hash_manifest",
+  "run_id": "run-20260319T183654Z-ebc2432b",
+  "created_at": "2026-03-19T18:36:54Z",
+  "source_workflow": "compliance-preflight",
+  "hashes": {
+    "run.json": {
+      "algorithm": "sha256",
+      "digest": "3aef9c5fa21f502979b29780be99f432b07e4486c78c70c821e8fe66b1fdeddc"
+    },
+    "compliance_report.json": {
+      "algorithm": "sha256",
+      "digest": "0201c24863e3656cd38a68807e711c7a65d394dd7828ccb15e1f7a3b1220ba1a"
+    }
+  }
+}
