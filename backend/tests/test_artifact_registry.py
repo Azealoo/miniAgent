@@ -1,0 +1,388 @@
+"""Tests for the file-first artifact registry."""
+
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+import yaml
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from artifacts.naming import prepare_run_directory  # noqa: E402
+from artifacts.registry import (  # noqa: E402
+    ARTIFACT_REGISTRY_PATH,
+    lookup_artifact_registry,
+    rebuild_artifact_registry,
+    refresh_artifact_registry_path,
+)
+from artifacts.schemas import SCHEMA_PACK_VERSION  # noqa: E402
+
+
+RUN_ID = "run-20260318T190203Z-deadbeef"
+RUN_DATE = "2026-03-18"
+WORKFLOW = "demo-workflow"
+DATASET_ID = "ds-demo-v1"
+
+
+def _run_dir(base_dir: Path) -> Path:
+    return base_dir / "artifacts" / WORKFLOW / RUN_DATE / RUN_ID
+
+
+def _run_dir_relpath(filename: str) -> str:
+    return f"artifacts/{WORKFLOW}/{RUN_DATE}/{RUN_ID}/{filename}"
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_yaml(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+
+def _write_minimal_run_record(base_dir: Path) -> None:
+    _write_json(
+        _run_dir(base_dir) / "run.json",
+        {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "workflow_run",
+            "run_id": RUN_ID,
+            "created_at": "2026-03-18T19:02:03Z",
+            "source_workflow": "internal-dag-runner",
+            "workflow": {
+                "name": "Demo Workflow",
+                "slug": WORKFLOW,
+            },
+            "paths": {
+                "run_dir": f"artifacts/{WORKFLOW}/{RUN_DATE}/{RUN_ID}",
+            },
+        },
+    )
+
+
+def _write_dataset_manifest(base_dir: Path) -> None:
+    _write_yaml(
+        _run_dir(base_dir) / "dataset_manifest.yaml",
+        {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "dataset_manifest",
+            "id": DATASET_ID,
+            "run_id": RUN_ID,
+            "created_at": "2026-03-18T19:02:03Z",
+            "source_workflow": "dataset-intake",
+            "related_artifacts": [],
+            "assay_type": "scrna_seq",
+            "organism": "homo_sapiens",
+            "reference_build": "grch38",
+            "privacy_classification": "controlled",
+            "design": {
+                "study_name": "demo-study",
+                "experiment_type": "scrna_seq",
+                "condition_summary": "demo condition summary",
+                "timepoints": ["baseline"],
+                "factors": ["condition"],
+            },
+            "source_files": ["data/demo.tsv"],
+        },
+    )
+
+
+def _write_qa_report(base_dir: Path) -> None:
+    _write_json(
+        _run_dir(base_dir) / "qa_report.json",
+        {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "qa_report",
+            "id": "qa-demo-v1",
+            "run_id": RUN_ID,
+            "created_at": "2026-03-18T19:05:00Z",
+            "source_workflow": "qa-review",
+            "related_artifacts": [
+                {
+                    "artifact_type": "workflow_run",
+                    "path": _run_dir_relpath("run.json"),
+                    "run_id": RUN_ID,
+                }
+            ],
+            "overall_status": "passed",
+            "failed_checks": [],
+            "warnings": [],
+            "missing_artifacts": [],
+            "recommended_remediation": [],
+            "checklist_artifacts": [],
+        },
+    )
+
+
+def _write_evidence_card(base_dir: Path) -> None:
+    _write_yaml(
+        _run_dir(base_dir) / "evidence_card.yaml",
+        {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "evidence_card",
+            "id": "evidence-demo-v1",
+            "run_id": RUN_ID,
+            "created_at": "2026-03-18T19:10:00Z",
+            "source_workflow": "literature-retrieval",
+            "related_artifacts": [],
+            "source_database": "pubmed",
+            "stable_identifier": "pubmed:12345678",
+            "title": "Demo evidence card",
+            "claims": [
+                {
+                    "id": "claim-demo-1",
+                    "statement": "Demo evidence statement.",
+                    "confidence": "high",
+                }
+            ],
+            "confidence": "high",
+            "limitations": ["Small demonstration artifact."],
+            "cached_raw_payload_path": "knowledge/cache/pubmed/12345678.md",
+        },
+    )
+
+
+def _workflow_plan_payload() -> dict:
+    return {
+        "schema_version": SCHEMA_PACK_VERSION,
+        "artifact_type": "workflow_plan",
+        "run_id": RUN_ID,
+        "created_at": "2026-03-18T19:06:00Z",
+        "source_workflow": WORKFLOW,
+        "steps": [
+            {"id": "qc", "name": "QC"},
+            {"id": "report", "name": "Report"},
+        ],
+    }
+
+
+def _provenance_payload() -> dict:
+    return {
+        "schema_version": SCHEMA_PACK_VERSION,
+        "artifact_type": "provenance",
+        "run_id": RUN_ID,
+        "created_at": "2026-03-18T19:07:00Z",
+        "source_workflow": WORKFLOW,
+        "entities": [],
+    }
+
+
+def _write_registry_fixture(base_dir: Path) -> None:
+    _write_minimal_run_record(base_dir)
+    _write_dataset_manifest(base_dir)
+    _write_qa_report(base_dir)
+
+
+@pytest.fixture
+def isolated_registry_root(tmp_path):
+    _write_registry_fixture(tmp_path)
+    return tmp_path
+
+
+class TestArtifactRegistryService:
+    def test_rebuild_persists_registry_and_indexes_canonical_artifacts(self, isolated_registry_root):
+        snapshot = rebuild_artifact_registry(isolated_registry_root)
+
+        assert snapshot.record_count == 3
+        assert snapshot.valid_count == 3
+        assert snapshot.invalid_count == 0
+
+        registry_path = isolated_registry_root / ARTIFACT_REGISTRY_PATH
+        assert registry_path.is_file()
+
+        records_by_type = {record.artifact_type: record for record in snapshot.records}
+        assert records_by_type["workflow_run"].artifact_id == f"workflow_run:{RUN_ID}"
+        assert records_by_type["workflow_run"].dataset_id == DATASET_ID
+        assert records_by_type["dataset_manifest"].artifact_id == DATASET_ID
+        assert records_by_type["qa_report"].dataset_id == DATASET_ID
+
+    def test_rebuild_indexes_reserved_generated_and_ro_crate_artifacts(self, isolated_registry_root):
+        _write_json(_run_dir(isolated_registry_root) / "workflow_plan.json", _workflow_plan_payload())
+        _write_json(_run_dir(isolated_registry_root) / "prov.json", _provenance_payload())
+        (_run_dir(isolated_registry_root) / "inputs" / "user").mkdir(parents=True, exist_ok=True)
+        (_run_dir(isolated_registry_root) / "inputs" / "user" / "sample-sheet__patients.csv").write_text(
+            "patient_id\nP1\n",
+            encoding="utf-8",
+        )
+        (_run_dir(isolated_registry_root) / "outputs" / "generated").mkdir(parents=True, exist_ok=True)
+        (_run_dir(isolated_registry_root) / "outputs" / "generated" / "volcano_plot.png").write_bytes(b"plot")
+        (_run_dir(isolated_registry_root) / "ro-crate").mkdir(exist_ok=True)
+        _write_json(
+            _run_dir(isolated_registry_root) / "ro-crate" / "ro-crate-metadata.json",
+            {"@context": "https://w3id.org/ro/crate/1.1/context"},
+        )
+
+        snapshot = rebuild_artifact_registry(isolated_registry_root)
+
+        assert snapshot.record_count == 9
+        assert {record.artifact_type for record in snapshot.records} >= {
+            "workflow_run",
+            "dataset_manifest",
+            "qa_report",
+            "workflow_plan",
+            "provenance",
+            "user_input",
+            "figure",
+            "ro_crate",
+            "ro_crate_entry",
+        }
+
+    def test_lookup_filters_by_run_workflow_type_and_dataset(self, isolated_registry_root):
+        rebuild_artifact_registry(isolated_registry_root)
+
+        result = lookup_artifact_registry(
+            isolated_registry_root,
+            run_id=RUN_ID,
+            artifact_type="qa_report",
+            workflow=WORKFLOW,
+            date=RUN_DATE,
+            dataset_id=DATASET_ID,
+        )
+
+        assert result.total_count == 3
+        assert result.matched_count == 1
+        assert result.records[0].path == _run_dir_relpath("qa_report.json")
+
+    def test_refresh_path_adds_new_artifact_without_full_rescan_contract(self, isolated_registry_root):
+        rebuild_artifact_registry(isolated_registry_root)
+        _write_evidence_card(isolated_registry_root)
+
+        record = refresh_artifact_registry_path(
+            isolated_registry_root,
+            _run_dir_relpath("evidence_card.yaml"),
+        )
+        assert record is not None
+        assert record.status == "valid"
+        assert record.artifact_type == "evidence_card"
+        assert record.dataset_id == DATASET_ID
+
+        refreshed = lookup_artifact_registry(
+            isolated_registry_root,
+            artifact_type="evidence_card",
+            dataset_id=DATASET_ID,
+        )
+        assert refreshed.matched_count == 1
+        assert refreshed.records[0].path == _run_dir_relpath("evidence_card.yaml")
+
+    def test_prepare_run_directory_registers_root_artifacts_immediately(self, tmp_path):
+        prepare_run_directory(
+            tmp_path,
+            "Demo Workflow",
+            created_at=datetime(2026, 3, 18, 19, 2, 3, tzinfo=timezone.utc),
+            run_id=RUN_ID,
+        )
+
+        result = lookup_artifact_registry(tmp_path, include_invalid=True)
+
+        assert result.matched_count == 2
+        assert {record.artifact_type for record in result.records} == {
+            "content_hash_manifest",
+            "workflow_run",
+        }
+        assert {record.path for record in result.records} == {
+            _run_dir_relpath("content_hashes.json"),
+            _run_dir_relpath("run.json"),
+        }
+
+    def test_run_layout_writes_refresh_registry_for_stable_and_generated_outputs(self, tmp_path):
+        layout = prepare_run_directory(
+            tmp_path,
+            "Demo Workflow",
+            created_at=datetime(2026, 3, 18, 19, 2, 3, tzinfo=timezone.utc),
+            run_id=RUN_ID,
+        )
+
+        layout.stable_artifact_path("workflow_plan").write_text(
+            json.dumps(_workflow_plan_payload(), indent=2) + "\n",
+            encoding="utf-8",
+        )
+        layout.generated_output_path("volcano plot.png").write_bytes(b"plot")
+        layout.stable_artifact_path("provenance").write_text(
+            json.dumps(_provenance_payload(), indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        result = lookup_artifact_registry(tmp_path, include_invalid=True)
+
+        assert {record.artifact_type for record in result.records} >= {
+            "content_hash_manifest",
+            "figure",
+            "provenance",
+            "workflow_plan",
+            "workflow_run",
+        }
+
+    def test_ro_crate_child_writes_preserve_tracking_and_refresh_registry(self, tmp_path):
+        layout = prepare_run_directory(
+            tmp_path,
+            "Demo Workflow",
+            created_at=datetime(2026, 3, 18, 19, 2, 3, tzinfo=timezone.utc),
+            run_id=RUN_ID,
+        )
+
+        ro_crate_dir = layout.stable_artifact_path("ro_crate")
+        ro_crate_dir.mkdir()
+        (ro_crate_dir / "ro-crate-metadata.json").write_text(
+            json.dumps({"@context": "https://w3id.org/ro/crate/1.1/context"}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        result = lookup_artifact_registry(tmp_path, include_invalid=True)
+
+        assert {record.artifact_type for record in result.records} >= {
+            "ro_crate",
+            "ro_crate_entry",
+        }
+        assert {record.path for record in result.records} >= {
+            _run_dir_relpath("ro-crate"),
+            _run_dir_relpath("ro-crate/ro-crate-metadata.json"),
+        }
+
+    def test_rebuild_marks_malformed_artifacts_invalid_instead_of_crashing(self, tmp_path):
+        _write_minimal_run_record(tmp_path)
+        (_run_dir(tmp_path) / "compliance_report.json").write_text("{bad json\n", encoding="utf-8")
+
+        snapshot = rebuild_artifact_registry(tmp_path)
+
+        assert snapshot.record_count == 2
+        assert snapshot.valid_count == 1
+        assert snapshot.invalid_count == 1
+
+        invalid = next(record for record in snapshot.records if record.status == "invalid")
+        assert invalid.artifact_type == "compliance_report"
+        assert invalid.path == _run_dir_relpath("compliance_report.json")
+        assert invalid.error is not None
+
+        default_lookup = lookup_artifact_registry(tmp_path)
+        assert default_lookup.matched_count == 1
+
+        with_invalid = lookup_artifact_registry(tmp_path, include_invalid=True)
+        assert with_invalid.matched_count == 2
+
+
+class TestArtifactRegistryApi:
+    def test_api_routes_expose_lookup_and_rebuild(self, isolated_registry_root):
+        from graph.agent import agent_manager
+        from api.artifact_registry import list_artifact_registry, rebuild_registry
+
+        original_base_dir = agent_manager.base_dir
+        try:
+            agent_manager.base_dir = isolated_registry_root
+
+            rebuilt = rebuild_registry()
+            assert rebuilt["record_count"] == 3
+            assert rebuilt["valid_count"] == 3
+
+            listed = list_artifact_registry(workflow=WORKFLOW, dataset_id=DATASET_ID)
+            assert listed["matched_count"] == 3
+            assert {record["artifact_type"] for record in listed["records"]} == {
+                "dataset_manifest",
+                "qa_report",
+                "workflow_run",
+            }
+        finally:
+            agent_manager.base_dir = original_base_dir

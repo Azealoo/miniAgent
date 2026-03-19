@@ -87,6 +87,7 @@ app.add_middleware(
 )
 
 # ── Register routers ───────────────────────────────────────────────
+from api.artifact_registry import router as artifact_registry_router
 from api.chat import router as chat_router
 from api.compress import router as compress_router
 from api.config_api import router as config_router
@@ -98,6 +99,7 @@ from api.tokens import router as tokens_router
 app.include_router(chat_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
+app.include_router(artifact_registry_router, prefix="/api")
 app.include_router(tokens_router, prefix="/api")
 app.include_router(compress_router, prefix="/api")
 app.include_router(config_router, prefix="/api")

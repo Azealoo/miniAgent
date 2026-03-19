@@ -225,6 +225,75 @@ def _dump_json(payload: Mapping[str, object]) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
 
+def _refresh_registry_for_path(base_dir: Path, target: Path) -> None:
+    try:
+        relative = target.resolve().relative_to(base_dir.resolve())
+    except ValueError:
+        return
+
+    try:
+        from .registry import refresh_artifact_registry_path
+
+        relative_str = relative.as_posix()
+        refresh_artifact_registry_path(base_dir, relative_str)
+
+        # Keep the run-level ro-crate record fresh when individual entries change.
+        if len(relative.parts) > 5 and relative.parts[4] == "ro-crate":
+            refresh_artifact_registry_path(
+                base_dir,
+                PurePosixPath(*relative.parts[:5]),
+            )
+    except Exception:
+        # Registry maintenance must not block artifact writes.
+        return
+
+
+class _TrackedArtifactPath(type(Path())):
+    __slots__ = ("_registry_base_dir",)
+
+    def __new__(
+        cls,
+        *args,
+        registry_base_dir: Path | None = None,
+    ):
+        self = super().__new__(cls, *args)
+        self._registry_base_dir = registry_base_dir
+        return self
+
+    def _registry_base_dir_or_none(self) -> Path | None:
+        return getattr(self, "_registry_base_dir", None)
+
+    def _tracked(self, target: Path) -> "_TrackedArtifactPath":
+        return type(self)(target, registry_base_dir=self._registry_base_dir_or_none())
+
+    def _refresh_registry(self) -> None:
+        registry_base_dir = self._registry_base_dir_or_none()
+        if registry_base_dir is None:
+            return
+        _refresh_registry_for_path(registry_base_dir, Path(self))
+
+    def __truediv__(self, key):
+        return self._tracked(super().__truediv__(key))
+
+    def joinpath(self, *pathsegments):
+        return self._tracked(super().joinpath(*pathsegments))
+
+    def write_text(self, data: str, encoding=None, errors=None, newline=None):
+        written = super().write_text(data, encoding=encoding, errors=errors, newline=newline)
+        self._refresh_registry()
+        return written
+
+    def write_bytes(self, data: bytes):
+        written = super().write_bytes(data)
+        self._refresh_registry()
+        return written
+
+    def mkdir(self, mode=0o777, parents=False, exist_ok=False):
+        result = super().mkdir(mode=mode, parents=parents, exist_ok=exist_ok)
+        self._refresh_registry()
+        return result
+
+
 def build_content_hash_manifest(
     *,
     run_id: str,
@@ -256,6 +325,7 @@ def build_content_hash_manifest(
 
 @dataclass(frozen=True)
 class RunLayout:
+    base_dir: Path
     workflow: str
     workflow_slug: str
     run_id: str
@@ -270,7 +340,7 @@ class RunLayout:
 
     @property
     def run_record_path(self) -> Path:
-        return self.run_dir / RUN_RECORD_FILENAME
+        return self._track_path(self.run_dir / RUN_RECORD_FILENAME)
 
     @property
     def content_hash_manifest_relpath(self) -> PurePosixPath:
@@ -278,10 +348,13 @@ class RunLayout:
 
     @property
     def content_hash_manifest_path(self) -> Path:
-        return self.run_dir / CONTENT_HASH_MANIFEST_FILENAME
+        return self._track_path(self.run_dir / CONTENT_HASH_MANIFEST_FILENAME)
 
     def stable_artifact_relpath(self, artifact_type: str) -> PurePosixPath:
         return self.relative_run_dir / stable_artifact_name(artifact_type)
+
+    def _track_path(self, target: Path) -> Path:
+        return _TrackedArtifactPath(target, registry_base_dir=self.base_dir)
 
     def _reserve_run_path(
         self,
@@ -292,7 +365,7 @@ class RunLayout:
         target = resolve_artifact_path(self.run_dir, relative_path, must_not_exist=True)
         if create_parent:
             target.parent.mkdir(parents=True, exist_ok=True)
-        return target
+        return self._track_path(target)
 
     def stable_artifact_path(self, artifact_type: str) -> Path:
         return self._reserve_run_path(PurePosixPath(stable_artifact_name(artifact_type)))
@@ -377,6 +450,7 @@ def prepare_run_directory(
     (run_dir / USER_INPUTS_DIR).mkdir(parents=True, exist_ok=False)
     (run_dir / GENERATED_OUTPUTS_DIR).mkdir(parents=True, exist_ok=False)
     layout = RunLayout(
+        base_dir=base,
         workflow=workflow,
         workflow_slug=_slugify_path_component(workflow),
         run_id=resolved_run_id,
