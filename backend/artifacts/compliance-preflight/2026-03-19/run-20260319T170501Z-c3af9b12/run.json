@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "workflow_run",
+  "run_id": "run-20260319T170501Z-c3af9b12",
+  "created_at": "2026-03-19T17:05:01Z",
+  "source_workflow": "compliance-preflight",
+  "workflow": {
+    "name": "compliance-preflight",
+    "slug": "compliance-preflight"
+  },
+  "paths": {
+    "run_dir": "artifacts/compliance-preflight/2026-03-19/run-20260319T170501Z-c3af9b12",
+    "root_record": "run.json",
+    "content_hash_manifest": "content_hashes.json",
+    "user_inputs_dir": "inputs/user",
+    "generated_outputs_dir": "outputs/generated"
+  },
+  "stable_artifacts": {
+    "workflow_run": "run.json",
+    "dataset_manifest": "dataset_manifest.yaml",
+    "workflow_plan": "workflow_plan.json",
+    "compliance_report": "compliance_report.json",
+    "evidence_card": "evidence_card.yaml",
+    "protocol_run": "protocol_run.yaml",
+    "qa_report": "qa_report.json",
+    "provenance": "prov.json",
+    "ro_crate": "ro-crate"
+  }
+}
