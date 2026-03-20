@@ -275,11 +275,95 @@ class TestArtifactSchemas:
             "equipment": [],
             "started_at": "2026-03-18T19:30:00Z",
             "completion_state": "completed",
+            "steps": [
+                {
+                    "step_id": "step-01",
+                    "sequence_number": 1,
+                    "title": "Example step",
+                    "instruction": "Run the example step.",
+                    "status": "completed",
+                }
+            ],
             "deviations": [],
             "assumptions": [],
         }
 
         with pytest.raises(ValueError, match="completed_at"):
+            ProtocolRun.model_validate(payload)
+
+    def test_completed_protocol_runs_require_real_operator_and_sample_ids(self):
+        payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "protocol_run",
+            "id": "protocol-run-test-v1b",
+            "run_id": "run-20260318T193000Z-deadbeef",
+            "created_at": "2026-03-18T19:30:00Z",
+            "source_workflow": "protocol-executor",
+            "source_agent": "protocol-executor",
+            "related_artifacts": [],
+            "protocol_source": {
+                "artifact_type": "protocol_document",
+                "path": "backend/knowledge/protocols/test.md",
+                "id": "test-protocol-v1",
+            },
+            "operator": "not_provided",
+            "sample_ids": [],
+            "materials": [],
+            "reagent_lots": [],
+            "equipment": [],
+            "started_at": "2026-03-18T19:30:00Z",
+            "completed_at": "2026-03-18T19:31:00Z",
+            "completion_state": "completed",
+            "steps": [
+                {
+                    "step_id": "step-01",
+                    "sequence_number": 1,
+                    "title": "Example step",
+                    "instruction": "Run the example step.",
+                    "status": "completed",
+                }
+            ],
+            "deviations": [],
+            "assumptions": [],
+        }
+
+        with pytest.raises(ValueError, match="real operator"):
+            ProtocolRun.model_validate(payload)
+
+        payload["operator"] = "operator-1"
+
+        with pytest.raises(ValueError, match="sample_id"):
+            ProtocolRun.model_validate(payload)
+
+        payload["sample_ids"] = ["sample-001"]
+        ProtocolRun.model_validate(payload)
+
+    def test_protocol_runs_require_steps_when_active(self):
+        payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "protocol_run",
+            "id": "protocol-run-test-v2",
+            "run_id": "run-20260318T193000Z-deadbeef",
+            "created_at": "2026-03-18T19:30:00Z",
+            "source_workflow": "protocol-executor",
+            "related_artifacts": [],
+            "protocol_source": {
+                "artifact_type": "protocol_document",
+                "path": "backend/knowledge/protocols/test.md",
+            },
+            "operator": "not_provided",
+            "sample_ids": [],
+            "materials": [],
+            "reagent_lots": [],
+            "equipment": [],
+            "started_at": "2026-03-18T19:30:00Z",
+            "completion_state": "in_progress",
+            "steps": [],
+            "deviations": [],
+            "assumptions": ["No sample identifiers were provided at protocol start."],
+        }
+
+        with pytest.raises(ValueError, match="explicit step"):
             ProtocolRun.model_validate(payload)
 
     def test_qa_reports_require_failure_context_for_blocked_status(self):

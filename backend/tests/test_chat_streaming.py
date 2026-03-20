@@ -90,6 +90,28 @@ def _stage_selected_workflow(base_dir: Path, *, include_manifest: bool = True) -
     return manifest_relpath
 
 
+def _stage_protocol_skill(base_dir: Path, skill_name: str = "demo_protocol") -> str:
+    skill_path = base_dir / "backend" / "skills" / skill_name / "SKILL.md"
+    skill_path.parent.mkdir(parents=True, exist_ok=True)
+    skill_path.write_text(
+        """---
+name: demo_protocol
+description: Demo protocol
+---
+
+# Demo Protocol
+
+## Steps
+
+1. Label the collection tubes for each sample.
+2. Add lysis buffer to each labeled tube.
+3. Incubate the tubes for the required hold time.
+""",
+        encoding="utf-8",
+    )
+    return skill_path.relative_to(base_dir).as_posix()
+
+
 @pytest.mark.asyncio
 async def test_chat_stream_includes_structured_tool_result_and_persists_it(isolated_chat_state):
     from api.chat import ChatRequest, chat
@@ -521,8 +543,195 @@ async def test_chat_stream_blocks_selected_workflow_without_required_inputs(isol
         for item in payloads
     )
 
+
+@pytest.mark.asyncio
+async def test_chat_stream_routes_protocol_requests_to_protocol_executor(isolated_chat_state):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+    _stage_protocol_skill(isolated_chat_state)
+
+    async def unexpected_astream(_message, _history):
+        if False:
+            yield {}
+        raise AssertionError("protocol execution chat should bypass agent_manager.astream")
+
+    with patch.object(agent_manager, "astream", unexpected_astream), patch(
+        "api.chat._generate_title_only",
+        new=AsyncMock(return_value=""),
+    ):
+        response = await chat(
+            ChatRequest(
+                message="Walk me through this protocol step by step using demo_protocol for sample-001.",
+                session_id=session_id,
+                stream=True,
+            )
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    tool_starts = [item for item in payloads if item["type"] == "tool_start"]
+    assert [item["tool"] for item in tool_starts] == [
+        "compliance_preflight",
+        "protocol_executor",
+    ]
+    assert not any(
+        item["type"] == "tool_end" and item["tool"] == "evidence_review_gate"
+        for item in payloads
+    )
+    protocol_end = next(
+        item for item in payloads if item["type"] == "tool_end" and item["tool"] == "protocol_executor"
+    )
+    assert protocol_end["result"]["status"] == "success"
+    assert protocol_end["result"]["structured_payload"]["source"]["kind"] == "skill"
+    protocol_run_path = protocol_end["result"]["structured_payload"]["protocol_run"]["artifact_path"]
+    assert (isolated_chat_state / protocol_run_path).is_file()
+    assert any(
+        item["type"] == "token"
+        and "Protocol execution mode started from `demo_protocol`." in item["content"]
+        for item in payloads
+    )
+
     history = agent_manager.session_manager.load_session(session_id)
     assistant_messages = [msg for msg in history if msg["role"] == "assistant"]
     assert assistant_messages
-    assert assistant_messages[0]["workflow_events"][1]["type"] == "workflow_blocked"
-    assert "blocked before execution" in assistant_messages[0]["content"]
+    assert [call["tool"] for call in assistant_messages[0]["tool_calls"]] == [
+        "compliance_preflight",
+        "protocol_executor",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_blocks_protocol_execution_without_explicit_source(isolated_chat_state):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    async def unexpected_astream(_message, _history):
+        if False:
+            yield {}
+        raise AssertionError("protocol execution chat should bypass agent_manager.astream")
+
+    with patch.object(agent_manager, "astream", unexpected_astream), patch(
+        "api.chat._generate_title_only",
+        new=AsyncMock(return_value=""),
+    ):
+        response = await chat(
+            ChatRequest(
+                message="Walk me through this protocol step by step.",
+                session_id=session_id,
+                stream=True,
+            )
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    protocol_end = next(
+        item for item in payloads if item["type"] == "tool_end" and item["tool"] == "protocol_executor"
+    )
+    assert protocol_end["result"]["status"] == "error"
+    assert protocol_end["result"]["outcome"] == "invalid_input"
+    assert protocol_end["result"]["structured_payload"]["source"]["kind"] == "request_note"
+    assert any(
+        item["type"] == "token"
+        and "no explicit source protocol or skill was provided" in item["content"].lower()
+        for item in payloads
+    )
+    assert not any(
+        item["type"] == "tool_end" and item["tool"] == "evidence_review_gate"
+        for item in payloads
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_blocks_unreadable_protocol_source_file(isolated_chat_state):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+    binary_relpath = "backend/artifacts/examples/binary_protocol.bin"
+    binary_path = isolated_chat_state / binary_relpath
+    binary_path.parent.mkdir(parents=True, exist_ok=True)
+    binary_path.write_bytes(b"\xff\xfe\x00\x01")
+
+    async def unexpected_astream(_message, _history):
+        if False:
+            yield {}
+        raise AssertionError("protocol execution chat should bypass agent_manager.astream")
+
+    with patch.object(agent_manager, "astream", unexpected_astream), patch(
+        "api.chat._generate_title_only",
+        new=AsyncMock(return_value=""),
+    ):
+        response = await chat(
+            ChatRequest(
+                message=(
+                    "Walk me through this protocol step by step using "
+                    f"{binary_relpath}."
+                ),
+                attached_identifiers=[binary_relpath],
+                session_id=session_id,
+                stream=True,
+            )
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    protocol_end = next(
+        item for item in payloads if item["type"] == "tool_end" and item["tool"] == "protocol_executor"
+    )
+    assert protocol_end["result"]["status"] == "error"
+    assert protocol_end["result"]["outcome"] == "invalid_input"
+    assert protocol_end["result"]["structured_payload"]["source"]["kind"] == "document"
+    assert protocol_end["result"]["structured_payload"]["source"]["readable"] is False
+    assert protocol_end["result"]["structured_payload"]["source"]["read_error"] == "unicode_decode_error"
+    assert any(
+        item["type"] == "token"
+        and "could not be decoded as utf-8 text" in item["content"].lower()
+        for item in payloads
+    )
+    assert not any(
+        item["type"] == "tool_end" and item["tool"] == "evidence_review_gate"
+        for item in payloads
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_protocol_requests_still_stop_at_compliance_before_protocol_executor(isolated_chat_state):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+    _stage_protocol_skill(isolated_chat_state)
+
+    async def unexpected_astream(_message, _history):
+        if False:
+            yield {}
+        raise AssertionError("blocked protocol execution should bypass agent_manager.astream")
+
+    with patch.object(agent_manager, "astream", unexpected_astream), patch(
+        "api.chat._generate_title_only",
+        new=AsyncMock(return_value=""),
+    ):
+        response = await chat(
+            ChatRequest(
+                message=(
+                    "Walk me through this protocol step by step using demo_protocol to "
+                    "culture SARS-CoV-2 in the lab."
+                ),
+                session_id=session_id,
+                stream=True,
+            )
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    assert [item["tool"] for item in payloads if item["type"] == "tool_start"] == ["compliance_preflight"]
+    assert not any(
+        item["type"] == "tool_end" and item["tool"] == "protocol_executor"
+        for item in payloads
+    )
+
+    history = agent_manager.session_manager.load_session(session_id)
+    assistant_messages = [msg for msg in history if msg["role"] == "assistant"]
+    assert assistant_messages
+    assert [call["tool"] for call in assistant_messages[0]["tool_calls"]] == ["compliance_preflight"]
+    assert "blocked" in assistant_messages[0]["content"].lower()

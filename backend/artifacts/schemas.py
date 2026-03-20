@@ -77,6 +77,7 @@ ComplianceDecisionSource = Literal["deterministic_rules", "safe_fallback", "huma
 ComplianceBlockStatus = Literal["not_blocked", "blocked"]
 ComplianceSeverity = Literal["low", "medium", "high", "critical"]
 ProtocolCompletionState = Literal["not_started", "in_progress", "completed", "blocked", "aborted"]
+ProtocolStepStatus = Literal["pending", "in_progress", "completed", "blocked", "skipped"]
 DeviationSeverity = Literal["minor", "major", "critical"]
 QAOverallStatus = Literal["passed", "warning", "failed", "blocked"]
 QACheckSeverity = Literal["warning", "error", "critical"]
@@ -2753,17 +2754,51 @@ class DeviationRecord(BaseModel):
         return _normalize_timestamp(value, field_name="logged_at")
 
 
+class ProtocolStepRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    step_id: str
+    sequence_number: int
+    title: str
+    instruction: str
+    status: ProtocolStepStatus
+    notes: list[str] = Field(default_factory=list)
+
+    @field_validator("step_id")
+    @classmethod
+    def _validate_step_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="step_id")
+
+    @field_validator("sequence_number")
+    @classmethod
+    def _validate_sequence_number(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("sequence_number must be at least 1.")
+        return value
+
+    @field_validator("title", "instruction")
+    @classmethod
+    def _validate_text_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @field_validator("notes")
+    @classmethod
+    def _validate_notes(cls, value: list[str]) -> list[str]:
+        return _clean_unique_text_list(value, field_name="notes")
+
+
 class ProtocolRun(ArtifactDocument):
     artifact_type: Literal["protocol_run"] = "protocol_run"
     protocol_source: ArtifactReference
     operator: str
-    sample_ids: list[str] = Field(min_length=1)
+    sample_ids: list[str] = Field(default_factory=list)
     materials: list[MaterialRecord] = Field(default_factory=list)
     reagent_lots: list[ReagentLotRecord] = Field(default_factory=list)
     equipment: list[EquipmentRecord] = Field(default_factory=list)
     started_at: datetime
     completed_at: datetime | None = None
     completion_state: ProtocolCompletionState
+    steps: list[ProtocolStepRecord] = Field(default_factory=list)
     deviations: list[DeviationRecord] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
 
@@ -2777,6 +2812,11 @@ class ProtocolRun(ArtifactDocument):
     def _validate_sample_ids(cls, value: list[str]) -> list[str]:
         return [_require_normalized_identifier(item, field_name="sample_id") for item in value]
 
+    @field_validator("assumptions")
+    @classmethod
+    def _validate_assumptions(cls, value: list[str]) -> list[str]:
+        return _clean_unique_text_list(value, field_name="assumptions")
+
     @field_validator("started_at", "completed_at")
     @classmethod
     def _validate_times(cls, value: datetime | None, info) -> datetime | None:
@@ -2788,8 +2828,20 @@ class ProtocolRun(ArtifactDocument):
     def _validate_completion_state(self) -> "ProtocolRun":
         if self.completion_state == "completed" and self.completed_at is None:
             raise ValueError("Completed protocol runs must include completed_at.")
+        if self.completion_state in {"in_progress", "completed"} and not self.steps:
+            raise ValueError("Active protocol runs must include at least one explicit step.")
+        if self.completion_state == "completed" and self.operator == "not_provided":
+            raise ValueError("Completed protocol runs must record a real operator.")
+        if self.completion_state == "completed" and not self.sample_ids:
+            raise ValueError("Completed protocol runs must include at least one sample_id.")
         if self.completed_at and self.completed_at < self.started_at:
             raise ValueError("completed_at must be on or after started_at.")
+        step_ids = [step.step_id for step in self.steps]
+        if len(step_ids) != len(set(step_ids)):
+            raise ValueError("Protocol steps must not reuse step_id values.")
+        sequence_numbers = [step.sequence_number for step in self.steps]
+        if len(sequence_numbers) != len(set(sequence_numbers)):
+            raise ValueError("Protocol steps must not reuse sequence_number values.")
         return self
 
 

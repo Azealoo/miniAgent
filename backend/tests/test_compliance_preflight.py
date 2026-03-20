@@ -267,8 +267,9 @@ async def test_chat_preflight_runs_before_agent_tool_execution(isolated_chat_sta
         payloads = await _collect_sse_payloads(response)
 
     tool_starts = [item for item in payloads if item["type"] == "tool_start"]
-    assert [item["tool"] for item in tool_starts[:2]] == [
+    assert [item["tool"] for item in tool_starts[:3]] == [
         "compliance_preflight",
+        "evidence_review_gate",
         "terminal",
     ]
     preflight_end = next(

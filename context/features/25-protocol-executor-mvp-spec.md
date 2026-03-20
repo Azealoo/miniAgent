@@ -22,6 +22,14 @@ Create a high-constraint protocol execution mode that behaves more like a carefu
 - Make protocol steps explicit and sequential so later deviation logging can attach to them cleanly.
 - Define the boundary between allowed high-level guidance and blocked unsafe procedural detail for sensitive cases.
 
+## Implementation Notes
+
+- Protocol-execution routing now happens in `backend/api/chat.py` after compliance preflight and before evidence-review or general agent streaming.
+- The MVP uses `backend/protocol_executor.py` to require an explicit workspace protocol path or named skill source before procedural guidance is emitted.
+- Missing, unreadable, or unstructured sources fail closed: BioAPEX records a blocked `protocol_run` artifact but does not emit sequential procedural instructions, and arbitrary non-protocol files are not treated as executable protocol documents.
+- `protocol_run` artifacts now include explicit sequential `steps` with stable `step_id`, `sequence_number`, `title`, `instruction`, and `status` fields.
+- Protocol mode includes a deterministic sensitive-procedure boundary: when the source or request matches sensitive operational signals, BioAPEX records the blocked run but withholds step-by-step guidance even if generic compliance preflight alone would have allowed the turn.
+
 ## References
 
 - @backend/skills/protocol_from_knowledge/SKILL.md

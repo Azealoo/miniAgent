@@ -109,6 +109,11 @@ async def chat(request: ChatRequest):
             EvidenceReviewGateInput,
             run_evidence_review_gate,
         )
+        from protocol_executor import (
+            ProtocolExecutorInput,
+            classify_protocol_execution_request,
+            run_protocol_executor,
+        )
 
         # Per-request accumulators
         segments: list[dict] = []          # [{content, tool_calls, workflow_events}]
@@ -269,6 +274,66 @@ async def chat(request: ChatRequest):
                 if preflight.response_text:
                     current_content.append(preflight.response_text)
                     yield _sse({"type": "token", "content": preflight.response_text})
+                for payload in await _finalize_turn():
+                    yield payload
+                return
+
+            protocol_request = classify_protocol_execution_request(
+                agent_manager.base_dir,
+                ProtocolExecutorInput(
+                    user_message=request.message,
+                    attached_identifiers=request.attached_identifiers,
+                    selected_workflow=request.selected_workflow,
+                ),
+            )
+            if protocol_request.is_protocol_request:
+                protocol_result = run_protocol_executor(
+                    agent_manager.base_dir,
+                    ProtocolExecutorInput(
+                        user_message=request.message,
+                        attached_identifiers=request.attached_identifiers,
+                        selected_workflow=request.selected_workflow,
+                    ),
+                    compliance_report=preflight.report,
+                    compliance_artifact_relpath=preflight.artifact_relpath,
+                    classification=protocol_request,
+                )
+                protocol_run_id = protocol_result.protocol_run.run_id
+                pending_tools[protocol_run_id] = {
+                    "tool": "protocol_executor",
+                    "input": protocol_result.tool_input,
+                }
+                yield _sse(
+                    {
+                        "type": "tool_start",
+                        "tool": "protocol_executor",
+                        "input": protocol_result.tool_input,
+                        "run_id": protocol_run_id,
+                    }
+                )
+                started = pending_tools.pop(
+                    protocol_run_id,
+                    {"tool": "protocol_executor", "input": protocol_result.tool_input},
+                )
+                protocol_call = {
+                    "tool": started["tool"],
+                    "input": started["input"],
+                    "output": protocol_result.tool_summary,
+                    "run_id": protocol_run_id,
+                    "result": protocol_result.tool_result,
+                }
+                current_tool_calls.append(protocol_call)
+                yield _sse(
+                    {
+                        "type": "tool_end",
+                        "tool": "protocol_executor",
+                        "output": protocol_result.tool_summary,
+                        "run_id": protocol_run_id,
+                        "result": protocol_result.tool_result,
+                    }
+                )
+                current_content.append(protocol_result.response_text)
+                yield _sse({"type": "token", "content": protocol_result.response_text})
                 for payload in await _finalize_turn():
                     yield payload
                 return

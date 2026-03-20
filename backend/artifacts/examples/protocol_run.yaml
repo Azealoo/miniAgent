@@ -40,8 +40,24 @@ equipment:
 started_at: 2026-03-18T19:31:00Z
 completed_at: 2026-03-18T20:05:00Z
 completion_state: completed
+steps:
+  - step_id: step-01
+    sequence_number: 1
+    title: Add lysis buffer
+    instruction: Add lysis buffer to the labeled collection tubes and mix thoroughly.
+    status: completed
+  - step_id: step-02
+    sequence_number: 2
+    title: Incubate samples
+    instruction: Incubate the tubes in the thermal mixer for the required extraction hold.
+    status: completed
+  - step_id: step-03
+    sequence_number: 3
+    title: Clarify pellet
+    instruction: Centrifuge and complete the wash step before collecting the clarified pellet.
+    status: completed
 deviations:
-  - step_id: wash-step
+  - step_id: step-03
     severity: minor
     description: Extended wash step by 2 minutes to clarify pellet carryover.
     logged_at: 2026-03-18T19:48:00Z
