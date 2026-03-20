@@ -22,11 +22,11 @@
     },
     {
       "id": "raw_qc",
-      "name": "Raw QC skeleton stage"
+      "name": "FastQC raw-read QC stage"
     },
     {
       "id": "aggregated_qc",
-      "name": "Aggregated QC skeleton stage"
+      "name": "Aggregated QC placeholder stage"
     },
     {
       "id": "quantification",
@@ -42,6 +42,14 @@
     }
   ],
   "expected_outputs": [
+    {
+      "name": "fastqc_run",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/fastqc_run.json"
+    },
+    {
+      "name": "fastqc_metrics",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/fastqc_metrics.json"
+    },
     {
       "name": "quantification_bundle",
       "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/outputs/generated/quantification/quantification_bundle.json"

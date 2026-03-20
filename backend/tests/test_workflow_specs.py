@@ -10,6 +10,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from artifacts import load_artifact_document  # noqa: E402
+from dataset_intake import validate_dataset_intake_manifest  # noqa: E402
 from workflow_specs import (  # noqa: E402
     WORKFLOW_SPEC_VERSION,
     WorkflowSpecDocument,
@@ -188,6 +189,7 @@ class TestWorkflowSpecs:
 
     def test_authored_rnaseq_workflow_skeleton_declares_required_stages_and_outputs(self):
         document = load_workflow_spec(WORKFLOWS_DIR / "rnaseq_qc_de.yaml")
+        raw_qc_step = next(step for step in document.steps if step.id == "raw_qc")
 
         assert document.workflow_id == "rnaseq_qc_de"
         assert [step.id for step in document.steps] == [
@@ -205,11 +207,20 @@ class TestWorkflowSpecs:
             "comparison_condition",
         ]
         assert [output.name for output in document.outputs] == [
+            "fastqc_run",
+            "fastqc_metrics",
             "quantification_bundle",
             "differential_expression_bundle",
             "report_bundle_manifest",
             "qa_report",
         ]
+        assert [output.name for output in raw_qc_step.outputs] == [
+            "raw_qc_bundle",
+            "fastqc_run",
+            "fastqc_metrics",
+        ]
+        assert raw_qc_step.outputs[1].artifact_type == "fastqc_run"
+        assert raw_qc_step.outputs[2].artifact_type == "fastqc_metrics"
         assert [hook.stage for hook in document.compliance_hooks] == ["before_execution"]
         assert {gate.id for gate in document.qc_gates} == {
             "dataset-manifest-required",
@@ -227,10 +238,14 @@ class TestWorkflowSpecs:
         manifest = load_artifact_document(EXAMPLES_DIR / "rnaseq_dataset_manifest.yaml")
         workflow_plan = json.loads((EXAMPLES_DIR / "rnaseq_workflow_plan.json").read_text(encoding="utf-8"))
         workflow_spec = yaml.safe_load((WORKFLOWS_DIR / "rnaseq_qc_de.yaml").read_text(encoding="utf-8"))
+        validation = validate_dataset_intake_manifest(REPO_ROOT, EXAMPLES_DIR / "rnaseq_dataset_manifest.yaml")
 
         assert manifest.assay_type == "bulk_rna_seq"
         assert manifest.design.analysis_kind == "comparative"
-        assert manifest.assay_extensions["workflow_stub"]["raw_qc"]["min_per_base_quality"] == 32.4
+        assert manifest.sample_sheet_path == "backend/artifacts/examples/rnaseq/sample_sheet.tsv"
+        assert validation.ok, validation.summary()
+        assert len(manifest.source_files) == 12
+        assert manifest.source_files[0].endswith("control_rep1_R1.fastq")
         assert manifest.assay_extensions["workflow_stub"]["aggregated_qc"]["fastqc_pass_rate"] == 1.0
 
         assert workflow_plan["artifact_type"] == "workflow_plan"
@@ -244,11 +259,16 @@ class TestWorkflowSpecs:
             "differential_expression",
             "report_bundle",
         ]
+        assert workflow_plan["steps"][2]["name"] == "FastQC raw-read QC stage"
+        assert workflow_plan["steps"][3]["name"] == "Aggregated QC placeholder stage"
         assert workflow_plan["inputs"]["dataset_manifest"] == "backend/artifacts/examples/rnaseq_dataset_manifest.yaml"
-        assert workflow_plan["expected_outputs"][1]["path"].endswith(
+        expected_outputs = {item["name"]: item["path"] for item in workflow_plan["expected_outputs"]}
+        assert expected_outputs["fastqc_run"].endswith("fastqc_run.json")
+        assert expected_outputs["fastqc_metrics"].endswith("fastqc_metrics.json")
+        assert expected_outputs["differential_expression_bundle"].endswith(
             "outputs/generated/differential-expression/differential_expression_bundle.json"
         )
-        assert workflow_plan["expected_outputs"][2]["path"].endswith(
+        assert expected_outputs["report_bundle_manifest"].endswith(
             "outputs/generated/report-bundle/report_bundle_manifest.json"
         )
 

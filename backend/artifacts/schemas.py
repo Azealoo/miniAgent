@@ -21,6 +21,8 @@ ArtifactFormat = Literal["json", "yaml"]
 
 ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
     "dataset_manifest": "yaml",
+    "fastqc_run": "json",
+    "fastqc_metrics": "json",
     "workflow_run": "json",
     "evidence_card": "yaml",
     "compliance_report": "json",
@@ -80,6 +82,9 @@ AssayType = Literal[
     "custom",
 ]
 EvidenceSourceDatabase = Literal["pubmed", "pmc", "uniprot", "ensembl", "doi", "custom"]
+FastQCSequencingLayout = Literal["single_end", "paired_end"]
+FastQCReadLabel = Literal["single", "read1", "read2"]
+FastQCModuleStatus = Literal["pass", "warn", "fail"]
 
 
 def _require_non_empty(value: str, *, field_name: str) -> str:
@@ -312,6 +317,245 @@ class DatasetManifest(ArtifactDocument):
         for key, item in value.items():
             normalized[_require_normalized_identifier(str(key), field_name="assay_extensions")] = item
         return normalized
+
+
+class FastQCInputFileRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sample_id: str
+    read_label: FastQCReadLabel
+    path: str
+    sha256: str
+    size_bytes: int
+    row_number: int | None = None
+
+    @field_validator("sample_id")
+    @classmethod
+    def _validate_sample_id(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="sample_id")
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: str) -> str:
+        return _normalize_relative_path(value)
+
+    @field_validator("sha256")
+    @classmethod
+    def _validate_sha256(cls, value: str) -> str:
+        cleaned = _require_non_empty(value, field_name="sha256").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", cleaned):
+            raise ValueError("sha256 must be a 64-character lowercase hexadecimal digest.")
+        return cleaned
+
+    @field_validator("size_bytes")
+    @classmethod
+    def _validate_size_bytes(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("size_bytes must be non-negative.")
+        return value
+
+    @field_validator("row_number")
+    @classmethod
+    def _validate_row_number(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if value < 2:
+            raise ValueError("row_number must refer to a data row in the sample sheet.")
+        return value
+
+
+class FastQCModuleResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    module_id: str
+    module_name: str
+    status: FastQCModuleStatus
+
+    @field_validator("module_id")
+    @classmethod
+    def _validate_module_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="module_id")
+
+    @field_validator("module_name")
+    @classmethod
+    def _validate_module_name(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="module_name")
+
+
+class FastQCReportArtifactSet(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sample_id: str
+    read_label: FastQCReadLabel
+    html_report: ArtifactReference
+    zip_archive: ArtifactReference
+
+    @field_validator("sample_id")
+    @classmethod
+    def _validate_sample_id(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="sample_id")
+
+
+class FastQCSampleMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sample_id: str
+    read_label: FastQCReadLabel
+    input_file: ArtifactReference
+    html_report: ArtifactReference
+    zip_archive: ArtifactReference
+    total_sequences: int | None = None
+    sequences_flagged_as_poor_quality: int | None = None
+    sequence_length: str | None = None
+    percent_gc: float | None = None
+    min_per_base_quality: float | None = None
+    module_results: list[FastQCModuleResult] = Field(default_factory=list)
+    overall_status: FastQCModuleStatus
+
+    @field_validator("sample_id")
+    @classmethod
+    def _validate_sample_id(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="sample_id")
+
+    @field_validator("sequence_length")
+    @classmethod
+    def _validate_sequence_length(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="sequence_length")
+
+    @field_validator("total_sequences", "sequences_flagged_as_poor_quality")
+    @classmethod
+    def _validate_counts(cls, value: int | None, info) -> int | None:
+        if value is None:
+            return None
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be non-negative.")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_unique_module_results(self) -> "FastQCSampleMetrics":
+        module_ids = [item.module_id for item in self.module_results]
+        if len(module_ids) != len(set(module_ids)):
+            raise ValueError("module_results may not define duplicate module_id entries.")
+        return self
+
+
+class FastQCModuleAggregate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    module_id: str
+    module_name: str
+    pass_count: int = 0
+    warn_count: int = 0
+    fail_count: int = 0
+
+    @field_validator("module_id")
+    @classmethod
+    def _validate_module_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="module_id")
+
+    @field_validator("module_name")
+    @classmethod
+    def _validate_module_name(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="module_name")
+
+    @field_validator("pass_count", "warn_count", "fail_count")
+    @classmethod
+    def _validate_counts(cls, value: int, info) -> int:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be non-negative.")
+        return value
+
+
+class FastQCAggregateMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sequencing_layout: FastQCSequencingLayout
+    sample_count: int
+    input_file_count: int
+    total_reads: int
+    total_reads_millions: float
+    min_per_base_quality: float | None = None
+    fastqc_pass_rate: float
+    module_status_counts: list[FastQCModuleAggregate] = Field(default_factory=list)
+
+    @field_validator("sample_count", "input_file_count", "total_reads")
+    @classmethod
+    def _validate_counts(cls, value: int, info) -> int:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be non-negative.")
+        return value
+
+    @field_validator("total_reads_millions", "fastqc_pass_rate")
+    @classmethod
+    def _validate_floats(cls, value: float, info) -> float:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be non-negative.")
+        if info.field_name == "fastqc_pass_rate" and value > 1:
+            raise ValueError("fastqc_pass_rate must be between 0 and 1.")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_unique_modules(self) -> "FastQCAggregateMetrics":
+        module_ids = [item.module_id for item in self.module_status_counts]
+        if len(module_ids) != len(set(module_ids)):
+            raise ValueError("module_status_counts may not define duplicate module_id entries.")
+        return self
+
+
+class FastQCRun(ArtifactDocument):
+    artifact_type: Literal["fastqc_run"] = "fastqc_run"
+    tool_name: Literal["fastqc"] = "fastqc"
+    tool_version: str
+    sequencing_layout: FastQCSequencingLayout
+    sample_sheet_path: str
+    output_directory: str
+    command: list[str] = Field(min_length=1)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    input_files: list[FastQCInputFileRecord] = Field(min_length=1)
+    reports: list[FastQCReportArtifactSet] = Field(min_length=1)
+    stdout_path: str | None = None
+    stderr_path: str | None = None
+    metrics_artifact: ArtifactReference | None = None
+
+    @field_validator("tool_version")
+    @classmethod
+    def _validate_tool_version(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="tool_version")
+
+    @field_validator("sample_sheet_path", "output_directory", "stdout_path", "stderr_path")
+    @classmethod
+    def _validate_optional_paths(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _normalize_relative_path(value)
+
+    @field_validator("command")
+    @classmethod
+    def _validate_command(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="command") for item in value]
+
+
+class FastQCMetrics(ArtifactDocument):
+    artifact_type: Literal["fastqc_metrics"] = "fastqc_metrics"
+    tool_name: Literal["fastqc"] = "fastqc"
+    tool_version: str
+    sequencing_layout: FastQCSequencingLayout
+    sample_sheet_path: str
+    run_artifact: ArtifactReference | None = None
+    sample_metrics: list[FastQCSampleMetrics] = Field(min_length=1)
+    aggregate_metrics: FastQCAggregateMetrics
+
+    @field_validator("tool_version")
+    @classmethod
+    def _validate_tool_version(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="tool_version")
+
+    @field_validator("sample_sheet_path")
+    @classmethod
+    def _validate_sample_sheet_path(cls, value: str) -> str:
+        return _normalize_relative_path(value)
 
 class WorkflowIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -839,10 +1083,12 @@ class QAReport(ArtifactDocument):
         return self
 
 
-ArtifactModel = DatasetManifest | WorkflowRun | EvidenceCard | ComplianceReport | ProtocolRun | QAReport
+ArtifactModel = DatasetManifest | FastQCRun | FastQCMetrics | WorkflowRun | EvidenceCard | ComplianceReport | ProtocolRun | QAReport
 
 _ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
     "dataset_manifest": DatasetManifest,
+    "fastqc_run": FastQCRun,
+    "fastqc_metrics": FastQCMetrics,
     "workflow_run": WorkflowRun,
     "evidence_card": EvidenceCard,
     "compliance_report": ComplianceReport,

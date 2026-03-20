@@ -38,6 +38,8 @@ Create the first explicit biology workflow that proves the new workflow layer ca
   - `differential_expression`
   - `report_bundle`
 - Declared workflow outputs:
+  - `fastqc_run` durable artifact via `artifact_schema:fastqc_run@1.0.0`
+  - `fastqc_metrics` durable artifact via `artifact_schema:fastqc_metrics@1.0.0`
   - `quantification_bundle` value handle for future count-generation artifacts
   - `differential_expression_bundle` value handle for future DE artifacts
   - `report_bundle_manifest` value handle for the final bundle contract
@@ -63,7 +65,7 @@ related_artifacts: []
 assay_type: bulk_rna_seq
 organism: homo_sapiens
 reference_build: grch38
-sample_sheet_path: data/rnaseq/sample_sheet.tsv
+sample_sheet_path: backend/artifacts/examples/rnaseq/sample_sheet.tsv
 privacy_classification: controlled
 design:
   study_name: interferon-rnaseq-pilot
@@ -81,13 +83,20 @@ design:
     - condition
     - batch
 source_files:
-  - data/rnaseq/counts.tsv
-  - data/rnaseq/metadata.tsv
+  - backend/artifacts/examples/rnaseq/control_rep1_R1.fastq
+  - backend/artifacts/examples/rnaseq/control_rep1_R2.fastq
+  - backend/artifacts/examples/rnaseq/control_rep2_R1.fastq
+  - backend/artifacts/examples/rnaseq/control_rep2_R2.fastq
+  - backend/artifacts/examples/rnaseq/control_rep3_R1.fastq
+  - backend/artifacts/examples/rnaseq/control_rep3_R2.fastq
+  - backend/artifacts/examples/rnaseq/treated_rep1_R1.fastq
+  - backend/artifacts/examples/rnaseq/treated_rep1_R2.fastq
+  - backend/artifacts/examples/rnaseq/treated_rep2_R1.fastq
+  - backend/artifacts/examples/rnaseq/treated_rep2_R2.fastq
+  - backend/artifacts/examples/rnaseq/treated_rep3_R1.fastq
+  - backend/artifacts/examples/rnaseq/treated_rep3_R2.fastq
 assay_extensions:
   workflow_stub:
-    raw_qc:
-      min_per_base_quality: 32.4
-      total_reads_millions: 38.1
     aggregated_qc:
       fastqc_pass_rate: 1.0
       libraries_aggregated: 6
@@ -114,13 +123,21 @@ Example file: `backend/artifacts/examples/rnaseq_workflow_plan.json`
   "steps": [
     {"id": "dataset_intake", "name": "Dataset intake and manifest validation"},
     {"id": "compliance_preflight", "name": "Compliance preflight"},
-    {"id": "raw_qc", "name": "Raw QC skeleton stage"},
-    {"id": "aggregated_qc", "name": "Aggregated QC skeleton stage"},
+    {"id": "raw_qc", "name": "FastQC raw-read QC stage"},
+    {"id": "aggregated_qc", "name": "Aggregated QC placeholder stage"},
     {"id": "quantification", "name": "Quantification planning skeleton stage"},
     {"id": "differential_expression", "name": "Differential expression planning skeleton stage"},
     {"id": "report_bundle", "name": "Report bundle skeleton stage"}
   ],
   "expected_outputs": [
+    {
+      "name": "fastqc_run",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/fastqc_run.json"
+    },
+    {
+      "name": "fastqc_metrics",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/fastqc_metrics.json"
+    },
     {
       "name": "quantification_bundle",
       "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/outputs/generated/quantification/quantification_bundle.json"

@@ -415,6 +415,14 @@ class InternalDAGRunner:
             emitter=emitter,
         )
         if run_document.lifecycle_status in _RUN_FINAL_STATUSES:
+            run_document = self._sync_workflow_outputs(
+                layout,
+                spec,
+                run_document,
+                step_output_refs,
+                materialize_final_artifacts=True,
+                emitter=None,
+            )
             run_document = self._sync_related_artifacts(run_document, workflow_inputs_ref)
             run_document = self._sync_qc_status(run_document)
             run_document = self._persist_run_document(layout, run_document)
@@ -463,7 +471,7 @@ class InternalDAGRunner:
                 spec,
                 run_document,
                 step_output_refs,
-                materialize_final_artifacts=False,
+                materialize_final_artifacts=run_document.lifecycle_status in _RUN_FINAL_STATUSES,
                 emitter=None,
             )
             run_document = self._sync_related_artifacts(run_document, workflow_inputs_ref)

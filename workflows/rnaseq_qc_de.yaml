@@ -3,7 +3,7 @@ kind: workflow_spec
 workflow_id: rnaseq_qc_de
 version: "1.0.0"
 name: RNA-seq QC and Differential Expression Skeleton
-purpose: Define the first explicit end-to-end RNA-seq workflow contract with dataset intake, compliance preflight, QC gates, quantification planning, differential expression planning, and report-bundle scaffolding.
+purpose: Define the first explicit end-to-end RNA-seq workflow contract with dataset intake, compliance preflight, concrete FastQC raw-read QC, QC gates, quantification planning, differential expression planning, and report-bundle scaffolding.
 engine: internal_dag_runner_v1
 required_inputs:
   - name: dataset_manifest
@@ -42,6 +42,22 @@ runtime:
   state_artifact: workflow_run
   artifact_root_template: artifacts/{workflow_id}/{date}/{run_id}
 outputs:
+  - name: fastqc_run
+    kind: artifact
+    artifact_type: fastqc_run
+    schema_ref: artifact_schema:fastqc_run@1.0.0
+    description: Durable FastQC execution artifact capturing command provenance, input hashes, and raw report paths.
+    source:
+      step_id: raw_qc
+      output_name: fastqc_run
+  - name: fastqc_metrics
+    kind: artifact
+    artifact_type: fastqc_metrics
+    schema_ref: artifact_schema:fastqc_metrics@1.0.0
+    description: Normalized FastQC metrics artifact extracted from the raw FastQC report archives.
+    source:
+      step_id: raw_qc
+      output_name: fastqc_metrics
   - name: quantification_bundle
     kind: value
     description: Structured handle describing the expected count-generation outputs for the quantification stage.
@@ -100,8 +116,8 @@ qc_gates:
           comparison: minimum
           pass_threshold: 28
           warn_threshold: 25
-          description: FastQC-derived base-quality summaries below this floor should stop the skeleton before count generation is interpreted.
-    description: Block the workflow when the stubbed raw QC stage reports FastQC-style base-quality metrics below the documented RNA-seq floor.
+          description: FastQC-derived base-quality summaries below this floor should stop the workflow before count generation is interpreted.
+    description: Block the workflow when the FastQC raw-QC stage reports base-quality metrics below the documented RNA-seq floor.
   - id: aggregated-qc-floor
     label: Aggregated QC must satisfy MultiQC summary thresholds
     when: after_step
@@ -126,8 +142,8 @@ qc_gates:
           comparison: minimum
           pass_threshold: 0.95
           warn_threshold: 0.8
-          description: The MultiQC summary should show that nearly all libraries passed upstream FastQC checks before downstream planning is trusted.
-    description: Block the workflow when aggregated QC indicates the staged FastQC results are not analysis-ready.
+          description: The aggregated QC summary should show that nearly all libraries passed upstream FastQC checks before downstream planning is trusted.
+    description: Block the workflow when aggregated QC indicates the upstream FastQC results are not analysis-ready.
 compliance_hooks:
   - id: privacy-preflight
     stage: before_execution
@@ -175,7 +191,7 @@ steps:
       backoff_seconds: 0
     failure_policy: block_workflow
   - id: raw_qc
-    label: Raw QC skeleton stage
+    label: FastQC raw-read QC stage
     executor:
       executor_type: python
       module: workflows.runners.rnaseq_qc_de
@@ -189,7 +205,17 @@ steps:
     outputs:
       - name: raw_qc_bundle
         kind: value
-        description: Structured stub output describing expected FastQC artifacts and observed raw-QC evidence for gating.
+        description: Structured FastQC stage output describing generated artifacts, normalized QC metrics, and raw-QC evidence for gating.
+      - name: fastqc_run
+        kind: artifact
+        artifact_type: fastqc_run
+        schema_ref: artifact_schema:fastqc_run@1.0.0
+        description: Durable FastQC execution artifact capturing command provenance, input hashes, and raw report paths.
+      - name: fastqc_metrics
+        kind: artifact
+        artifact_type: fastqc_metrics
+        schema_ref: artifact_schema:fastqc_metrics@1.0.0
+        description: Normalized FastQC metrics artifact extracted from the raw FastQC report archives.
     prerequisites:
       - dataset_intake
     retry_policy:
@@ -197,7 +223,7 @@ steps:
       backoff_seconds: 0
     failure_policy: block_workflow
   - id: aggregated_qc
-    label: Aggregated QC skeleton stage
+    label: Aggregated QC placeholder stage
     executor:
       executor_type: python
       module: workflows.runners.rnaseq_qc_de
@@ -216,7 +242,7 @@ steps:
     outputs:
       - name: aggregated_qc_bundle
         kind: value
-        description: Structured stub output describing expected MultiQC artifacts and observed aggregated-QC evidence for gating.
+        description: Structured placeholder output describing expected MultiQC artifacts and observed aggregated-QC evidence for gating.
     prerequisites:
       - dataset_intake
       - raw_qc

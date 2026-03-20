@@ -8,7 +8,7 @@ related_artifacts: []
 assay_type: bulk_rna_seq
 organism: homo_sapiens
 reference_build: grch38
-sample_sheet_path: data/rnaseq/sample_sheet.tsv
+sample_sheet_path: backend/artifacts/examples/rnaseq/sample_sheet.tsv
 privacy_classification: controlled
 design:
   study_name: interferon-rnaseq-pilot
@@ -26,13 +26,20 @@ design:
     - condition
     - batch
 source_files:
-  - data/rnaseq/counts.tsv
-  - data/rnaseq/metadata.tsv
+  - backend/artifacts/examples/rnaseq/control_rep1_R1.fastq
+  - backend/artifacts/examples/rnaseq/control_rep1_R2.fastq
+  - backend/artifacts/examples/rnaseq/control_rep2_R1.fastq
+  - backend/artifacts/examples/rnaseq/control_rep2_R2.fastq
+  - backend/artifacts/examples/rnaseq/control_rep3_R1.fastq
+  - backend/artifacts/examples/rnaseq/control_rep3_R2.fastq
+  - backend/artifacts/examples/rnaseq/treated_rep1_R1.fastq
+  - backend/artifacts/examples/rnaseq/treated_rep1_R2.fastq
+  - backend/artifacts/examples/rnaseq/treated_rep2_R1.fastq
+  - backend/artifacts/examples/rnaseq/treated_rep2_R2.fastq
+  - backend/artifacts/examples/rnaseq/treated_rep3_R1.fastq
+  - backend/artifacts/examples/rnaseq/treated_rep3_R2.fastq
 assay_extensions:
   workflow_stub:
-    raw_qc:
-      min_per_base_quality: 32.4
-      total_reads_millions: 38.1
     aggregated_qc:
       fastqc_pass_rate: 1.0
       libraries_aggregated: 6

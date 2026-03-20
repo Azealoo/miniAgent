@@ -105,15 +105,194 @@ def _stage_authored_rnaseq_qc_de_workflow(base_dir: Path) -> Path:
     return workflows_dir / "rnaseq_qc_de.yaml"
 
 
+def _write_fake_fastqc_executable(base_dir: Path) -> str:
+    tool_relpath = "tools/fake_fastqc.py"
+    tool_path = base_dir / tool_relpath
+    tool_path.parent.mkdir(parents=True, exist_ok=True)
+    tool_path.write_text(
+        """#!/usr/bin/env python3
+import sys
+import zipfile
+from pathlib import Path
+
+
+FASTQ_SUFFIXES = (".fastq.gz", ".fq.gz", ".fastq", ".fq")
+
+
+def _prefix(name: str) -> str:
+    lower = name.lower()
+    for suffix in FASTQ_SUFFIXES:
+        if lower.endswith(suffix):
+            return name[: -len(suffix)]
+    return Path(name).stem
+
+
+def _mode_for_input(path: str) -> str:
+    lower = Path(path).name.lower()
+    if "execfail" in lower:
+        return "execfail"
+    if "qualityfail" in lower:
+        return "qualityfail"
+    if "adapterfail" in lower:
+        return "adapterfail"
+    if "qualitywarn" in lower:
+        return "qualitywarn"
+    return "pass"
+
+
+def _statuses(mode: str):
+    if mode == "qualityfail":
+        return {"per_base": "fail", "adapter": "pass", "means": (23.0, 24.0)}
+    if mode == "qualitywarn":
+        return {"per_base": "warn", "adapter": "pass", "means": (26.0, 27.0)}
+    if mode == "adapterfail":
+        return {"per_base": "pass", "adapter": "fail", "means": (31.0, 31.5)}
+    return {"per_base": "pass", "adapter": "pass", "means": (31.5, 32.0)}
+
+
+def _summary_text(filename: str, per_base: str, adapter: str) -> str:
+    return "\\n".join(
+        [
+            f"PASS\\tBasic Statistics\\t{filename}",
+            f"{per_base.upper()}\\tPer base sequence quality\\t{filename}",
+            f"{adapter.upper()}\\tAdapter Content\\t{filename}",
+        ]
+    ) + "\\n"
+
+
+def _fastqc_data_text(filename: str, per_base: str, adapter: str, mean1: float, mean2: float) -> str:
+    return (
+        "##FastQC\\t0.12.1\\n"
+        ">>Basic Statistics\\tpass\\n"
+        "#Measure\\tValue\\n"
+        f"Filename\\t{filename}\\n"
+        "Total Sequences\\t1200000\\n"
+        "Sequences flagged as poor quality\\t0\\n"
+        "Sequence length\\t75\\n"
+        "%GC\\t48\\n"
+        ">>END_MODULE\\n"
+        f">>Per base sequence quality\\t{per_base}\\n"
+        "#Base\\tMean\\tMedian\\tLower Quartile\\tUpper Quartile\\t10th Percentile\\t90th Percentile\\n"
+        f"1\\t{mean1}\\t{mean1}\\t{mean1}\\t{mean1}\\t{mean1}\\t{mean1}\\n"
+        f"2\\t{mean2}\\t{mean2}\\t{mean2}\\t{mean2}\\t{mean2}\\t{mean2}\\n"
+        ">>END_MODULE\\n"
+        f">>Adapter Content\\t{adapter}\\n"
+        "#Position\\tIllumina Universal Adapter\\n"
+        "1\\t0.0\\n"
+        ">>END_MODULE\\n"
+    )
+
+
+def main(argv: list[str]) -> int:
+    if "--version" in argv:
+        print("FastQC v0.12.1")
+        return 0
+
+    try:
+        outdir = Path(argv[argv.index("--outdir") + 1])
+    except (ValueError, IndexError):
+        print("missing --outdir", file=sys.stderr)
+        return 2
+
+    inputs = []
+    skip_next = False
+    for index, token in enumerate(argv):
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--outdir":
+            skip_next = True
+            continue
+        if token.startswith("-"):
+            continue
+        if index == 0:
+            continue
+        inputs.append(token)
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    for input_path in inputs:
+        mode = _mode_for_input(input_path)
+        if mode == "execfail":
+            print(f"FastQC simulated execution failure for {input_path}", file=sys.stderr)
+            return 2
+        filename = Path(input_path).name
+        prefix = _prefix(filename)
+        statuses = _statuses(mode)
+        html_path = outdir / f"{prefix}_fastqc.html"
+        zip_path = outdir / f"{prefix}_fastqc.zip"
+        html_path.write_text(f"<html><body>{filename}</body></html>\\n", encoding="utf-8")
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr(f"{prefix}_fastqc/summary.txt", _summary_text(filename, statuses["per_base"], statuses["adapter"]))
+            archive.writestr(
+                f"{prefix}_fastqc/fastqc_data.txt",
+                _fastqc_data_text(
+                    filename,
+                    statuses["per_base"],
+                    statuses["adapter"],
+                    statuses["means"][0],
+                    statuses["means"][1],
+                ),
+            )
+
+    print(f"processed={len(inputs)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
+""",
+        encoding="utf-8",
+    )
+    tool_path.chmod(0o755)
+    return tool_relpath
+
+
 def _write_bulk_rnaseq_manifest(
     base_dir: Path,
     *,
-    min_per_base_quality: float = 32.0,
-    fastqc_pass_rate: float = 1.0,
+    fastqc_executable: str | None = None,
+    sequencing_layout: str = "paired_end",
+    sample_modes: dict[str, str] | None = None,
 ) -> str:
     manifest_relpath = "manifests/rnaseq_dataset_manifest.yaml"
     manifest_path = base_dir / manifest_relpath
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    sample_sheet_relpath = "data/rnaseq/sample_sheet.tsv"
+    samples = [
+        ("control_rep1", "control", "batch_a"),
+        ("control_rep2", "control", "batch_a"),
+        ("control_rep3", "control", "batch_b"),
+        ("treated_rep1", "treated", "batch_a"),
+        ("treated_rep2", "treated", "batch_b"),
+        ("treated_rep3", "treated", "batch_b"),
+    ]
+    sample_modes = sample_modes or {}
+    source_files: list[str] = []
+    sample_sheet_lines = ["sample_id\tcondition\tbatch\tfastq_r1\tfastq_r2"]
+    for sample_id, condition, batch in samples:
+        mode = sample_modes.get(sample_id, "pass")
+        read1_relpath = f"data/rnaseq/{sample_id}__{mode}_R1.fastq"
+        read1_path = base_dir / read1_relpath
+        read1_path.parent.mkdir(parents=True, exist_ok=True)
+        read1_path.write_text("@read1\nACGT\n+\nIIII\n", encoding="utf-8")
+        source_files.append(read1_relpath)
+
+        if sequencing_layout == "paired_end":
+            read2_relpath = f"data/rnaseq/{sample_id}__{mode}_R2.fastq"
+            read2_path = base_dir / read2_relpath
+            read2_path.parent.mkdir(parents=True, exist_ok=True)
+            read2_path.write_text("@read2\nTGCA\n+\nIIII\n", encoding="utf-8")
+            source_files.append(read2_relpath)
+        else:
+            read2_relpath = ""
+
+        sample_sheet_lines.append(
+            "\t".join([sample_id, condition, batch, read1_relpath, read2_relpath])
+        )
+
+    assay_extensions: dict[str, object] = {}
+    if fastqc_executable is not None:
+        assay_extensions["fastqc"] = {"executable": fastqc_executable}
     payload = {
         "schema_version": SCHEMA_PACK_VERSION,
         "artifact_type": "dataset_manifest",
@@ -125,7 +304,7 @@ def _write_bulk_rnaseq_manifest(
         "assay_type": "bulk_rna_seq",
         "organism": "homo_sapiens",
         "reference_build": "grch38",
-        "sample_sheet_path": "data/rnaseq/sample_sheet.tsv",
+        "sample_sheet_path": sample_sheet_relpath,
         "privacy_classification": "public",
         "design": {
             "study_name": "interferon-rnaseq-pilot",
@@ -138,32 +317,13 @@ def _write_bulk_rnaseq_manifest(
             "timepoints": ["end_point"],
             "factors": ["condition", "batch"],
         },
-        "source_files": [
-            "data/rnaseq/counts.tsv",
-            "data/rnaseq/metadata.tsv",
-        ],
-        "assay_extensions": {
-            "workflow_stub": {
-                "raw_qc": {
-                    "min_per_base_quality": min_per_base_quality,
-                    "total_reads_millions": 38.0,
-                },
-                "aggregated_qc": {
-                    "fastqc_pass_rate": fastqc_pass_rate,
-                    "libraries_aggregated": 6,
-                },
-            }
-        },
+        "source_files": source_files,
+        "assay_extensions": assay_extensions,
     }
     manifest_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
-    for relpath in (
-        "data/rnaseq/sample_sheet.tsv",
-        "data/rnaseq/counts.tsv",
-        "data/rnaseq/metadata.tsv",
-    ):
-        target = base_dir / relpath
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("placeholder\n", encoding="utf-8")
+    sample_sheet_path = base_dir / sample_sheet_relpath
+    sample_sheet_path.parent.mkdir(parents=True, exist_ok=True)
+    sample_sheet_path.write_text("\n".join(sample_sheet_lines) + "\n", encoding="utf-8")
     return manifest_relpath
 
 
@@ -1760,7 +1920,11 @@ def launch(inputs, _context):
 
     def test_authored_rnaseq_workflow_skeleton_runs_and_emits_declared_outputs(self, tmp_path):
         spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
-        manifest_relpath = _write_bulk_rnaseq_manifest(tmp_path)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+        )
 
         result = InternalDAGRunner(tmp_path).run(
             spec_path,
@@ -1781,6 +1945,16 @@ def launch(inputs, _context):
             "completed",
             "completed",
         ]
+        raw_qc_step = next(step for step in result.run.steps if step.id == "raw_qc")
+        assert {ref.artifact_type for ref in raw_qc_step.outputs_produced} == {
+            "workflow_value",
+            "fastqc_run",
+            "fastqc_metrics",
+        }
+        assert (result.run_dir / "outputs" / "generated" / "raw-qc" / "fastqc_run.json").exists()
+        assert (result.run_dir / "outputs" / "generated" / "raw-qc" / "fastqc_metrics.json").exists()
+        assert (result.run_dir / "outputs" / "generated" / "raw-qc" / "fastqc.stdout.txt").exists()
+        assert (result.run_dir / "outputs" / "generated" / "raw-qc" / "fastqc.stderr.txt").exists()
         assert (result.run_dir / "outputs" / "generated" / "quantification" / "quantification_bundle.json").exists()
         assert (
             result.run_dir
@@ -1790,6 +1964,8 @@ def launch(inputs, _context):
             / "differential_expression_bundle.json"
         ).exists()
         assert (result.run_dir / "outputs" / "generated" / "report-bundle" / "report_bundle_manifest.json").exists()
+        assert (result.run_dir / "fastqc_run.json").exists()
+        assert (result.run_dir / "fastqc_metrics.json").exists()
         assert (result.run_dir / "qa_report.json").exists()
 
         report_bundle_payload = json.loads(
@@ -1797,8 +1973,30 @@ def launch(inputs, _context):
                 encoding="utf-8"
             )
         )["value"]
+        fastqc_run = load_artifact_document(result.run_dir / "outputs" / "generated" / "raw-qc" / "fastqc_run.json")
+        fastqc_metrics = load_artifact_document(
+            result.run_dir / "outputs" / "generated" / "raw-qc" / "fastqc_metrics.json"
+        )
         qa_report = load_artifact_document(result.run_dir / "qa_report.json")
 
+        assert fastqc_run.tool_name == "fastqc"
+        assert fastqc_metrics.aggregate_metrics.sample_count == 6
+        assert fastqc_metrics.aggregate_metrics.input_file_count == 12
+        assert fastqc_metrics.aggregate_metrics.fastqc_pass_rate == 1.0
+        assert any(
+            ref.artifact_type == "fastqc_run" and ref.path.endswith("/fastqc_run.json")
+            for ref in result.run.outputs
+        )
+        assert any(
+            ref.artifact_type == "fastqc_metrics" and ref.path.endswith("/fastqc_metrics.json")
+            for ref in result.run.outputs
+        )
+        assert any(ref.artifact_type == "fastqc_run" for ref in result.run.related_artifacts)
+        assert any(ref.artifact_type == "fastqc_metrics" for ref in result.run.related_artifacts)
+        assert any(
+            artifact["artifact_type"] == "fastqc_run"
+            for artifact in report_bundle_payload["expected_artifacts"]
+        )
         assert any(
             artifact["path"].endswith("outputs/generated/differential-expression/treated-vs-control.tsv")
             for artifact in report_bundle_payload["expected_artifacts"]
@@ -1810,15 +2008,56 @@ def launch(inputs, _context):
         assert qa_report.overall_status == "warning"
         assert any(item.artifact_type == "count_matrix" for item in qa_report.missing_artifacts)
         assert any(item.artifact_type == "report_bundle" for item in qa_report.missing_artifacts)
+        assert not any(item.artifact_type == "fastqc_run" for item in qa_report.missing_artifacts)
         assert any(
             item.expected_path is not None
             and item.expected_path.endswith("outputs/generated/report-bundle/rnaseq_report_bundle.md")
             for item in qa_report.missing_artifacts
         )
 
+    def test_authored_rnaseq_workflow_skeleton_supports_single_end_fastqc_inputs(self, tmp_path):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+            sequencing_layout="single_end",
+        )
+
+        result = InternalDAGRunner(tmp_path).run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+        )
+
+        assert result.run.lifecycle_status == "completed"
+        fastqc_run = load_artifact_document(result.run_dir / "fastqc_run.json")
+        fastqc_metrics = load_artifact_document(result.run_dir / "fastqc_metrics.json")
+
+        assert fastqc_run.sequencing_layout == "single_end"
+        assert len(fastqc_run.input_files) == 6
+        assert len(fastqc_run.reports) == 6
+        assert fastqc_metrics.sequencing_layout == "single_end"
+        assert fastqc_metrics.aggregate_metrics.sequencing_layout == "single_end"
+        assert fastqc_metrics.aggregate_metrics.sample_count == 6
+        assert fastqc_metrics.aggregate_metrics.input_file_count == 6
+        assert fastqc_metrics.aggregate_metrics.fastqc_pass_rate == 1.0
+
     def test_authored_rnaseq_workflow_skeleton_blocks_on_aggregated_qc_gate(self, tmp_path):
         spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
-        manifest_relpath = _write_bulk_rnaseq_manifest(tmp_path, fastqc_pass_rate=0.7)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+            sample_modes={
+                "control_rep1": "adapterfail",
+                "treated_rep1": "adapterfail",
+            },
+        )
 
         events: list[dict] = []
         result = InternalDAGRunner(tmp_path).run(
@@ -1842,12 +2081,62 @@ def launch(inputs, _context):
             "blocked",
             "blocked",
         ]
+        assert (result.run_dir / "outputs" / "generated" / "raw-qc" / "fastqc_run.json").exists()
+        assert (result.run_dir / "outputs" / "generated" / "raw-qc" / "fastqc_metrics.json").exists()
+        assert (result.run_dir / "fastqc_run.json").exists()
+        assert (result.run_dir / "fastqc_metrics.json").exists()
         assert not (result.run_dir / "qa_report.json").exists()
+        assert any(
+            ref.artifact_type == "fastqc_run"
+            and ref.path.endswith("/fastqc_run.json")
+            and "outputs/generated/raw-qc/" not in ref.path
+            for ref in result.run.outputs
+        )
+        assert any(
+            ref.artifact_type == "fastqc_metrics"
+            and ref.path.endswith("/fastqc_metrics.json")
+            and "outputs/generated/raw-qc/" not in ref.path
+            for ref in result.run.outputs
+        )
 
         blocked_event = next(event for event in events if event["type"] == "workflow_blocked")
         assert blocked_event["blocking_source"] == "qc_gate"
         assert blocked_event["stage"] == "after_step"
         assert "fastqc_pass_rate" in blocked_event["reason"]
+
+    def test_authored_rnaseq_workflow_blocks_when_fastqc_execution_fails(self, tmp_path):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+            sample_modes={"control_rep1": "execfail"},
+        )
+
+        events: list[dict] = []
+        result = InternalDAGRunner(tmp_path).run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+            event_callback=events.append,
+        )
+
+        assert result.run.lifecycle_status == "blocked"
+        assert result.run.steps[0].status == "completed"
+        assert result.run.steps[1].status == "blocked"
+        assert all(step.status == "blocked" for step in result.run.steps[2:])
+        assert not (result.run_dir / "outputs" / "generated" / "raw-qc" / "fastqc_run.json").exists()
+        assert not (result.run_dir / "fastqc_run.json").exists()
+        assert not (result.run_dir / "fastqc_metrics.json").exists()
+
+        blocked_event = next(event for event in events if event["type"] == "workflow_blocked")
+        assert blocked_event["blocking_source"] == "step_failure"
+        assert blocked_event["stage"] == "after_step"
+        assert "simulated execution failure" in blocked_event["reason"]
 
     def test_runner_does_not_materialize_publish_ready_artifacts_when_before_publish_blocks(self, tmp_path, monkeypatch):
         module_name = _write_runner_module(

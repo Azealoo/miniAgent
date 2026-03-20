@@ -13,6 +13,8 @@ from artifacts.schemas import (  # noqa: E402
     ComplianceReport,
     DatasetManifest,
     EvidenceCard,
+    FastQCMetrics,
+    FastQCRun,
     ProtocolRun,
     QAReport,
     WorkflowRun,
@@ -40,6 +42,12 @@ class TestArtifactSchemas:
             filename = stable_artifact_name(artifact_type)
             assert schema_format_for_artifact(artifact_type) == expected_format
             assert filename.endswith(".json") or filename.endswith(".yaml")
+
+    def test_fastqc_artifact_types_use_json_schema_format(self):
+        assert artifact_model_for_type("fastqc_run") is FastQCRun
+        assert artifact_model_for_type("fastqc_metrics") is FastQCMetrics
+        assert schema_format_for_artifact("fastqc_run") == "json"
+        assert schema_format_for_artifact("fastqc_metrics") == "json"
 
     def test_dataset_manifest_rejects_absolute_source_paths(self):
         payload = {
@@ -319,6 +327,144 @@ class TestArtifactSchemas:
         assert parsed.design.analysis_kind == "comparative"
         assert parsed.design.condition_fields is None
         assert parsed.design.batch_fields is None
+
+    def test_fastqc_artifacts_validate_structured_provenance_and_metrics(self):
+        run_payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "fastqc_run",
+            "id": "fastqc-run-rnaseq-qc-de-raw-qc-run-20260319t210000z-deadbeef",
+            "run_id": "run-20260319T210000Z-deadbeef",
+            "created_at": "2026-03-19T21:00:00Z",
+            "source_workflow": "rnaseq_qc_de",
+            "related_artifacts": [
+                {
+                    "artifact_type": "fastqc_zip_archive",
+                    "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/raw-qc/fastqc/sample1_R1_fastqc.zip",
+                    "run_id": "run-20260319T210000Z-deadbeef",
+                }
+            ],
+            "tool_version": "FastQC v0.12.1",
+            "sequencing_layout": "paired_end",
+            "sample_sheet_path": "backend/artifacts/examples/rnaseq/sample_sheet.tsv",
+            "output_directory": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/raw-qc/fastqc",
+            "command": ["fastqc", "--outdir", "artifacts/rnaseq-qc-de/.../fastqc", "sample1_R1.fastq.gz"],
+            "parameters": {"extra_args": ["--quiet"], "input_count": 2},
+            "input_files": [
+                {
+                    "sample_id": "sample1",
+                    "read_label": "read1",
+                    "path": "backend/artifacts/examples/rnaseq/sample1_R1.fastq.gz",
+                    "sha256": "a" * 64,
+                    "size_bytes": 123,
+                    "row_number": 2,
+                }
+            ],
+            "reports": [
+                {
+                    "sample_id": "sample1",
+                    "read_label": "read1",
+                    "html_report": {
+                        "artifact_type": "fastqc_html_report",
+                        "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/raw-qc/fastqc/sample1_R1_fastqc.html",
+                        "run_id": "run-20260319T210000Z-deadbeef",
+                    },
+                    "zip_archive": {
+                        "artifact_type": "fastqc_zip_archive",
+                        "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/raw-qc/fastqc/sample1_R1_fastqc.zip",
+                        "run_id": "run-20260319T210000Z-deadbeef",
+                    },
+                }
+            ],
+            "stdout_path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/raw-qc/fastqc.stdout.txt",
+            "stderr_path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/raw-qc/fastqc.stderr.txt",
+            "metrics_artifact": {
+                "artifact_type": "fastqc_metrics",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/raw-qc/fastqc_metrics.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+        }
+        metrics_payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "fastqc_metrics",
+            "id": "fastqc-metrics-rnaseq-qc-de-raw-qc-run-20260319t210000z-deadbeef",
+            "run_id": "run-20260319T210000Z-deadbeef",
+            "created_at": "2026-03-19T21:00:05Z",
+            "source_workflow": "rnaseq_qc_de",
+            "related_artifacts": [
+                {
+                    "artifact_type": "fastqc_run",
+                    "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/raw-qc/fastqc_run.json",
+                    "run_id": "run-20260319T210000Z-deadbeef",
+                }
+            ],
+            "tool_version": "FastQC v0.12.1",
+            "sequencing_layout": "paired_end",
+            "sample_sheet_path": "backend/artifacts/examples/rnaseq/sample_sheet.tsv",
+            "run_artifact": {
+                "artifact_type": "fastqc_run",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/raw-qc/fastqc_run.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "sample_metrics": [
+                {
+                    "sample_id": "sample1",
+                    "read_label": "read1",
+                    "input_file": {
+                        "artifact_type": "fastq",
+                        "path": "backend/artifacts/examples/rnaseq/sample1_R1.fastq.gz",
+                    },
+                    "html_report": {
+                        "artifact_type": "fastqc_html_report",
+                        "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/raw-qc/fastqc/sample1_R1_fastqc.html",
+                        "run_id": "run-20260319T210000Z-deadbeef",
+                    },
+                    "zip_archive": {
+                        "artifact_type": "fastqc_zip_archive",
+                        "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/raw-qc/fastqc/sample1_R1_fastqc.zip",
+                        "run_id": "run-20260319T210000Z-deadbeef",
+                    },
+                    "total_sequences": 1200,
+                    "sequences_flagged_as_poor_quality": 0,
+                    "sequence_length": "75",
+                    "percent_gc": 48.0,
+                    "min_per_base_quality": 31.4,
+                    "module_results": [
+                        {
+                            "module_id": "per-base-sequence-quality",
+                            "module_name": "Per base sequence quality",
+                            "status": "pass",
+                        }
+                    ],
+                    "overall_status": "pass",
+                }
+            ],
+            "aggregate_metrics": {
+                "sequencing_layout": "paired_end",
+                "sample_count": 1,
+                "input_file_count": 1,
+                "total_reads": 1200,
+                "total_reads_millions": 0.0012,
+                "min_per_base_quality": 31.4,
+                "fastqc_pass_rate": 1.0,
+                "module_status_counts": [
+                    {
+                        "module_id": "per-base-sequence-quality",
+                        "module_name": "Per base sequence quality",
+                        "pass_count": 1,
+                        "warn_count": 0,
+                        "fail_count": 0,
+                    }
+                ],
+            },
+        }
+
+        run_document = validate_artifact_payload(run_payload)
+        metrics_document = validate_artifact_payload(metrics_payload)
+
+        assert isinstance(run_document, FastQCRun)
+        assert run_document.reports[0].zip_archive.artifact_type == "fastqc_zip_archive"
+        assert isinstance(metrics_document, FastQCMetrics)
+        assert metrics_document.aggregate_metrics.fastqc_pass_rate == 1.0
 
     def test_dataset_manifest_accepts_embedded_qc_policy_and_workflow_run_persists_evaluation_summary(self):
         manifest_payload = {
