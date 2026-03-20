@@ -366,6 +366,220 @@ class TestArtifactSchemas:
         with pytest.raises(ValueError, match="explicit step"):
             ProtocolRun.model_validate(payload)
 
+    def test_protocol_deviations_must_reference_parent_run_and_existing_step(self):
+        payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "protocol_run",
+            "id": "protocol-run-test-v2b",
+            "run_id": "run-20260318T193000Z-deadbeef",
+            "created_at": "2026-03-18T19:30:00Z",
+            "source_workflow": "protocol-executor",
+            "related_artifacts": [],
+            "protocol_source": {
+                "artifact_type": "protocol_document",
+                "path": "backend/knowledge/protocols/test.md",
+            },
+            "operator": "operator-1",
+            "sample_ids": ["sample-001"],
+            "materials": [],
+            "reagent_lots": [],
+            "equipment": [],
+            "started_at": "2026-03-18T19:30:00Z",
+            "completed_at": "2026-03-18T19:31:00Z",
+            "completion_state": "completed",
+            "steps": [
+                {
+                    "step_id": "step-01",
+                    "sequence_number": 1,
+                    "title": "Example step",
+                    "instruction": "Run the example step.",
+                    "status": "completed",
+                }
+            ],
+            "deviations": [
+                {
+                    "run_id": "run-20260318T193000Z-deadbeef",
+                    "step_id": "step-01",
+                    "severity": "minor",
+                    "origin": "manual",
+                    "logged_at": "2026-03-18T19:30:30Z",
+                    "original_expected_behavior": "Complete the example step without any procedural adjustments.",
+                    "actual_behavior": "The step took longer than planned because the sample labels had to be reconciled.",
+                    "reason": "A sample label mismatch was discovered during execution.",
+                    "impact_assessment": "The run stayed usable, but the reconciliation should be reviewed during QA.",
+                    "author_or_agent": "operator-1",
+                }
+            ],
+            "assumptions": [],
+        }
+
+        ProtocolRun.model_validate(payload)
+
+        payload["deviations"][0]["step_id"] = "step-99"
+        with pytest.raises(ValueError, match="existing protocol step_id"):
+            ProtocolRun.model_validate(payload)
+
+        payload["deviations"][0]["step_id"] = "step-01"
+        payload["deviations"][0]["run_id"] = "run-20260318T193000Z-feedface"
+        with pytest.raises(ValueError, match="parent protocol run_id"):
+            ProtocolRun.model_validate(payload)
+
+    def test_protocol_run_backfills_legacy_deviation_shape(self):
+        payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "protocol_run",
+            "id": "protocol-run-legacy-v1",
+            "run_id": "run-20260318T193000Z-deadbeef",
+            "created_at": "2026-03-18T19:30:00Z",
+            "source_workflow": "protocol-executor",
+            "related_artifacts": [],
+            "protocol_source": {
+                "artifact_type": "protocol_document",
+                "path": "backend/knowledge/protocols/test.md",
+            },
+            "operator": "operator-1",
+            "sample_ids": ["sample-001"],
+            "materials": [],
+            "reagent_lots": [],
+            "equipment": [],
+            "started_at": "2026-03-18T19:30:00Z",
+            "completed_at": "2026-03-18T19:31:00Z",
+            "completion_state": "completed",
+            "steps": [
+                {
+                    "step_id": "step-01",
+                    "sequence_number": 1,
+                    "title": "Example step",
+                    "instruction": "Run the example step.",
+                    "status": "completed",
+                }
+            ],
+            "deviations": [
+                {
+                    "step_id": "step-01",
+                    "severity": "minor",
+                    "description": "Legacy deviation note without structured fields.",
+                    "logged_at": "2026-03-18T19:30:30Z",
+                }
+            ],
+            "assumptions": [],
+        }
+
+        document = ProtocolRun.model_validate(payload)
+        assert document.deviations[0].run_id == payload["run_id"]
+        assert document.deviations[0].actual_behavior == "Legacy deviation note without structured fields."
+        assert document.deviations[0].author_or_agent == "legacy_record"
+
+    def test_workflow_deviations_must_reference_parent_run_and_existing_step(self):
+        payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "workflow_run",
+            "id": "workflow-run-test-v1",
+            "run_id": "run-20260318T193000Z-deadbeef",
+            "created_at": "2026-03-18T19:30:00Z",
+            "source_workflow": "demo-workflow",
+            "related_artifacts": [],
+            "workflow": {"name": "Demo Workflow", "slug": "demo-workflow"},
+            "lifecycle_status": "completed",
+            "qc_status": "warning",
+            "engine": "internal_dag_runner_v1",
+            "parameters": {},
+            "environment": {},
+            "inputs": [],
+            "outputs": [],
+            "steps": [
+                {
+                    "id": "summarize",
+                    "name": "Summarize",
+                    "status": "completed",
+                    "inputs_resolved": [],
+                    "outputs_produced": [],
+                    "warnings": [],
+                    "errors": [],
+                }
+            ],
+            "provenance_exports": [],
+            "biocompute_exports": [],
+            "qc_policies": [],
+            "qc_policy_results": [],
+            "summary_metrics": [],
+            "deviations": [
+                {
+                    "run_id": "run-20260318T193000Z-deadbeef",
+                    "step_id": "summarize",
+                    "severity": "major",
+                    "origin": "automatic",
+                    "logged_at": "2026-03-18T19:35:00Z",
+                    "original_expected_behavior": "The summarize step should complete without warning-state QC drift.",
+                    "actual_behavior": "The summarize step completed, but donor balance remained in the warning band.",
+                    "reason": "Observed QC metrics fell below the preferred pass threshold.",
+                    "impact_assessment": "The run should be reviewed before interpretation or publication.",
+                    "author_or_agent": "system:workflow_runner",
+                }
+            ],
+            "warnings": [],
+        }
+
+        WorkflowRun.model_validate(payload)
+
+        payload["deviations"][0]["step_id"] = "missing-step"
+        with pytest.raises(ValueError, match="existing workflow step_id"):
+            WorkflowRun.model_validate(payload)
+
+        payload["deviations"][0]["step_id"] = "summarize"
+        payload["deviations"][0]["run_id"] = "run-20260318T193000Z-feedface"
+        with pytest.raises(ValueError, match="parent workflow run_id"):
+            WorkflowRun.model_validate(payload)
+
+    def test_workflow_run_backfills_legacy_deviation_shape(self):
+        payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "workflow_run",
+            "id": "workflow-run-legacy-v1",
+            "run_id": "run-20260318T193000Z-deadbeef",
+            "created_at": "2026-03-18T19:30:00Z",
+            "source_workflow": "demo-workflow",
+            "related_artifacts": [],
+            "workflow": {"name": "Demo Workflow", "slug": "demo-workflow"},
+            "lifecycle_status": "completed",
+            "qc_status": "warning",
+            "engine": "internal_dag_runner_v1",
+            "parameters": {},
+            "environment": {},
+            "inputs": [],
+            "outputs": [],
+            "steps": [
+                {
+                    "id": "summarize",
+                    "name": "Summarize",
+                    "status": "completed",
+                    "inputs_resolved": [],
+                    "outputs_produced": [],
+                    "warnings": [],
+                    "errors": [],
+                }
+            ],
+            "provenance_exports": [],
+            "biocompute_exports": [],
+            "qc_policies": [],
+            "qc_policy_results": [],
+            "summary_metrics": [],
+            "deviations": [
+                {
+                    "step_id": "summarize",
+                    "severity": "major",
+                    "description": "Legacy workflow deviation note.",
+                    "logged_at": "2026-03-18T19:35:00Z",
+                }
+            ],
+            "warnings": [],
+        }
+
+        document = WorkflowRun.model_validate(payload)
+        assert document.deviations[0].run_id == payload["run_id"]
+        assert document.deviations[0].actual_behavior == "Legacy workflow deviation note."
+        assert document.deviations[0].author_or_agent == "legacy_record"
+
     def test_qa_reports_require_failure_context_for_blocked_status(self):
         payload = {
             "schema_version": SCHEMA_PACK_VERSION,

@@ -31,7 +31,8 @@
     }
   ],
   "warnings": [
-    "One donor replicate exceeded the ambient RNA warning threshold."
+    "One donor replicate exceeded the ambient RNA warning threshold.",
+    "Major workflow deviation recorded at `qc-summary`: donor balance and ambient RNA metrics remained in the warning band."
   ],
   "missing_artifacts": [
     {
@@ -41,7 +42,8 @@
   ],
   "recommended_remediation": [
     "Regenerate the provenance export bundle.",
-    "Review donor-specific QC thresholds before final report publication."
+    "Review donor-specific QC thresholds before final report publication.",
+    "Review the logged workflow deviation before downstream interpretation or publication."
   ],
   "checklist_artifacts": [
     {

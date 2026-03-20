@@ -217,6 +217,20 @@
     }
   ],
   "qc_summary": "Single-cell default QC policy [warn] Batch-effect warnings: donor_balance_ratio=0.74 did not meet >= 0.8.",
+  "deviations": [
+    {
+      "run_id": "run-20260318T193000Z-deadbeef",
+      "step_id": "qc-summary",
+      "severity": "major",
+      "origin": "automatic",
+      "logged_at": "2026-03-18T19:36:00Z",
+      "original_expected_behavior": "The QC summary stage should complete without donor-balance or ambient-RNA warnings that require explicit downstream review.",
+      "actual_behavior": "The QC summary completed, but donor balance remained below the preferred threshold and one donor replicate exceeded the ambient RNA warning threshold.",
+      "reason": "Observed QC metrics fell outside the workflow's preferred pass thresholds while remaining within the configured warning tolerance.",
+      "impact_assessment": "The run remained usable, but publication or biological interpretation should wait until the warning-state QC deviation is reviewed and documented.",
+      "author_or_agent": "system:workflow_runner"
+    }
+  ],
   "warnings": [
     "qc warning threshold exceeded for one donor replicate"
   ]

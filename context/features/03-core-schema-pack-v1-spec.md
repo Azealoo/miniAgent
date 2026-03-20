@@ -31,7 +31,7 @@ Define the first version of the structured artifact schemas that all later workf
   - path format rules
   - identifier normalization rules
 - Make dataset manifests explicit about assay type, organism, reference build, design metadata, and privacy classification.
-- Make workflow runs explicit about inputs, outputs, engine, parameters, environment, QC status, provenance exports, and any additive export pointers introduced by later artifact features.
+- Make workflow runs explicit about inputs, outputs, engine, parameters, environment, QC status, structured deviations, provenance exports, and any additive export pointers introduced by later artifact features.
 - Make evidence cards explicit about source database, stable identifier, extracted claims, confidence, limitations, and cached raw payload location.
 - Make compliance reports explicit about risk category, triggered rules, block status, human approval requirement, and final disposition.
 - Make protocol runs explicit about operator, sample IDs, materials, reagent lots, equipment, timestamps, deviations, and completion state.
@@ -93,6 +93,31 @@ source_files:
   "environment": {"conda_env": "miniAgent", "platform": "linux"},
   "inputs": [],
   "outputs": [],
+  "steps": [
+    {
+      "id": "qc-summary",
+      "name": "QC Summary",
+      "status": "completed",
+      "inputs_resolved": [],
+      "outputs_produced": [],
+      "warnings": [],
+      "errors": []
+    }
+  ],
+  "deviations": [
+    {
+      "run_id": "run-20260318T193000Z-deadbeef",
+      "step_id": "qc-summary",
+      "severity": "major",
+      "origin": "automatic",
+      "logged_at": "2026-03-18T19:36:00Z",
+      "original_expected_behavior": "The QC summary stage should complete without donor-balance warnings that require explicit downstream review.",
+      "actual_behavior": "The QC summary completed, but donor balance remained below the preferred threshold.",
+      "reason": "Observed QC metrics fell outside the preferred pass threshold while remaining within the configured warning tolerance.",
+      "impact_assessment": "The run remained usable, but the deviation should be reviewed before publication or downstream interpretation.",
+      "author_or_agent": "system:workflow_runner"
+    }
+  ],
   "provenance_exports": [
     "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/prov.json"
   ],
@@ -173,7 +198,23 @@ materials:
 started_at: 2026-03-18T19:31:00Z
 completed_at: 2026-03-18T20:05:00Z
 completion_state: completed
-deviations: []
+steps:
+  - step_id: step-01
+    sequence_number: 1
+    title: Add lysis buffer
+    instruction: Add lysis buffer to each labeled tube and mix thoroughly.
+    status: completed
+deviations:
+  - run_id: run-20260318T193000Z-deadbeef
+    step_id: step-01
+    severity: minor
+    origin: manual
+    logged_at: 2026-03-18T19:48:00Z
+    original_expected_behavior: Complete the standard wash interval before collecting the clarified pellet.
+    actual_behavior: The wash step was extended by 2 minutes to clarify visible pellet carryover before collection.
+    reason: Pellet carryover remained visible at the end of the standard wash interval.
+    impact_assessment: The extraction remained usable, but the longer wash should be reviewed alongside downstream yield measurements.
+    author_or_agent: wetlab-operator-01
 assumptions: []
 ```
 

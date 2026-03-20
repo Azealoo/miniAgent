@@ -41,6 +41,7 @@ from artifacts import (
 from artifacts.biocompute import expected_biocompute_export_paths, materialize_biocompute_bundle
 from artifacts.provenance import expected_provenance_export_paths, materialize_provenance_bundle
 from artifacts.schemas import (
+    DeviationRecord,
     WorkflowEnvironment,
     WorkflowIssueDetail,
     WorkflowStepRecord,
@@ -144,6 +145,60 @@ def _dedupe_workflow_issue_details(details: list[WorkflowIssueDetail]) -> list[W
         seen.add(key)
         deduped.append(detail)
     return deduped
+
+
+def _deviation_dedupe_key(
+    deviation: DeviationRecord,
+) -> tuple[str, str, str, str, str, str, str, str, str]:
+    return (
+        deviation.run_id,
+        deviation.step_id,
+        deviation.severity,
+        deviation.origin,
+        deviation.original_expected_behavior,
+        deviation.actual_behavior,
+        deviation.reason,
+        deviation.impact_assessment,
+        deviation.author_or_agent,
+    )
+
+
+def _dedupe_deviations(deviations: list[DeviationRecord]) -> list[DeviationRecord]:
+    deduped: list[DeviationRecord] = []
+    seen: set[tuple[str, str, str, str, str, str, str, str, str]] = set()
+    for deviation in deviations:
+        key = _deviation_dedupe_key(deviation)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(deviation)
+    return deduped
+
+
+def _build_workflow_deviation(
+    *,
+    run_id: str,
+    step_id: str,
+    severity: str,
+    original_expected_behavior: str,
+    actual_behavior: str,
+    reason: str,
+    impact_assessment: str,
+    author_or_agent: str = "system:workflow_runner",
+    origin: str = "automatic",
+) -> DeviationRecord:
+    return DeviationRecord(
+        run_id=run_id,
+        step_id=step_id,
+        severity=severity,
+        origin=origin,
+        logged_at=_utcnow(),
+        original_expected_behavior=original_expected_behavior,
+        actual_behavior=actual_behavior,
+        reason=reason,
+        impact_assessment=impact_assessment,
+        author_or_agent=author_or_agent,
+    )
 
 
 def _workflow_issue_details_from_exception(exc: Exception) -> list[WorkflowIssueDetail]:
@@ -857,6 +912,11 @@ class InternalDAGRunner:
             for metric in run_document.summary_metrics
             if metric.stage not in reset_steps
         ]
+        run_document.deviations = [
+            deviation
+            for deviation in run_document.deviations
+            if deviation.step_id not in reset_steps
+        ]
         return run_document
 
     def _stale_restart_ref_keys(
@@ -1084,6 +1144,7 @@ class InternalDAGRunner:
         except Exception as exc:
             error_message = str(exc) or exc.__class__.__name__
             issue_details = _workflow_issue_details_from_exception(exc)
+            expected_outputs = ", ".join(output.name for output in step.outputs) or "no declared outputs"
             record.errors.append(error_message)
             record.error_details = _dedupe_workflow_issue_details([*record.error_details, *issue_details])
             record.end_time = _utcnow()
@@ -1097,6 +1158,30 @@ class InternalDAGRunner:
                 run_document.warnings.append(
                     f"Step {step.id} continued with warning after execution error: {error_message}"
                 )
+                run_document = self._append_workflow_deviation(
+                    run_document,
+                    _build_workflow_deviation(
+                        run_id=run_document.run_id,
+                        step_id=step.id,
+                        severity="major",
+                        original_expected_behavior=(
+                            f"Workflow step {step.id} should complete without execution errors and emit "
+                            f"its declared outputs: {expected_outputs}."
+                        ),
+                        actual_behavior=(
+                            f"Step {step.id} encountered an execution error but continued with warning: "
+                            f"{error_message}"
+                        ),
+                        reason=(
+                            "The step executor raised an exception while the workflow allowed the stage to "
+                            "continue with warning."
+                        ),
+                        impact_assessment=(
+                            "Downstream outputs may still be present, but the affected stage should be reviewed "
+                            "before publication or downstream interpretation."
+                        ),
+                    ),
+                )
             else:
                 terminal_status = "blocked" if step.failure_policy == "block_workflow" else "failed"
                 record.status = terminal_status
@@ -1107,6 +1192,30 @@ class InternalDAGRunner:
                     run_document.warning_details = _dedupe_workflow_issue_details(
                         [*run_document.warning_details, *issue_details]
                     )
+                run_document = self._append_workflow_deviation(
+                    run_document,
+                    _build_workflow_deviation(
+                        run_id=run_document.run_id,
+                        step_id=step.id,
+                        severity="critical",
+                        original_expected_behavior=(
+                            f"Workflow step {step.id} should complete without execution errors and emit "
+                            f"its declared outputs: {expected_outputs}."
+                        ),
+                        actual_behavior=(
+                            f"Step {step.id} terminated in {terminal_status} state because execution raised: "
+                            f"{error_message}"
+                        ),
+                        reason=(
+                            f"The step executor raised an exception and the step failure policy escalated "
+                            f"the run to {terminal_status}."
+                        ),
+                        impact_assessment=(
+                            "The workflow entered a terminal state and downstream outputs may be partial or "
+                            "absent until the step failure is corrected and the run is retried."
+                        ),
+                    ),
+                )
                 self._block_descendants(spec, run_document, failed_step_id=step.id, reason=error_message)
                 if emitter is not None and terminal_status == "blocked":
                     emitter.blocked(
@@ -1610,12 +1719,20 @@ class InternalDAGRunner:
             workflow_inputs_ref=workflow_inputs_ref,
             refresh_existing=provenance_exports_changed,
         )
-        return self._materialize_terminal_provenance_if_needed(
+        run_document = self._materialize_terminal_provenance_if_needed(
             layout=layout,
             spec=spec,
             run_document=run_document,
             force=force_provenance_materialization,
         )
+        run_document = self._record_terminal_output_deviations(
+            layout=layout,
+            spec=spec,
+            run_document=run_document,
+            step_output_refs=step_output_refs,
+        )
+        run_document = self._sync_qc_status(run_document)
+        return self._persist_run_document(layout, run_document)
 
     def _ensure_terminal_provenance_exports(
         self,
@@ -1930,6 +2047,7 @@ class InternalDAGRunner:
         gate,
         emitter: _WorkflowRunStreamEmitter | None,
     ) -> WorkflowRun:
+        deviation_step_id = self._policy_deviation_step_id(current_step=current_step, target=gate.target)
         try:
             value = self._resolve_binding_value(gate.target, resolved_inputs, step_output_values)
             policy = self._resolve_qc_policy_definition(gate.policy, value)
@@ -1948,6 +2066,29 @@ class InternalDAGRunner:
             if evaluation.overall_status == "pass":
                 return run_document
             if evaluation.overall_status == "warn":
+                if deviation_step_id is not None:
+                    run_document = self._append_workflow_deviation(
+                        run_document,
+                        _build_workflow_deviation(
+                            run_id=run_document.run_id,
+                            step_id=deviation_step_id,
+                            severity="major",
+                            original_expected_behavior=(
+                                f"Workflow step {deviation_step_id} should satisfy QC policy {policy.policy_id} "
+                                f"during {stage} without entering the warning band."
+                            ),
+                            actual_behavior=evaluation.summary or (
+                                f"QC policy {policy.policy_id} returned warning status."
+                            ),
+                            reason=(
+                                f"QC policy {policy.policy_id} returned warning status for gate {gate.id}."
+                            ),
+                            impact_assessment=(
+                                "The workflow continued, but the affected stage should be reviewed and "
+                                "documented before publication or downstream interpretation."
+                            ),
+                        ),
+                    )
                 return self._record_policy_warning(
                     run_document,
                     evaluation.summary,
@@ -1955,6 +2096,30 @@ class InternalDAGRunner:
                     issue_details=issue_details,
                 )
             if gate.failure_policy == "warn":
+                if deviation_step_id is not None:
+                    run_document = self._append_workflow_deviation(
+                        run_document,
+                        _build_workflow_deviation(
+                            run_id=run_document.run_id,
+                            step_id=deviation_step_id,
+                            severity="major",
+                            original_expected_behavior=(
+                                f"Workflow step {deviation_step_id} should satisfy QC policy {policy.policy_id} "
+                                f"during {stage} without entering a blocking state."
+                            ),
+                            actual_behavior=evaluation.summary or (
+                                f"QC policy {policy.policy_id} returned non-pass status."
+                            ),
+                            reason=(
+                                f"QC policy {policy.policy_id} returned {evaluation.overall_status} "
+                                f"for gate {gate.id}, but the gate is configured to warn."
+                            ),
+                            impact_assessment=(
+                                "The workflow continued under warning, so downstream consumers should "
+                                "review the affected QC gate before publication or export."
+                            ),
+                        ),
+                    )
                 return self._record_policy_warning(
                     run_document,
                     evaluation.summary,
@@ -1967,6 +2132,7 @@ class InternalDAGRunner:
                 reason=evaluation.summary,
                 stage=stage,
                 current_step=current_step,
+                deviation_step_id=deviation_step_id,
                 blocking_source="qc_gate",
                 issue_details=issue_details,
                 emitter=emitter,
@@ -1981,6 +2147,7 @@ class InternalDAGRunner:
                 reason=reason,
                 stage=stage,
                 current_step=current_step,
+                deviation_step_id=deviation_step_id,
                 blocking_source="qc_gate",
                 emitter=emitter,
             )
@@ -2100,6 +2267,7 @@ class InternalDAGRunner:
         hook,
         emitter: _WorkflowRunStreamEmitter | None,
     ) -> WorkflowRun:
+        deviation_step_id = self._hook_deviation_step_id(hook=hook, current_step=current_step)
         try:
             hook_inputs = self._resolve_named_bindings(hook.inputs, resolved_inputs, step_output_values)
             if hook.tool != "compliance_preflight":
@@ -2135,6 +2303,7 @@ class InternalDAGRunner:
                         reason=message,
                         stage=hook.stage,
                         current_step=current_step,
+                        deviation_step_id=deviation_step_id,
                         blocking_source="compliance_hook",
                         emitter=emitter,
                     )
@@ -2148,11 +2317,28 @@ class InternalDAGRunner:
                     reason=message,
                     stage=hook.stage,
                     current_step=current_step,
+                    deviation_step_id=deviation_step_id,
                     blocking_source="compliance_hook",
                     emitter=emitter,
                 )
             return self._record_policy_warning(run_document, message, current_step=current_step)
         return run_document
+
+    def _hook_deviation_step_id(
+        self,
+        *,
+        hook,
+        current_step: WorkflowStepDefinition | None,
+    ) -> str | None:
+        if current_step is not None:
+            return current_step.id
+        if hook.step_id is not None:
+            return hook.step_id
+        for binding in hook.inputs:
+            source = binding.source
+            if isinstance(source, StepOutputSource):
+                return source.step_id
+        return None
 
     def _resolve_named_bindings(
         self,
@@ -2284,6 +2470,7 @@ class InternalDAGRunner:
         reason: str,
         stage: str,
         current_step: WorkflowStepDefinition | None,
+        deviation_step_id: str | None = None,
         blocking_source: str,
         issue_details: list[WorkflowIssueDetail] | None = None,
         emitter: _WorkflowRunStreamEmitter | None,
@@ -2313,6 +2500,29 @@ class InternalDAGRunner:
 
         if current_step is not None and stage in {"before_step", "after_step"}:
             self._block_descendants(spec, run_document, failed_step_id=current_step.id, reason=reason)
+
+        if deviation_step_id is not None:
+            run_document = self._append_workflow_deviation(
+                run_document,
+                _build_workflow_deviation(
+                    run_id=run_document.run_id,
+                    step_id=deviation_step_id,
+                    severity="critical",
+                    original_expected_behavior=(
+                        f"Workflow step {deviation_step_id} should satisfy {blocking_source.replace('_', ' ')} "
+                        f"requirements during {stage} and allow the workflow to continue."
+                    ),
+                    actual_behavior=reason,
+                    reason=(
+                        f"{blocking_source.replace('_', ' ')} triggered a blocking workflow deviation "
+                        f"during {stage}."
+                    ),
+                    impact_assessment=(
+                        "The workflow entered a blocked terminal state and downstream outputs may be "
+                        "partial or absent until the blocking condition is resolved."
+                    ),
+                ),
+            )
 
         if emitter is not None:
             emitter.blocked(
@@ -2412,6 +2622,69 @@ class InternalDAGRunner:
             return "true" if value else "false"
         return str(value)
 
+    def _append_workflow_deviation(
+        self,
+        run_document: WorkflowRun,
+        deviation: DeviationRecord | None,
+    ) -> WorkflowRun:
+        if deviation is None:
+            return run_document
+        run_document.deviations = _dedupe_deviations([*run_document.deviations, deviation])
+        return run_document
+
+    def _policy_deviation_step_id(
+        self,
+        *,
+        current_step: WorkflowStepDefinition | None,
+        target,
+    ) -> str | None:
+        if current_step is not None:
+            return current_step.id
+        if isinstance(target, StepOutputSource):
+            return target.step_id
+        return None
+
+    def _record_terminal_output_deviations(
+        self,
+        *,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        run_document: WorkflowRun,
+        step_output_refs: Mapping[tuple[str, str], ArtifactReference],
+    ) -> WorkflowRun:
+        severity = "critical" if run_document.lifecycle_status in {"blocked", "failed"} else "major"
+        impact_assessment = (
+            "Downstream QA, reporting, and provenance consumers should treat this run as partial until the missing workflow output is either materialized or explicitly waived."
+            if severity == "critical"
+            else "The run remained available, but downstream consumers should review why the expected workflow output was not materialized."
+        )
+        for workflow_output in spec.outputs:
+            if workflow_output.kind != "artifact" or workflow_output.artifact_type is None:
+                continue
+            key = (workflow_output.source.step_id, workflow_output.source.output_name)
+            if key in step_output_refs:
+                continue
+            expected_path = layout.stable_artifact_relpath(workflow_output.artifact_type).as_posix()
+            run_document = self._append_workflow_deviation(
+                run_document,
+                _build_workflow_deviation(
+                    run_id=run_document.run_id,
+                    step_id=workflow_output.source.step_id,
+                    severity=severity,
+                    original_expected_behavior=(
+                        f"Workflow step {workflow_output.source.step_id} should materialize output "
+                        f"{workflow_output.name} as {workflow_output.artifact_type} at {expected_path}."
+                    ),
+                    actual_behavior=(
+                        f"Workflow reached terminal state {run_document.lifecycle_status} without materializing "
+                        f"{workflow_output.name} ({workflow_output.artifact_type})."
+                    ),
+                    reason="The persisted workflow outputs did not match the workflow specification's declared artifact outputs.",
+                    impact_assessment=impact_assessment,
+                ),
+            )
+        return run_document
+
     def _sync_related_artifacts(
         self,
         run_document: WorkflowRun,
@@ -2424,9 +2697,20 @@ class InternalDAGRunner:
 
     def _sync_qc_status(self, run_document: WorkflowRun) -> WorkflowRun:
         qc_result_statuses = [item.overall_status for item in run_document.qc_policy_results]
-        if run_document.lifecycle_status in {"failed", "blocked"} or "fail" in qc_result_statuses:
+        deviation_severities = [item.severity for item in run_document.deviations]
+        important_deviation_severities = {item for item in deviation_severities if item in {"major", "critical"}}
+        if (
+            run_document.lifecycle_status in {"failed", "blocked"}
+            or "fail" in qc_result_statuses
+            or "critical" in important_deviation_severities
+        ):
             run_document.qc_status = "failed"
-        elif "warn" in qc_result_statuses or run_document.warnings or any(record.warnings for record in run_document.steps):
+        elif (
+            "warn" in qc_result_statuses
+            or run_document.warnings
+            or any(record.warnings for record in run_document.steps)
+            or "major" in important_deviation_severities
+        ):
             run_document.qc_status = "warning"
         elif self._all_steps_completed(run_document):
             run_document.qc_status = "passed"

@@ -56,6 +56,7 @@ _REPORT_BUNDLE_SECTIONS: tuple[str, ...] = (
     "qc_summary",
     "key_outputs",
     "warnings_and_failures",
+    "deviations",
     "provenance_pointers",
     "next_recommended_actions",
 )
@@ -1633,6 +1634,7 @@ def _render_rnaseq_report_bundle(
     canonical_artifacts_by_type: Mapping[str, Mapping[str, Any]],
     evidence_review_artifacts: Sequence[Mapping[str, Any]],
     missing_artifacts: Sequence[Mapping[str, Any]],
+    deviations: Sequence[Mapping[str, Any]],
     recommendations: Sequence[str],
 ) -> str:
     raw_metrics = raw_qc_bundle.get("aggregate_metrics", {}) if isinstance(raw_qc_bundle, Mapping) else {}
@@ -1734,6 +1736,21 @@ def _render_rnaseq_report_bundle(
         )
     else:
         lines.append("- All expected canonical workflow outputs for this report bundle were available.")
+    lines.extend(["", "## Deviations"])
+    if deviations:
+        for item in deviations:
+            step_id = str(item.get("step_id", "unknown-step"))
+            step_label = str(item.get("step_label", "")).strip()
+            step_display = f"`{step_id}` ({step_label})" if step_label else f"`{step_id}`"
+            lines.append(
+                f"- [{item.get('severity', 'minor')}/{item.get('origin', 'automatic')}] step {step_display}: "
+                f"expected {item.get('original_expected_behavior', 'n/a')} "
+                f"Observed: {item.get('actual_behavior', 'n/a')} "
+                f"Reason: {item.get('reason', 'n/a')} "
+                f"Impact: {item.get('impact_assessment', 'n/a')}"
+            )
+    else:
+        lines.append("- No structured workflow deviations were recorded for this run.")
     lines.extend(
         [
             "",
@@ -1798,11 +1815,15 @@ def _build_rnaseq_report_bundle_outputs(
         workflow_run,
         artifact_type="evidence_review",
     )
+    deviations = _workflow_deviation_entries(workflow_run)
+    deviation_summary = _workflow_deviation_summary(deviations)
     supplementary_generated_artifacts = _filter_artifacts_excluding_types(
         generated_artifacts,
         excluded_artifact_types=set(_REPORT_BUNDLE_WORKFLOW_OUTPUT_ARTIFACT_TYPES),
     )
-    warnings = list(workflow_run.warnings)
+    warnings = _dedupe_text_entries(
+        [*workflow_run.warnings, *_workflow_deviation_warning_lines(deviations)]
+    )
     if manifest_load_error:
         warnings.append(
             f"Terminal report bundle used degraded manifest metadata because dataset_manifest could not be loaded: {manifest_load_error}"
@@ -1822,6 +1843,7 @@ def _build_rnaseq_report_bundle_outputs(
         lifecycle_status=report_lifecycle_status,
         warnings=warnings,
         missing_artifacts=missing_artifacts,
+        deviations=deviations,
         differential_expression_bundle=differential_expression_bundle,
     )
     report_bundle_relpath = _write_generated_text(
@@ -1851,6 +1873,7 @@ def _build_rnaseq_report_bundle_outputs(
             canonical_artifacts_by_type=canonical_artifacts_by_type,
             evidence_review_artifacts=evidence_review_artifacts,
             missing_artifacts=missing_artifacts,
+            deviations=deviations,
             recommendations=recommendations,
         ),
     )
@@ -1909,10 +1932,13 @@ def _build_rnaseq_report_bundle_outputs(
                 },
             ],
             "missing_artifacts": missing_artifacts,
+            "deviations": deviations,
+            "deviation_summary": deviation_summary,
             "next_actions": recommendations,
             "notes": [
                 "The report bundle links the canonical workflow run record and any stable workflow outputs that were actually materialized for this run.",
                 "Linked evidence-review artifacts are carried forward when available so downstream QA and report consumers can inspect literature-grounded claim support directly from the bundle.",
+                "Structured workflow deviations are copied into the bundle so reviewers can inspect what changed, why it changed, and the likely downstream impact without reopening the raw run record.",
                 "Blocked or failed runs still emit a partial report bundle so users can inspect available artifacts and missing downstream outputs without reading the raw run record.",
             ],
         },
@@ -1921,6 +1947,7 @@ def _build_rnaseq_report_bundle_outputs(
             "failed_checks": _report_bundle_failed_checks(
                 lifecycle_status=report_lifecycle_status,
                 missing_artifacts=missing_artifacts,
+                deviations=deviations,
             ),
             "warnings": warnings,
             "missing_artifacts": missing_artifacts,
@@ -1950,6 +1977,101 @@ def _optional_string(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _dedupe_text_entries(values: Sequence[str]) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        candidate = str(item).strip()
+        if not candidate:
+            continue
+        key = candidate.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(candidate)
+    return cleaned
+
+
+def _workflow_deviation_entries(workflow_run: WorkflowRun) -> list[dict[str, Any]]:
+    step_labels = {record.id: record.name for record in workflow_run.steps}
+    entries: list[dict[str, Any]] = []
+    for deviation in workflow_run.deviations:
+        payload = deviation.model_dump(mode="json")
+        step_label = step_labels.get(deviation.step_id)
+        if step_label:
+            payload["step_label"] = step_label
+        entries.append(payload)
+    return entries
+
+
+def _workflow_deviation_summary(deviations: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    by_severity = {"minor": 0, "major": 0, "critical": 0}
+    by_origin = {"manual": 0, "automatic": 0}
+    severity_rank = {"minor": 1, "major": 2, "critical": 3}
+    highest_severity: str | None = None
+    highest_rank = 0
+
+    for item in deviations:
+        severity = item.get("severity")
+        if isinstance(severity, str) and severity in by_severity:
+            by_severity[severity] += 1
+            rank = severity_rank[severity]
+            if rank > highest_rank:
+                highest_rank = rank
+                highest_severity = severity
+        origin = item.get("origin")
+        if isinstance(origin, str) and origin in by_origin:
+            by_origin[origin] += 1
+
+    return {
+        "count": len(deviations),
+        "by_severity": by_severity,
+        "by_origin": by_origin,
+        "highest_severity": highest_severity,
+    }
+
+
+def _workflow_deviation_warning_lines(deviations: Sequence[Mapping[str, Any]]) -> list[str]:
+    warnings: list[str] = []
+    for item in deviations:
+        step_id = str(item.get("step_id", "unknown-step"))
+        step_label = str(item.get("step_label", "")).strip()
+        actual_behavior = str(item.get("actual_behavior", "Deviation details were not provided.")).strip()
+        severity = str(item.get("severity", "minor")).strip() or "minor"
+        if severity not in {"major", "critical"}:
+            continue
+        label = f" ({step_label})" if step_label else ""
+        warnings.append(
+            f"{severity.capitalize()} workflow deviation at {step_id}{label}: {actual_behavior}"
+        )
+    return warnings
+
+
+def _workflow_deviation_failed_checks(deviations: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    failed_checks: list[dict[str, Any]] = []
+    for index, item in enumerate(deviations, start=1):
+        severity = item.get("severity")
+        if severity not in {"major", "critical"}:
+            continue
+        step_id = str(item.get("step_id", "unknown-step"))
+        step_label = str(item.get("step_label", "")).strip()
+        label = f" ({step_label})" if step_label else ""
+        actual_behavior = str(item.get("actual_behavior", "Deviation details were not provided.")).strip()
+        impact_assessment = str(
+            item.get("impact_assessment", "Review the logged workflow deviation before publication or export.")
+        ).strip()
+        failed_checks.append(
+            {
+                "id": f"workflow-deviation-{step_id}-{index}",
+                "description": f"Structured workflow deviation at {step_id}{label}: {actual_behavior}",
+                "severity": "critical" if severity == "critical" else "error",
+                "artifact_type": "workflow_run",
+                "remediation": impact_assessment,
+            }
+        )
+    return failed_checks
 
 
 def _available_report_bundle_output_artifact_types(
@@ -2006,6 +2128,7 @@ def _report_bundle_recommendations(
     lifecycle_status: str,
     warnings: Sequence[str],
     missing_artifacts: Sequence[Mapping[str, Any]],
+    deviations: Sequence[Mapping[str, Any]],
     differential_expression_bundle: Mapping[str, Any],
 ) -> list[str]:
     recommendations: list[str] = []
@@ -2025,6 +2148,10 @@ def _report_bundle_recommendations(
     if missing_artifacts:
         recommendations.append(
             "Review the available QC artifacts and the workflow run record to confirm which downstream outputs were never materialized."
+        )
+    if deviations:
+        recommendations.append(
+            "Review the structured workflow deviations and document whether each impact assessment is acceptable before publication, export, or wet-lab follow-up."
         )
     if differential_expression_bundle:
         recommendations.append(
@@ -2070,9 +2197,11 @@ def _report_bundle_failed_checks(
     *,
     lifecycle_status: str,
     missing_artifacts: Sequence[Mapping[str, Any]],
+    deviations: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
+    failed_checks = _workflow_deviation_failed_checks(deviations)
     if lifecycle_status not in {"blocked", "failed"}:
-        return []
+        return failed_checks
     severity = "error" if lifecycle_status == "blocked" else "critical"
     description = (
         "Workflow execution was blocked before the final report-bundle stage completed."
@@ -2085,13 +2214,14 @@ def _report_bundle_failed_checks(
         else "Review the workflow warnings and upstream stage outputs before rerunning the workflow."
     )
     return [
+        *failed_checks,
         {
             "id": f"workflow-{lifecycle_status}",
             "description": description,
             "severity": severity,
             "artifact_type": "workflow_run",
             "remediation": remediation,
-        }
+        },
     ]
 
 

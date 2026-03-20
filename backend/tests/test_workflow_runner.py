@@ -2363,10 +2363,13 @@ def launch(inputs, _context):
             "qc_summary",
             "key_outputs",
             "warnings_and_failures",
+            "deviations",
             "provenance_pointers",
             "next_recommended_actions",
         ]
         assert report_bundle_payload["missing_artifacts"] == []
+        assert report_bundle_payload["deviations"] == []
+        assert report_bundle_payload["deviation_summary"]["count"] == 0
         assert qa_report.overall_status == "passed"
         assert qa_report.missing_artifacts == []
         assert qa_report.warnings == []
@@ -2445,6 +2448,7 @@ def launch(inputs, _context):
         assert expected_provenance_exports[0] in report_bundle_markdown
         assert expected_provenance_exports[1] in report_bundle_markdown
         assert "No provenance exports were materialized for this run." not in report_bundle_markdown
+        assert "No structured workflow deviations were recorded for this run." in report_bundle_markdown
         assert next(ref.path for ref in result.run.outputs if ref.artifact_type == "count_matrix") in report_bundle_markdown
         assert (
             next(ref.path for ref in result.run.outputs if ref.artifact_type == "differential_expression_run")
@@ -2683,8 +2687,11 @@ def launch(inputs, _context):
         assert result.run.lifecycle_status == "completed"
         assert result.run.qc_status == "warning"
         assert any("missing_expected_batch_fields" in warning for warning in result.run.warnings)
+        assert result.run.deviations
+        assert any(item.severity == "major" for item in result.run.deviations)
         assert qa_report.overall_status == "warning"
         assert qa_report.warnings
+        assert any("workflow deviation" in warning.lower() for warning in qa_report.warnings)
         assert not any(event["type"] == "workflow_blocked" for event in events)
         assert {
             item.metric_name: item.value
@@ -2721,11 +2728,15 @@ def launch(inputs, _context):
         assert result.run.lifecycle_status == "completed"
         assert result.run.qc_status == "warning"
         assert result.run.warnings
+        assert result.run.deviations
         assert qa_report.overall_status == "warning"
-        assert qa_report.warnings == result.run.warnings
+        for warning in result.run.warnings:
+            assert warning in qa_report.warnings
+        assert any("workflow deviation" in warning.lower() for warning in qa_report.warnings)
         assert "Workflow QC status: `warning`" in report_bundle_markdown
         for warning in result.run.warnings:
             assert warning in report_bundle_markdown
+        assert "## Deviations" in report_bundle_markdown
 
     def test_authored_rnaseq_workflow_blocks_when_multiple_expected_batch_fields_are_missing(self, tmp_path):
         spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
@@ -2791,9 +2802,12 @@ def launch(inputs, _context):
         assert qa_report.overall_status == "blocked"
         assert qa_report.missing_artifacts == []
         assert qa_report.failed_checks
+        assert result.run.deviations
+        assert any(item.severity == "critical" for item in result.run.deviations)
         assert report_bundle_payload["lifecycle_status"] == "blocked"
         assert report_bundle_payload["provenance_exports"] == expected_provenance_exports
         assert report_bundle_payload["missing_artifacts"] == []
+        assert report_bundle_payload["deviation_summary"]["count"] >= 1
         assert result.run.provenance_exports == expected_provenance_exports
         assert result.run.biocompute_exports == expected_biocompute_exports
         assert provenance_payload["workflow"]["lifecycle_status"] == "blocked"
@@ -2806,6 +2820,7 @@ def launch(inputs, _context):
         validate_biocompute_payload_against_reference_schemas(biocompute_artifact.model_dump(mode="json"))
         assert "Workflow lifecycle status: `blocked`" in report_bundle_markdown
         assert expected_provenance_exports[0] in report_bundle_markdown
+        assert "## Deviations" in report_bundle_markdown
 
         blocked_event = next(event for event in events if event["type"] == "workflow_blocked")
         assert blocked_event["blocking_source"] == "qc_gate"
@@ -3139,6 +3154,54 @@ def launch(inputs, _context):
             ],
         ]
 
+    def test_authored_rnaseq_workflow_clears_stale_deviations_for_reset_steps_on_restart(self, tmp_path):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        multiqc_executable = _write_fake_multiqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+            multiqc_executable=multiqc_executable,
+        )
+
+        runner = InternalDAGRunner(tmp_path)
+        completed = runner.run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+        )
+
+        run_payload = json.loads((completed.run_dir / "run.json").read_text(encoding="utf-8"))
+        run_payload["deviations"] = [
+            {
+                "run_id": completed.run.run_id,
+                "step_id": "aggregated_qc",
+                "severity": "major",
+                "origin": "automatic",
+                "logged_at": "2026-03-20T20:00:00Z",
+                "original_expected_behavior": "Legacy restart test expected aggregated QC to complete cleanly.",
+                "actual_behavior": "Legacy deviation that should be removed when aggregated_qc is restarted.",
+                "reason": "Injected stale deviation for restart coverage.",
+                "impact_assessment": "Should not survive the restart once the affected step is rerun.",
+                "author_or_agent": "system:test",
+            }
+        ]
+        (completed.run_dir / "run.json").write_text(json.dumps(run_payload, indent=2) + "\n", encoding="utf-8")
+
+        rerun = runner.run(
+            spec_path,
+            run_dir=completed.run_dir,
+            restart_from_step="aggregated_qc",
+        )
+
+        assert rerun.resumed is True
+        assert rerun.run.lifecycle_status == "completed"
+        assert all(item.step_id != "aggregated_qc" for item in rerun.run.deviations)
+
     def test_authored_rnaseq_workflow_removes_stale_multiqc_root_outputs_when_rerun_fails(self, tmp_path):
         spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
         fastqc_executable = _write_fake_fastqc_executable(tmp_path)
@@ -3317,6 +3380,9 @@ def emit(_inputs, _context):
 
         assert result.run.lifecycle_status == "blocked"
         assert result.run.steps[0].status == "completed"
+        assert result.run.deviations
+        assert result.run.deviations[0].step_id == "emit"
+        assert result.run.deviations[0].severity == "critical"
         assert (result.run_dir / "outputs" / "generated" / "emit" / "qa_report.json").exists()
         assert not (result.run_dir / "qa_report.json").exists()
         assert result.run.outputs[0].path.endswith("outputs/generated/emit/qa_report.json")
@@ -3580,18 +3646,78 @@ def materialize_terminal_report_bundle(inputs, _context):
             and artifact["path"] == evidence_review_path
             for artifact in manifest_payload["expected_artifacts"]
         )
+        assert manifest_payload["deviation_summary"]["count"] == 1
+        assert manifest_payload["deviations"][0]["step_id"] == "qc-summary"
         assert outputs["qa_report"]["related_artifacts"] == manifest_payload["evidence_review_artifacts"]
         assert any(
             artifact["artifact_type"] == "evidence_review"
             and artifact["path"] == evidence_review_path
             for artifact in outputs["qa_report"]["checklist_artifacts"]
         )
+        assert any("workflow deviation" in warning.lower() for warning in outputs["qa_report"]["warnings"])
 
         report_bundle_markdown = (
             run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
         ).read_text(encoding="utf-8")
         assert "Evidence review artifacts" in report_bundle_markdown
         assert evidence_review_path in report_bundle_markdown
+        assert "## Deviations" in report_bundle_markdown
+
+    def test_rnaseq_report_bundle_keeps_minor_deviations_visible_without_degrading_status(self, tmp_path):
+        module_spec = importlib.util.spec_from_file_location(
+            "bioapex_test_rnaseq_qc_de_minor",
+            REPO_ROOT / "workflows" / "runners" / "rnaseq_qc_de.py",
+        )
+        assert module_spec is not None
+        assert module_spec.loader is not None
+        rnaseq_runner = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(rnaseq_runner)
+
+        manifest = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "dataset_manifest.yaml")
+        workflow_run = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "run.json")
+        workflow_run.qc_status = "passed"
+        workflow_run.warnings = []
+        workflow_run.deviations = [
+            workflow_run.deviations[0].model_copy(update={"severity": "minor"})
+        ]
+
+        run_relpath = Path("artifacts/rnaseq-qc-de/2026-03-20/run-20260320T223000Z-deadbeef")
+        run_dir = tmp_path / run_relpath
+        run_dir.mkdir(parents=True, exist_ok=True)
+        context = SimpleNamespace(
+            base_dir=tmp_path,
+            run_dir=run_dir,
+            relative_run_dir=run_relpath.as_posix(),
+            run_id="run-20260320T223000Z-deadbeef",
+            workflow_id="rnaseq_qc_de",
+            relative_path=lambda path: str(path),
+        )
+
+        outputs = rnaseq_runner._build_rnaseq_report_bundle_outputs(
+            context=context,
+            manifest_path="manifests/demo_dataset_manifest.yaml",
+            manifest=manifest,
+            workflow_run=workflow_run,
+            raw_qc_bundle={},
+            aggregated_qc_bundle={},
+            quantification_bundle={},
+            differential_expression_bundle={},
+            condition_field="condition",
+            baseline_condition="control",
+            comparison_condition="treated",
+            report_lifecycle_status="completed",
+        )
+
+        assert outputs["qa_report"]["overall_status"] == "passed"
+        assert outputs["qa_report"]["warnings"] == []
+        assert outputs["qa_report"]["failed_checks"] == []
+        assert outputs["report_bundle_manifest"]["deviation_summary"]["highest_severity"] == "minor"
+
+        report_bundle_markdown = (
+            run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
+        ).read_text(encoding="utf-8")
+        assert "## Deviations" in report_bundle_markdown
+        assert "[minor/automatic]" in report_bundle_markdown
 
     def test_terminal_report_bundle_materializer_is_idempotent_when_resuming_final_run(self, tmp_path):
         module_name = _write_runner_module(

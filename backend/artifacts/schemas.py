@@ -79,6 +79,7 @@ ComplianceSeverity = Literal["low", "medium", "high", "critical"]
 ProtocolCompletionState = Literal["not_started", "in_progress", "completed", "blocked", "aborted"]
 ProtocolStepStatus = Literal["pending", "in_progress", "completed", "blocked", "skipped"]
 DeviationSeverity = Literal["minor", "major", "critical"]
+DeviationOrigin = Literal["manual", "automatic"]
 QAOverallStatus = Literal["passed", "warning", "failed", "blocked"]
 QACheckSeverity = Literal["warning", "error", "critical"]
 PrivacyClassification = Literal["public", "internal", "controlled", "restricted"]
@@ -191,6 +192,41 @@ def _normalize_timestamp(value: datetime, *, field_name: str) -> datetime:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must include timezone information.")
     return value.astimezone(timezone.utc).replace(microsecond=0)
+
+
+def _normalize_legacy_deviation_payload(
+    value: Any,
+    *,
+    parent_run_id: str | None = None,
+) -> Any:
+    if not isinstance(value, dict):
+        return value
+
+    payload = dict(value)
+    if parent_run_id and "run_id" not in payload:
+        payload["run_id"] = parent_run_id
+
+    legacy_description = payload.get("description")
+    if not isinstance(legacy_description, str) or not legacy_description.strip():
+        return payload
+
+    description = legacy_description.strip()
+    payload.setdefault("actual_behavior", description)
+    payload.setdefault(
+        "original_expected_behavior",
+        "Legacy deviation record did not capture the original expected behavior.",
+    )
+    payload.setdefault(
+        "reason",
+        "Imported from a legacy deviation record that stored only a free-text description.",
+    )
+    payload.setdefault(
+        "impact_assessment",
+        "Legacy deviation record did not preserve a structured impact assessment and should be reviewed manually.",
+    )
+    payload.setdefault("author_or_agent", "legacy_record")
+    payload.pop("description", None)
+    return payload
 
 
 class ArtifactReference(BaseModel):
@@ -1202,8 +1238,25 @@ class WorkflowRun(ArtifactDocument):
     qc_policy_results: list[QCPolicyEvaluation] = Field(default_factory=list)
     qc_summary: str | None = None
     summary_metrics: list[WorkflowSummaryMetric] = Field(default_factory=list)
+    deviations: list["DeviationRecord"] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     warning_details: list[WorkflowIssueDetail] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_legacy_deviations(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        raw_run_id = value.get("run_id")
+        raw_deviations = value.get("deviations")
+        if not isinstance(raw_run_id, str) or not isinstance(raw_deviations, list):
+            return value
+        value = dict(value)
+        value["deviations"] = [
+            _normalize_legacy_deviation_payload(item, parent_run_id=raw_run_id)
+            for item in raw_deviations
+        ]
+        return value
 
     @field_validator("engine")
     @classmethod
@@ -1226,6 +1279,16 @@ class WorkflowRun(ArtifactDocument):
         if value is None:
             return None
         return _require_non_empty(value, field_name="qc_summary")
+
+    @model_validator(mode="after")
+    def _validate_deviation_refs(self) -> "WorkflowRun":
+        step_ids = {step.id for step in self.steps}
+        for deviation in self.deviations:
+            if deviation.run_id != self.run_id:
+                raise ValueError("Workflow deviations must use the parent workflow run_id.")
+            if deviation.step_id not in step_ids:
+                raise ValueError("Workflow deviations must reference an existing workflow step_id.")
+        return self
 
 
 class ProvenanceHashRecord(BaseModel):
@@ -2733,20 +2796,44 @@ class EquipmentRecord(BaseModel):
 class DeviationRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    run_id: str
     step_id: str
     severity: DeviationSeverity
-    description: str
+    origin: DeviationOrigin = "manual"
     logged_at: datetime
+    original_expected_behavior: str
+    actual_behavior: str
+    reason: str
+    impact_assessment: str
+    author_or_agent: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_payload(cls, value: Any) -> Any:
+        return _normalize_legacy_deviation_payload(value)
+
+    @field_validator("run_id")
+    @classmethod
+    def _validate_run_id(cls, value: str) -> str:
+        if not is_valid_run_id(value):
+            raise ValueError(f"Invalid run_id format: {value!r}")
+        return value
 
     @field_validator("step_id")
     @classmethod
     def _validate_step_id(cls, value: str) -> str:
         return _require_normalized_identifier(value, field_name="step_id")
 
-    @field_validator("description")
+    @field_validator(
+        "original_expected_behavior",
+        "actual_behavior",
+        "reason",
+        "impact_assessment",
+        "author_or_agent",
+    )
     @classmethod
-    def _validate_description(cls, value: str) -> str:
-        return _require_non_empty(value, field_name="description")
+    def _validate_text_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
 
     @field_validator("logged_at")
     @classmethod
@@ -2802,6 +2889,22 @@ class ProtocolRun(ArtifactDocument):
     deviations: list[DeviationRecord] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_legacy_deviations(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        raw_run_id = value.get("run_id")
+        raw_deviations = value.get("deviations")
+        if not isinstance(raw_run_id, str) or not isinstance(raw_deviations, list):
+            return value
+        value = dict(value)
+        value["deviations"] = [
+            _normalize_legacy_deviation_payload(item, parent_run_id=raw_run_id)
+            for item in raw_deviations
+        ]
+        return value
+
     @field_validator("operator")
     @classmethod
     def _validate_operator(cls, value: str) -> str:
@@ -2842,6 +2945,11 @@ class ProtocolRun(ArtifactDocument):
         sequence_numbers = [step.sequence_number for step in self.steps]
         if len(sequence_numbers) != len(set(sequence_numbers)):
             raise ValueError("Protocol steps must not reuse sequence_number values.")
+        for deviation in self.deviations:
+            if deviation.run_id != self.run_id:
+                raise ValueError("Protocol deviations must use the parent protocol run_id.")
+            if deviation.step_id not in step_ids:
+                raise ValueError("Protocol deviations must reference an existing protocol step_id.")
         return self
 
 
