@@ -185,6 +185,117 @@ def _write_entity_grounding(base_dir: Path) -> None:
     )
 
 
+def _write_claim_graph(base_dir: Path) -> None:
+    _write_json(
+        _run_dir(base_dir) / "claim_graph.json",
+        {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "claim_graph",
+            "id": "claim-graph-demo-v1",
+            "run_id": RUN_ID,
+            "created_at": "2026-03-18T19:12:00Z",
+            "source_workflow": "claim-graph",
+            "related_artifacts": [
+                {
+                    "artifact_type": "evidence_card",
+                    "path": _run_dir_relpath("evidence_card.yaml"),
+                    "id": "evidence-demo-v1",
+                    "run_id": RUN_ID,
+                }
+            ],
+            "source_artifacts": [
+                {
+                    "artifact_type": "evidence_card",
+                    "path": _run_dir_relpath("evidence_card.yaml"),
+                    "id": "evidence-demo-v1",
+                    "run_id": RUN_ID,
+                }
+            ],
+            "contradiction_rule_set": "claim_graph_contradiction_v1",
+            "claim_nodes": [
+                {
+                    "node_id": "claim-evidence-demo-v1-claim-demo-1",
+                    "node_type": "claim",
+                    "statement": "Demo evidence statement.",
+                    "confidence": "high",
+                    "status": "proposed",
+                    "provenance": [
+                        {
+                            "source_type": "evidence_card_claim",
+                            "artifact": {
+                                "artifact_type": "evidence_card",
+                                "path": _run_dir_relpath("evidence_card.yaml"),
+                                "id": "evidence-demo-v1",
+                                "run_id": RUN_ID,
+                            },
+                            "source_identifier": "claim-demo-1",
+                        }
+                    ],
+                }
+            ],
+            "evidence_card_nodes": [
+                {
+                    "node_id": "evidence-card-evidence-demo-v1",
+                    "node_type": "evidence_card",
+                    "artifact": {
+                        "artifact_type": "evidence_card",
+                        "path": _run_dir_relpath("evidence_card.yaml"),
+                        "id": "evidence-demo-v1",
+                        "run_id": RUN_ID,
+                    },
+                    "stable_identifier": "pubmed:12345678",
+                    "source_database": "pubmed",
+                    "title": "Demo evidence card",
+                    "confidence": "high",
+                }
+            ],
+            "entity_nodes": [],
+            "workflow_result_nodes": [],
+            "edges": [
+                {
+                    "id": "supports-evidence-card-evidence-demo-v1-claim-evidence-demo-v1-claim-demo-1",
+                    "edge_type": "supports",
+                    "source_node_id": "evidence-card-evidence-demo-v1",
+                    "source_node_type": "evidence_card",
+                    "target_node_id": "claim-evidence-demo-v1-claim-demo-1",
+                    "target_node_type": "claim",
+                    "provenance_artifact": {
+                        "artifact_type": "evidence_card",
+                        "path": _run_dir_relpath("evidence_card.yaml"),
+                        "id": "evidence-demo-v1",
+                        "run_id": RUN_ID,
+                    },
+                    "rationale": "Evidence card contains the extracted claim statement.",
+                },
+                {
+                    "id": "derived-from-claim-evidence-demo-v1-claim-demo-1-evidence-card-evidence-demo-v1",
+                    "edge_type": "derived_from",
+                    "source_node_id": "claim-evidence-demo-v1-claim-demo-1",
+                    "source_node_type": "claim",
+                    "target_node_id": "evidence-card-evidence-demo-v1",
+                    "target_node_type": "evidence_card",
+                    "provenance_artifact": {
+                        "artifact_type": "evidence_card",
+                        "path": _run_dir_relpath("evidence_card.yaml"),
+                        "id": "evidence-demo-v1",
+                        "run_id": RUN_ID,
+                    },
+                    "rationale": "Claim text was extracted from the evidence card artifact.",
+                },
+            ],
+            "summary": {
+                "claim_count": 1,
+                "evidence_card_count": 1,
+                "entity_count": 0,
+                "workflow_result_count": 0,
+                "edge_count": 2,
+                "contradiction_count": 0,
+                "source_artifact_count": 1,
+            },
+        },
+    )
+
+
 def _workflow_plan_payload() -> dict:
     return {
         "schema_version": SCHEMA_PACK_VERSION,
@@ -534,6 +645,26 @@ class TestArtifactRegistryService:
         )
         assert refreshed.matched_count == 1
         assert refreshed.records[0].path == _run_dir_relpath("entity_grounding.json")
+
+    def test_refresh_path_indexes_claim_graph_artifact(self, isolated_registry_root):
+        rebuild_artifact_registry(isolated_registry_root)
+        _write_evidence_card(isolated_registry_root)
+        _write_claim_graph(isolated_registry_root)
+
+        record = refresh_artifact_registry_path(
+            isolated_registry_root,
+            _run_dir_relpath("claim_graph.json"),
+        )
+        assert record is not None
+        assert record.status == "valid"
+        assert record.artifact_type == "claim_graph"
+
+        refreshed = lookup_artifact_registry(
+            isolated_registry_root,
+            artifact_type="claim_graph",
+        )
+        assert refreshed.matched_count == 1
+        assert refreshed.records[0].path == _run_dir_relpath("claim_graph.json")
 
     def test_prepare_run_directory_registers_root_artifacts_immediately(self, tmp_path):
         prepare_run_directory(

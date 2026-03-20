@@ -34,6 +34,7 @@ ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
     "biocompute": "json",
     "evidence_card": "yaml",
     "evidence_review": "json",
+    "claim_graph": "json",
     "entity_grounding": "json",
     "compliance_report": "json",
     "protocol_run": "yaml",
@@ -96,6 +97,15 @@ EvidenceReviewStatus = Literal["supported", "mixed", "insufficient_evidence"]
 GroundedEntityType = Literal["gene", "protein", "transcript"]
 GroundedEntitySourceDatabase = Literal["ensembl", "uniprot", "ncbigene", "custom"]
 GroundingResultStatus = Literal["resolved", "ambiguous", "unresolved"]
+ClaimGraphNodeType = Literal["claim", "evidence_card", "entity", "workflow_result"]
+ClaimGraphEdgeType = Literal["supports", "contradicts", "mentions", "derived_from", "evaluated_by"]
+ClaimGraphClaimStatus = Literal["proposed", "supported", "mixed", "insufficient_evidence"]
+ClaimGraphProvenanceSource = Literal[
+    "evidence_card_claim",
+    "evidence_review_conclusion",
+    "workflow_summary",
+]
+WorkflowResultArtifactType = Literal["workflow_run", "evidence_review"]
 FastQCSequencingLayout = Literal["single_end", "paired_end"]
 FastQCReadLabel = Literal["single", "read1", "read2"]
 FastQCModuleStatus = Literal["pass", "warn", "fail"]
@@ -2251,6 +2261,282 @@ class EntityGroundingArtifact(ArtifactDocument):
         return self
 
 
+class ClaimGraphClaimProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: ClaimGraphProvenanceSource
+    artifact: ArtifactReference
+    source_identifier: str | None = None
+    note: str | None = None
+
+    @field_validator("source_identifier")
+    @classmethod
+    def _validate_source_identifier(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="source_identifier")
+
+    @field_validator("note")
+    @classmethod
+    def _validate_note(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="note")
+
+
+class ClaimGraphClaimNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str
+    node_type: Literal["claim"] = "claim"
+    statement: str
+    confidence: ConfidenceLevel
+    status: ClaimGraphClaimStatus
+    provenance: list[ClaimGraphClaimProvenance] = Field(min_length=1)
+
+    @field_validator("node_id")
+    @classmethod
+    def _validate_node_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="node_id")
+
+    @field_validator("statement")
+    @classmethod
+    def _validate_statement(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="statement")
+
+
+class ClaimGraphEvidenceCardNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str
+    node_type: Literal["evidence_card"] = "evidence_card"
+    artifact: ArtifactReference
+    stable_identifier: str
+    source_database: EvidenceSourceDatabase
+    title: str
+    confidence: ConfidenceLevel
+
+    @field_validator("node_id")
+    @classmethod
+    def _validate_node_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="node_id")
+
+    @field_validator("stable_identifier")
+    @classmethod
+    def _validate_stable_identifier(cls, value: str) -> str:
+        return _require_prefixed_identifier(value, field_name="stable_identifier")
+
+    @field_validator("title")
+    @classmethod
+    def _validate_title(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="title")
+
+
+class ClaimGraphEntityNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str
+    node_type: Literal["entity"] = "entity"
+    entity_type: GroundedEntityType
+    source_database: GroundedEntitySourceDatabase
+    stable_identifier: str
+    preferred_label: str
+    aliases: list[str] = Field(default_factory=list)
+    species: str | None = None
+    taxon_id: str | None = None
+
+    @field_validator("node_id")
+    @classmethod
+    def _validate_node_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="node_id")
+
+    @field_validator("stable_identifier")
+    @classmethod
+    def _validate_stable_identifier(cls, value: str) -> str:
+        return _require_prefixed_identifier(value, field_name="stable_identifier")
+
+    @field_validator("preferred_label")
+    @classmethod
+    def _validate_preferred_label(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="preferred_label")
+
+    @field_validator("aliases")
+    @classmethod
+    def _validate_aliases(cls, value: list[str]) -> list[str]:
+        return _clean_unique_text_list(value, field_name="alias")
+
+    @field_validator("species")
+    @classmethod
+    def _validate_species(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="species")
+
+    @field_validator("taxon_id")
+    @classmethod
+    def _validate_taxon_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_prefixed_identifier(value, field_name="taxon_id")
+
+
+class ClaimGraphWorkflowResultNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str
+    node_type: Literal["workflow_result"] = "workflow_result"
+    artifact: ArtifactReference
+    artifact_type: WorkflowResultArtifactType
+    label: str
+    workflow_name: str | None = None
+    workflow_slug: str | None = None
+    result_status: str | None = None
+    confidence: ConfidenceLevel | None = None
+
+    @field_validator("node_id")
+    @classmethod
+    def _validate_node_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="node_id")
+
+    @field_validator("label")
+    @classmethod
+    def _validate_label(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="label")
+
+    @field_validator("workflow_name")
+    @classmethod
+    def _validate_workflow_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="workflow_name")
+
+    @field_validator("workflow_slug", "result_status")
+    @classmethod
+    def _validate_optional_identifiers(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_normalized_identifier(value, field_name=info.field_name)
+
+
+class ClaimGraphEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    edge_type: ClaimGraphEdgeType
+    source_node_id: str
+    source_node_type: ClaimGraphNodeType
+    target_node_id: str
+    target_node_type: ClaimGraphNodeType
+    provenance_artifact: ArtifactReference | None = None
+    rationale: str | None = None
+
+    @field_validator("id", "source_node_id", "target_node_id")
+    @classmethod
+    def _validate_ids(cls, value: str, info) -> str:
+        return _require_normalized_identifier(value, field_name=info.field_name)
+
+    @field_validator("rationale")
+    @classmethod
+    def _validate_rationale(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="rationale")
+
+
+class ClaimGraphSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_count: int
+    evidence_card_count: int
+    entity_count: int
+    workflow_result_count: int
+    edge_count: int
+    contradiction_count: int
+    source_artifact_count: int
+
+    @field_validator(
+        "claim_count",
+        "evidence_card_count",
+        "entity_count",
+        "workflow_result_count",
+        "edge_count",
+        "contradiction_count",
+        "source_artifact_count",
+    )
+    @classmethod
+    def _validate_non_negative_counts(cls, value: int, info) -> int:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be non-negative.")
+        return value
+
+
+class ClaimGraphArtifact(ArtifactDocument):
+    artifact_type: Literal["claim_graph"] = "claim_graph"
+    source_artifacts: list[ArtifactReference] = Field(min_length=1)
+    contradiction_rule_set: str
+    claim_nodes: list[ClaimGraphClaimNode] = Field(min_length=1)
+    evidence_card_nodes: list[ClaimGraphEvidenceCardNode] = Field(default_factory=list)
+    entity_nodes: list[ClaimGraphEntityNode] = Field(default_factory=list)
+    workflow_result_nodes: list[ClaimGraphWorkflowResultNode] = Field(default_factory=list)
+    edges: list[ClaimGraphEdge] = Field(default_factory=list)
+    summary: ClaimGraphSummary
+
+    @field_validator("contradiction_rule_set")
+    @classmethod
+    def _validate_contradiction_rule_set(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="contradiction_rule_set")
+
+    @model_validator(mode="after")
+    def _validate_graph(self) -> "ClaimGraphArtifact":
+        node_ids = [
+            node.node_id
+            for node in [
+                *self.claim_nodes,
+                *self.evidence_card_nodes,
+                *self.entity_nodes,
+                *self.workflow_result_nodes,
+            ]
+        ]
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("Claim graph nodes must not reuse node_id values.")
+
+        known_nodes = set(node_ids)
+        contradiction_count = 0
+        edge_ids: set[str] = set()
+        for edge in self.edges:
+            if edge.id in edge_ids:
+                raise ValueError("Claim graph edges must not reuse id values.")
+            edge_ids.add(edge.id)
+            if edge.source_node_id not in known_nodes or edge.target_node_id not in known_nodes:
+                raise ValueError("Claim graph edges must reference known nodes.")
+            if edge.edge_type == "contradicts":
+                contradiction_count += 1
+
+        if self.summary.claim_count != len(self.claim_nodes):
+            raise ValueError("Claim graph summary.claim_count must match claim_nodes.")
+        if self.summary.evidence_card_count != len(self.evidence_card_nodes):
+            raise ValueError(
+                "Claim graph summary.evidence_card_count must match evidence_card_nodes."
+            )
+        if self.summary.entity_count != len(self.entity_nodes):
+            raise ValueError("Claim graph summary.entity_count must match entity_nodes.")
+        if self.summary.workflow_result_count != len(self.workflow_result_nodes):
+            raise ValueError(
+                "Claim graph summary.workflow_result_count must match workflow_result_nodes."
+            )
+        if self.summary.edge_count != len(self.edges):
+            raise ValueError("Claim graph summary.edge_count must match edges.")
+        if self.summary.contradiction_count != contradiction_count:
+            raise ValueError(
+                "Claim graph summary.contradiction_count must match contradicts edges."
+            )
+        if self.summary.source_artifact_count != len(self.source_artifacts):
+            raise ValueError(
+                "Claim graph summary.source_artifact_count must match source_artifacts."
+            )
+        return self
+
+
 class ComplianceRuleHit(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2593,6 +2879,7 @@ ArtifactModel = (
     | BioComputeArtifact
     | EvidenceCard
     | EvidenceReviewArtifact
+    | ClaimGraphArtifact
     | EntityGroundingArtifact
     | ComplianceReport
     | ProtocolRun
@@ -2614,6 +2901,7 @@ _ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
     "biocompute": BioComputeArtifact,
     "evidence_card": EvidenceCard,
     "evidence_review": EvidenceReviewArtifact,
+    "claim_graph": ClaimGraphArtifact,
     "entity_grounding": EntityGroundingArtifact,
     "compliance_report": ComplianceReport,
     "protocol_run": ProtocolRun,

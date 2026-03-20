@@ -1,3 +1,4 @@
+import json
 import sys
 import urllib.parse
 from pathlib import Path
@@ -333,3 +334,58 @@ def test_search_knowledge_contract_returns_structured_hits(tmp_path):
     assert artifact["tool_name"] == "search_knowledge_base"
     assert artifact["structured_payload"]["results"][0]["source"] == "tp53.md"
     assert artifact["structured_payload"]["results"][0]["retrieval_mode"] == "vector"
+
+
+def test_claim_graph_tool_contract_reports_workflow_backed_claims(tmp_path):
+    from artifacts.schemas import SCHEMA_PACK_VERSION
+    from tools.claim_graph_tool import ClaimGraphTool
+
+    relpath = "artifacts/rna-seq-qc/2026-03-18/run-20260318T200500Z-abcddcba/run.json"
+    payload = {
+        "schema_version": SCHEMA_PACK_VERSION,
+        "artifact_type": "workflow_run",
+        "id": "workflow-run-rna-seq-qc-demo-v1",
+        "run_id": "run-20260318T200500Z-abcddcba",
+        "created_at": "2026-03-18T20:05:00Z",
+        "source_workflow": "internal-dag-runner",
+        "related_artifacts": [],
+        "workflow": {
+            "name": "RNA Seq QC",
+            "slug": "rna-seq-qc",
+        },
+        "lifecycle_status": "completed",
+        "qc_status": "warning",
+        "engine": "internal_dag_runner_v1",
+        "parameters": {"min_genes": 200},
+        "environment": {"conda_env": "miniAgent"},
+        "inputs": [],
+        "outputs": [],
+        "qc_summary": "Batch-effect warning remained after QC evaluation.",
+        "warnings": ["one donor replicate fell below the warning threshold"],
+    }
+
+    path = tmp_path / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    tool = ClaimGraphTool(base_dir=str(tmp_path))
+    summary, artifact = tool._run(
+        workflow_run_paths=[relpath],
+        include_related_artifacts=False,
+    )
+
+    assert "Built claim graph" in summary
+    assert artifact["tool_name"] == "claim_graph"
+    assert artifact["status"] == "success"
+    assert artifact["structured_payload"]["summary"]["claim_count"] == 4
+    assert artifact["structured_payload"]["summary"]["workflow_result_count"] == 1
+    assert artifact["structured_payload"]["summary"]["evidence_card_count"] == 0
+    assert artifact["metadata"]["workflow_result_count"] == 1
+    assert any(
+        node["statement"] == "Workflow RNA Seq QC reached lifecycle status completed."
+        for node in artifact["structured_payload"]["claim_nodes"]
+    )
+    assert any(
+        ref["artifact_type"] == "workflow_run" and ref["path"] == relpath
+        for ref in artifact["artifact_refs"]
+    )

@@ -13,6 +13,7 @@ from artifacts.schema_validation import validate_biocompute_payload_against_refe
 from artifacts.schemas import (  # noqa: E402
     SCHEMA_PACK_VERSION,
     BioComputeArtifact,
+    ClaimGraphArtifact,
     ComplianceReport,
     CountMatrix,
     DatasetManifest,
@@ -55,6 +56,7 @@ class TestArtifactSchemas:
             "biocompute": "json",
             "evidence_card": "yaml",
             "evidence_review": "json",
+            "claim_graph": "json",
             "entity_grounding": "json",
             "compliance_report": "json",
             "protocol_run": "yaml",
@@ -1085,6 +1087,7 @@ class TestArtifactSchemas:
             "biocompute.json": BioComputeArtifact,
             "evidence_card.yaml": EvidenceCard,
             "evidence_review.json": EvidenceReviewArtifact,
+            "claim_graph.json": ClaimGraphArtifact,
             "entity_grounding.json": EntityGroundingArtifact,
             "compliance_report.json": ComplianceReport,
             "protocol_run.yaml": ProtocolRun,

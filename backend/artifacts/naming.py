@@ -38,6 +38,7 @@ STABLE_ARTIFACT_FILENAMES: dict[str, str] = {
     "provenance": "prov.json",
     "biocompute": "biocompute.json",
     "evidence_review": "evidence_review.json",
+    "claim_graph": "claim_graph.json",
     "provenance_export": "prov.json",
     "prov": "prov.json",
     "ro_crate": "ro-crate",
@@ -434,6 +435,7 @@ class RunLayout:
                 "provenance",
                 "biocompute",
                 "ro_crate",
+                "claim_graph",
             }
         }
         return record
