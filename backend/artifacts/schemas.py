@@ -31,6 +31,7 @@ ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
     "differential_expression_run": "json",
     "workflow_run": "json",
     "provenance": "json",
+    "biocompute": "json",
     "evidence_card": "yaml",
     "compliance_report": "json",
     "protocol_run": "yaml",
@@ -1166,6 +1167,7 @@ class WorkflowRun(ArtifactDocument):
     outputs: list[ArtifactReference]
     steps: list[WorkflowStepRecord] = Field(default_factory=list)
     provenance_exports: list[str] = Field(default_factory=list)
+    biocompute_exports: list[str] = Field(default_factory=list)
     qc_policies: list[QCPolicyDefinition] = Field(default_factory=list)
     qc_policy_results: list[QCPolicyEvaluation] = Field(default_factory=list)
     qc_summary: str | None = None
@@ -1181,6 +1183,11 @@ class WorkflowRun(ArtifactDocument):
     @field_validator("provenance_exports")
     @classmethod
     def _validate_provenance_exports(cls, value: list[str]) -> list[str]:
+        return [_normalize_relative_path(item) for item in value]
+
+    @field_validator("biocompute_exports")
+    @classmethod
+    def _validate_biocompute_exports(cls, value: list[str]) -> list[str]:
         return [_normalize_relative_path(item) for item in value]
 
     @field_validator("qc_summary")
@@ -1520,6 +1527,374 @@ class ProvenanceArtifact(ArtifactDocument):
     wasGeneratedBy: list[ProvenanceGenerationRelation] = Field(default_factory=list)
     wasAssociatedWith: list[ProvenanceAssociationRelation] = Field(default_factory=list)
     conforms_to: ProvenanceConformance
+
+
+BioComputeExportStatus = Literal["full", "partial"]
+
+
+class BioComputeUri(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    uri: str
+    filename: str | None = None
+    access_time: datetime | None = None
+
+    @field_validator("uri")
+    @classmethod
+    def _validate_uri(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="uri")
+
+    @field_validator("filename")
+    @classmethod
+    def _validate_filename(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="filename")
+
+    @field_validator("access_time")
+    @classmethod
+    def _validate_access_time(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return _normalize_timestamp(value, field_name="access_time")
+
+
+class BioComputeContributor(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    contribution: list[str] = Field(min_length=1)
+    affiliation: str | None = None
+    email: str | None = None
+    orcid: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="name")
+
+    @field_validator("contribution")
+    @classmethod
+    def _validate_contribution(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="contribution") for item in value]
+
+    @field_validator("affiliation", "email", "orcid")
+    @classmethod
+    def _validate_optional_text(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class BioComputeProvenanceDomain(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    version: str
+    created: datetime
+    modified: datetime
+    contributors: list[BioComputeContributor] = Field(min_length=1)
+    license: str
+
+    @field_validator("name", "version", "license")
+    @classmethod
+    def _validate_text_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @field_validator("created", "modified")
+    @classmethod
+    def _validate_timestamps(cls, value: datetime, info) -> datetime:
+        return _normalize_timestamp(value, field_name=info.field_name)
+
+
+class BioComputeDescriptionXref(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    namespace: str
+    name: str
+    ids: list[str] = Field(default_factory=list)
+    access_time: datetime
+
+    @field_validator("namespace", "name")
+    @classmethod
+    def _validate_text_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @field_validator("ids")
+    @classmethod
+    def _validate_ids(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="ids") for item in value]
+
+    @field_validator("access_time")
+    @classmethod
+    def _validate_access_time(cls, value: datetime) -> datetime:
+        return _normalize_timestamp(value, field_name="access_time")
+
+
+class BioComputeNamedUri(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    uri: BioComputeUri
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="name")
+
+
+class BioComputePipelineStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    step_number: int = Field(ge=0)
+    name: str
+    description: str
+    version: str
+    prerequisite: list[BioComputeNamedUri] = Field(default_factory=list)
+    input_list: list[BioComputeUri] = Field(default_factory=list)
+    output_list: list[BioComputeUri] = Field(default_factory=list)
+
+    @field_validator("name", "description", "version")
+    @classmethod
+    def _validate_text_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class BioComputeDescriptionDomain(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    keywords: list[str] = Field(min_length=1)
+    xref: list[BioComputeDescriptionXref] = Field(default_factory=list)
+    platform: list[str] = Field(default_factory=list)
+    pipeline_steps: list[BioComputePipelineStep] = Field(min_length=1)
+
+    @field_validator("keywords", "platform")
+    @classmethod
+    def _validate_text_lists(cls, value: list[str], info) -> list[str]:
+        return [_require_non_empty(item, field_name=info.field_name) for item in value]
+
+
+class BioComputeExecutionScript(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    uri: BioComputeUri
+
+
+class BioComputeExternalDataEndpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    url: str
+
+    @field_validator("name", "url")
+    @classmethod
+    def _validate_text_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class BioComputeSoftwarePrerequisite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    version: str
+    uri: BioComputeUri
+
+    @field_validator("name", "version")
+    @classmethod
+    def _validate_text_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class BioComputeExecutionDomain(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    script: list[BioComputeExecutionScript] = Field(default_factory=list)
+    script_driver: str
+    software_prerequisites: list[BioComputeSoftwarePrerequisite] = Field(default_factory=list)
+    external_data_endpoints: list[BioComputeExternalDataEndpoint] = Field(default_factory=list)
+    environment_variables: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("script_driver")
+    @classmethod
+    def _validate_script_driver(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="script_driver")
+
+    @field_validator("environment_variables")
+    @classmethod
+    def _validate_environment_variables(cls, value: dict[str, str]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for key, item in value.items():
+            normalized[_require_non_empty(str(key), field_name="environment_variable")] = _require_non_empty(
+                str(item),
+                field_name="environment_variable_value",
+            )
+        return normalized
+
+
+class BioComputeParametricEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    param: str
+    value: str
+    step: str | None = None
+
+    @field_validator("param")
+    @classmethod
+    def _validate_param(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="param")
+
+    @field_validator("value")
+    @classmethod
+    def _validate_value(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="value")
+
+    @field_validator("step")
+    @classmethod
+    def _validate_step(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="step")
+
+
+class BioComputeInputSubdomainItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    uri: BioComputeUri
+
+
+class BioComputeOutputSubdomainItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mediatype: str
+    uri: BioComputeUri
+
+    @field_validator("mediatype")
+    @classmethod
+    def _validate_mediatype(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="mediatype")
+
+
+class BioComputeIODomain(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_subdomain: list[BioComputeInputSubdomainItem] = Field(default_factory=list)
+    output_subdomain: list[BioComputeOutputSubdomainItem] = Field(default_factory=list)
+
+
+class BioComputeErrorEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    description: str
+    observed: Any | None = None
+    expected: Any | None = None
+    severity: Literal["info", "warning", "error"] | None = None
+    messages: list[str] = Field(default_factory=list)
+
+    @field_validator("title", "description")
+    @classmethod
+    def _validate_text_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @field_validator("messages")
+    @classmethod
+    def _validate_messages(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="message") for item in value]
+
+
+class BioComputeErrorDomain(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    empirical_error: dict[str, BioComputeErrorEntry] = Field(min_length=1)
+    algorithmic_error: dict[str, BioComputeErrorEntry] = Field(min_length=1)
+
+    @field_validator("empirical_error", "algorithmic_error")
+    @classmethod
+    def _validate_error_maps(cls, value: dict[str, BioComputeErrorEntry], info) -> dict[str, BioComputeErrorEntry]:
+        normalized: dict[str, BioComputeErrorEntry] = {}
+        for key, item in value.items():
+            cleaned = _require_non_empty(key, field_name=info.field_name.rstrip("s"))
+            if not (cleaned.startswith("urn:") or "://" in cleaned):
+                raise ValueError(
+                    f"{info.field_name} keys must be full URIs or URNs so the BioCompute error metric is namespaced."
+                )
+            normalized[cleaned] = item
+        return normalized
+
+
+class BioComputeExtensionDomain(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    export_status: BioComputeExportStatus
+    export_warnings: list[str] = Field(default_factory=list)
+    workflow_run: ArtifactReference
+    provenance_exports: list[str] = Field(default_factory=list)
+    provenance_artifact: ArtifactReference | None = None
+    internal_references: list[ArtifactReference] = Field(default_factory=list)
+
+    @field_validator("export_warnings")
+    @classmethod
+    def _validate_export_warnings(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="export_warning") for item in value]
+
+    @field_validator("provenance_exports")
+    @classmethod
+    def _validate_provenance_exports(cls, value: list[str]) -> list[str]:
+        return [_normalize_relative_path(item) for item in value]
+
+
+class BioComputeExtensionEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    extension_schema: str
+    bioapex_extension: BioComputeExtensionDomain
+
+    @field_validator("extension_schema")
+    @classmethod
+    def _validate_extension_schema(cls, value: str) -> str:
+        cleaned = _require_non_empty(value, field_name="extension_schema")
+        if "://" not in cleaned:
+            raise ValueError("extension_schema must be an absolute URL.")
+        return cleaned
+
+
+class BioComputeArtifact(ArtifactDocument):
+    artifact_type: Literal["biocompute"] = "biocompute"
+    spec_version: str
+    object_id: str
+    type: str
+    etag: str
+    provenance_domain: BioComputeProvenanceDomain
+    usability_domain: list[str] = Field(min_length=1)
+    description_domain: BioComputeDescriptionDomain
+    execution_domain: BioComputeExecutionDomain
+    parametric_domain: list[BioComputeParametricEntry] = Field(default_factory=list)
+    io_domain: BioComputeIODomain
+    error_domain: BioComputeErrorDomain
+    extension_domain: list[BioComputeExtensionEntry] = Field(min_length=1)
+
+    @field_validator("spec_version", "object_id")
+    @classmethod
+    def _validate_text_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @field_validator("type")
+    @classmethod
+    def _validate_type(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="type")
+
+    @field_validator("etag")
+    @classmethod
+    def _validate_etag(cls, value: str) -> str:
+        cleaned = _require_non_empty(value, field_name="etag").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", cleaned):
+            raise ValueError("etag must be a 64-character lowercase hexadecimal digest.")
+        return cleaned
+
+    @field_validator("usability_domain")
+    @classmethod
+    def _validate_usability_domain(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="usability_domain") for item in value]
 
 
 class ExtractedClaim(BaseModel):
@@ -1950,6 +2325,7 @@ _ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
     "differential_expression_run": DifferentialExpressionRun,
     "workflow_run": WorkflowRun,
     "provenance": ProvenanceArtifact,
+    "biocompute": BioComputeArtifact,
     "evidence_card": EvidenceCard,
     "compliance_report": ComplianceReport,
     "protocol_run": ProtocolRun,

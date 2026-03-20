@@ -4,6 +4,7 @@ Tests for API endpoint logic that does NOT require a live LLM or embeddings.
 These tests exercise the route handlers directly instead of going through an
 in-process ASGI client, which currently hangs in this environment.
 """
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -41,6 +42,20 @@ def isolated_api_state(tmp_path):
         / "run-20260318T190203Z-deadbeef"
         / "run.json"
     ).write_text('{"artifact_type": "workflow_run"}\n', encoding="utf-8")
+    (tmp_path / "artifacts" / "reference_schemas").mkdir(parents=True, exist_ok=True)
+    (
+        tmp_path
+        / "artifacts"
+        / "reference_schemas"
+        / "biocompute_bioapex_extension.v1.schema.json"
+    ).write_text(
+        (
+            '{"$schema": "https://json-schema.org/draft/2020-12/schema", '
+            '"$id": "http://localhost:8002/api/files/raw?path=artifacts/reference_schemas/'
+            'biocompute_bioapex_extension.v1.schema.json"}\n'
+        ),
+        encoding="utf-8",
+    )
     (tmp_path / "SKILLS_SNAPSHOT.md").write_text("<available_skills/>", encoding="utf-8")
     (tmp_path / "skills").mkdir(exist_ok=True)
     (tmp_path / "skills" / "demo").mkdir(parents=True, exist_ok=True)
@@ -189,6 +204,30 @@ class TestFilesEndpoints:
 
         resp = read_file("artifacts/demo/2026-03-18/run-20260318T190203Z-deadbeef/run.json")
         assert "workflow_run" in resp["content"]
+
+    def test_read_artifact_file_raw(self, isolated_api_state):
+        from api.files import read_raw_file
+
+        resp = read_raw_file("artifacts/reference_schemas/biocompute_bioapex_extension.v1.schema.json")
+        assert resp.media_type == "application/json"
+        assert b'"$schema"' in resp.body
+
+    def test_read_artifact_reference_schema_raw_rewrites_schema_id_to_public_url(
+        self,
+        isolated_api_state,
+        monkeypatch,
+    ):
+        from api.files import read_raw_file
+
+        monkeypatch.setenv("BIOAPEX_PUBLIC_BASE_URL", "https://bioapex.example.org/base/")
+
+        resp = read_raw_file("artifacts/reference_schemas/biocompute_bioapex_extension.v1.schema.json")
+        payload = json.loads(resp.body.decode("utf-8"))
+
+        assert payload["$id"] == (
+            "https://bioapex.example.org/base/api/files/raw"
+            "?path=artifacts/reference_schemas/biocompute_bioapex_extension.v1.schema.json"
+        )
 
     def test_read_path_traversal_blocked(self, isolated_api_state):
         from api.files import read_file

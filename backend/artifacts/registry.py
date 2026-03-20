@@ -41,6 +41,7 @@ _SCHEMA_ARTIFACT_TYPES = {
     "differential_expression_run",
     "workflow_run",
     "provenance",
+    "biocompute",
     "evidence_card",
     "compliance_report",
     "protocol_run",
@@ -61,6 +62,7 @@ _ROOT_STABLE_FILENAMES_TO_TYPES: dict[str, str] = {
     "protocol_run.yaml": "protocol_run",
     "qa_report.json": "qa_report",
     "prov.json": "provenance",
+    "biocompute.json": "biocompute",
     "ro-crate": "ro_crate",
 }
 

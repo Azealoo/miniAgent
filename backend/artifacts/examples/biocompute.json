@@ -1,0 +1,354 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "biocompute",
+  "id": "biocompute-rnaseq_qc_de-run-20260318t193000z-deadbeef",
+  "run_id": "run-20260318T193000Z-deadbeef",
+  "created_at": "2026-03-18T19:37:00Z",
+  "source_workflow": "rnaseq_qc_de",
+  "related_artifacts": [
+    {
+      "artifact_type": "workflow_run",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/run.json",
+      "id": "workflow_run:run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "provenance",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/prov.json",
+      "id": "provenance-rnaseq_qc_de-run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "dataset_manifest",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+      "id": "ds-rnaseq-demo-v1",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "count_matrix",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/count_matrix.json",
+      "id": "count-matrix-rnaseq-demo-v1",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "differential_expression_results",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/differential_expression_results.json",
+      "id": "de-results-rnaseq-demo-v1",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "spec_version": "https://w3id.org/ieee/ieee-2791-schema/2791object.json",
+  "object_id": "urn:uuid:1352dad9-a904-5385-8dc8-daf849b55d0c",
+  "type": "rna_seq_differential_expression",
+  "etag": "97523f7cf26d803c02286c69754bffea068b6bc96e6671be905db5568b7a827c",
+  "provenance_domain": {
+    "name": "RNA-seq QC and Differential Expression Workflow BioCompute export",
+    "version": "1.0.0",
+    "created": "2026-03-18T19:30:00Z",
+    "modified": "2026-03-18T19:37:00Z",
+    "contributors": [
+      {
+        "name": "internal_dag_runner_v1",
+        "contribution": [
+          "createdBy"
+        ]
+      }
+    ],
+    "license": "NOASSERTION"
+  },
+  "usability_domain": [
+    "Define an explicit end-to-end RNA-seq workflow contract with dataset intake, compliance preflight, concrete FastQC raw-read QC, concrete MultiQC aggregation, deterministic count-matrix generation, explicit differential expression outputs, and report-bundle handoff artifacts.",
+    "Study 'interferon-rnaseq-pilot' uses assay 'bulk_rna_seq' in organism 'homo_sapiens'.",
+    "Reference build: 'grch38'.",
+    "Requested contrast compares 'treated' against 'control' using condition field 'condition'.",
+    "Terminal workflow status is 'completed' with QC status 'passed'."
+  ],
+  "description_domain": {
+    "keywords": [
+      "bioapex",
+      "bulk_rna_seq",
+      "rna_seq_qc",
+      "differential_expression",
+      "rnaseq_qc_de",
+      "completed",
+      "passed",
+      "homo_sapiens"
+    ],
+    "xref": [
+      {
+        "namespace": "taxonomy",
+        "name": "NCBI Taxonomy",
+        "ids": [
+          "9606"
+        ],
+        "access_time": "2026-03-18T19:37:00Z"
+      }
+    ],
+    "platform": [
+      "linux",
+      "miniAgent",
+      "internal_dag_runner_v1"
+    ],
+    "pipeline_steps": [
+      {
+        "step_number": 1,
+        "name": "Dataset Intake",
+        "description": "Dataset Intake. Recorded status: completed.",
+        "version": "1.0.0",
+        "prerequisite": [],
+        "input_list": [
+          {
+            "uri": "http://localhost:8002/api/files/raw?path=artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+            "filename": "dataset_manifest.yaml"
+          }
+        ],
+        "output_list": []
+      },
+      {
+        "step_number": 2,
+        "name": "Raw QC",
+        "description": "Raw QC. Recorded status: completed. Prerequisites: dataset_intake.",
+        "version": "1.0.0",
+        "prerequisite": [
+          {
+            "name": "dataset_intake",
+            "uri": {
+              "uri": "urn:bioapex:step:rnaseq_qc_de:dataset_intake"
+            }
+          }
+        ],
+        "input_list": [],
+        "output_list": []
+      },
+      {
+        "step_number": 3,
+        "name": "Aggregated QC",
+        "description": "Aggregated QC. Recorded status: completed. Prerequisites: raw_qc.",
+        "version": "1.0.0",
+        "prerequisite": [
+          {
+            "name": "raw_qc",
+            "uri": {
+              "uri": "urn:bioapex:step:rnaseq_qc_de:raw_qc"
+            }
+          }
+        ],
+        "input_list": [],
+        "output_list": []
+      },
+      {
+        "step_number": 4,
+        "name": "Differential Expression",
+        "description": "Differential Expression. Recorded status: completed. Prerequisites: aggregated_qc.",
+        "version": "1.0.0",
+        "prerequisite": [
+          {
+            "name": "aggregated_qc",
+            "uri": {
+              "uri": "urn:bioapex:step:rnaseq_qc_de:aggregated_qc"
+            }
+          }
+        ],
+        "input_list": [],
+        "output_list": [
+          {
+            "uri": "http://localhost:8002/api/files/raw?path=artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/count_matrix.json",
+            "filename": "count_matrix.json"
+          },
+          {
+            "uri": "http://localhost:8002/api/files/raw?path=artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/differential_expression_results.json",
+            "filename": "differential_expression_results.json"
+          }
+        ]
+      }
+    ]
+  },
+  "execution_domain": {
+    "script": [
+      {
+        "uri": {
+          "uri": "tool://fastqc",
+          "filename": "fastqc.tool"
+        }
+      },
+      {
+        "uri": {
+          "uri": "tool://multiqc",
+          "filename": "multiqc.tool"
+        }
+      },
+      {
+        "uri": {
+          "uri": "tool://bioapex_deterministic_quantification",
+          "filename": "bioapex_deterministic_quantification.tool"
+        }
+      },
+      {
+        "uri": {
+          "uri": "tool://bioapex_mean_centered_t_test",
+          "filename": "bioapex_mean_centered_t_test.tool"
+        }
+      }
+    ],
+    "script_driver": "internal_dag_runner_v1",
+    "software_prerequisites": [
+      {
+        "name": "fastqc",
+        "version": "1.0.0",
+        "uri": {
+          "uri": "tool://fastqc"
+        }
+      },
+      {
+        "name": "multiqc",
+        "version": "1.0.0",
+        "uri": {
+          "uri": "tool://multiqc"
+        }
+      },
+      {
+        "name": "bioapex_deterministic_quantification",
+        "version": "1.0.0",
+        "uri": {
+          "uri": "tool://bioapex_deterministic_quantification"
+        }
+      },
+      {
+        "name": "bioapex_mean_centered_t_test",
+        "version": "1.0.0",
+        "uri": {
+          "uri": "tool://bioapex_mean_centered_t_test"
+        }
+      }
+    ],
+    "external_data_endpoints": [],
+    "environment_variables": {
+      "CONDA_DEFAULT_ENV": "miniAgent",
+      "PLATFORM": "linux",
+      "PYTHON_VERSION": "3.11.11"
+    }
+  },
+  "parametric_domain": [
+    {
+      "param": "baseline_condition",
+      "value": "control",
+      "step": "workflow"
+    },
+    {
+      "param": "comparison_condition",
+      "value": "treated",
+      "step": "workflow"
+    },
+    {
+      "param": "condition_field",
+      "value": "condition",
+      "step": "workflow"
+    }
+  ],
+  "io_domain": {
+    "input_subdomain": [
+      {
+        "uri": {
+          "uri": "http://localhost:8002/api/files/raw?path=artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+          "filename": "dataset_manifest.yaml",
+          "access_time": "2026-03-18T19:30:00Z"
+        }
+      }
+    ],
+    "output_subdomain": [
+      {
+        "mediatype": "application/json",
+        "uri": {
+          "uri": "http://localhost:8002/api/files/raw?path=artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/count_matrix.json",
+          "filename": "count_matrix.json",
+          "access_time": "2026-03-18T19:35:00Z"
+        }
+      },
+      {
+        "mediatype": "application/json",
+        "uri": {
+          "uri": "http://localhost:8002/api/files/raw?path=artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/differential_expression_results.json",
+          "filename": "differential_expression_results.json",
+          "access_time": "2026-03-18T19:36:00Z"
+        }
+      }
+    ]
+  },
+  "error_domain": {
+    "empirical_error": {
+      "urn:bioapex:biocompute:error:observed-run-state:1.0.0": {
+        "title": "Observed workflow state",
+        "description": "Observed terminal workflow warnings and errors carried into this BioCompute export.",
+        "observed": {
+          "lifecycle_status": "completed",
+          "qc_status": "passed",
+          "warning_count": 0,
+          "error_count": 0
+        },
+        "severity": "info",
+        "messages": []
+      }
+    },
+    "algorithmic_error": {
+      "urn:bioapex:biocompute:error:export-completeness:1.0.0": {
+        "title": "Export completeness",
+        "description": "Algorithmic limits encountered while deriving the BioCompute export from canonical persisted artifacts.",
+        "observed": {
+          "export_status": "full",
+          "warning_count": 0
+        },
+        "expected": {
+          "export_status": "full",
+          "warning_count": 0
+        },
+        "severity": "info",
+        "messages": []
+      }
+    }
+  },
+  "extension_domain": [
+    {
+      "extension_schema": "http://localhost:8002/api/files/raw?path=artifacts/reference_schemas/biocompute_bioapex_extension.v1.schema.json",
+      "bioapex_extension": {
+        "export_status": "full",
+        "export_warnings": [],
+        "workflow_run": {
+          "artifact_type": "workflow_run",
+          "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/run.json",
+          "id": "workflow_run:run-20260318t193000z-deadbeef",
+          "run_id": "run-20260318T193000Z-deadbeef"
+        },
+        "provenance_exports": [
+          "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/prov.json",
+          "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/ro-crate/ro-crate-metadata.json"
+        ],
+        "provenance_artifact": {
+          "artifact_type": "provenance",
+          "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/prov.json",
+          "id": "provenance-rnaseq_qc_de-run-20260318t193000z-deadbeef",
+          "run_id": "run-20260318T193000Z-deadbeef"
+        },
+        "internal_references": [
+          {
+            "artifact_type": "dataset_manifest",
+            "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+            "id": "ds-rnaseq-demo-v1",
+            "run_id": "run-20260318T193000Z-deadbeef"
+          },
+          {
+            "artifact_type": "count_matrix",
+            "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/count_matrix.json",
+            "id": "count-matrix-rnaseq-demo-v1",
+            "run_id": "run-20260318T193000Z-deadbeef"
+          },
+          {
+            "artifact_type": "differential_expression_results",
+            "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/differential_expression_results.json",
+            "id": "de-results-rnaseq-demo-v1",
+            "run_id": "run-20260318T193000Z-deadbeef"
+          }
+        ]
+      }
+    }
+  ]
+}

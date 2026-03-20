@@ -2,12 +2,17 @@
 File read/write endpoints with path whitelist protection.
 
 GET  /api/files?path=<relative>   — read file content, including artifacts/
+GET  /api/files/raw?path=<relative> — read raw file content for whitelisted files
 POST /api/files                   — save file (Monaco editor)
 GET  /api/skills                  — list available skills
 """
+import json
+import mimetypes
 from pathlib import Path
 
+from artifacts.public_urls import public_raw_file_url
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -17,6 +22,7 @@ _READ_ALLOWED_PREFIXES = ("workspace/", "memory/", "skills/", "knowledge/", "art
 _WRITE_ALLOWED_PREFIXES = ("workspace/", "memory/", "skills/", "knowledge/")
 _ALLOWED_ROOT_FILES = {"SKILLS_SNAPSHOT.md"}
 _MAX_SAVE_BYTES = 500_000  # 500 KB limit for writes via the editor API
+_REFERENCE_SCHEMA_PREFIX = "artifacts/reference_schemas/"
 
 
 def _base_dir() -> Path:
@@ -64,6 +70,36 @@ def _check_path(relative_path: str, *, write: bool = False) -> tuple[Path, str]:
     return target, clean
 
 
+def _guess_media_type(path: Path) -> str:
+    guessed, _ = mimetypes.guess_type(path.name)
+    if guessed:
+        return guessed
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return "application/json"
+    if suffix in {".yaml", ".yml"}:
+        return "application/yaml"
+    if suffix == ".md":
+        return "text/markdown"
+    return "text/plain; charset=utf-8"
+
+
+def _read_raw_content(target: Path, clean_path: str) -> str:
+    content = target.read_text(encoding="utf-8")
+    if not clean_path.startswith(_REFERENCE_SCHEMA_PREFIX) or target.suffix.lower() != ".json":
+        return content
+
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return content
+    if not isinstance(payload, dict):
+        return content
+
+    payload["$id"] = public_raw_file_url(clean_path)
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
 # ------------------------------------------------------------------ #
 # Read                                                                 #
 # ------------------------------------------------------------------ #
@@ -79,6 +115,17 @@ def read_file(path: str = Query(..., description="Relative file path")):
 
     content = target.read_text(encoding="utf-8")
     return {"path": path, "content": content}
+
+
+@router.get("/files/raw")
+def read_raw_file(path: str = Query(..., description="Relative file path")):
+    target, clean = _check_path(path, write=False)
+    if not target.exists():
+        raise HTTPException(404, f"File not found: {path}")
+    if not target.is_file():
+        raise HTTPException(400, f"Not a file: {path}")
+
+    return Response(content=_read_raw_content(target, clean), media_type=_guess_media_type(target))
 
 
 # ------------------------------------------------------------------ #

@@ -161,6 +161,7 @@ def materialize_blocked_workflow_run(
             for step in prepared.spec.steps
         ],
         provenance_exports=[],
+        biocompute_exports=[],
         warnings=[reason],
     )
     persisted_run = runner._persist_run_document(layout, run_document)

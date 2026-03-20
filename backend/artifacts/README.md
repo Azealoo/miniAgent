@@ -32,6 +32,7 @@ Each run directory reserves these top-level locations:
 - `protocol_run.yaml`
 - `qa_report.json`
 - `prov.json`
+- `biocompute.json`
 - `ro-crate/`
 
 ## User-Supplied vs Generated Files

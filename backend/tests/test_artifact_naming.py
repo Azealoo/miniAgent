@@ -92,6 +92,7 @@ class TestArtifactNaming:
         assert stable_artifact_name("differential_expression_results") == "differential_expression_results.json"
         assert stable_artifact_name("differential_expression_run") == "differential_expression_run.json"
         assert stable_artifact_name("provenance") == "prov.json"
+        assert stable_artifact_name("biocompute") == "biocompute.json"
         assert stable_artifact_name("ro_crate") == "ro-crate"
 
     def test_user_and_generated_paths_are_separated(self):

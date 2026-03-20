@@ -35,6 +35,7 @@ STABLE_ARTIFACT_FILENAMES: dict[str, str] = {
     "protocol_run": "protocol_run.yaml",
     "qa_report": "qa_report.json",
     "provenance": "prov.json",
+    "biocompute": "biocompute.json",
     "provenance_export": "prov.json",
     "prov": "prov.json",
     "ro_crate": "ro-crate",
@@ -427,6 +428,7 @@ class RunLayout:
                 "protocol_run",
                 "qa_report",
                 "provenance",
+                "biocompute",
                 "ro_crate",
             }
         }

@@ -1,5 +1,6 @@
 """Tests for the BioAPEX core schema pack."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -8,8 +9,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from artifacts.naming import stable_artifact_name
+from artifacts.schema_validation import validate_biocompute_payload_against_reference_schemas
 from artifacts.schemas import (  # noqa: E402
     SCHEMA_PACK_VERSION,
+    BioComputeArtifact,
     ComplianceReport,
     CountMatrix,
     DatasetManifest,
@@ -46,6 +49,7 @@ class TestArtifactSchemas:
             "differential_expression_run": "json",
             "workflow_run": "json",
             "provenance": "json",
+            "biocompute": "json",
             "evidence_card": "yaml",
             "compliance_report": "json",
             "protocol_run": "yaml",
@@ -80,6 +84,10 @@ class TestArtifactSchemas:
     def test_provenance_artifact_type_uses_json_schema_format(self):
         assert artifact_model_for_type("provenance") is ProvenanceArtifact
         assert schema_format_for_artifact("provenance") == "json"
+
+    def test_biocompute_artifact_type_uses_json_schema_format(self):
+        assert artifact_model_for_type("biocompute") is BioComputeArtifact
+        assert schema_format_for_artifact("biocompute") == "json"
 
     def test_dataset_manifest_rejects_absolute_source_paths(self):
         payload = {
@@ -988,6 +996,7 @@ class TestArtifactSchemas:
             ],
             "steps": [],
             "provenance_exports": [],
+            "biocompute_exports": [],
             "warnings": ["QC thresholds should be reviewed before interpretation."],
             "warning_details": [],
         }
@@ -998,6 +1007,7 @@ class TestArtifactSchemas:
         assert run_document.qc_policy_results[0].applied_assay_override == "perturb_seq"
         assert "Technical warnings" in run_document.qc_summary
         assert run_document.summary_metrics[0].metric_name == "fastqc_pass_rate"
+        assert run_document.biocompute_exports == []
 
     def test_qc_policy_summary_distinguishes_batch_and_design_failures_from_warnings(self):
         policy = QCPolicyDefinition.model_validate(
@@ -1053,6 +1063,7 @@ class TestArtifactSchemas:
             "differential_expression_run.json": DifferentialExpressionRun,
             "run.json": WorkflowRun,
             "prov.json": ProvenanceArtifact,
+            "biocompute.json": BioComputeArtifact,
             "evidence_card.yaml": EvidenceCard,
             "compliance_report.json": ComplianceReport,
             "protocol_run.yaml": ProtocolRun,
@@ -1063,6 +1074,27 @@ class TestArtifactSchemas:
             document = load_artifact_document(EXAMPLES_DIR / filename)
             assert isinstance(document, expected_model)
             assert document.schema_version == SCHEMA_PACK_VERSION
+
+    def test_biocompute_example_uses_extension_schema_and_public_xrefs(self):
+        document = load_artifact_document(EXAMPLES_DIR / "biocompute.json")
+        extension_schema_path = (
+            Path(__file__).parent.parent
+            / "artifacts"
+            / "reference_schemas"
+            / "biocompute_bioapex_extension.v1.schema.json"
+        )
+        extension_schema_payload = json.loads(extension_schema_path.read_text(encoding="utf-8"))
+
+        assert document.error_domain.empirical_error
+        assert document.error_domain.algorithmic_error
+        assert len(document.extension_domain) == 1
+        assert document.extension_domain[0].extension_schema == extension_schema_payload["$id"]
+        assert document.description_domain.xref
+        assert {xref.namespace for xref in document.description_domain.xref} == {"taxonomy"}
+        assert all(
+            isinstance(step.step_number, int) for step in document.description_domain.pipeline_steps
+        )
+        validate_biocompute_payload_against_reference_schemas(document.model_dump(mode="json"))
 
     def test_validate_artifact_payload_dispatches_by_artifact_type(self):
         document = load_artifact_document(EXAMPLES_DIR / "run.json")

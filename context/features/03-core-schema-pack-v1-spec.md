@@ -31,7 +31,7 @@ Define the first version of the structured artifact schemas that all later workf
   - path format rules
   - identifier normalization rules
 - Make dataset manifests explicit about assay type, organism, reference build, design metadata, and privacy classification.
-- Make workflow runs explicit about inputs, outputs, engine, parameters, environment, QC status, and provenance exports.
+- Make workflow runs explicit about inputs, outputs, engine, parameters, environment, QC status, provenance exports, and any additive export pointers introduced by later artifact features.
 - Make evidence cards explicit about source database, stable identifier, extracted claims, confidence, limitations, and cached raw payload location.
 - Make compliance reports explicit about risk category, triggered rules, block status, human approval requirement, and final disposition.
 - Make protocol runs explicit about operator, sample IDs, materials, reagent lots, equipment, timestamps, deviations, and completion state.
@@ -95,7 +95,8 @@ source_files:
   "outputs": [],
   "provenance_exports": [
     "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/prov.json"
-  ]
+  ],
+  "biocompute_exports": []
 }
 ```
 

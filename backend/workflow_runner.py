@@ -38,6 +38,7 @@ from artifacts import (
     validate_artifact_payload,
     validate_artifact_root,
 )
+from artifacts.biocompute import expected_biocompute_export_paths, materialize_biocompute_bundle
 from artifacts.provenance import expected_provenance_export_paths, materialize_provenance_bundle
 from artifacts.schemas import (
     WorkflowEnvironment,
@@ -67,6 +68,7 @@ _STEP_OUTPUT_PERSISTED_STATUSES = {_STEP_COMPLETE_STATUS, "blocked"}
 _WORKFLOW_INPUT_SNAPSHOT_NAME = "workflow_inputs.json"
 _STEP_INPUT_SNAPSHOT_NAME = "resolved_inputs.json"
 _STEP_OUTPUT_SNAPSHOT_NAME = "resolved_outputs.json"
+_BIOCOMPUTE_MATERIALIZATION_WARNING_PREFIX = "Optional BioCompute export could not be materialized deterministically:"
 
 
 def _utcnow() -> datetime:
@@ -713,6 +715,7 @@ class InternalDAGRunner:
                 for step in spec.steps
             ],
             provenance_exports=[],
+            biocompute_exports=[],
             summary_metrics=[],
             warnings=[],
         )
@@ -1640,13 +1643,67 @@ class InternalDAGRunner:
         expected = expected_provenance_export_paths(layout)
         exports_exist = all(resolve_artifact_path(self.base_dir, path).exists() for path in expected)
         if not force and run_document.provenance_exports == expected and exports_exist:
-            return run_document
+            return self._materialize_terminal_biocompute_if_needed(
+                layout=layout,
+                spec=spec,
+                run_document=run_document,
+            )
         run_document.provenance_exports = materialize_provenance_bundle(
             base_dir=self.base_dir,
             layout=layout,
             run_document=run_document,
             workflow_version=spec.version,
         )
+        run_document = self._persist_run_document(layout, run_document)
+        return self._materialize_terminal_biocompute_if_needed(
+            layout=layout,
+            spec=spec,
+            run_document=run_document,
+        )
+
+    def _materialize_terminal_biocompute_if_needed(
+        self,
+        *,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        run_document: WorkflowRun,
+    ) -> WorkflowRun:
+        if run_document.lifecycle_status not in _RUN_FINAL_STATUSES:
+            return run_document
+
+        expected = expected_biocompute_export_paths(layout, workflow_id=spec.workflow_id)
+        if not expected:
+            if not run_document.biocompute_exports:
+                return run_document
+            run_document.biocompute_exports = []
+            return self._persist_run_document(layout, run_document)
+
+        exports_exist = all(resolve_artifact_path(self.base_dir, path).exists() for path in expected)
+        if run_document.biocompute_exports == expected and exports_exist:
+            return run_document
+
+        try:
+            run_document.biocompute_exports = materialize_biocompute_bundle(
+                base_dir=self.base_dir,
+                layout=layout,
+                run_document=run_document,
+                spec=spec,
+            )
+        except Exception as exc:
+            warning = f"{_BIOCOMPUTE_MATERIALIZATION_WARNING_PREFIX} {exc}"
+            run_document.warnings = [
+                existing
+                for existing in run_document.warnings
+                if not existing.startswith(_BIOCOMPUTE_MATERIALIZATION_WARNING_PREFIX)
+            ]
+            run_document.warnings.append(warning)
+            return self._persist_run_document(layout, run_document)
+
+        run_document.warnings = [
+            existing
+            for existing in run_document.warnings
+            if not existing.startswith(_BIOCOMPUTE_MATERIALIZATION_WARNING_PREFIX)
+        ]
         return self._persist_run_document(layout, run_document)
 
     def _finalize_terminal_report_bundle_if_needed(

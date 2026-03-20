@@ -12,8 +12,11 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from artifacts import load_artifact_document, resolve_artifact_path  # noqa: E402
+from artifacts.public_urls import public_raw_file_url  # noqa: E402
 from artifacts.registry import rebuild_artifact_registry  # noqa: E402
+from artifacts.schema_validation import validate_biocompute_payload_against_reference_schemas  # noqa: E402
 from artifacts.schemas import SCHEMA_PACK_VERSION  # noqa: E402
+import workflow_runner as workflow_runner_module  # noqa: E402
 from workflow_runner import InternalDAGRunner  # noqa: E402
 from workflow_specs import WORKFLOW_SPEC_VERSION, validate_workflow_spec_payload  # noqa: E402
 
@@ -836,8 +839,10 @@ def never(_inputs, context):
         assert result.run.lifecycle_status == "failed"
         assert [record.status for record in result.run.steps] == ["failed", "blocked"]
         assert result.run.provenance_exports == expected_provenance_exports
+        assert result.run.biocompute_exports == []
         assert (result.run_dir / "prov.json").exists()
         assert (result.run_dir / "ro-crate" / "ro-crate-metadata.json").exists()
+        assert not (result.run_dir / "biocompute.json").exists()
         assert provenance_payload["workflow"]["lifecycle_status"] == "failed"
         assert provenance_payload["terminal_state"]["is_partial"] is True
         assert any(
@@ -2210,10 +2215,14 @@ def launch(inputs, _context):
             f"{result.run_dir.relative_to(tmp_path).as_posix()}/prov.json",
             f"{result.run_dir.relative_to(tmp_path).as_posix()}/ro-crate/ro-crate-metadata.json",
         ]
+        expected_biocompute_exports = [
+            f"{result.run_dir.relative_to(tmp_path).as_posix()}/biocompute.json",
+        ]
         provenance_payload = json.loads((result.run_dir / "prov.json").read_text(encoding="utf-8"))
         ro_crate_payload = json.loads(
             (result.run_dir / "ro-crate" / "ro-crate-metadata.json").read_text(encoding="utf-8")
         )
+        biocompute_artifact = load_artifact_document(result.run_dir / "biocompute.json")
         content_hash_manifest = json.loads((result.run_dir / "content_hashes.json").read_text(encoding="utf-8"))
         report_bundle_markdown = (
             result.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
@@ -2287,8 +2296,10 @@ def launch(inputs, _context):
         )
         assert any(ref.artifact_type == "differential_expression_run" for ref in result.run.related_artifacts)
         assert result.run.provenance_exports == expected_provenance_exports
+        assert result.run.biocompute_exports == expected_biocompute_exports
         assert (result.run_dir / "prov.json").exists()
         assert (result.run_dir / "ro-crate" / "ro-crate-metadata.json").exists()
+        assert (result.run_dir / "biocompute.json").exists()
         assert any(
             artifact["artifact_type"] == "fastqc_run"
             for artifact in report_bundle_payload["expected_artifacts"]
@@ -2396,6 +2407,35 @@ def launch(inputs, _context):
             and entry.get("actionStatus") == "CompletedActionStatus"
             for entry in ro_crate_payload["@graph"]
         )
+        assert biocompute_artifact.type == "rna_seq_differential_expression"
+        empirical_error = biocompute_artifact.error_domain.empirical_error[
+            "urn:bioapex:biocompute:error:observed-run-state:1.0.0"
+        ]
+        algorithmic_error = biocompute_artifact.error_domain.algorithmic_error[
+            "urn:bioapex:biocompute:error:export-completeness:1.0.0"
+        ]
+        assert empirical_error.observed["warning_count"] == 0
+        assert empirical_error.observed["error_count"] == 0
+        assert algorithmic_error.observed["export_status"] == "full"
+        assert len(biocompute_artifact.extension_domain) == 1
+        assert biocompute_artifact.extension_domain[0].extension_schema == public_raw_file_url(
+            "artifacts/reference_schemas/biocompute_bioapex_extension.v1.schema.json"
+        )
+        assert biocompute_artifact.extension_domain[0].bioapex_extension.export_status == "full"
+        assert (
+            biocompute_artifact.extension_domain[0].bioapex_extension.provenance_exports
+            == expected_provenance_exports
+        )
+        assert biocompute_artifact.extension_domain[0].bioapex_extension.workflow_run.path.endswith("/run.json")
+        assert biocompute_artifact.description_domain.xref
+        assert {xref.namespace for xref in biocompute_artifact.description_domain.xref} == {"taxonomy"}
+        assert biocompute_artifact.description_domain.xref[0].ids == ["9606"]
+        assert all(
+            isinstance(step.step_number, int) for step in biocompute_artifact.description_domain.pipeline_steps
+        )
+        assert biocompute_artifact.io_domain.output_subdomain
+        assert biocompute_artifact.execution_domain.script_driver == "internal_dag_runner_v1"
+        validate_biocompute_payload_against_reference_schemas(biocompute_artifact.model_dump(mode="json"))
         assert "Differential Expression Summary" in report_bundle_markdown
         assert "## Workflow Version" in report_bundle_markdown
         assert "## QC Summary" in report_bundle_markdown
@@ -2435,6 +2475,38 @@ def launch(inputs, _context):
         assert differential_expression_metrics["missing_expected_batch_fields"] == 0
         assert differential_expression_metrics["significant_gene_count"] >= 1
 
+    def test_authored_rnaseq_workflow_uses_configured_public_base_url_for_extension_schema(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        multiqc_executable = _write_fake_multiqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+            multiqc_executable=multiqc_executable,
+        )
+        monkeypatch.setenv("BIOAPEX_PUBLIC_BASE_URL", "https://bioapex.example.org/base/")
+
+        runner = InternalDAGRunner(tmp_path)
+        result = runner.run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+        )
+
+        assert result.run.lifecycle_status == "completed"
+        biocompute_artifact = load_artifact_document(result.run_dir / "biocompute.json")
+        assert biocompute_artifact.extension_domain[0].extension_schema == public_raw_file_url(
+            "artifacts/reference_schemas/biocompute_bioapex_extension.v1.schema.json"
+        )
+
     def test_authored_rnaseq_workflow_refreshes_stale_report_bundle_when_resuming_legacy_final_run(self, tmp_path):
         spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
         fastqc_executable = _write_fake_fastqc_executable(tmp_path)
@@ -2461,11 +2533,16 @@ def launch(inputs, _context):
             f"{first.run_dir.relative_to(tmp_path).as_posix()}/prov.json",
             f"{first.run_dir.relative_to(tmp_path).as_posix()}/ro-crate/ro-crate-metadata.json",
         ]
+        expected_biocompute_exports = [
+            f"{first.run_dir.relative_to(tmp_path).as_posix()}/biocompute.json",
+        ]
         run_payload = json.loads((first.run_dir / "run.json").read_text(encoding="utf-8"))
         run_payload["provenance_exports"] = []
+        run_payload["biocompute_exports"] = []
         (first.run_dir / "run.json").write_text(json.dumps(run_payload, indent=2) + "\n", encoding="utf-8")
         (first.run_dir / "prov.json").unlink()
         shutil.rmtree(first.run_dir / "ro-crate")
+        (first.run_dir / "biocompute.json").unlink()
 
         report_bundle_path = first.run_dir / "outputs" / "generated" / "report-bundle" / "report_bundle_manifest.json"
         report_bundle_payload = json.loads(report_bundle_path.read_text(encoding="utf-8"))
@@ -2487,8 +2564,57 @@ def launch(inputs, _context):
         assert expected_provenance_exports[0] in refreshed_report_bundle_markdown
         assert "No provenance exports were materialized for this run." not in refreshed_report_bundle_markdown
         assert resumed.run.provenance_exports == expected_provenance_exports
+        assert resumed.run.biocompute_exports == expected_biocompute_exports
         assert (first.run_dir / "prov.json").exists()
         assert (first.run_dir / "ro-crate" / "ro-crate-metadata.json").exists()
+        assert (first.run_dir / "biocompute.json").exists()
+
+    def test_authored_rnaseq_workflow_clears_stale_biocompute_materialization_warnings_after_successful_resume(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        multiqc_executable = _write_fake_multiqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+            multiqc_executable=multiqc_executable,
+        )
+        failure_prefix = "Optional BioCompute export could not be materialized deterministically:"
+
+        def _failing_biocompute_bundle(*args, **kwargs):
+            raise RuntimeError("simulated bioCompute export failure")
+
+        real_materialize = workflow_runner_module.materialize_biocompute_bundle
+        monkeypatch.setattr(workflow_runner_module, "materialize_biocompute_bundle", _failing_biocompute_bundle)
+        runner = InternalDAGRunner(tmp_path)
+        first = runner.run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+        )
+
+        assert first.run.lifecycle_status == "completed"
+        assert first.run.biocompute_exports == []
+        assert not (first.run_dir / "biocompute.json").exists()
+        assert any(warning.startswith(failure_prefix) for warning in first.run.warnings)
+
+        monkeypatch.setattr(workflow_runner_module, "materialize_biocompute_bundle", real_materialize)
+        resumed = runner.run(spec_path, run_dir=first.run_dir)
+
+        assert resumed.resumed is True
+        assert resumed.run.lifecycle_status == "completed"
+        assert resumed.run.biocompute_exports == [
+            f"{first.run_dir.relative_to(tmp_path).as_posix()}/biocompute.json",
+        ]
+        assert (first.run_dir / "biocompute.json").exists()
+        assert not any(warning.startswith(failure_prefix) for warning in resumed.run.warnings)
 
     def test_authored_rnaseq_workflow_skeleton_supports_single_end_fastqc_inputs(self, tmp_path):
         spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
@@ -2652,7 +2778,11 @@ def launch(inputs, _context):
             f"{result.run_dir.relative_to(tmp_path).as_posix()}/prov.json",
             f"{result.run_dir.relative_to(tmp_path).as_posix()}/ro-crate/ro-crate-metadata.json",
         ]
+        expected_biocompute_exports = [
+            f"{result.run_dir.relative_to(tmp_path).as_posix()}/biocompute.json",
+        ]
         provenance_payload = json.loads((result.run_dir / "prov.json").read_text(encoding="utf-8"))
+        biocompute_artifact = load_artifact_document(result.run_dir / "biocompute.json")
         report_bundle_markdown = (
             result.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
         ).read_text(encoding="utf-8")
@@ -2664,8 +2794,15 @@ def launch(inputs, _context):
         assert report_bundle_payload["provenance_exports"] == expected_provenance_exports
         assert report_bundle_payload["missing_artifacts"] == []
         assert result.run.provenance_exports == expected_provenance_exports
+        assert result.run.biocompute_exports == expected_biocompute_exports
         assert provenance_payload["workflow"]["lifecycle_status"] == "blocked"
         assert provenance_payload["terminal_state"]["is_partial"] is True
+        empirical_error = biocompute_artifact.error_domain.empirical_error[
+            "urn:bioapex:biocompute:error:observed-run-state:1.0.0"
+        ]
+        assert empirical_error.observed["warning_count"] >= 1
+        assert biocompute_artifact.extension_domain[0].bioapex_extension.export_status == "full"
+        validate_biocompute_payload_against_reference_schemas(biocompute_artifact.model_dump(mode="json"))
         assert "Workflow lifecycle status: `blocked`" in report_bundle_markdown
         assert expected_provenance_exports[0] in report_bundle_markdown
 

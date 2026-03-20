@@ -11,6 +11,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from artifacts.naming import prepare_run_directory  # noqa: E402
+from artifacts.public_urls import public_raw_file_url  # noqa: E402
 from artifacts.registry import (  # noqa: E402
     ARTIFACT_REGISTRY_PATH,
     lookup_artifact_registry,
@@ -216,6 +217,169 @@ def _provenance_payload() -> dict:
     }
 
 
+def _biocompute_payload() -> dict:
+    return {
+        "schema_version": SCHEMA_PACK_VERSION,
+        "artifact_type": "biocompute",
+        "id": f"biocompute-{WORKFLOW}-{RUN_ID.lower()}",
+        "run_id": RUN_ID,
+        "created_at": "2026-03-18T19:08:00Z",
+        "source_workflow": WORKFLOW,
+        "related_artifacts": [
+            {
+                "artifact_type": "workflow_run",
+                "path": _run_dir_relpath("run.json"),
+                "id": f"workflow_run:{RUN_ID.lower()}",
+                "run_id": RUN_ID,
+            },
+            {
+                "artifact_type": "provenance",
+                "path": _run_dir_relpath("prov.json"),
+                "id": f"provenance-{WORKFLOW}-{RUN_ID.lower()}",
+                "run_id": RUN_ID,
+            },
+        ],
+        "spec_version": "https://w3id.org/ieee/ieee-2791-schema/2791object.json",
+        "object_id": "urn:uuid:5d1972ec-e66b-528d-9066-c6f63bf1af37",
+        "type": "demo_pipeline",
+        "etag": "a760bef3b98f9e2df4da72108a42bc7d91a02f1bc4387ab9d282354af9b8c398",
+        "provenance_domain": {
+            "name": "Demo Workflow BioCompute export",
+            "version": "1.0.0",
+            "created": "2026-03-18T19:02:03Z",
+            "modified": "2026-03-18T19:08:00Z",
+            "contributors": [
+                {
+                    "name": "internal_dag_runner_v1",
+                    "contribution": ["createdBy"],
+                }
+            ],
+            "license": "NOASSERTION",
+        },
+        "usability_domain": [
+            "Demonstration BioCompute export for registry coverage.",
+            "Terminal workflow status is 'completed' with QC status 'passed'.",
+        ],
+        "description_domain": {
+            "keywords": ["demo", "biocompute", WORKFLOW],
+            "xref": [
+                {
+                    "namespace": "taxonomy",
+                    "name": "NCBI Taxonomy",
+                    "ids": ["9606"],
+                    "access_time": "2026-03-18T19:08:00Z",
+                }
+            ],
+            "platform": ["linux", "internal_dag_runner_v1"],
+            "pipeline_steps": [
+                {
+                    "step_number": 1,
+                    "name": "QC",
+                    "description": "QC. Recorded status: completed.",
+                    "version": "1.0.0",
+                    "prerequisite": [],
+                    "input_list": [],
+                    "output_list": [],
+                }
+            ],
+        },
+        "execution_domain": {
+            "script": [{"uri": {"uri": "tool://internal_dag_runner_v1", "filename": "internal_dag_runner_v1.tool"}}],
+            "script_driver": "internal_dag_runner_v1",
+            "software_prerequisites": [
+                {
+                    "name": "internal_dag_runner_v1",
+                    "version": "1.0.0",
+                    "uri": {"uri": "tool://internal_dag_runner_v1"},
+                }
+            ],
+            "external_data_endpoints": [],
+            "environment_variables": {"PLATFORM": "linux"},
+        },
+        "parametric_domain": [],
+        "io_domain": {
+            "input_subdomain": [],
+            "output_subdomain": [
+                {
+                    "mediatype": "application/json",
+                    "uri": {
+                        "uri": public_raw_file_url(_run_dir_relpath("qa_report.json")),
+                        "filename": "qa_report.json",
+                        "access_time": "2026-03-18T19:05:00Z",
+                    },
+                }
+            ],
+        },
+        "error_domain": {
+            "empirical_error": {
+                "urn:bioapex:biocompute:error:observed-run-state:1.0.0": {
+                    "title": "Observed workflow state",
+                    "description": "Observed terminal workflow warnings and errors carried into this BioCompute export.",
+                    "observed": {
+                        "lifecycle_status": "completed",
+                        "qc_status": "passed",
+                        "warning_count": 0,
+                        "error_count": 0,
+                    },
+                    "severity": "info",
+                    "messages": [],
+                }
+            },
+            "algorithmic_error": {
+                "urn:bioapex:biocompute:error:export-completeness:1.0.0": {
+                    "title": "Export completeness",
+                    "description": "Algorithmic limits encountered while deriving the BioCompute export from canonical persisted artifacts.",
+                    "observed": {
+                        "export_status": "full",
+                        "warning_count": 0,
+                    },
+                    "expected": {
+                        "export_status": "full",
+                        "warning_count": 0,
+                    },
+                    "severity": "info",
+                    "messages": [],
+                }
+            },
+        },
+        "extension_domain": [
+            {
+                "extension_schema": public_raw_file_url(
+                    "artifacts/reference_schemas/biocompute_bioapex_extension.v1.schema.json"
+                ),
+                "bioapex_extension": {
+                    "export_status": "full",
+                    "export_warnings": [],
+                    "workflow_run": {
+                        "artifact_type": "workflow_run",
+                        "path": _run_dir_relpath("run.json"),
+                        "id": f"workflow_run:{RUN_ID.lower()}",
+                        "run_id": RUN_ID,
+                    },
+                    "provenance_exports": [
+                        _run_dir_relpath("prov.json"),
+                        _run_dir_relpath("ro-crate/ro-crate-metadata.json"),
+                    ],
+                    "provenance_artifact": {
+                        "artifact_type": "provenance",
+                        "path": _run_dir_relpath("prov.json"),
+                        "id": f"provenance-{WORKFLOW}-{RUN_ID.lower()}",
+                        "run_id": RUN_ID,
+                    },
+                    "internal_references": [
+                        {
+                            "artifact_type": "qa_report",
+                            "path": _run_dir_relpath("qa_report.json"),
+                            "id": f"qa-report-{RUN_ID.lower()}",
+                            "run_id": RUN_ID,
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+
 def _write_registry_fixture(base_dir: Path) -> None:
     _write_minimal_run_record(base_dir)
     _write_dataset_manifest(base_dir)
@@ -248,6 +412,7 @@ class TestArtifactRegistryService:
     def test_rebuild_indexes_reserved_generated_and_ro_crate_artifacts(self, isolated_registry_root):
         _write_json(_run_dir(isolated_registry_root) / "workflow_plan.json", _workflow_plan_payload())
         _write_json(_run_dir(isolated_registry_root) / "prov.json", _provenance_payload())
+        _write_json(_run_dir(isolated_registry_root) / "biocompute.json", _biocompute_payload())
         (_run_dir(isolated_registry_root) / "inputs" / "user").mkdir(parents=True, exist_ok=True)
         (_run_dir(isolated_registry_root) / "inputs" / "user" / "sample-sheet__patients.csv").write_text(
             "patient_id\nP1\n",
@@ -263,13 +428,14 @@ class TestArtifactRegistryService:
 
         snapshot = rebuild_artifact_registry(isolated_registry_root)
 
-        assert snapshot.record_count == 9
+        assert snapshot.record_count == 10
         assert {record.artifact_type for record in snapshot.records} >= {
             "workflow_run",
             "dataset_manifest",
             "qa_report",
             "workflow_plan",
             "provenance",
+            "biocompute",
             "user_input",
             "figure",
             "ro_crate",
@@ -350,11 +516,16 @@ class TestArtifactRegistryService:
             json.dumps(_provenance_payload(), indent=2) + "\n",
             encoding="utf-8",
         )
+        layout.stable_artifact_path("biocompute").write_text(
+            json.dumps(_biocompute_payload(), indent=2) + "\n",
+            encoding="utf-8",
+        )
 
         result = lookup_artifact_registry(tmp_path, include_invalid=True)
 
         assert {record.artifact_type for record in result.records} >= {
             "content_hash_manifest",
+            "biocompute",
             "figure",
             "provenance",
             "workflow_plan",
