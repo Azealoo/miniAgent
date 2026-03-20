@@ -22,6 +22,7 @@ from artifacts.schemas import (  # noqa: E402
     MultiQCRun,
     NormalizedCountMatrix,
     ProtocolRun,
+    ProvenanceArtifact,
     QAReport,
     WorkflowRun,
     artifact_model_for_type,
@@ -44,6 +45,7 @@ class TestArtifactSchemas:
             "differential_expression_results": "json",
             "differential_expression_run": "json",
             "workflow_run": "json",
+            "provenance": "json",
             "evidence_card": "yaml",
             "compliance_report": "json",
             "protocol_run": "yaml",
@@ -74,6 +76,10 @@ class TestArtifactSchemas:
         assert schema_format_for_artifact("normalized_count_matrix") == "json"
         assert schema_format_for_artifact("differential_expression_results") == "json"
         assert schema_format_for_artifact("differential_expression_run") == "json"
+
+    def test_provenance_artifact_type_uses_json_schema_format(self):
+        assert artifact_model_for_type("provenance") is ProvenanceArtifact
+        assert schema_format_for_artifact("provenance") == "json"
 
     def test_dataset_manifest_rejects_absolute_source_paths(self):
         payload = {
@@ -1046,6 +1052,7 @@ class TestArtifactSchemas:
             "differential_expression_results.json": DifferentialExpressionResults,
             "differential_expression_run.json": DifferentialExpressionRun,
             "run.json": WorkflowRun,
+            "prov.json": ProvenanceArtifact,
             "evidence_card.yaml": EvidenceCard,
             "compliance_report.json": ComplianceReport,
             "protocol_run.yaml": ProtocolRun,

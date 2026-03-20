@@ -1760,6 +1760,7 @@ def _build_rnaseq_report_bundle_outputs(
     comparison_condition: str,
     report_lifecycle_status: str,
 ) -> dict[str, Any]:
+    provenance_exports = _provenance_exports_for_workflow_run(context, workflow_run)
     generated_artifacts = _collect_declared_artifacts(
         raw_qc_bundle,
         aggregated_qc_bundle,
@@ -1835,7 +1836,7 @@ def _build_rnaseq_report_bundle_outputs(
             workflow_warnings=warnings,
             workflow_run_path=workflow_run_ref["path"],
             report_manifest_path=report_manifest_path,
-            provenance_exports=list(workflow_run.provenance_exports),
+            provenance_exports=provenance_exports,
             canonical_artifacts_by_type=canonical_artifacts_by_type,
             missing_artifacts=missing_artifacts,
             recommendations=recommendations,
@@ -1876,7 +1877,7 @@ def _build_rnaseq_report_bundle_outputs(
             "sections": list(_REPORT_BUNDLE_SECTIONS),
             "workflow_run_path": workflow_run_ref["path"],
             "report_markdown_path": report_bundle_relpath,
-            "provenance_exports": list(workflow_run.provenance_exports),
+            "provenance_exports": provenance_exports,
             "expected_artifacts": [
                 workflow_run_ref,
                 *canonical_output_artifacts,
@@ -1911,6 +1912,15 @@ def _build_rnaseq_report_bundle_outputs(
             "checklist_artifacts": checklist_artifacts,
         },
     }
+
+
+def _provenance_exports_for_workflow_run(context, workflow_run: WorkflowRun) -> list[str]:
+    if workflow_run.provenance_exports:
+        return list(workflow_run.provenance_exports)
+    return [
+        _run_relative_path(context, "prov.json"),
+        _run_relative_path(context, "ro-crate", "ro-crate-metadata.json"),
+    ]
 
 
 def _mapping_or_empty(value: Any) -> Mapping[str, Any]:

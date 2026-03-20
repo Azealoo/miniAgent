@@ -827,9 +827,23 @@ def never(_inputs, context):
 
         runner = InternalDAGRunner(tmp_path)
         result = runner.run(spec, {"seed": 7})
+        expected_provenance_exports = [
+            f"{result.run_dir.relative_to(tmp_path).as_posix()}/prov.json",
+            f"{result.run_dir.relative_to(tmp_path).as_posix()}/ro-crate/ro-crate-metadata.json",
+        ]
+        provenance_payload = json.loads((result.run_dir / "prov.json").read_text(encoding="utf-8"))
 
         assert result.run.lifecycle_status == "failed"
         assert [record.status for record in result.run.steps] == ["failed", "blocked"]
+        assert result.run.provenance_exports == expected_provenance_exports
+        assert (result.run_dir / "prov.json").exists()
+        assert (result.run_dir / "ro-crate" / "ro-crate-metadata.json").exists()
+        assert provenance_payload["workflow"]["lifecycle_status"] == "failed"
+        assert provenance_payload["terminal_state"]["is_partial"] is True
+        assert any(
+            activity["status"] == "failed"
+            for activity in provenance_payload["activity"].values()
+        )
         assert json.loads((tmp_path / "execution_log.json").read_text(encoding="utf-8")) == ["explode"]
         assert "boom" in result.run.steps[0].errors[0]
         assert "Blocked by prerequisite explode" in result.run.steps[1].errors[0]
@@ -2192,6 +2206,15 @@ def launch(inputs, _context):
             result.run_dir / "differential_expression_run.json"
         )
         qa_report = load_artifact_document(result.run_dir / "qa_report.json")
+        expected_provenance_exports = [
+            f"{result.run_dir.relative_to(tmp_path).as_posix()}/prov.json",
+            f"{result.run_dir.relative_to(tmp_path).as_posix()}/ro-crate/ro-crate-metadata.json",
+        ]
+        provenance_payload = json.loads((result.run_dir / "prov.json").read_text(encoding="utf-8"))
+        ro_crate_payload = json.loads(
+            (result.run_dir / "ro-crate" / "ro-crate-metadata.json").read_text(encoding="utf-8")
+        )
+        content_hash_manifest = json.loads((result.run_dir / "content_hashes.json").read_text(encoding="utf-8"))
         report_bundle_markdown = (
             result.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
         ).read_text(encoding="utf-8")
@@ -2263,6 +2286,9 @@ def launch(inputs, _context):
             ref.artifact_type == "differential_expression_results" for ref in result.run.related_artifacts
         )
         assert any(ref.artifact_type == "differential_expression_run" for ref in result.run.related_artifacts)
+        assert result.run.provenance_exports == expected_provenance_exports
+        assert (result.run_dir / "prov.json").exists()
+        assert (result.run_dir / "ro-crate" / "ro-crate-metadata.json").exists()
         assert any(
             artifact["artifact_type"] == "fastqc_run"
             for artifact in report_bundle_payload["expected_artifacts"]
@@ -2317,7 +2343,7 @@ def launch(inputs, _context):
         assert report_bundle_payload["report_markdown_path"].endswith(
             "outputs/generated/report-bundle/rnaseq_report_bundle.md"
         )
-        assert report_bundle_payload["provenance_exports"] == []
+        assert report_bundle_payload["provenance_exports"] == expected_provenance_exports
         assert report_bundle_payload["sections"] == [
             "executive_summary",
             "inputs_used",
@@ -2338,12 +2364,46 @@ def launch(inputs, _context):
             item.artifact_type == "differential_expression_results"
             for item in qa_report.checklist_artifacts
         )
+        assert provenance_payload["artifact_type"] == "provenance"
+        assert provenance_payload["workflow"]["version"] == "1.0.0"
+        assert provenance_payload["workflow"]["lifecycle_status"] == "completed"
+        assert provenance_payload["terminal_state"]["is_partial"] is False
+        assert any(
+            entity["path"] == manifest_relpath
+            and entity["hash"]["algorithm"] == "sha256"
+            and entity["hash"]["digest"]
+            for entity in provenance_payload["entity"].values()
+        )
+        assert any(
+            entity["path"].endswith("/count_matrix.json")
+            and entity["hash"]["algorithm"] == "sha256"
+            for entity in provenance_payload["entity"].values()
+        )
+        assert next(
+            entity for entity in provenance_payload["entity"].values() if entity["path"].endswith("/content_hashes.json")
+        )["hash"] is None
+        assert {item["name"] for item in provenance_payload["tool_versions"]} >= {
+            "fastqc",
+            "multiqc",
+            "bioapex_deterministic_quantification",
+            "bioapex_mean_centered_t_test",
+        }
+        assert "prov.json" in content_hash_manifest["hashes"]
+        assert "ro-crate/ro-crate-metadata.json" in content_hash_manifest["hashes"]
+        assert any(entry.get("@id") == "../prov.json" for entry in ro_crate_payload["@graph"])
+        assert any(
+            entry.get("@type") == "CreateAction"
+            and entry.get("actionStatus") == "CompletedActionStatus"
+            for entry in ro_crate_payload["@graph"]
+        )
         assert "Differential Expression Summary" in report_bundle_markdown
         assert "## Workflow Version" in report_bundle_markdown
         assert "## QC Summary" in report_bundle_markdown
         assert "Workflow lifecycle status: `completed`" in report_bundle_markdown
         assert "Workflow QC status: `passed`" in report_bundle_markdown
-        assert "No provenance exports were materialized for this run." in report_bundle_markdown
+        assert expected_provenance_exports[0] in report_bundle_markdown
+        assert expected_provenance_exports[1] in report_bundle_markdown
+        assert "No provenance exports were materialized for this run." not in report_bundle_markdown
         assert next(ref.path for ref in result.run.outputs if ref.artifact_type == "count_matrix") in report_bundle_markdown
         assert (
             next(ref.path for ref in result.run.outputs if ref.artifact_type == "differential_expression_run")
@@ -2374,6 +2434,61 @@ def launch(inputs, _context):
         assert differential_expression_metrics["minimum_condition_replicates"] == 3
         assert differential_expression_metrics["missing_expected_batch_fields"] == 0
         assert differential_expression_metrics["significant_gene_count"] >= 1
+
+    def test_authored_rnaseq_workflow_refreshes_stale_report_bundle_when_resuming_legacy_final_run(self, tmp_path):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        multiqc_executable = _write_fake_multiqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+            multiqc_executable=multiqc_executable,
+        )
+
+        runner = InternalDAGRunner(tmp_path)
+        first = runner.run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+        )
+
+        assert first.run.lifecycle_status == "completed"
+        expected_provenance_exports = [
+            f"{first.run_dir.relative_to(tmp_path).as_posix()}/prov.json",
+            f"{first.run_dir.relative_to(tmp_path).as_posix()}/ro-crate/ro-crate-metadata.json",
+        ]
+        run_payload = json.loads((first.run_dir / "run.json").read_text(encoding="utf-8"))
+        run_payload["provenance_exports"] = []
+        (first.run_dir / "run.json").write_text(json.dumps(run_payload, indent=2) + "\n", encoding="utf-8")
+        (first.run_dir / "prov.json").unlink()
+        shutil.rmtree(first.run_dir / "ro-crate")
+
+        report_bundle_path = first.run_dir / "outputs" / "generated" / "report-bundle" / "report_bundle_manifest.json"
+        report_bundle_payload = json.loads(report_bundle_path.read_text(encoding="utf-8"))
+        report_bundle_payload["value"]["provenance_exports"] = []
+        report_bundle_path.write_text(json.dumps(report_bundle_payload, indent=2) + "\n", encoding="utf-8")
+        report_bundle_markdown_path = first.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
+        report_bundle_markdown_path.write_text(
+            "# Legacy report bundle\n\n- No provenance exports were materialized for this run.\n",
+            encoding="utf-8",
+        )
+
+        resumed = runner.run(spec_path, run_dir=first.run_dir)
+
+        assert resumed.resumed is True
+        assert resumed.run.lifecycle_status == "completed"
+        refreshed_report_bundle_payload = json.loads(report_bundle_path.read_text(encoding="utf-8"))["value"]
+        refreshed_report_bundle_markdown = report_bundle_markdown_path.read_text(encoding="utf-8")
+        assert refreshed_report_bundle_payload["provenance_exports"] == expected_provenance_exports
+        assert expected_provenance_exports[0] in refreshed_report_bundle_markdown
+        assert "No provenance exports were materialized for this run." not in refreshed_report_bundle_markdown
+        assert resumed.run.provenance_exports == expected_provenance_exports
+        assert (first.run_dir / "prov.json").exists()
+        assert (first.run_dir / "ro-crate" / "ro-crate-metadata.json").exists()
 
     def test_authored_rnaseq_workflow_skeleton_supports_single_end_fastqc_inputs(self, tmp_path):
         spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
@@ -2533,6 +2648,11 @@ def launch(inputs, _context):
                 encoding="utf-8"
             )
         )["value"]
+        expected_provenance_exports = [
+            f"{result.run_dir.relative_to(tmp_path).as_posix()}/prov.json",
+            f"{result.run_dir.relative_to(tmp_path).as_posix()}/ro-crate/ro-crate-metadata.json",
+        ]
+        provenance_payload = json.loads((result.run_dir / "prov.json").read_text(encoding="utf-8"))
         report_bundle_markdown = (
             result.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
         ).read_text(encoding="utf-8")
@@ -2541,8 +2661,13 @@ def launch(inputs, _context):
         assert qa_report.missing_artifacts == []
         assert qa_report.failed_checks
         assert report_bundle_payload["lifecycle_status"] == "blocked"
+        assert report_bundle_payload["provenance_exports"] == expected_provenance_exports
         assert report_bundle_payload["missing_artifacts"] == []
+        assert result.run.provenance_exports == expected_provenance_exports
+        assert provenance_payload["workflow"]["lifecycle_status"] == "blocked"
+        assert provenance_payload["terminal_state"]["is_partial"] is True
         assert "Workflow lifecycle status: `blocked`" in report_bundle_markdown
+        assert expected_provenance_exports[0] in report_bundle_markdown
 
         blocked_event = next(event for event in events if event["type"] == "workflow_blocked")
         assert blocked_event["blocking_source"] == "qc_gate"

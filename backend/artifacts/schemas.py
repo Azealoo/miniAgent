@@ -30,6 +30,7 @@ ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
     "differential_expression_results": "json",
     "differential_expression_run": "json",
     "workflow_run": "json",
+    "provenance": "json",
     "evidence_card": "yaml",
     "compliance_report": "json",
     "protocol_run": "yaml",
@@ -1190,6 +1191,337 @@ class WorkflowRun(ArtifactDocument):
         return _require_non_empty(value, field_name="qc_summary")
 
 
+class ProvenanceHashRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    algorithm: str
+    digest: str
+
+    @field_validator("algorithm", "digest")
+    @classmethod
+    def _validate_text_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class ProvenanceBundleFormat(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    primary_package: str
+    ro_crate_version: str
+    lineage_model: str
+
+    @field_validator("primary_package", "ro_crate_version", "lineage_model")
+    @classmethod
+    def _validate_text_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class ProvenanceWorkflowSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+    name: str
+    slug: str
+    version: str | None = None
+    engine: str
+    run_record_path: str
+    lifecycle_status: WorkflowLifecycleStatus
+    qc_status: WorkflowQCStatus
+
+    @field_validator("workflow_id", "slug", "engine")
+    @classmethod
+    def _validate_normalized_fields(cls, value: str, info) -> str:
+        return _require_normalized_identifier(value, field_name=info.field_name)
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="name")
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="version")
+
+    @field_validator("run_record_path")
+    @classmethod
+    def _validate_run_record_path(cls, value: str) -> str:
+        return _normalize_relative_path(value)
+
+
+class ProvenanceTerminalState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lifecycle_status: WorkflowLifecycleStatus
+    representation: str
+    is_partial: bool
+
+    @field_validator("representation")
+    @classmethod
+    def _validate_representation(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="representation")
+
+
+class ProvenanceExportPaths(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provenance_path: str
+    ro_crate_metadata_path: str
+    exported_at: datetime
+
+    @field_validator("provenance_path", "ro_crate_metadata_path")
+    @classmethod
+    def _validate_paths(cls, value: str, info) -> str:
+        return _normalize_relative_path(value)
+
+    @field_validator("exported_at")
+    @classmethod
+    def _validate_exported_at(cls, value: datetime) -> datetime:
+        return _normalize_timestamp(value, field_name="exported_at")
+
+
+class ProvenanceEntityRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_type: str
+    path: str
+    artifact_id: str | None = None
+    run_id: str | None = None
+    roles: list[str] = Field(default_factory=list)
+    hash: ProvenanceHashRecord | None = None
+    source_workflow: str | None = None
+    source_tool: str | None = None
+    source_agent: str | None = None
+
+    @field_validator("artifact_type")
+    @classmethod
+    def _validate_artifact_type(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="artifact_type")
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: str) -> str:
+        return _normalize_relative_path(value)
+
+    @field_validator("artifact_id")
+    @classmethod
+    def _validate_artifact_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_normalized_identifier(value, field_name="artifact_id")
+
+    @field_validator("run_id")
+    @classmethod
+    def _validate_run_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not is_valid_run_id(value):
+            raise ValueError(f"Invalid run_id format: {value!r}")
+        return value
+
+    @field_validator("roles")
+    @classmethod
+    def _validate_roles(cls, value: list[str]) -> list[str]:
+        return [_require_normalized_identifier(item, field_name="roles") for item in value]
+
+    @field_validator("source_workflow")
+    @classmethod
+    def _validate_source_workflow(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_normalized_identifier(value, field_name="source_workflow")
+
+    @field_validator("source_tool", "source_agent")
+    @classmethod
+    def _validate_optional_text(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class ProvenanceActivityRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    workflow_id: str | None = None
+    workflow_name: str | None = None
+    workflow_slug: str | None = None
+    workflow_version: str | None = None
+    step_id: str | None = None
+    name: str | None = None
+    status: WorkflowLifecycleStatus
+    started_at: datetime
+    ended_at: datetime
+    used_entities: list[str] = Field(default_factory=list)
+    generated_entities: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+    @field_validator("type")
+    @classmethod
+    def _validate_type(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="type")
+
+    @field_validator("workflow_id", "workflow_slug", "step_id")
+    @classmethod
+    def _validate_optional_identifiers(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_normalized_identifier(value, field_name=info.field_name)
+
+    @field_validator("workflow_name", "workflow_version", "name")
+    @classmethod
+    def _validate_optional_text(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @field_validator("started_at", "ended_at")
+    @classmethod
+    def _validate_times(cls, value: datetime, info) -> datetime:
+        return _normalize_timestamp(value, field_name=info.field_name)
+
+    @field_validator("used_entities", "generated_entities")
+    @classmethod
+    def _validate_entity_ids(cls, value: list[str], info) -> list[str]:
+        return [_require_normalized_identifier(item, field_name=info.field_name) for item in value]
+
+    @field_validator("warnings", "errors")
+    @classmethod
+    def _validate_messages(cls, value: list[str], info) -> list[str]:
+        return [_require_non_empty(item, field_name=info.field_name) for item in value]
+
+    @model_validator(mode="after")
+    def _validate_time_order(self) -> "ProvenanceActivityRecord":
+        if self.ended_at < self.started_at:
+            raise ValueError("Provenance activity ended_at must be on or after started_at.")
+        return self
+
+
+class ProvenanceAgentRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    name: str
+    version: str | None = None
+
+    @field_validator("type")
+    @classmethod
+    def _validate_type(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="type")
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="name")
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="version")
+
+
+class ProvenanceToolVersion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    version: str | None = None
+    agent_id: str
+    source_artifact_path: str
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="name")
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="version")
+
+    @field_validator("agent_id")
+    @classmethod
+    def _validate_agent_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="agent_id")
+
+    @field_validator("source_artifact_path")
+    @classmethod
+    def _validate_source_artifact_path(cls, value: str) -> str:
+        return _normalize_relative_path(value)
+
+
+class ProvenanceUsedRelation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    activity: str
+    entity: str
+
+    @field_validator("activity", "entity")
+    @classmethod
+    def _validate_identifiers(cls, value: str, info) -> str:
+        return _require_normalized_identifier(value, field_name=info.field_name)
+
+
+class ProvenanceGenerationRelation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entity: str
+    activity: str
+
+    @field_validator("entity", "activity")
+    @classmethod
+    def _validate_identifiers(cls, value: str, info) -> str:
+        return _require_normalized_identifier(value, field_name=info.field_name)
+
+
+class ProvenanceAssociationRelation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    activity: str
+    agent: str
+    role: str
+
+    @field_validator("activity", "agent", "role")
+    @classmethod
+    def _validate_identifiers(cls, value: str, info) -> str:
+        return _require_normalized_identifier(value, field_name=info.field_name)
+
+
+class ProvenanceConformance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ro_crate: str
+    prov: str
+
+    @field_validator("ro_crate", "prov")
+    @classmethod
+    def _validate_urls(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class ProvenanceArtifact(ArtifactDocument):
+    artifact_type: Literal["provenance"] = "provenance"
+    bundle_format: ProvenanceBundleFormat
+    workflow: ProvenanceWorkflowSummary
+    terminal_state: ProvenanceTerminalState
+    environment: WorkflowEnvironment
+    tool_versions: list[ProvenanceToolVersion] = Field(default_factory=list)
+    exports: ProvenanceExportPaths
+    entity: dict[str, ProvenanceEntityRecord] = Field(default_factory=dict)
+    activity: dict[str, ProvenanceActivityRecord] = Field(default_factory=dict)
+    agent: dict[str, ProvenanceAgentRecord] = Field(default_factory=dict)
+    used: list[ProvenanceUsedRelation] = Field(default_factory=list)
+    wasGeneratedBy: list[ProvenanceGenerationRelation] = Field(default_factory=list)
+    wasAssociatedWith: list[ProvenanceAssociationRelation] = Field(default_factory=list)
+    conforms_to: ProvenanceConformance
+
+
 class ExtractedClaim(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1599,6 +1931,7 @@ ArtifactModel = (
     | DifferentialExpressionResults
     | DifferentialExpressionRun
     | WorkflowRun
+    | ProvenanceArtifact
     | EvidenceCard
     | ComplianceReport
     | ProtocolRun
@@ -1616,6 +1949,7 @@ _ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
     "differential_expression_results": DifferentialExpressionResults,
     "differential_expression_run": DifferentialExpressionRun,
     "workflow_run": WorkflowRun,
+    "provenance": ProvenanceArtifact,
     "evidence_card": EvidenceCard,
     "compliance_report": ComplianceReport,
     "protocol_run": ProtocolRun,

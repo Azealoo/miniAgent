@@ -165,10 +165,54 @@ def _provenance_payload() -> dict:
     return {
         "schema_version": SCHEMA_PACK_VERSION,
         "artifact_type": "provenance",
+        "id": f"provenance-{WORKFLOW}-{RUN_ID.lower()}",
         "run_id": RUN_ID,
         "created_at": "2026-03-18T19:07:00Z",
         "source_workflow": WORKFLOW,
-        "entities": [],
+        "related_artifacts": [
+            {
+                "artifact_type": "workflow_run",
+                "path": _run_dir_relpath("run.json"),
+                "run_id": RUN_ID,
+            }
+        ],
+        "bundle_format": {
+            "primary_package": "ro_crate",
+            "ro_crate_version": "1.2",
+            "lineage_model": "prov_compatible",
+        },
+        "workflow": {
+            "workflow_id": WORKFLOW,
+            "name": "Demo Workflow",
+            "slug": WORKFLOW,
+            "version": "1.0.0",
+            "engine": "internal_dag_runner_v1",
+            "run_record_path": _run_dir_relpath("run.json"),
+            "lifecycle_status": "completed",
+            "qc_status": "passed",
+        },
+        "terminal_state": {
+            "lifecycle_status": "completed",
+            "representation": "Completed runs include persisted inputs, outputs, and step lineage.",
+            "is_partial": False,
+        },
+        "environment": {},
+        "tool_versions": [],
+        "exports": {
+            "provenance_path": _run_dir_relpath("prov.json"),
+            "ro_crate_metadata_path": _run_dir_relpath("ro-crate/ro-crate-metadata.json"),
+            "exported_at": "2026-03-18T19:07:00Z",
+        },
+        "entity": {},
+        "activity": {},
+        "agent": {},
+        "used": [],
+        "wasGeneratedBy": [],
+        "wasAssociatedWith": [],
+        "conforms_to": {
+            "ro_crate": "https://w3id.org/ro/crate/1.2",
+            "prov": "https://www.w3.org/TR/prov-overview/",
+        },
     }
 
 

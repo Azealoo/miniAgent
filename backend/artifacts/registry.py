@@ -40,6 +40,7 @@ _SCHEMA_ARTIFACT_TYPES = {
     "differential_expression_results",
     "differential_expression_run",
     "workflow_run",
+    "provenance",
     "evidence_card",
     "compliance_report",
     "protocol_run",

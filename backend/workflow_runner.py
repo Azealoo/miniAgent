@@ -38,6 +38,7 @@ from artifacts import (
     validate_artifact_payload,
     validate_artifact_root,
 )
+from artifacts.provenance import expected_provenance_export_paths, materialize_provenance_bundle
 from artifacts.schemas import (
     WorkflowEnvironment,
     WorkflowIssueDetail,
@@ -411,7 +412,7 @@ class InternalDAGRunner:
 
         if run_document.lifecycle_status in _RUN_FINAL_STATUSES:
             step_output_values, step_output_refs = self._load_completed_step_outputs(layout, spec, run_document)
-            run_document = self._finalize_terminal_report_bundle_if_needed(
+            run_document = self._finalize_terminal_artifacts(
                 layout=layout,
                 spec=spec,
                 run_document=run_document,
@@ -419,6 +420,7 @@ class InternalDAGRunner:
                 step_output_values=step_output_values,
                 step_output_refs=step_output_refs,
                 workflow_inputs_ref=workflow_inputs_ref,
+                force_provenance_materialization=False,
             )
             emitter.done(run_document)
             return self._build_result(layout, run_document, resumed=resumed)
@@ -448,7 +450,7 @@ class InternalDAGRunner:
             run_document = self._sync_related_artifacts(run_document, workflow_inputs_ref)
             run_document = self._sync_qc_status(run_document)
             run_document = self._persist_run_document(layout, run_document)
-            run_document = self._finalize_terminal_report_bundle_if_needed(
+            run_document = self._finalize_terminal_artifacts(
                 layout=layout,
                 spec=spec,
                 run_document=run_document,
@@ -456,6 +458,7 @@ class InternalDAGRunner:
                 step_output_values=step_output_values,
                 step_output_refs=step_output_refs,
                 workflow_inputs_ref=workflow_inputs_ref,
+                force_provenance_materialization=True,
             )
             emitter.done(run_document)
             return self._build_result(layout, run_document, resumed=resumed)
@@ -546,7 +549,7 @@ class InternalDAGRunner:
             run_document = self._persist_run_document(layout, run_document)
 
         if run_document.lifecycle_status in _RUN_FINAL_STATUSES:
-            run_document = self._finalize_terminal_report_bundle_if_needed(
+            run_document = self._finalize_terminal_artifacts(
                 layout=layout,
                 spec=spec,
                 run_document=run_document,
@@ -554,6 +557,7 @@ class InternalDAGRunner:
                 step_output_values=step_output_values,
                 step_output_refs=step_output_refs,
                 workflow_inputs_ref=workflow_inputs_ref,
+                force_provenance_materialization=True,
             )
 
         emitter.done(run_document)
@@ -1580,6 +1584,71 @@ class InternalDAGRunner:
 
         return run_document
 
+    def _finalize_terminal_artifacts(
+        self,
+        *,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        run_document: WorkflowRun,
+        resolved_inputs: Mapping[str, Any],
+        step_output_values: dict[tuple[str, str], Any],
+        step_output_refs: dict[tuple[str, str], ArtifactReference],
+        workflow_inputs_ref: ArtifactReference,
+        force_provenance_materialization: bool,
+    ) -> WorkflowRun:
+        run_document, provenance_exports_changed = self._ensure_terminal_provenance_exports(layout, run_document)
+        run_document = self._finalize_terminal_report_bundle_if_needed(
+            layout=layout,
+            spec=spec,
+            run_document=run_document,
+            resolved_inputs=resolved_inputs,
+            step_output_values=step_output_values,
+            step_output_refs=step_output_refs,
+            workflow_inputs_ref=workflow_inputs_ref,
+            refresh_existing=provenance_exports_changed,
+        )
+        return self._materialize_terminal_provenance_if_needed(
+            layout=layout,
+            spec=spec,
+            run_document=run_document,
+            force=force_provenance_materialization,
+        )
+
+    def _ensure_terminal_provenance_exports(
+        self,
+        layout: RunLayout,
+        run_document: WorkflowRun,
+    ) -> tuple[WorkflowRun, bool]:
+        if run_document.lifecycle_status not in _RUN_FINAL_STATUSES:
+            return run_document, False
+        expected = expected_provenance_export_paths(layout)
+        if run_document.provenance_exports == expected:
+            return run_document, False
+        run_document.provenance_exports = list(expected)
+        return self._persist_run_document(layout, run_document), True
+
+    def _materialize_terminal_provenance_if_needed(
+        self,
+        *,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        run_document: WorkflowRun,
+        force: bool,
+    ) -> WorkflowRun:
+        if run_document.lifecycle_status not in _RUN_FINAL_STATUSES:
+            return run_document
+        expected = expected_provenance_export_paths(layout)
+        exports_exist = all(resolve_artifact_path(self.base_dir, path).exists() for path in expected)
+        if not force and run_document.provenance_exports == expected and exports_exist:
+            return run_document
+        run_document.provenance_exports = materialize_provenance_bundle(
+            base_dir=self.base_dir,
+            layout=layout,
+            run_document=run_document,
+            workflow_version=spec.version,
+        )
+        return self._persist_run_document(layout, run_document)
+
     def _finalize_terminal_report_bundle_if_needed(
         self,
         *,
@@ -1590,6 +1659,7 @@ class InternalDAGRunner:
         step_output_values: dict[tuple[str, str], Any],
         step_output_refs: dict[tuple[str, str], ArtifactReference],
         workflow_inputs_ref: ArtifactReference,
+        refresh_existing: bool,
     ) -> WorkflowRun:
         if run_document.lifecycle_status not in _RUN_FINAL_STATUSES:
             return run_document
@@ -1607,6 +1677,7 @@ class InternalDAGRunner:
             resolved_inputs=resolved_inputs,
             step_output_values=step_output_values,
             step_output_refs=step_output_refs,
+            refresh_existing=refresh_existing,
         )
         if not materialized:
             if not state_changed:
@@ -1635,6 +1706,7 @@ class InternalDAGRunner:
         resolved_inputs: Mapping[str, Any],
         step_output_values: dict[tuple[str, str], Any],
         step_output_refs: dict[tuple[str, str], ArtifactReference],
+        refresh_existing: bool,
     ) -> tuple[
         dict[tuple[str, str], Any],
         dict[tuple[str, str], ArtifactReference],
@@ -1645,7 +1717,13 @@ class InternalDAGRunner:
         report_step = next((step for step in spec.steps if step.id == "report_bundle"), None)
         if report_step is None:
             return step_output_values, step_output_refs, run_document, False, False
-        if any((report_step.id, output.name) in step_output_refs for output in report_step.outputs):
+        report_outputs_exist = any((report_step.id, output.name) in step_output_refs for output in report_step.outputs)
+        if report_outputs_exist and not self._should_refresh_existing_terminal_report_bundle(
+            report_step=report_step,
+            run_document=run_document,
+            step_output_values=step_output_values,
+            refresh_existing=refresh_existing,
+        ):
             return step_output_values, step_output_refs, run_document, False, False
         if not isinstance(report_step.executor, PythonExecutor):
             return step_output_values, step_output_refs, run_document, False, False
@@ -1715,6 +1793,26 @@ class InternalDAGRunner:
             if note not in record.warnings:
                 record.warnings.append(note)
         return step_output_values, step_output_refs, run_document, True, True
+
+    def _should_refresh_existing_terminal_report_bundle(
+        self,
+        *,
+        report_step: WorkflowStepDefinition,
+        run_document: WorkflowRun,
+        step_output_values: Mapping[tuple[str, str], Any],
+        refresh_existing: bool,
+    ) -> bool:
+        if not refresh_existing or not run_document.provenance_exports:
+            return False
+
+        manifest_value = step_output_values.get((report_step.id, "report_bundle_manifest"))
+        if not isinstance(manifest_value, Mapping):
+            return False
+
+        existing_exports = manifest_value.get("provenance_exports")
+        if not isinstance(existing_exports, list) or not all(isinstance(item, str) for item in existing_exports):
+            return False
+        return list(existing_exports) != run_document.provenance_exports
 
     def _resolve_terminal_report_bundle_inputs(
         self,
