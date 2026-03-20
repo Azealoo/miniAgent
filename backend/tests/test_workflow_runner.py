@@ -2311,6 +2311,24 @@ def launch(inputs, _context):
             artifact["path"].endswith("outputs/generated/report-bundle/rnaseq_report_bundle.md")
             for artifact in report_bundle_payload["expected_artifacts"]
         )
+        assert report_bundle_payload["bundle_version"] == "1.0.0"
+        assert report_bundle_payload["lifecycle_status"] == "completed"
+        assert report_bundle_payload["qc_status"] == "passed"
+        assert report_bundle_payload["report_markdown_path"].endswith(
+            "outputs/generated/report-bundle/rnaseq_report_bundle.md"
+        )
+        assert report_bundle_payload["provenance_exports"] == []
+        assert report_bundle_payload["sections"] == [
+            "executive_summary",
+            "inputs_used",
+            "workflow_version",
+            "qc_summary",
+            "key_outputs",
+            "warnings_and_failures",
+            "provenance_pointers",
+            "next_recommended_actions",
+        ]
+        assert report_bundle_payload["missing_artifacts"] == []
         assert qa_report.overall_status == "passed"
         assert qa_report.missing_artifacts == []
         assert qa_report.warnings == []
@@ -2323,7 +2341,9 @@ def launch(inputs, _context):
         assert "Differential Expression Summary" in report_bundle_markdown
         assert "## Workflow Version" in report_bundle_markdown
         assert "## QC Summary" in report_bundle_markdown
+        assert "Workflow lifecycle status: `completed`" in report_bundle_markdown
         assert "Workflow QC status: `passed`" in report_bundle_markdown
+        assert "No provenance exports were materialized for this run." in report_bundle_markdown
         assert next(ref.path for ref in result.run.outputs if ref.artifact_type == "count_matrix") in report_bundle_markdown
         assert (
             next(ref.path for ref in result.run.outputs if ref.artifact_type == "differential_expression_run")
@@ -2503,7 +2523,26 @@ def launch(inputs, _context):
         assert (result.run_dir / "normalized_count_matrix.json").exists()
         assert (result.run_dir / "differential_expression_results.json").exists()
         assert (result.run_dir / "differential_expression_run.json").exists()
-        assert not (result.run_dir / "qa_report.json").exists()
+        assert (result.run_dir / "qa_report.json").exists()
+        assert (result.run_dir / "outputs" / "generated" / "report-bundle" / "report_bundle_manifest.json").exists()
+        assert (result.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md").exists()
+
+        qa_report = load_artifact_document(result.run_dir / "qa_report.json")
+        report_bundle_payload = json.loads(
+            (result.run_dir / "outputs" / "generated" / "report-bundle" / "report_bundle_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )["value"]
+        report_bundle_markdown = (
+            result.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
+        ).read_text(encoding="utf-8")
+
+        assert qa_report.overall_status == "blocked"
+        assert qa_report.missing_artifacts == []
+        assert qa_report.failed_checks
+        assert report_bundle_payload["lifecycle_status"] == "blocked"
+        assert report_bundle_payload["missing_artifacts"] == []
+        assert "Workflow lifecycle status: `blocked`" in report_bundle_markdown
 
         blocked_event = next(event for event in events if event["type"] == "workflow_blocked")
         assert blocked_event["blocking_source"] == "qc_gate"
@@ -2554,7 +2593,27 @@ def launch(inputs, _context):
         assert (result.run_dir / "outputs" / "generated" / "aggregated-qc" / "multiqc_metrics.json").exists()
         assert (result.run_dir / "multiqc_run.json").exists()
         assert (result.run_dir / "multiqc_metrics.json").exists()
-        assert not (result.run_dir / "qa_report.json").exists()
+        assert (result.run_dir / "qa_report.json").exists()
+        assert (result.run_dir / "outputs" / "generated" / "report-bundle" / "report_bundle_manifest.json").exists()
+        assert (result.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md").exists()
+        qa_report = load_artifact_document(result.run_dir / "qa_report.json")
+        report_bundle_payload = json.loads(
+            (result.run_dir / "outputs" / "generated" / "report-bundle" / "report_bundle_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )["value"]
+        report_bundle_markdown = (
+            result.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
+        ).read_text(encoding="utf-8")
+        missing_artifact_types = {item.artifact_type for item in qa_report.missing_artifacts}
+        assert qa_report.overall_status == "blocked"
+        assert qa_report.failed_checks
+        assert {"count_matrix", "differential_expression_results"}.issubset(missing_artifact_types)
+        assert {
+            item["artifact_type"] for item in report_bundle_payload["missing_artifacts"]
+        } >= {"count_matrix", "differential_expression_results"}
+        assert "Workflow lifecycle status: `blocked`" in report_bundle_markdown
+        assert "Missing artifact: `count_matrix`" in report_bundle_markdown
         assert any(
             ref.artifact_type == "fastqc_run"
             and ref.path.endswith("/fastqc_run.json")
@@ -2611,10 +2670,55 @@ def launch(inputs, _context):
         assert not (result.run_dir / "fastqc_metrics.json").exists()
         assert not (result.run_dir / "multiqc_run.json").exists()
         assert not (result.run_dir / "multiqc_metrics.json").exists()
+        assert (result.run_dir / "qa_report.json").exists()
+        qa_report = load_artifact_document(result.run_dir / "qa_report.json")
+        assert qa_report.overall_status == "blocked"
+        assert {"fastqc_run", "multiqc_run"}.issubset(
+            {item.artifact_type for item in qa_report.missing_artifacts}
+        )
 
         blocked_event = next(event for event in events if event["type"] == "workflow_blocked")
         assert blocked_event["blocking_source"] == "step_failure"
         assert blocked_event["stage"] == "after_step"
+
+    def test_authored_rnaseq_workflow_materializes_terminal_report_bundle_when_manifest_cannot_be_loaded(self, tmp_path):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+
+        result = InternalDAGRunner(tmp_path).run(
+            spec_path,
+            {
+                "dataset_manifest": "manifests/missing_dataset_manifest.yaml",
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+        )
+
+        assert result.run.lifecycle_status == "blocked"
+        report_step = next(step for step in result.run.steps if step.id == "report_bundle")
+        assert report_step.status == "blocked"
+        assert any(ref.artifact_type == "workflow_value" for ref in report_step.outputs_produced)
+        assert any(ref.artifact_type == "qa_report" for ref in report_step.outputs_produced)
+        assert (result.run_dir / "qa_report.json").exists()
+        assert (result.run_dir / "outputs" / "generated" / "report-bundle" / "report_bundle_manifest.json").exists()
+        assert (result.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md").exists()
+
+        qa_report = load_artifact_document(result.run_dir / "qa_report.json")
+        report_bundle_payload = json.loads(
+            (result.run_dir / "outputs" / "generated" / "report-bundle" / "report_bundle_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )["value"]
+        report_bundle_markdown = (
+            result.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
+        ).read_text(encoding="utf-8")
+
+        assert qa_report.overall_status == "blocked"
+        assert any("dataset_manifest could not be loaded" in warning for warning in qa_report.warnings)
+        assert report_bundle_payload["study_name"] == "unknown-study"
+        assert report_bundle_payload["lifecycle_status"] == "blocked"
+        assert "Dataset manifest path: `n/a`" in report_bundle_markdown
+        assert "Dataset manifest could not be loaded for terminal bundle rendering" in report_bundle_markdown
 
     def test_authored_rnaseq_workflow_blocks_when_multiqc_execution_fails(self, tmp_path):
         spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
@@ -2648,6 +2752,12 @@ def launch(inputs, _context):
         assert (result.run_dir / "fastqc_metrics.json").exists()
         assert not (result.run_dir / "multiqc_run.json").exists()
         assert not (result.run_dir / "multiqc_metrics.json").exists()
+        assert (result.run_dir / "qa_report.json").exists()
+        qa_report = load_artifact_document(result.run_dir / "qa_report.json")
+        assert qa_report.overall_status == "blocked"
+        assert {"multiqc_run", "count_matrix"}.issubset(
+            {item.artifact_type for item in qa_report.missing_artifacts}
+        )
 
         blocked_event = next(event for event in events if event["type"] == "workflow_blocked")
         assert blocked_event["blocking_source"] == "step_failure"
@@ -2947,3 +3057,711 @@ def emit(_inputs, _context):
         assert (result.run_dir / "outputs" / "generated" / "emit" / "qa_report.json").exists()
         assert not (result.run_dir / "qa_report.json").exists()
         assert result.run.outputs[0].path.endswith("outputs/generated/emit/qa_report.json")
+
+    def test_terminal_report_bundle_materializer_preserves_literal_bindings(self, tmp_path):
+        module_name = _write_runner_module(
+            tmp_path,
+            "terminal_report_literal_demo",
+            """
+def collect(_inputs, _context):
+    return {"report_inputs": {"note": "upstream"}}
+
+
+def fail(_inputs, _context):
+    raise RuntimeError("synthetic failure")
+
+
+def materialize_terminal_report_bundle(inputs, _context):
+    return {
+        "qa_report": {
+            "overall_status": "blocked",
+            "failed_checks": [
+                {
+                    "id": "synthetic-block",
+                    "description": inputs["literal_note"],
+                    "severity": "error",
+                    "artifact_type": "workflow_run",
+                    "remediation": "retry",
+                }
+            ],
+            "warnings": [inputs["literal_note"]],
+            "missing_artifacts": [],
+            "recommended_remediation": [inputs["literal_note"]],
+            "checklist_artifacts": [],
+        },
+        "report_bundle_manifest": {
+            "literal_note": inputs["literal_note"],
+        },
+    }
+""",
+        )
+
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "terminal-report-literal-demo",
+                "version": "1.0.0",
+                "name": "Terminal Report Literal Demo",
+                "purpose": "Verify literal bindings are preserved when terminal report bundles are materialized after a blocked run.",
+                "engine": "internal_dag_runner_v1",
+                "required_inputs": [
+                    {
+                        "name": "seed",
+                        "kind": "parameter",
+                        "data_type": "integer",
+                        "description": "Seed integer for the test workflow.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": _runtime_contract(["seed"]),
+                "outputs": [
+                    {
+                        "name": "report_bundle_manifest",
+                        "kind": "value",
+                        "description": "Terminal report manifest.",
+                        "source": {
+                            "step_id": "report_bundle",
+                            "output_name": "report_bundle_manifest",
+                        },
+                    },
+                    _qa_report_output("report_bundle", "qa_report"),
+                ],
+                "qc_gates": [],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "collect",
+                        "label": "Collect",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "collect",
+                        },
+                        "inputs": [
+                            {
+                                "name": "seed",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "seed",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "report_inputs",
+                                "kind": "value",
+                                "description": "Upstream report inputs.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    },
+                    {
+                        "id": "fail",
+                        "label": "Fail",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "fail",
+                        },
+                        "inputs": [
+                            {
+                                "name": "report_inputs",
+                                "source": {
+                                    "source_type": "step_output",
+                                    "step_id": "collect",
+                                    "output_name": "report_inputs",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "unused_output",
+                                "kind": "value",
+                                "description": "Unused output because the step fails.",
+                            }
+                        ],
+                        "prerequisites": ["collect"],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    },
+                    {
+                        "id": "report_bundle",
+                        "label": "Report bundle",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "materialize_terminal_report_bundle",
+                        },
+                        "inputs": [
+                            {
+                                "name": "report_inputs",
+                                "source": {
+                                    "source_type": "step_output",
+                                    "step_id": "collect",
+                                    "output_name": "report_inputs",
+                                },
+                            },
+                            {
+                                "name": "literal_note",
+                                "source": {
+                                    "source_type": "literal",
+                                    "value": "literal-note-preserved",
+                                },
+                            },
+                        ],
+                        "outputs": [
+                            {
+                                "name": "report_bundle_manifest",
+                                "kind": "value",
+                                "description": "Terminal report manifest.",
+                            },
+                            {
+                                "name": "qa_report",
+                                "kind": "artifact",
+                                "artifact_type": "qa_report",
+                                "schema_ref": "artifact_schema:qa_report@1.0.0",
+                                "description": "Terminal QA report.",
+                            },
+                        ],
+                        "prerequisites": ["collect", "fail"],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    },
+                ],
+            }
+        )
+
+        result = InternalDAGRunner(tmp_path).run(spec, {"seed": 1})
+
+        assert result.run.lifecycle_status == "failed"
+        report_step = next(step for step in result.run.steps if step.id == "report_bundle")
+        assert report_step.status == "blocked"
+        assert any(ref.artifact_type == "qa_report" for ref in report_step.outputs_produced)
+        qa_report = load_artifact_document(result.run_dir / "qa_report.json")
+        assert qa_report.warnings == ["literal-note-preserved"]
+        manifest_payload = json.loads(
+            (result.run_dir / "outputs" / "generated" / "report-bundle" / "report_bundle_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )["value"]
+        assert manifest_payload["literal_note"] == "literal-note-preserved"
+
+    def test_terminal_report_bundle_materializer_is_idempotent_when_resuming_final_run(self, tmp_path):
+        module_name = _write_runner_module(
+            tmp_path,
+            "terminal_report_resume_demo",
+            """
+import json
+
+
+def _log(context, entry):
+    path = context.base_dir / "terminal_report_log.json"
+    entries = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    entries.append(entry)
+    path.write_text(json.dumps(entries), encoding="utf-8")
+
+
+def collect(_inputs, _context):
+    return {"report_inputs": {"note": "upstream"}}
+
+
+def fail(_inputs, _context):
+    raise RuntimeError("synthetic failure")
+
+
+def materialize_terminal_report_bundle(inputs, context):
+    _log(context, inputs["literal_note"])
+    return {
+        "qa_report": {
+            "overall_status": "failed",
+            "failed_checks": [
+                {
+                    "id": "synthetic-failure",
+                    "description": inputs["literal_note"],
+                    "severity": "critical",
+                    "artifact_type": "workflow_run",
+                    "remediation": "retry",
+                }
+            ],
+            "warnings": [inputs["literal_note"]],
+            "missing_artifacts": [],
+            "recommended_remediation": [inputs["literal_note"]],
+            "checklist_artifacts": [],
+        },
+        "report_bundle_manifest": {
+            "literal_note": inputs["literal_note"],
+        },
+    }
+""",
+        )
+
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "terminal-report-resume-demo",
+                "version": "1.0.0",
+                "name": "Terminal Report Resume Demo",
+                "purpose": "Verify terminal report materialization is not re-run when resuming a final workflow.",
+                "engine": "internal_dag_runner_v1",
+                "required_inputs": [
+                    {
+                        "name": "seed",
+                        "kind": "parameter",
+                        "data_type": "integer",
+                        "description": "Seed integer for the test workflow.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": _runtime_contract(["seed"]),
+                "outputs": [
+                    {
+                        "name": "report_bundle_manifest",
+                        "kind": "value",
+                        "description": "Terminal report manifest.",
+                        "source": {
+                            "step_id": "report_bundle",
+                            "output_name": "report_bundle_manifest",
+                        },
+                    },
+                    _qa_report_output("report_bundle", "qa_report"),
+                ],
+                "qc_gates": [],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "collect",
+                        "label": "Collect",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "collect",
+                        },
+                        "inputs": [
+                            {
+                                "name": "seed",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "seed",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "report_inputs",
+                                "kind": "value",
+                                "description": "Upstream report inputs.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    },
+                    {
+                        "id": "fail",
+                        "label": "Fail",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "fail",
+                        },
+                        "inputs": [
+                            {
+                                "name": "report_inputs",
+                                "source": {
+                                    "source_type": "step_output",
+                                    "step_id": "collect",
+                                    "output_name": "report_inputs",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "unused_output",
+                                "kind": "value",
+                                "description": "Unused output because the step fails.",
+                            }
+                        ],
+                        "prerequisites": ["collect"],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    },
+                    {
+                        "id": "report_bundle",
+                        "label": "Report bundle",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "materialize_terminal_report_bundle",
+                        },
+                        "inputs": [
+                            {
+                                "name": "report_inputs",
+                                "source": {
+                                    "source_type": "step_output",
+                                    "step_id": "collect",
+                                    "output_name": "report_inputs",
+                                },
+                            },
+                            {
+                                "name": "literal_note",
+                                "source": {
+                                    "source_type": "literal",
+                                    "value": "terminal-report-ran-once",
+                                },
+                            },
+                        ],
+                        "outputs": [
+                            {
+                                "name": "report_bundle_manifest",
+                                "kind": "value",
+                                "description": "Terminal report manifest.",
+                            },
+                            {
+                                "name": "qa_report",
+                                "kind": "artifact",
+                                "artifact_type": "qa_report",
+                                "schema_ref": "artifact_schema:qa_report@1.0.0",
+                                "description": "Terminal QA report.",
+                            },
+                        ],
+                        "prerequisites": ["collect", "fail"],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    },
+                ],
+            }
+        )
+
+        runner = InternalDAGRunner(tmp_path)
+        first = runner.run(spec, {"seed": 1})
+        resumed = runner.run(spec, run_dir=first.run_dir)
+
+        assert first.run.lifecycle_status == "failed"
+        assert resumed.resumed is True
+        assert resumed.run.lifecycle_status == "failed"
+        assert json.loads((tmp_path / "terminal_report_log.json").read_text(encoding="utf-8")) == [
+            "terminal-report-ran-once"
+        ]
+        report_step = next(step for step in resumed.run.steps if step.id == "report_bundle")
+        assert report_step.status == "blocked"
+        assert any(ref.artifact_type == "qa_report" for ref in report_step.outputs_produced)
+
+    def test_terminal_report_bundle_materializer_persists_warning_when_helper_fails(self, tmp_path):
+        module_name = _write_runner_module(
+            tmp_path,
+            "terminal_report_warning_demo",
+            """
+def collect(_inputs, _context):
+    return {"report_inputs": {"note": "upstream"}}
+
+
+def fail(_inputs, _context):
+    raise RuntimeError("synthetic failure")
+
+
+def materialize_terminal_report_bundle(_inputs, _context):
+    raise RuntimeError("synthetic terminal helper failure")
+""",
+        )
+
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "terminal-report-warning-demo",
+                "version": "1.0.0",
+                "name": "Terminal Report Warning Demo",
+                "purpose": "Verify terminal report helper failures are persisted into the canonical run record.",
+                "engine": "internal_dag_runner_v1",
+                "required_inputs": [
+                    {
+                        "name": "seed",
+                        "kind": "parameter",
+                        "data_type": "integer",
+                        "description": "Seed integer for the test workflow.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": _runtime_contract(["seed"]),
+                "outputs": [
+                    {
+                        "name": "report_bundle_manifest",
+                        "kind": "value",
+                        "description": "Terminal report manifest.",
+                        "source": {
+                            "step_id": "report_bundle",
+                            "output_name": "report_bundle_manifest",
+                        },
+                    },
+                    _qa_report_output("report_bundle", "qa_report"),
+                ],
+                "qc_gates": [],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "collect",
+                        "label": "Collect",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "collect",
+                        },
+                        "inputs": [
+                            {
+                                "name": "seed",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "seed",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "report_inputs",
+                                "kind": "value",
+                                "description": "Upstream report inputs.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    },
+                    {
+                        "id": "fail",
+                        "label": "Fail",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "fail",
+                        },
+                        "inputs": [
+                            {
+                                "name": "report_inputs",
+                                "source": {
+                                    "source_type": "step_output",
+                                    "step_id": "collect",
+                                    "output_name": "report_inputs",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "unused_output",
+                                "kind": "value",
+                                "description": "Unused output because the step fails.",
+                            }
+                        ],
+                        "prerequisites": ["collect"],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    },
+                    {
+                        "id": "report_bundle",
+                        "label": "Report bundle",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "materialize_terminal_report_bundle",
+                        },
+                        "inputs": [
+                            {
+                                "name": "report_inputs",
+                                "source": {
+                                    "source_type": "step_output",
+                                    "step_id": "collect",
+                                    "output_name": "report_inputs",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "report_bundle_manifest",
+                                "kind": "value",
+                                "description": "Terminal report manifest.",
+                            },
+                            {
+                                "name": "qa_report",
+                                "kind": "artifact",
+                                "artifact_type": "qa_report",
+                                "schema_ref": "artifact_schema:qa_report@1.0.0",
+                                "description": "Terminal QA report.",
+                            },
+                        ],
+                        "prerequisites": ["collect", "fail"],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    },
+                ],
+            }
+        )
+
+        result = InternalDAGRunner(tmp_path).run(spec, {"seed": 1})
+
+        assert result.run.lifecycle_status == "failed"
+        assert any(
+            "synthetic terminal helper failure" in warning for warning in result.run.warnings
+        )
+        persisted_run = load_artifact_document(result.artifact_path)
+        assert any(
+            "synthetic terminal helper failure" in warning for warning in persisted_run.warnings
+        )
+        report_step = next(step for step in persisted_run.steps if step.id == "report_bundle")
+        assert any(
+            "synthetic terminal helper failure" in warning for warning in report_step.warnings
+        )
+
+    def test_terminal_report_bundle_materializer_marks_ready_step_blocked_after_preflight_block(self, tmp_path):
+        module_name = _write_runner_module(
+            tmp_path,
+            "terminal_report_preflight_demo",
+            """
+def materialize_terminal_report_bundle(inputs, _context):
+    return {
+        "qa_report": {
+            "overall_status": "blocked",
+            "failed_checks": [
+                {
+                    "id": "preflight-block",
+                    "description": inputs["literal_note"],
+                    "severity": "error",
+                    "artifact_type": "workflow_run",
+                    "remediation": "retry",
+                }
+            ],
+            "warnings": [inputs["literal_note"]],
+            "missing_artifacts": [],
+            "recommended_remediation": [inputs["literal_note"]],
+            "checklist_artifacts": [],
+        },
+        "report_bundle_manifest": {
+            "literal_note": inputs["literal_note"],
+        },
+    }
+""",
+        )
+
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "terminal-report-preflight-demo",
+                "version": "1.0.0",
+                "name": "Terminal Report Preflight Demo",
+                "purpose": "Verify terminal report materialization updates a ready report step after a preflight block.",
+                "engine": "internal_dag_runner_v1",
+                "required_inputs": [
+                    {
+                        "name": "seed",
+                        "kind": "parameter",
+                        "data_type": "integer",
+                        "description": "Seed integer for the test workflow.",
+                    }
+                ],
+                "optional_inputs": [
+                    {
+                        "name": "dataset_manifest",
+                        "kind": "artifact",
+                        "artifact_type": "dataset_manifest",
+                        "schema_ref": "artifact_schema:dataset_manifest@1.0.0",
+                        "description": "Optional manifest gate target.",
+                    }
+                ],
+                "runtime": {
+                    "provided_inputs": ["seed", "dataset_manifest"],
+                    "allowed_parameter_overrides": ["seed"],
+                    "generated_state": [
+                        "run_id",
+                        "created_at",
+                        "resolved_input_paths",
+                        "step_statuses",
+                        "artifact_paths",
+                    ],
+                    "state_artifact": "workflow_run",
+                    "artifact_root_template": "artifacts/{workflow_id}/{date}/{run_id}",
+                },
+                "outputs": [
+                    {
+                        "name": "report_bundle_manifest",
+                        "kind": "value",
+                        "description": "Terminal report manifest.",
+                        "source": {
+                            "step_id": "report_bundle",
+                            "output_name": "report_bundle_manifest",
+                        },
+                    },
+                    _qa_report_output("report_bundle", "qa_report"),
+                ],
+                "qc_gates": [
+                    {
+                        "id": "dataset-manifest-required",
+                        "label": "Dataset manifest required",
+                        "when": "before_execution",
+                        "target": {
+                            "source_type": "workflow_input",
+                            "input_name": "dataset_manifest",
+                        },
+                        "failure_policy": "block",
+                        "description": "Block execution while the manifest is missing.",
+                    }
+                ],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "report_bundle",
+                        "label": "Report bundle",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "materialize_terminal_report_bundle",
+                        },
+                        "inputs": [
+                            {
+                                "name": "seed",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "seed",
+                                },
+                            },
+                            {
+                                "name": "literal_note",
+                                "source": {
+                                    "source_type": "literal",
+                                    "value": "preflight-note",
+                                },
+                            },
+                        ],
+                        "outputs": [
+                            {
+                                "name": "report_bundle_manifest",
+                                "kind": "value",
+                                "description": "Terminal report manifest.",
+                            },
+                            {
+                                "name": "qa_report",
+                                "kind": "artifact",
+                                "artifact_type": "qa_report",
+                                "schema_ref": "artifact_schema:qa_report@1.0.0",
+                                "description": "Terminal QA report.",
+                            },
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    }
+                ],
+            }
+        )
+
+        result = InternalDAGRunner(tmp_path).run(spec, {"seed": 1})
+
+        assert result.run.lifecycle_status == "blocked"
+        report_step = next(step for step in result.run.steps if step.id == "report_bundle")
+        assert report_step.status == "blocked"
+        assert report_step.start_time is not None
+        assert report_step.end_time is not None
+        assert any(ref.artifact_type == "workflow_value" for ref in report_step.outputs_produced)
+        assert any(ref.artifact_type == "qa_report" for ref in report_step.outputs_produced)

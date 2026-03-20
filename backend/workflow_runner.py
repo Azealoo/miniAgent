@@ -62,6 +62,7 @@ from workflow_streaming import WORKFLOW_EVENT_CONTRACT_VERSION, normalize_workfl
 _RUN_FINAL_STATUSES = {"completed", "failed", "blocked"}
 _STEP_READY_STATUS = {"created", "waiting"}
 _STEP_COMPLETE_STATUS = "completed"
+_STEP_OUTPUT_PERSISTED_STATUSES = {_STEP_COMPLETE_STATUS, "blocked"}
 _WORKFLOW_INPUT_SNAPSHOT_NAME = "workflow_inputs.json"
 _STEP_INPUT_SNAPSHOT_NAME = "resolved_inputs.json"
 _STEP_OUTPUT_SNAPSHOT_NAME = "resolved_outputs.json"
@@ -409,6 +410,16 @@ class InternalDAGRunner:
         emitter.artifact(self._run_record_ref(layout), scope="run_record")
 
         if run_document.lifecycle_status in _RUN_FINAL_STATUSES:
+            step_output_values, step_output_refs = self._load_completed_step_outputs(layout, spec, run_document)
+            run_document = self._finalize_terminal_report_bundle_if_needed(
+                layout=layout,
+                spec=spec,
+                run_document=run_document,
+                resolved_inputs=resolved_inputs,
+                step_output_values=step_output_values,
+                step_output_refs=step_output_refs,
+                workflow_inputs_ref=workflow_inputs_ref,
+            )
             emitter.done(run_document)
             return self._build_result(layout, run_document, resumed=resumed)
 
@@ -437,6 +448,15 @@ class InternalDAGRunner:
             run_document = self._sync_related_artifacts(run_document, workflow_inputs_ref)
             run_document = self._sync_qc_status(run_document)
             run_document = self._persist_run_document(layout, run_document)
+            run_document = self._finalize_terminal_report_bundle_if_needed(
+                layout=layout,
+                spec=spec,
+                run_document=run_document,
+                resolved_inputs=resolved_inputs,
+                step_output_values=step_output_values,
+                step_output_refs=step_output_refs,
+                workflow_inputs_ref=workflow_inputs_ref,
+            )
             emitter.done(run_document)
             return self._build_result(layout, run_document, resumed=resumed)
 
@@ -524,6 +544,17 @@ class InternalDAGRunner:
                 run_document.lifecycle_status = "waiting"
             run_document = self._sync_qc_status(run_document)
             run_document = self._persist_run_document(layout, run_document)
+
+        if run_document.lifecycle_status in _RUN_FINAL_STATUSES:
+            run_document = self._finalize_terminal_report_bundle_if_needed(
+                layout=layout,
+                spec=spec,
+                run_document=run_document,
+                resolved_inputs=resolved_inputs,
+                step_output_values=step_output_values,
+                step_output_refs=step_output_refs,
+                workflow_inputs_ref=workflow_inputs_ref,
+            )
 
         emitter.done(run_document)
         return self._build_result(layout, run_document, resumed=resumed)
@@ -909,7 +940,7 @@ class InternalDAGRunner:
         steps_by_id = {step.id: step for step in spec.steps}
 
         for record in run_document.steps:
-            if record.status != _STEP_COMPLETE_STATUS:
+            if record.status not in _STEP_OUTPUT_PERSISTED_STATUSES:
                 continue
             step = steps_by_id[record.id]
             snapshot = self._load_step_output_snapshot(layout, step.id)
@@ -1186,6 +1217,14 @@ class InternalDAGRunner:
             return getattr(module, function_name)
         except AttributeError as exc:
             raise ValueError(f"Python executor function {function_name!r} was not found in {module_name!r}.") from exc
+
+    def _load_optional_python_callable(self, search_root: Path, module_name: str, function_name: str):
+        try:
+            return self._load_python_callable(search_root, module_name, function_name)
+        except ValueError as exc:
+            if "was not found" in str(exc):
+                return None
+            raise
 
     def _invoke_python_callable(
         self,
@@ -1540,6 +1579,166 @@ class InternalDAGRunner:
                 return run_document
 
         return run_document
+
+    def _finalize_terminal_report_bundle_if_needed(
+        self,
+        *,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        run_document: WorkflowRun,
+        resolved_inputs: Mapping[str, Any],
+        step_output_values: dict[tuple[str, str], Any],
+        step_output_refs: dict[tuple[str, str], ArtifactReference],
+        workflow_inputs_ref: ArtifactReference,
+    ) -> WorkflowRun:
+        if run_document.lifecycle_status not in _RUN_FINAL_STATUSES:
+            return run_document
+
+        (
+            step_output_values,
+            step_output_refs,
+            run_document,
+            materialized,
+            state_changed,
+        ) = self._maybe_materialize_terminal_report_bundle(
+            layout=layout,
+            spec=spec,
+            run_document=run_document,
+            resolved_inputs=resolved_inputs,
+            step_output_values=step_output_values,
+            step_output_refs=step_output_refs,
+        )
+        if not materialized:
+            if not state_changed:
+                return run_document
+            run_document = self._sync_qc_status(run_document)
+            return self._persist_run_document(layout, run_document)
+        run_document = self._sync_workflow_outputs(
+            layout,
+            spec,
+            run_document,
+            step_output_values,
+            step_output_refs,
+            materialize_final_artifacts=True,
+            emitter=None,
+        )
+        run_document = self._sync_related_artifacts(run_document, workflow_inputs_ref)
+        run_document = self._sync_qc_status(run_document)
+        return self._persist_run_document(layout, run_document)
+
+    def _maybe_materialize_terminal_report_bundle(
+        self,
+        *,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        run_document: WorkflowRun,
+        resolved_inputs: Mapping[str, Any],
+        step_output_values: dict[tuple[str, str], Any],
+        step_output_refs: dict[tuple[str, str], ArtifactReference],
+    ) -> tuple[
+        dict[tuple[str, str], Any],
+        dict[tuple[str, str], ArtifactReference],
+        WorkflowRun,
+        bool,
+        bool,
+    ]:
+        report_step = next((step for step in spec.steps if step.id == "report_bundle"), None)
+        if report_step is None:
+            return step_output_values, step_output_refs, run_document, False, False
+        if any((report_step.id, output.name) in step_output_refs for output in report_step.outputs):
+            return step_output_values, step_output_refs, run_document, False, False
+        if not isinstance(report_step.executor, PythonExecutor):
+            return step_output_values, step_output_refs, run_document, False, False
+
+        callable_obj = self._load_optional_python_callable(
+            layout.base_dir,
+            report_step.executor.module,
+            "materialize_terminal_report_bundle",
+        )
+        if callable_obj is None:
+            return step_output_values, step_output_refs, run_document, False, False
+
+        record = self._step_record(run_document, report_step.id)
+        try:
+            context = StepExecutionContext(
+                base_dir=self.base_dir,
+                run_dir=layout.run_dir,
+                relative_run_dir=layout.relative_run_dir,
+                run_id=layout.run_id,
+                created_at=layout.created_at,
+                workflow_id=spec.workflow_id,
+                step_id=report_step.id,
+            )
+            raw_outputs = self._invoke_python_callable(
+                callable_obj,
+                self._resolve_terminal_report_bundle_inputs(report_step, resolved_inputs, step_output_values),
+                context,
+            )
+            if raw_outputs is None:
+                return step_output_values, step_output_refs, run_document, False, False
+
+            output_values = self._normalize_executor_outputs(report_step, raw_outputs)
+            output_refs: list[ArtifactReference] = []
+            snapshot_payload: dict[str, Any] = {}
+            for output in report_step.outputs:
+                ref, persisted_value = self._persist_step_output(
+                    layout=layout,
+                    spec=spec,
+                    step=report_step,
+                    output_name=output.name,
+                    output_kind=output.kind,
+                    artifact_type=output.artifact_type,
+                    raw_value=output_values[output.name],
+                )
+                step_output_values[(report_step.id, output.name)] = persisted_value
+                step_output_refs[(report_step.id, output.name)] = ref
+                output_refs.append(ref)
+                snapshot_payload[output.name] = ref.model_dump(mode="json")
+            self._persist_step_output_snapshot(layout, report_step.id, snapshot_payload)
+        except Exception as exc:
+            warning = f"Terminal report bundle could not be materialized deterministically: {exc}"
+            if warning not in run_document.warnings:
+                run_document.warnings.append(warning)
+            if warning not in record.warnings:
+                record.warnings.append(warning)
+            return step_output_values, step_output_refs, run_document, False, True
+
+        record.outputs_produced = self._dedupe_refs([*record.outputs_produced, *output_refs])
+        if record.status in _STEP_READY_STATUS:
+            record.status = "completed" if run_document.lifecycle_status == "completed" else "blocked"
+        if record.start_time is None:
+            record.start_time = _utcnow()
+        if record.end_time is None:
+            record.end_time = record.start_time
+        if record.status != "completed":
+            note = "Terminal report bundle materialized after the workflow reached a terminal state."
+            if note not in record.warnings:
+                record.warnings.append(note)
+        return step_output_values, step_output_refs, run_document, True, True
+
+    def _resolve_terminal_report_bundle_inputs(
+        self,
+        step: WorkflowStepDefinition,
+        resolved_inputs: Mapping[str, Any],
+        step_output_values: Mapping[tuple[str, str], Any],
+    ) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        for binding in step.inputs:
+            source = binding.source
+            if isinstance(source, WorkflowInputSource):
+                if source.input_name in resolved_inputs:
+                    values[binding.name] = resolved_inputs[source.input_name]
+                continue
+            if isinstance(source, StepOutputSource):
+                key = (source.step_id, source.output_name)
+                if key in step_output_values:
+                    values[binding.name] = step_output_values[key]
+                continue
+            if isinstance(source, LiteralBindingSource):
+                values[binding.name] = source.value
+                continue
+            raise ValueError(f"Unsupported binding source for terminal report bundle step {step.id}.")
+        return values
 
     def _qc_gate_applies_to_step(
         self,

@@ -37,6 +37,8 @@ _DIFFERENTIAL_EXPRESSION_ENGINE = "bioapex_mean_centered_t_test"
 _ENGINE_VERSION = "1.0.0"
 _DE_SIGNIFICANCE_THRESHOLD = 0.05
 _DE_LOG2_EFFECT_FLOOR = 1.0
+_REPORT_BUNDLE_STEP_ID = "report_bundle"
+_REPORT_BUNDLE_FILENAME = "rnaseq_report_bundle.md"
 _REPORT_BUNDLE_WORKFLOW_OUTPUT_ARTIFACT_TYPES: tuple[str, ...] = (
     "fastqc_run",
     "fastqc_metrics",
@@ -46,6 +48,16 @@ _REPORT_BUNDLE_WORKFLOW_OUTPUT_ARTIFACT_TYPES: tuple[str, ...] = (
     "normalized_count_matrix",
     "differential_expression_results",
     "differential_expression_run",
+)
+_REPORT_BUNDLE_SECTIONS: tuple[str, ...] = (
+    "executive_summary",
+    "inputs_used",
+    "workflow_version",
+    "qc_summary",
+    "key_outputs",
+    "warnings_and_failures",
+    "provenance_pointers",
+    "next_recommended_actions",
 )
 _DE_GENE_PANEL: tuple[dict[str, Any], ...] = (
     {
@@ -941,124 +953,58 @@ def plan_differential_expression(inputs, context):
 
 
 def build_report_bundle(inputs, context):
-    manifest = _load_manifest(context, inputs["dataset_manifest"])
+    manifest_path = str(inputs["dataset_manifest"])
+    manifest = _load_manifest(context, manifest_path)
     workflow_run = _load_workflow_run_document(context)
-    generated_artifacts = _collect_declared_artifacts(
-        inputs["raw_qc_bundle"],
-        inputs["aggregated_qc_bundle"],
-        inputs["quantification_bundle"],
-        inputs["differential_expression_bundle"],
-        field_name="generated_artifacts",
-    )
-    canonical_output_artifacts = _canonical_artifact_refs(
-        context,
-        artifact_types=_REPORT_BUNDLE_WORKFLOW_OUTPUT_ARTIFACT_TYPES,
-    )
-    workflow_run_ref = _canonical_artifact_ref(context, "workflow_run")
-    supplementary_generated_artifacts = _filter_artifacts_excluding_types(
-        generated_artifacts,
-        excluded_artifact_types=set(_REPORT_BUNDLE_WORKFLOW_OUTPUT_ARTIFACT_TYPES),
-    )
-    warnings = list(workflow_run.warnings)
-    overall_status = _qa_overall_status_from_workflow_qc(workflow_run.qc_status, warnings=warnings)
-    qa_report_path = _run_relative_path(context, "qa_report.json")
-    report_manifest_path = _generated_output_path(context, "report_bundle_manifest.json", step="report_bundle")
-    canonical_artifacts_by_type = {
-        artifact["artifact_type"]: artifact for artifact in canonical_output_artifacts
-    }
-    report_bundle_relpath = _write_generated_text(
-        context,
-        step="report_bundle",
-        filename="rnaseq_report_bundle.md",
-        content=_render_rnaseq_report_bundle(
-            manifest=manifest,
-            raw_qc_bundle=inputs["raw_qc_bundle"],
-            aggregated_qc_bundle=inputs["aggregated_qc_bundle"],
-            quantification_bundle=inputs["quantification_bundle"],
-            differential_expression_bundle=inputs["differential_expression_bundle"],
-            condition_field=str(inputs["condition_field"]).strip(),
-            baseline_condition=str(inputs["baseline_condition"]).strip(),
-            comparison_condition=str(inputs["comparison_condition"]).strip(),
-            run_id=context.run_id,
-            workflow_version=_RNASEQ_WORKFLOW_VERSION,
-            workflow_qc_status=overall_status,
-            workflow_warnings=warnings,
-            workflow_run_path=workflow_run_ref["path"],
-            report_manifest_path=report_manifest_path,
-            canonical_count_matrix_ref=canonical_artifacts_by_type["count_matrix"],
-            canonical_normalized_count_matrix_ref=canonical_artifacts_by_type["normalized_count_matrix"],
-            canonical_de_results_ref=canonical_artifacts_by_type["differential_expression_results"],
-            canonical_de_run_ref=canonical_artifacts_by_type["differential_expression_run"],
-        ),
-    )
-    checklist_artifacts = _dedupe_artifacts(
-        [
-            {
-                "artifact_type": "dataset_manifest",
-                "path": context.relative_path(inputs["dataset_manifest"]),
-                "id": manifest.id,
-                "run_id": manifest.run_id,
-            },
-            workflow_run_ref,
-            *canonical_output_artifacts,
-            *supplementary_generated_artifacts,
-        ]
+    return _build_rnaseq_report_bundle_outputs(
+        context=context,
+        manifest_path=manifest_path,
+        manifest=manifest,
+        workflow_run=workflow_run,
+        raw_qc_bundle=_mapping_or_empty(inputs.get("raw_qc_bundle")),
+        aggregated_qc_bundle=_mapping_or_empty(inputs.get("aggregated_qc_bundle")),
+        quantification_bundle=_mapping_or_empty(inputs.get("quantification_bundle")),
+        differential_expression_bundle=_mapping_or_empty(inputs.get("differential_expression_bundle")),
+        condition_field=str(inputs["condition_field"]).strip(),
+        baseline_condition=str(inputs["baseline_condition"]).strip(),
+        comparison_condition=str(inputs["comparison_condition"]).strip(),
+        report_lifecycle_status="completed",
     )
 
-    return {
-        "report_bundle_manifest": {
-            "stage": "report_bundle",
-            "workflow_id": context.workflow_id,
-            "study_name": manifest.design.study_name,
-            "contrast": {
-                "condition_field": str(inputs["condition_field"]),
-                "baseline_condition": str(inputs["baseline_condition"]).strip(),
-                "comparison_condition": str(inputs["comparison_condition"]).strip(),
-            },
-            "sections": [
-                "dataset_intake",
-                "compliance_preflight",
-                "raw_qc",
-                "aggregated_qc",
-                "quantification",
-                "differential_expression",
-                "report_bundle",
-            ],
-            "expected_artifacts": [
-                workflow_run_ref,
-                *canonical_output_artifacts,
-                *supplementary_generated_artifacts,
-                {
-                    "artifact_type": "report_bundle",
-                    "path": report_bundle_relpath,
-                    "description": "Human-readable RNA-seq report bundle linking the canonical QC, count-matrix, and DE outputs.",
-                },
-                {
-                    "artifact_type": "qa_report",
-                    "path": qa_report_path,
-                    "description": "Structured QA report copied to the stable root artifact location.",
-                },
-            ],
-            "notes": [
-                "This manifest now links the materialized QC, count-matrix, normalized-count, DE-result, and report-bundle outputs.",
-                "It remains the durable handoff contract for later provenance export and richer report templating work.",
-            ],
-        },
-        "qa_report": {
-            "overall_status": overall_status,
-            "failed_checks": [],
-            "warnings": warnings,
-            "missing_artifacts": [],
-            "recommended_remediation": (
-                [
-                    "Review the workflow warnings before drawing biological conclusions from the generated comparison."
-                ]
-                if warnings
-                else []
-            ),
-            "checklist_artifacts": checklist_artifacts,
-        },
-    }
+
+def materialize_terminal_report_bundle(inputs, context):
+    workflow_run = _load_workflow_run_document(context)
+    manifest_path = inputs.get("dataset_manifest")
+    if not isinstance(manifest_path, str) or not manifest_path.strip():
+        manifest_path = ""
+
+    manifest: DatasetManifest | None
+    manifest_load_error: str | None = None
+    if manifest_path:
+        try:
+            manifest = _load_manifest(context, manifest_path)
+        except Exception as exc:
+            manifest = None
+            manifest_load_error = str(exc) or exc.__class__.__name__
+    else:
+        manifest = None
+        manifest_load_error = "dataset_manifest input was unavailable during terminal report-bundle materialization."
+
+    return _build_rnaseq_report_bundle_outputs(
+        context=context,
+        manifest_path=manifest_path,
+        manifest=manifest,
+        manifest_load_error=manifest_load_error,
+        workflow_run=workflow_run,
+        raw_qc_bundle=_mapping_or_empty(inputs.get("raw_qc_bundle")),
+        aggregated_qc_bundle=_mapping_or_empty(inputs.get("aggregated_qc_bundle")),
+        quantification_bundle=_mapping_or_empty(inputs.get("quantification_bundle")),
+        differential_expression_bundle=_mapping_or_empty(inputs.get("differential_expression_bundle")),
+        condition_field=_optional_string(inputs.get("condition_field")),
+        baseline_condition=_optional_string(inputs.get("baseline_condition")),
+        comparison_condition=_optional_string(inputs.get("comparison_condition")),
+        report_lifecycle_status=workflow_run.lifecycle_status,
+    )
 
 
 def _load_sample_sheet_records(context, sample_sheet_path: str) -> tuple[list[str], list[dict[str, str]]]:
@@ -1665,7 +1611,10 @@ def _svg_escape(value: str) -> str:
 
 def _render_rnaseq_report_bundle(
     *,
-    manifest: DatasetManifest,
+    manifest: DatasetManifest | None,
+    manifest_path: str,
+    manifest_load_error: str | None,
+    workflow_run: WorkflowRun,
     raw_qc_bundle: Mapping[str, Any],
     aggregated_qc_bundle: Mapping[str, Any],
     quantification_bundle: Mapping[str, Any],
@@ -1675,14 +1624,15 @@ def _render_rnaseq_report_bundle(
     comparison_condition: str,
     run_id: str,
     workflow_version: str,
+    workflow_lifecycle_status: str,
     workflow_qc_status: str,
     workflow_warnings: Sequence[str],
     workflow_run_path: str,
     report_manifest_path: str,
-    canonical_count_matrix_ref: Mapping[str, Any],
-    canonical_normalized_count_matrix_ref: Mapping[str, Any],
-    canonical_de_results_ref: Mapping[str, Any],
-    canonical_de_run_ref: Mapping[str, Any],
+    provenance_exports: Sequence[str],
+    canonical_artifacts_by_type: Mapping[str, Mapping[str, Any]],
+    missing_artifacts: Sequence[Mapping[str, Any]],
+    recommendations: Sequence[str],
 ) -> str:
     raw_metrics = raw_qc_bundle.get("aggregate_metrics", {}) if isinstance(raw_qc_bundle, Mapping) else {}
     aggregated_metrics = (
@@ -1707,75 +1657,415 @@ def _render_rnaseq_report_bundle(
         for item in plot_refs
         if isinstance(item, Mapping) and isinstance(item.get("path"), str)
     ]
-
-    recommendations = [
-        "Review the top DE genes in the report bundle before moving to biological interpretation.",
-        "Use the durable count and normalized-count matrices for downstream reproducibility checks.",
+    completed_steps = [record.id for record in workflow_run.steps if record.status == "completed"]
+    blocked_or_pending_steps = [
+        record.id for record in workflow_run.steps if record.status != "completed"
+    ]
+    study_name = manifest.design.study_name if manifest is not None else "unknown-study"
+    manifest_id = manifest.id if manifest is not None else "n/a"
+    assay_type = manifest.assay_type if manifest is not None else "n/a"
+    sample_sheet_path = manifest.sample_sheet_path if manifest is not None else None
+    canonical_count_matrix_ref = canonical_artifacts_by_type.get("count_matrix", {})
+    canonical_normalized_count_matrix_ref = canonical_artifacts_by_type.get("normalized_count_matrix", {})
+    canonical_de_results_ref = canonical_artifacts_by_type.get("differential_expression_results", {})
+    canonical_de_run_ref = canonical_artifacts_by_type.get("differential_expression_run", {})
+    lines = [
+        f"# RNA-seq Report Bundle for {study_name}",
+        "",
+        "## Executive Summary",
+        f"Run `{run_id}` reached workflow lifecycle status `{workflow_lifecycle_status}` in `rnaseq_qc_de`.",
+        f"Contrast: `{comparison_condition}` vs `{baseline_condition}` using condition field `{condition_field}`.",
+        f"Completed stages: `{', '.join(completed_steps) if completed_steps else 'none'}`.",
+        f"Remaining or blocked stages: `{', '.join(blocked_or_pending_steps) if blocked_or_pending_steps else 'none'}`.",
+        "",
+        "## Inputs Used",
+        f"- Dataset manifest: `{manifest_id}`",
+        f"- Dataset manifest path: `{manifest_path or 'n/a'}`",
+        f"- Assay type: `{assay_type}`",
+        f"- Sample sheet: `{sample_sheet_path or 'n/a'}`",
+        "",
+        "## Workflow Version",
+        f"- Workflow: `rnaseq_qc_de`",
+        f"- Version: `{workflow_version}`",
+        "",
+        "## QC Summary",
+        f"- Workflow lifecycle status: `{workflow_lifecycle_status}`",
+        f"- Workflow QC status: `{workflow_qc_status}`",
+        f"- Raw QC FastQC pass rate: `{raw_metrics.get('fastqc_pass_rate', 'n/a')}`",
+        f"- Aggregated QC MultiQC pass rate: `{aggregated_metrics.get('fastqc_pass_rate', 'n/a')}`",
+        f"- Aggregated QC sample count: `{aggregated_metrics.get('report_sample_count', 'n/a')}`",
+        "",
+        "## Key Outputs",
+        f"- Count matrix artifact: `{canonical_count_matrix_ref.get('path', 'n/a')}`",
+        f"- Count matrix TSV: `{quantification_bundle.get('count_matrix_path', 'n/a')}`",
+        f"- Normalized count artifact: `{canonical_normalized_count_matrix_ref.get('path', 'n/a')}`",
+        f"- Normalized counts TSV: `{differential_expression_bundle.get('normalized_counts_path', 'n/a')}`",
+        f"- DE results artifact: `{canonical_de_results_ref.get('path', 'n/a')}`",
+        f"- DE results TSV: `{differential_expression_bundle.get('results_path', 'n/a')}`",
+        f"- DE run artifact: `{canonical_de_run_ref.get('path', 'n/a')}`",
+        f"- Diagnostic plots: `{', '.join(plot_paths) if plot_paths else 'n/a'}`",
+        "",
+        "## Differential Expression Summary",
+        f"- Tested genes: `{de_summary.get('tested_gene_count', 'n/a')}`",
+        f"- Significant genes: `{de_summary.get('significant_gene_count', 'n/a')}`",
+        f"- Top upregulated gene: `{de_summary.get('top_upregulated_gene', 'n/a')}`",
+        f"- Top downregulated gene: `{de_summary.get('top_downregulated_gene', 'n/a')}`",
+        f"- Design formula: `{de_design.get('design_formula', 'n/a')}`",
+        "",
+        "## Warnings and Failures",
     ]
     if workflow_warnings:
-        recommendations.insert(0, "Resolve or document the workflow warnings before publication or wet-lab follow-up.")
-
-    return "\n".join(
+        lines.extend(f"- {warning}" for warning in workflow_warnings)
+    else:
+        lines.append("- No workflow warnings or failures were recorded for this run.")
+    if manifest_load_error:
+        lines.append(f"- Dataset manifest could not be loaded for terminal bundle rendering: `{manifest_load_error}`")
+    if missing_artifacts:
+        lines.extend(
+            f"- Missing artifact: `{item.get('artifact_type', 'artifact')}` expected at `{item.get('expected_path', 'n/a')}`"
+            for item in missing_artifacts
+        )
+    else:
+        lines.append("- All expected canonical workflow outputs for this report bundle were available.")
+    lines.extend(
         [
-            f"# RNA-seq Report Bundle for {manifest.design.study_name}",
-            "",
-            "## Executive Summary",
-            (
-                f"Run `{run_id}` completed the explicit RNA-seq workflow with concrete FastQC, MultiQC, "
-                "count-matrix generation, and differential expression outputs."
-            ),
-            (
-                f"Contrast: `{comparison_condition}` vs `{baseline_condition}` using condition field "
-                f"`{condition_field}`."
-            ),
-            "",
-            "## Inputs Used",
-            f"- Dataset manifest: `{manifest.id}`",
-            f"- Assay type: `{manifest.assay_type}`",
-            f"- Sample sheet: `{manifest.sample_sheet_path}`",
-            "",
-            "## Workflow Version",
-            f"- Workflow: `rnaseq_qc_de`",
-            f"- Version: `{workflow_version}`",
-            "",
-            "## QC Summary",
-            f"- Workflow QC status: `{workflow_qc_status}`",
-            f"- Raw QC FastQC pass rate: `{raw_metrics.get('fastqc_pass_rate', 'n/a')}`",
-            f"- Aggregated QC MultiQC pass rate: `{aggregated_metrics.get('fastqc_pass_rate', 'n/a')}`",
-            f"- Aggregated QC sample count: `{aggregated_metrics.get('report_sample_count', 'n/a')}`",
-            "",
-            "## Key Outputs",
-            f"- Count matrix artifact: `{canonical_count_matrix_ref.get('path', 'n/a')}`",
-            f"- Count matrix TSV: `{quantification_bundle.get('count_matrix_path', 'n/a')}`",
-            f"- Normalized count artifact: `{canonical_normalized_count_matrix_ref.get('path', 'n/a')}`",
-            f"- Normalized counts TSV: `{differential_expression_bundle.get('normalized_counts_path', 'n/a')}`",
-            f"- DE results artifact: `{canonical_de_results_ref.get('path', 'n/a')}`",
-            f"- DE results TSV: `{differential_expression_bundle.get('results_path', 'n/a')}`",
-            f"- DE run artifact: `{canonical_de_run_ref.get('path', 'n/a')}`",
-            f"- Diagnostic plots: `{', '.join(plot_paths) if plot_paths else 'n/a'}`",
-            "",
-            "## Differential Expression Summary",
-            f"- Tested genes: `{de_summary.get('tested_gene_count', 'n/a')}`",
-            f"- Significant genes: `{de_summary.get('significant_gene_count', 'n/a')}`",
-            f"- Top upregulated gene: `{de_summary.get('top_upregulated_gene', 'n/a')}`",
-            f"- Top downregulated gene: `{de_summary.get('top_downregulated_gene', 'n/a')}`",
-            f"- Design formula: `{de_design.get('design_formula', 'n/a')}`",
-            "",
-            "## Warnings and Failures",
-            *(
-                [f"- {warning}" for warning in workflow_warnings]
-                if workflow_warnings
-                else ["- No workflow warnings were recorded for this run."]
-            ),
             "",
             "## Provenance Pointers",
             f"- Workflow run record: `{workflow_run_path}`",
             f"- Report manifest: `{report_manifest_path}`",
-            "",
-            "## Next Recommended Actions",
-            *[f"- {item}" for item in recommendations],
         ]
     )
+    if provenance_exports:
+        lines.extend(f"- Provenance export: `{path}`" for path in provenance_exports)
+    else:
+        lines.append("- No provenance exports were materialized for this run.")
+    lines.extend(["", "## Next Recommended Actions"])
+    lines.extend(f"- {item}" for item in recommendations)
+    return "\n".join(lines)
+
+
+def _build_rnaseq_report_bundle_outputs(
+    *,
+    context,
+    manifest_path: str,
+    manifest: DatasetManifest | None,
+    manifest_load_error: str | None = None,
+    workflow_run: WorkflowRun,
+    raw_qc_bundle: Mapping[str, Any],
+    aggregated_qc_bundle: Mapping[str, Any],
+    quantification_bundle: Mapping[str, Any],
+    differential_expression_bundle: Mapping[str, Any],
+    condition_field: str,
+    baseline_condition: str,
+    comparison_condition: str,
+    report_lifecycle_status: str,
+) -> dict[str, Any]:
+    generated_artifacts = _collect_declared_artifacts(
+        raw_qc_bundle,
+        aggregated_qc_bundle,
+        quantification_bundle,
+        differential_expression_bundle,
+        field_name="generated_artifacts",
+    )
+    available_output_types = _available_report_bundle_output_artifact_types(
+        workflow_run=workflow_run,
+        raw_qc_bundle=raw_qc_bundle,
+        aggregated_qc_bundle=aggregated_qc_bundle,
+        quantification_bundle=quantification_bundle,
+        differential_expression_bundle=differential_expression_bundle,
+    )
+    canonical_output_artifacts = _canonical_artifact_refs(
+        context,
+        artifact_types=[
+            artifact_type
+            for artifact_type in _REPORT_BUNDLE_WORKFLOW_OUTPUT_ARTIFACT_TYPES
+            if artifact_type in available_output_types
+        ],
+    )
+    canonical_artifacts_by_type = {
+        artifact["artifact_type"]: artifact for artifact in canonical_output_artifacts
+    }
+    workflow_run_ref = _canonical_artifact_ref(context, "workflow_run")
+    supplementary_generated_artifacts = _filter_artifacts_excluding_types(
+        generated_artifacts,
+        excluded_artifact_types=set(_REPORT_BUNDLE_WORKFLOW_OUTPUT_ARTIFACT_TYPES),
+    )
+    warnings = list(workflow_run.warnings)
+    if manifest_load_error:
+        warnings.append(
+            f"Terminal report bundle used degraded manifest metadata because dataset_manifest could not be loaded: {manifest_load_error}"
+        )
+    report_qc_status = _report_bundle_display_qc_status(
+        lifecycle_status=report_lifecycle_status,
+        qc_status=workflow_run.qc_status,
+        warnings=warnings,
+    )
+    qa_report_path = _run_relative_path(context, "qa_report.json")
+    report_manifest_path = _generated_output_path(context, "report_bundle_manifest.json", step=_REPORT_BUNDLE_STEP_ID)
+    missing_artifacts = _missing_report_bundle_artifacts(
+        context,
+        available_artifact_types=available_output_types,
+    )
+    recommendations = _report_bundle_recommendations(
+        lifecycle_status=report_lifecycle_status,
+        warnings=warnings,
+        missing_artifacts=missing_artifacts,
+        differential_expression_bundle=differential_expression_bundle,
+    )
+    report_bundle_relpath = _write_generated_text(
+        context,
+        step=_REPORT_BUNDLE_STEP_ID,
+        filename=_REPORT_BUNDLE_FILENAME,
+        content=_render_rnaseq_report_bundle(
+            manifest=manifest,
+            manifest_path=manifest_path,
+            manifest_load_error=manifest_load_error,
+            workflow_run=workflow_run,
+            raw_qc_bundle=raw_qc_bundle,
+            aggregated_qc_bundle=aggregated_qc_bundle,
+            quantification_bundle=quantification_bundle,
+            differential_expression_bundle=differential_expression_bundle,
+            condition_field=condition_field or "n/a",
+            baseline_condition=baseline_condition or "n/a",
+            comparison_condition=comparison_condition or "n/a",
+            run_id=context.run_id,
+            workflow_version=_RNASEQ_WORKFLOW_VERSION,
+            workflow_lifecycle_status=report_lifecycle_status,
+            workflow_qc_status=report_qc_status,
+            workflow_warnings=warnings,
+            workflow_run_path=workflow_run_ref["path"],
+            report_manifest_path=report_manifest_path,
+            provenance_exports=list(workflow_run.provenance_exports),
+            canonical_artifacts_by_type=canonical_artifacts_by_type,
+            missing_artifacts=missing_artifacts,
+            recommendations=recommendations,
+        ),
+    )
+    checklist_artifacts = _dedupe_artifacts(
+        [
+            {
+                "artifact_type": "dataset_manifest",
+                "path": context.relative_path(manifest_path) if manifest_path else "n/a",
+                **({"id": manifest.id, "run_id": manifest.run_id} if manifest is not None else {}),
+            },
+            workflow_run_ref,
+            *canonical_output_artifacts,
+            *supplementary_generated_artifacts,
+        ]
+    )
+    overall_status = _report_bundle_qa_status(
+        lifecycle_status=report_lifecycle_status,
+        qc_status=workflow_run.qc_status,
+        warnings=warnings,
+    )
+
+    return {
+        "report_bundle_manifest": {
+            "bundle_version": "1.0.0",
+            "stage": _REPORT_BUNDLE_STEP_ID,
+            "workflow_id": context.workflow_id,
+            "workflow_version": _RNASEQ_WORKFLOW_VERSION,
+            "lifecycle_status": report_lifecycle_status,
+            "qc_status": report_qc_status,
+            "study_name": manifest.design.study_name if manifest is not None else "unknown-study",
+            "contrast": {
+                "condition_field": condition_field or "n/a",
+                "baseline_condition": baseline_condition or "n/a",
+                "comparison_condition": comparison_condition or "n/a",
+            },
+            "sections": list(_REPORT_BUNDLE_SECTIONS),
+            "workflow_run_path": workflow_run_ref["path"],
+            "report_markdown_path": report_bundle_relpath,
+            "provenance_exports": list(workflow_run.provenance_exports),
+            "expected_artifacts": [
+                workflow_run_ref,
+                *canonical_output_artifacts,
+                *supplementary_generated_artifacts,
+                {
+                    "artifact_type": "report_bundle",
+                    "path": report_bundle_relpath,
+                    "description": "Human-readable RNA-seq report bundle linking the canonical QC, quantification, and DE outputs.",
+                },
+                {
+                    "artifact_type": "qa_report",
+                    "path": qa_report_path,
+                    "description": "Structured QA report copied to the stable root artifact location.",
+                },
+            ],
+            "missing_artifacts": missing_artifacts,
+            "next_actions": recommendations,
+            "notes": [
+                "The report bundle links the canonical workflow run record and any stable workflow outputs that were actually materialized for this run.",
+                "Blocked or failed runs still emit a partial report bundle so users can inspect available artifacts and missing downstream outputs without reading the raw run record.",
+            ],
+        },
+        "qa_report": {
+            "overall_status": overall_status,
+            "failed_checks": _report_bundle_failed_checks(
+                lifecycle_status=report_lifecycle_status,
+                missing_artifacts=missing_artifacts,
+            ),
+            "warnings": warnings,
+            "missing_artifacts": missing_artifacts,
+            "recommended_remediation": recommendations,
+            "checklist_artifacts": checklist_artifacts,
+        },
+    }
+
+
+def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
+def _optional_string(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _available_report_bundle_output_artifact_types(
+    *,
+    workflow_run: WorkflowRun,
+    raw_qc_bundle: Mapping[str, Any],
+    aggregated_qc_bundle: Mapping[str, Any],
+    quantification_bundle: Mapping[str, Any],
+    differential_expression_bundle: Mapping[str, Any],
+) -> set[str]:
+    artifact_types = {
+        ref.artifact_type
+        for ref in workflow_run.outputs
+        if ref.artifact_type in _REPORT_BUNDLE_WORKFLOW_OUTPUT_ARTIFACT_TYPES
+    }
+    if raw_qc_bundle:
+        artifact_types.update({"fastqc_run", "fastqc_metrics"})
+    if aggregated_qc_bundle:
+        artifact_types.update({"multiqc_run", "multiqc_metrics"})
+    if quantification_bundle:
+        artifact_types.add("count_matrix")
+    if differential_expression_bundle:
+        artifact_types.update(
+            {
+                "normalized_count_matrix",
+                "differential_expression_results",
+                "differential_expression_run",
+            }
+        )
+    return artifact_types
+
+
+def _missing_report_bundle_artifacts(
+    context,
+    *,
+    available_artifact_types: set[str],
+) -> list[dict[str, Any]]:
+    missing: list[dict[str, Any]] = []
+    for artifact_type in _REPORT_BUNDLE_WORKFLOW_OUTPUT_ARTIFACT_TYPES:
+        if artifact_type in available_artifact_types:
+            continue
+        missing.append(
+            {
+                "artifact_type": artifact_type,
+                "expected_path": _run_relative_path(context, stable_artifact_name(artifact_type)),
+                "rationale": f"The workflow did not materialize {artifact_type} before reaching a terminal state.",
+            }
+        )
+    return missing
+
+
+def _report_bundle_recommendations(
+    *,
+    lifecycle_status: str,
+    warnings: Sequence[str],
+    missing_artifacts: Sequence[Mapping[str, Any]],
+    differential_expression_bundle: Mapping[str, Any],
+) -> list[str]:
+    recommendations: list[str] = []
+    if lifecycle_status == "blocked":
+        recommendations.append(
+            "Resolve the blocking QC or execution issue, then rerun the workflow before using absent downstream outputs."
+        )
+    elif lifecycle_status == "failed":
+        recommendations.append(
+            "Inspect the failed workflow step and rerun once the execution error has been corrected."
+        )
+    elif warnings:
+        recommendations.append(
+            "Resolve or explicitly document the workflow warnings before publication or wet-lab follow-up."
+        )
+
+    if missing_artifacts:
+        recommendations.append(
+            "Review the available QC artifacts and the workflow run record to confirm which downstream outputs were never materialized."
+        )
+    if differential_expression_bundle:
+        recommendations.append(
+            "Review the top DE genes and diagnostic plots in the bundle before moving to biological interpretation."
+        )
+        recommendations.append(
+            "Use the durable count and normalized-count matrices for downstream reproducibility checks."
+        )
+    if not recommendations:
+        recommendations.append(
+            "Archive the report bundle alongside the workflow run record as the primary human-readable handoff artifact."
+        )
+    return recommendations
+
+
+def _report_bundle_qa_status(
+    *,
+    lifecycle_status: str,
+    qc_status: str,
+    warnings: Sequence[str],
+) -> str:
+    if lifecycle_status == "blocked":
+        return "blocked"
+    if lifecycle_status == "failed":
+        return "failed"
+    return _qa_overall_status_from_workflow_qc(qc_status, warnings=warnings)
+
+
+def _report_bundle_display_qc_status(
+    *,
+    lifecycle_status: str,
+    qc_status: str,
+    warnings: Sequence[str],
+) -> str:
+    if lifecycle_status in {"blocked", "failed"}:
+        return "failed"
+    if qc_status in {"passed", "warning", "failed"}:
+        return qc_status
+    return "warning" if warnings else "passed"
+
+
+def _report_bundle_failed_checks(
+    *,
+    lifecycle_status: str,
+    missing_artifacts: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if lifecycle_status not in {"blocked", "failed"}:
+        return []
+    severity = "error" if lifecycle_status == "blocked" else "critical"
+    description = (
+        "Workflow execution was blocked before the final report-bundle stage completed."
+        if lifecycle_status == "blocked"
+        else "Workflow execution failed before the final report-bundle stage completed."
+    )
+    remediation = (
+        "Review the workflow warnings, missing artifacts, and upstream stage outputs before rerunning the workflow."
+        if missing_artifacts
+        else "Review the workflow warnings and upstream stage outputs before rerunning the workflow."
+    )
+    return [
+        {
+            "id": f"workflow-{lifecycle_status}",
+            "description": description,
+            "severity": severity,
+            "artifact_type": "workflow_run",
+            "remediation": remediation,
+        }
+    ]
 
 
 def _contrast_slug(comparison_condition: str, baseline_condition: str) -> str:
