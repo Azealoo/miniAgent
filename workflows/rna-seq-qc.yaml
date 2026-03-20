@@ -99,7 +99,7 @@ steps:
     retry_policy:
       max_attempts: 1
       backoff_seconds: 0
-    failure_policy: fail_workflow
+    failure_policy: block_workflow
   - id: summarize_qc
     label: Summarize QC metrics
     executor:

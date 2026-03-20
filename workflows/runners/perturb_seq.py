@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from artifacts import load_artifact_document
+from dataset_intake import ensure_valid_dataset_intake_manifest
 
 
 def validate_inputs(inputs, context):
-    manifest_path = context.resolve_path(inputs["dataset_manifest"])
-    manifest = load_artifact_document(manifest_path)
-    if manifest.artifact_type != "dataset_manifest":
-        raise ValueError("Perturb-seq preflight requires a dataset_manifest artifact.")
-    return {"validated_manifest": context.relative_path(manifest_path)}
+    result = ensure_valid_dataset_intake_manifest(
+        context.base_dir,
+        inputs["dataset_manifest"],
+        expected_reference_build=inputs["reference_build"],
+    )
+    return {"validated_manifest": result.manifest_path}
 
 
 def summarize_outputs(inputs, _context):

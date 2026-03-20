@@ -22,6 +22,7 @@ import type {
   ToolResultEnvelope,
   WorkflowArtifactEvent,
   WorkflowArtifactRef,
+  WorkflowIssueDetail,
   WorkflowStreamEvent,
 } from "@/lib/types";
 
@@ -328,7 +329,9 @@ interface WorkflowStepTrace {
   prerequisiteStepIds: string[];
   artifacts: WorkflowArtifactRef[];
   warnings: string[];
+  warningDetails: WorkflowIssueDetail[];
   errors: string[];
+  errorDetails: WorkflowIssueDetail[];
 }
 
 interface WorkflowRunTrace {
@@ -339,6 +342,7 @@ interface WorkflowRunTrace {
   resumed: boolean;
   runRecordPath?: string;
   blockedReason?: string;
+  blockedIssueDetails: WorkflowIssueDetail[];
   blockedStage?: string;
   blockingSource?: string;
   completedSteps?: number;
@@ -364,6 +368,37 @@ function pushUniqueArtifact(
   return [...current, artifact];
 }
 
+function pushUniqueIssueDetail(
+  current: WorkflowIssueDetail[],
+  detail: WorkflowIssueDetail
+): WorkflowIssueDetail[] {
+  if (
+    current.some(
+      (existing) =>
+        existing.code === detail.code &&
+        existing.message === detail.message &&
+        existing.field_path === detail.field_path &&
+        existing.path === detail.path
+    )
+  ) {
+    return current;
+  }
+  return [...current, detail];
+}
+
+function pushUniqueIssueDetails(
+  current: WorkflowIssueDetail[],
+  details: WorkflowIssueDetail[]
+): WorkflowIssueDetail[] {
+  return details.reduce(pushUniqueIssueDetail, current);
+}
+
+function formatWorkflowIssueDetail(detail: WorkflowIssueDetail): string {
+  const location = detail.field_path ?? "manifest";
+  const pathSuffix = detail.path ? ` (${detail.path})` : "";
+  return `${location}${pathSuffix}: ${detail.message}`;
+}
+
 function buildWorkflowRuns(events: WorkflowStreamEvent[]): WorkflowRunTrace[] {
   const runs = new Map<string, WorkflowRunTrace>();
   const steps = new Map<string, Map<string, WorkflowStepTrace>>();
@@ -378,6 +413,7 @@ function buildWorkflowRuns(events: WorkflowStreamEvent[]): WorkflowRunTrace[] {
       workflowName: event.workflow_id,
       status: "created",
       resumed: false,
+      blockedIssueDetails: [],
       steps: [],
       artifacts: [],
     };
@@ -406,7 +442,9 @@ function buildWorkflowRuns(events: WorkflowStreamEvent[]): WorkflowRunTrace[] {
       prerequisiteStepIds: [],
       artifacts: [],
       warnings: [],
+      warningDetails: [],
       errors: [],
+      errorDetails: [],
     };
     runSteps.set(stepId, created);
     run.steps.push(created);
@@ -460,7 +498,9 @@ function buildWorkflowRuns(events: WorkflowStreamEvent[]): WorkflowRunTrace[] {
           step.status = event.status;
         }
         step.warnings = Array.from(new Set([...step.warnings, ...event.warnings]));
+        step.warningDetails = pushUniqueIssueDetails(step.warningDetails, event.warning_details);
         step.errors = Array.from(new Set([...step.errors, ...event.errors]));
+        step.errorDetails = pushUniqueIssueDetails(step.errorDetails, event.error_details);
         for (const artifact of event.artifact_refs) {
           step.artifacts = pushUniqueArtifact(step.artifacts, artifact);
         }
@@ -469,11 +509,16 @@ function buildWorkflowRuns(events: WorkflowStreamEvent[]): WorkflowRunTrace[] {
       case "workflow_blocked":
         run.status = event.lifecycle_status;
         run.blockedReason = event.reason;
+        run.blockedIssueDetails = pushUniqueIssueDetails(
+          run.blockedIssueDetails,
+          event.issue_details
+        );
         run.blockedStage = event.stage;
         run.blockingSource = event.blocking_source;
         if (event.step_id && event.step_label) {
           const step = ensureStep(run, event.step_id, event.step_label);
           step.status = "blocked";
+          step.errorDetails = pushUniqueIssueDetails(step.errorDetails, event.issue_details);
           if (!step.errors.includes(event.reason)) {
             step.errors = [...step.errors, event.reason];
           }
@@ -570,6 +615,11 @@ function WorkflowRunCard({ run }: { run: WorkflowRunTrace }) {
                   : ""}
               </div>
             )}
+            {run.blockedIssueDetails.length > 0 && (
+              <pre className="mt-2 text-xs font-mono text-red-700 whitespace-pre-wrap break-all bg-red-50 p-2 rounded">
+                {run.blockedIssueDetails.map(formatWorkflowIssueDetail).join("\n")}
+              </pre>
+            )}
           </div>
         </div>
       </div>
@@ -643,9 +693,21 @@ function WorkflowRunCard({ run }: { run: WorkflowRunTrace }) {
               </pre>
             )}
 
+            {step.warningDetails.length > 0 && (
+              <pre className="mt-2 text-xs font-mono text-amber-700 whitespace-pre-wrap break-all bg-amber-50 p-2 rounded">
+                {step.warningDetails.map(formatWorkflowIssueDetail).join("\n")}
+              </pre>
+            )}
+
             {step.errors.length > 0 && (
               <pre className="mt-2 text-xs font-mono text-red-700 whitespace-pre-wrap break-all bg-red-50 p-2 rounded">
                 {step.errors.join("\n")}
+              </pre>
+            )}
+
+            {step.errorDetails.length > 0 && (
+              <pre className="mt-2 text-xs font-mono text-red-700 whitespace-pre-wrap break-all bg-red-50 p-2 rounded">
+                {step.errorDetails.map(formatWorkflowIssueDetail).join("\n")}
               </pre>
             )}
           </div>

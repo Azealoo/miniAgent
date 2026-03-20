@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from artifacts import load_artifact_document, resolve_artifact_path  # noqa: E402
 from artifacts.registry import rebuild_artifact_registry  # noqa: E402
+from artifacts.schemas import SCHEMA_PACK_VERSION  # noqa: E402
 from workflow_runner import InternalDAGRunner  # noqa: E402
 from workflow_specs import WORKFLOW_SPEC_VERSION, validate_workflow_spec_payload  # noqa: E402
 
@@ -1052,6 +1053,150 @@ def launch(inputs, _context):
         assert events[2]["stage"] == "before_execution"
         assert "dataset-manifest-required" in events[2]["reason"]
         assert events[3]["lifecycle_status"] == "blocked"
+
+    def test_blocked_dataset_intake_failures_preserve_structured_issue_details(self, tmp_path):
+        module_name = _write_runner_module(
+            tmp_path,
+            "blocked_step_demo",
+            """
+from dataset_intake import ensure_valid_dataset_intake_manifest
+
+
+def validate(inputs, context):
+    ensure_valid_dataset_intake_manifest(context.base_dir, inputs["dataset_manifest"])
+""",
+        )
+        manifest_payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "dataset_manifest",
+            "id": "ds-blocked-step-v1",
+            "run_id": "run-20260319T000000Z-deadbeef",
+            "created_at": "2026-03-19T00:00:00Z",
+            "source_workflow": "dataset-intake",
+            "related_artifacts": [],
+            "assay_type": "scrna_seq",
+            "organism": "homo_sapiens",
+            "reference_build": "grch38",
+            "privacy_classification": "controlled",
+            "design": {
+                "study_name": "blocked-step-demo",
+                "experiment_type": "scrna_seq",
+                "condition_summary": "single-condition pilot",
+                "analysis_kind": "descriptive",
+                "timepoints": ["baseline"],
+                "factors": ["condition"],
+            },
+            "source_files": ["data/counts.h5ad"],
+        }
+        manifest_path = tmp_path / "manifests" / "dataset_manifest.yaml"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+        source_file = tmp_path / "data" / "counts.h5ad"
+        source_file.parent.mkdir(parents=True, exist_ok=True)
+        source_file.write_text("placeholder\n", encoding="utf-8")
+
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "blocked-step-warning-demo",
+                "version": "1.0.0",
+                "name": "Blocked Step Warning Demo",
+                "purpose": "Verify blocked step failures preserve the blocking reason on the run record.",
+                "engine": "internal_dag_runner_v1",
+                "required_inputs": [
+                    {
+                        "name": "dataset_manifest",
+                        "kind": "artifact",
+                        "artifact_type": "dataset_manifest",
+                        "schema_ref": "artifact_schema:dataset_manifest@1.0.0",
+                        "description": "Manifest passed into the dataset intake gate.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": {
+                    "provided_inputs": ["dataset_manifest"],
+                    "allowed_parameter_overrides": [],
+                    "generated_state": [
+                        "run_id",
+                        "created_at",
+                        "resolved_input_paths",
+                        "step_statuses",
+                        "artifact_paths",
+                    ],
+                    "state_artifact": "workflow_run",
+                    "artifact_root_template": "artifacts/{workflow_id}/{date}/{run_id}",
+                },
+                "outputs": [
+                    {
+                        "name": "blocked_payload",
+                        "kind": "value",
+                        "description": "Unreached output reserved for spec validation.",
+                        "source": {
+                            "step_id": "preflight_check",
+                            "output_name": "blocked_payload",
+                        },
+                    }
+                ],
+                "qc_gates": [],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "preflight_check",
+                        "label": "Validate Dataset Intake",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "validate",
+                        },
+                        "inputs": [
+                            {
+                                "name": "dataset_manifest",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "dataset_manifest",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "blocked_payload",
+                                "kind": "value",
+                                "description": "Unreached output reserved for spec validation.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "block_workflow",
+                    }
+                ],
+            }
+        )
+
+        events: list[dict] = []
+        result = InternalDAGRunner(tmp_path).run(
+            spec,
+            {"dataset_manifest": "manifests/dataset_manifest.yaml"},
+            event_callback=events.append,
+        )
+
+        assert result.run.lifecycle_status == "blocked"
+        assert result.run.steps[0].status == "blocked"
+        assert len(result.run.warnings) == 1
+        assert "sample_sheet_path" in result.run.warnings[0]
+        assert result.run.steps[0].errors == result.run.warnings
+        assert result.run.warning_details[0].field_path == "sample_sheet_path"
+        assert result.run.warning_details[0].code == "missing_field"
+        assert result.run.steps[0].error_details[0].field_path == "sample_sheet_path"
+        blocked_event = next(event for event in events if event["type"] == "workflow_blocked")
+        assert blocked_event["issue_details"][0]["field_path"] == "sample_sheet_path"
+        assert blocked_event["issue_details"][0]["code"] == "missing_field"
+        step_end_event = next(event for event in events if event["type"] == "workflow_step_end")
+        assert step_end_event["error_details"][0]["field_path"] == "sample_sheet_path"
+        assert step_end_event["error_details"][0]["code"] == "missing_field"
+        run_document = load_artifact_document(result.artifact_path)
+        assert run_document.warning_details[0].field_path == "sample_sheet_path"
+        assert run_document.steps[0].error_details[0].field_path == "sample_sheet_path"
 
     def test_runner_uses_slugified_workflow_identity_in_workflow_run_artifact(self, tmp_path):
         module_name = _write_runner_module(

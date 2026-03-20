@@ -58,11 +58,18 @@ related_artifacts:
 assay_type: perturb_seq
 organism: homo_sapiens
 reference_build: grch38
+sample_sheet_path: data/norman/sample_sheet.tsv
 privacy_classification: controlled
 design:
   study_name: norman-perturb-seq-pilot
   experiment_type: perturb_seq
   condition_summary: CRISPRi perturb-seq pilot with non-targeting controls and donor replicates.
+  analysis_kind: comparative
+  condition_fields:
+    - perturbation
+  batch_fields:
+    - donor
+    - batch
 source_files:
   - data/norman/counts.h5ad
 ```

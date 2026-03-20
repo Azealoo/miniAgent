@@ -37,7 +37,7 @@ from artifacts import (
     validate_artifact_payload,
     validate_artifact_root,
 )
-from artifacts.schemas import WorkflowEnvironment, WorkflowStepRecord
+from artifacts.schemas import WorkflowEnvironment, WorkflowIssueDetail, WorkflowStepRecord
 from workflow_specs import (
     ExternalEngineExecutor,
     LiteralBindingSource,
@@ -93,6 +93,59 @@ def _serialize_for_json(value: Any) -> Any:
     if isinstance(value, list):
         return [_serialize_for_json(item) for item in value]
     return value
+
+
+def _workflow_issue_detail_from_object(issue: Any) -> WorkflowIssueDetail | None:
+    if isinstance(issue, Mapping):
+        code = issue.get("code")
+        message = issue.get("message")
+        field_path = issue.get("field_path")
+        path = issue.get("path")
+    else:
+        code = getattr(issue, "code", None)
+        message = getattr(issue, "message", None)
+        field_path = getattr(issue, "field_path", None)
+        path = getattr(issue, "path", None)
+
+    if not isinstance(code, str) or not code.strip():
+        return None
+    if not isinstance(message, str) or not message.strip():
+        return None
+    if field_path is not None and not isinstance(field_path, str):
+        field_path = str(field_path)
+    if path is not None and not isinstance(path, str):
+        path = str(path)
+    return WorkflowIssueDetail(
+        code=code,
+        message=message,
+        field_path=field_path,
+        path=path,
+    )
+
+
+def _dedupe_workflow_issue_details(details: list[WorkflowIssueDetail]) -> list[WorkflowIssueDetail]:
+    deduped: list[WorkflowIssueDetail] = []
+    seen: set[tuple[str, str | None, str, str | None]] = set()
+    for detail in details:
+        key = (detail.code, detail.field_path, detail.message, detail.path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(detail)
+    return deduped
+
+
+def _workflow_issue_details_from_exception(exc: Exception) -> list[WorkflowIssueDetail]:
+    result = getattr(exc, "result", None)
+    raw_issues = getattr(result, "issues", None)
+    if not isinstance(raw_issues, list):
+        return []
+    details = [
+        detail
+        for issue in raw_issues
+        if (detail := _workflow_issue_detail_from_object(issue)) is not None
+    ]
+    return _dedupe_workflow_issue_details(details)
 
 
 @dataclass(frozen=True)
@@ -194,7 +247,9 @@ class _WorkflowRunStreamEmitter:
                 "status": record.status,
                 "artifact_refs": [_workflow_artifact_payload(ref) for ref in record.outputs_produced],
                 "warnings": list(record.warnings),
+                "warning_details": [detail.model_dump(mode="json") for detail in record.warning_details],
                 "errors": list(record.errors),
+                "error_details": [detail.model_dump(mode="json") for detail in record.error_details],
             }
         )
 
@@ -202,6 +257,7 @@ class _WorkflowRunStreamEmitter:
         self,
         *,
         reason: str,
+        issue_details: list[WorkflowIssueDetail] | None = None,
         stage: str,
         blocking_source: str,
         step: WorkflowStepDefinition | None,
@@ -214,6 +270,7 @@ class _WorkflowRunStreamEmitter:
                 "workflow_id": self.spec.workflow_id,
                 "lifecycle_status": "blocked",
                 "reason": reason,
+                "issue_details": [detail.model_dump(mode="json") for detail in issue_details or []],
                 "stage": stage,
                 "blocking_source": blocking_source,
                 "step_id": step.id if step is not None else None,
@@ -818,11 +875,17 @@ class InternalDAGRunner:
                 emitter.step_end(step, record)
         except Exception as exc:
             error_message = str(exc) or exc.__class__.__name__
+            issue_details = _workflow_issue_details_from_exception(exc)
             record.errors.append(error_message)
+            record.error_details = _dedupe_workflow_issue_details([*record.error_details, *issue_details])
             record.end_time = _utcnow()
             if step.failure_policy == "continue_with_warning":
                 record.status = _STEP_COMPLETE_STATUS
                 record.warnings.append(error_message)
+                record.warning_details = _dedupe_workflow_issue_details([*record.warning_details, *issue_details])
+                run_document.warning_details = _dedupe_workflow_issue_details(
+                    [*run_document.warning_details, *issue_details]
+                )
                 run_document.warnings.append(
                     f"Step {step.id} continued with warning after execution error: {error_message}"
                 )
@@ -830,10 +893,17 @@ class InternalDAGRunner:
                 terminal_status = "blocked" if step.failure_policy == "block_workflow" else "failed"
                 record.status = terminal_status
                 run_document.lifecycle_status = terminal_status
+                if terminal_status == "blocked":
+                    if error_message not in run_document.warnings:
+                        run_document.warnings.append(error_message)
+                    run_document.warning_details = _dedupe_workflow_issue_details(
+                        [*run_document.warning_details, *issue_details]
+                    )
                 self._block_descendants(spec, run_document, failed_step_id=step.id, reason=error_message)
                 if emitter is not None and terminal_status == "blocked":
                     emitter.blocked(
                         reason=error_message,
+                        issue_details=issue_details,
                         stage="after_step",
                         blocking_source="step_failure",
                         step=step,

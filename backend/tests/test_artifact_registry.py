@@ -78,6 +78,7 @@ def _write_dataset_manifest(base_dir: Path) -> None:
             "assay_type": "scrna_seq",
             "organism": "homo_sapiens",
             "reference_build": "grch38",
+            "sample_sheet_path": "data/demo_sample_sheet.tsv",
             "privacy_classification": "controlled",
             "design": {
                 "study_name": "demo-study",

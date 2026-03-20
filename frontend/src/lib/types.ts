@@ -140,6 +140,13 @@ export interface WorkflowArtifactRef {
   run_id?: string | null;
 }
 
+export interface WorkflowIssueDetail {
+  code: string;
+  message: string;
+  field_path?: string | null;
+  path?: string | null;
+}
+
 export interface WorkflowEventBase {
   contract_version: "workflow_event.v1";
   run_id: string;
@@ -171,13 +178,16 @@ export interface WorkflowStepEndEvent extends WorkflowEventBase {
   status: Extract<WorkflowStepStatus, "completed" | "failed" | "blocked">;
   artifact_refs: WorkflowArtifactRef[];
   warnings: string[];
+  warning_details: WorkflowIssueDetail[];
   errors: string[];
+  error_details: WorkflowIssueDetail[];
 }
 
 export interface WorkflowBlockedEvent extends WorkflowEventBase {
   type: "workflow_blocked";
   lifecycle_status: "blocked";
   reason: string;
+  issue_details: WorkflowIssueDetail[];
   stage: WorkflowBlockStage;
   blocking_source: WorkflowBlockingSource;
   step_id?: string | null;

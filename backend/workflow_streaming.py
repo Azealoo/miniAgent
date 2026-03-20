@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from artifacts.schemas import WorkflowLifecycleStatus
+from artifacts.schemas import WorkflowIssueDetail, WorkflowLifecycleStatus
 
 WORKFLOW_EVENT_CONTRACT_VERSION = "workflow_event.v1"
 
@@ -65,13 +65,16 @@ class WorkflowStepEndEvent(WorkflowStreamEventBase):
     status: Literal["completed", "failed", "blocked"] = "completed"
     artifact_refs: list[WorkflowArtifactRefPayload] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    warning_details: list[WorkflowIssueDetail] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+    error_details: list[WorkflowIssueDetail] = Field(default_factory=list)
 
 
 class WorkflowBlockedEvent(WorkflowStreamEventBase):
     type: Literal["workflow_blocked"] = "workflow_blocked"
     lifecycle_status: Literal["blocked"] = "blocked"
     reason: str
+    issue_details: list[WorkflowIssueDetail] = Field(default_factory=list)
     stage: WorkflowBlockStage
     blocking_source: WorkflowBlockingSource
     step_id: str | None = None

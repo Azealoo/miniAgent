@@ -66,6 +66,7 @@ DeviationSeverity = Literal["minor", "major", "critical"]
 QAOverallStatus = Literal["passed", "warning", "failed", "blocked"]
 QACheckSeverity = Literal["warning", "error", "critical"]
 PrivacyClassification = Literal["public", "internal", "controlled", "restricted"]
+AnalysisKind = Literal["descriptive", "comparative"]
 AssayType = Literal[
     "bulk_rna_seq",
     "scrna_seq",
@@ -233,6 +234,9 @@ class DatasetDesign(BaseModel):
     study_name: str
     experiment_type: str
     condition_summary: str
+    analysis_kind: AnalysisKind = "descriptive"
+    condition_fields: list[str] | None = None
+    batch_fields: list[str] | None = None
     replicate_structure: str | None = None
     timepoints: list[str] = Field(default_factory=list)
     factors: list[str] = Field(default_factory=list)
@@ -248,26 +252,63 @@ class DatasetDesign(BaseModel):
     def _validate_experiment_type(cls, value: str) -> str:
         return _require_normalized_identifier(value, field_name="experiment_type")
 
+    @field_validator("condition_fields", "batch_fields")
+    @classmethod
+    def _validate_design_fields(cls, value: list[str] | None, info) -> list[str] | None:
+        if value is None:
+            return None
+        return [_require_non_empty(item, field_name=info.field_name) for item in value]
 
 class DatasetManifest(ArtifactDocument):
     artifact_type: Literal["dataset_manifest"] = "dataset_manifest"
     assay_type: AssayType
     organism: str
-    reference_build: str
+    reference_build: str | None = None
+    reference_resource: str | None = None
+    sample_sheet_path: str | None = None
     privacy_classification: PrivacyClassification
     design: DatasetDesign
     source_files: list[str] = Field(min_length=1)
+    assay_extensions: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("organism", "reference_build")
+    @field_validator("organism")
     @classmethod
     def _validate_normalized_fields(cls, value: str, info) -> str:
         return _require_normalized_identifier(value, field_name=info.field_name)
+
+    @field_validator("reference_build")
+    @classmethod
+    def _validate_reference_build(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_normalized_identifier(value, field_name="reference_build")
+
+    @field_validator("reference_resource")
+    @classmethod
+    def _validate_reference_resource(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="reference_resource")
+
+    @field_validator("sample_sheet_path")
+    @classmethod
+    def _validate_sample_sheet_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_relative_path(value)
 
     @field_validator("source_files")
     @classmethod
     def _validate_source_files(cls, value: list[str]) -> list[str]:
         return [_normalize_relative_path(item) for item in value]
 
+    @field_validator("assay_extensions")
+    @classmethod
+    def _validate_assay_extensions(cls, value: dict[str, Any]) -> dict[str, Any]:
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized[_require_normalized_identifier(str(key), field_name="assay_extensions")] = item
+        return normalized
 
 class WorkflowIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -296,6 +337,32 @@ class WorkflowEnvironment(BaseModel):
     hostname: str | None = None
 
 
+class WorkflowIssueDetail(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    message: str
+    field_path: str | None = None
+    path: str | None = None
+
+    @field_validator("code")
+    @classmethod
+    def _validate_code(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="code")
+
+    @field_validator("message")
+    @classmethod
+    def _validate_message(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="message")
+
+    @field_validator("field_path", "path")
+    @classmethod
+    def _validate_optional_text(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name=info.field_name)
+
+
 class WorkflowStepRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -307,7 +374,9 @@ class WorkflowStepRecord(BaseModel):
     inputs_resolved: list[ArtifactReference] = Field(default_factory=list)
     outputs_produced: list[ArtifactReference] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    warning_details: list[WorkflowIssueDetail] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+    error_details: list[WorkflowIssueDetail] = Field(default_factory=list)
 
     @field_validator("id")
     @classmethod
@@ -346,6 +415,7 @@ class WorkflowRun(ArtifactDocument):
     steps: list[WorkflowStepRecord] = Field(default_factory=list)
     provenance_exports: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    warning_details: list[WorkflowIssueDetail] = Field(default_factory=list)
 
     @field_validator("engine")
     @classmethod

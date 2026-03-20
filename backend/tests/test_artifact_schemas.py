@@ -52,6 +52,7 @@ class TestArtifactSchemas:
             "assay_type": "scrna_seq",
             "organism": "homo_sapiens",
             "reference_build": "grch38",
+            "sample_sheet_path": "data/sample_sheet.tsv",
             "privacy_classification": "controlled",
             "design": {
                 "study_name": "test-study",
@@ -243,6 +244,7 @@ class TestArtifactSchemas:
             "assay_type": "scrna_seq",
             "organism": "homo_sapiens",
             "reference_build": "grch38",
+            "sample_sheet_path": "data/sample_sheet.tsv",
             "privacy_classification": "controlled",
             "design": {
                 "study_name": "test-study",
@@ -261,6 +263,61 @@ class TestArtifactSchemas:
 
         with pytest.raises(ValueError, match="source_workflow or source_tool"):
             DatasetManifest.model_validate(payload)
+
+    def test_dataset_manifest_allows_missing_analysis_ready_reference_fields_for_backward_compatibility(self):
+        payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "dataset_manifest",
+            "id": "ds-test-v1",
+            "run_id": "run-20260318T193000Z-deadbeef",
+            "created_at": "2026-03-18T19:30:00Z",
+            "source_workflow": "dataset-intake",
+            "related_artifacts": [],
+            "assay_type": "scrna_seq",
+            "organism": "homo_sapiens",
+            "sample_sheet_path": "data/sample_sheet.tsv",
+            "privacy_classification": "controlled",
+            "design": {
+                "study_name": "test-study",
+                "experiment_type": "scrna_seq",
+                "condition_summary": "test summary",
+                "timepoints": ["baseline"],
+                "factors": ["condition"],
+            },
+            "source_files": ["data/test.tsv"],
+        }
+
+        parsed = DatasetManifest.model_validate(payload)
+        assert parsed.reference_build is None
+        assert parsed.reference_resource is None
+
+    def test_dataset_manifest_allows_missing_analysis_ready_design_fields_for_backward_compatibility(self):
+        payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "dataset_manifest",
+            "id": "ds-test-v1",
+            "run_id": "run-20260318T193000Z-deadbeef",
+            "created_at": "2026-03-18T19:30:00Z",
+            "source_workflow": "dataset-intake",
+            "related_artifacts": [],
+            "assay_type": "scrna_seq",
+            "organism": "homo_sapiens",
+            "reference_build": "grch38",
+            "sample_sheet_path": "data/sample_sheet.tsv",
+            "privacy_classification": "controlled",
+            "design": {
+                "study_name": "test-study",
+                "experiment_type": "scrna_seq",
+                "condition_summary": "test summary",
+                "analysis_kind": "comparative",
+            },
+            "source_files": ["data/test.tsv"],
+        }
+
+        parsed = DatasetManifest.model_validate(payload)
+        assert parsed.design.analysis_kind == "comparative"
+        assert parsed.design.condition_fields is None
+        assert parsed.design.batch_fields is None
 
     def test_example_artifacts_validate_from_disk(self):
         expected_types = {

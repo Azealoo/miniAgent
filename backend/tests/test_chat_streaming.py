@@ -55,8 +55,19 @@ async def _collect_sse_payloads(response) -> list[dict]:
 
 def _stage_selected_workflow(base_dir: Path, *, include_manifest: bool = True) -> str | None:
     workflows_dir = base_dir / "workflows"
+    runners_dir = workflows_dir / "runners"
+    report_templates_dir = workflows_dir / "report_templates"
     workflows_dir.mkdir(parents=True, exist_ok=True)
+    runners_dir.mkdir(parents=True, exist_ok=True)
+    report_templates_dir.mkdir(parents=True, exist_ok=True)
+    (workflows_dir / "__init__.py").write_text('"""Temporary workflow package for chat tests."""\n', encoding="utf-8")
+    (runners_dir / "__init__.py").write_text('"""Temporary workflow runners for chat tests."""\n', encoding="utf-8")
     shutil.copy2(REPO_ROOT / "workflows" / "rna-seq-qc.yaml", workflows_dir / "rna-seq-qc.yaml")
+    shutil.copy2(REPO_ROOT / "workflows" / "runners" / "rna_seq_qc.py", runners_dir / "rna_seq_qc.py")
+    shutil.copy2(
+        REPO_ROOT / "workflows" / "report_templates" / "rna_seq_qc_summary.md.j2",
+        report_templates_dir / "rna_seq_qc_summary.md.j2",
+    )
 
     if not include_manifest:
         return None
@@ -68,6 +79,14 @@ def _stage_selected_workflow(base_dir: Path, *, include_manifest: bool = True) -
         REPO_ROOT / "backend" / "artifacts" / "examples" / "dataset_manifest.yaml",
         manifest_path,
     )
+    for relpath in (
+        "data/norman/sample_sheet.tsv",
+        "data/norman/counts.h5ad",
+        "data/norman/metadata.tsv",
+    ):
+        target = base_dir / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("placeholder\n", encoding="utf-8")
     return manifest_relpath
 
 
@@ -209,8 +228,17 @@ async def test_chat_stream_includes_workflow_events_and_persists_them(isolated_c
                     "run_id": "run-20260319T120000Z-demo1234",
                 }
             ],
-            "warnings": [],
+            "warnings": ["sample metadata normalized"],
+            "warning_details": [
+                {
+                    "code": "normalized_metadata",
+                    "field_path": "design.condition_summary",
+                    "message": "Normalized whitespace in manifest metadata.",
+                    "path": None,
+                }
+            ],
             "errors": [],
+            "error_details": [],
         }
         yield {
             "type": "workflow_done",
@@ -244,12 +272,14 @@ async def test_chat_stream_includes_workflow_events_and_persists_them(isolated_c
     ]
     assert workflow_payloads[0]["contract_version"] == "workflow_event.v1"
     assert workflow_payloads[-1]["lifecycle_status"] == "completed"
+    assert workflow_payloads[3]["warning_details"][0]["code"] == "normalized_metadata"
 
     history = agent_manager.session_manager.load_session(session_id)
     assistant_messages = [msg for msg in history if msg["role"] == "assistant"]
     assert assistant_messages
     assert assistant_messages[0]["workflow_events"][0]["type"] == "workflow_start"
     assert assistant_messages[0]["workflow_events"][-1]["type"] == "workflow_done"
+    assert assistant_messages[0]["workflow_events"][3]["warning_details"][0]["field_path"] == "design.condition_summary"
 
 
 @pytest.mark.asyncio
