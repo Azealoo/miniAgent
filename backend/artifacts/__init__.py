@@ -50,6 +50,7 @@ from .schemas import (
     schema_format_for_artifact,
     validate_artifact_payload,
 )
+from qc_policy import QCPolicyDefinition, QCPolicyEvaluation, QCEvidence
 
 __all__ = [
     "ARTIFACTS_ROOT",
@@ -73,6 +74,9 @@ __all__ = [
     "DatasetManifest",
     "EvidenceCard",
     "ProtocolRun",
+    "QCPolicyDefinition",
+    "QCPolicyEvaluation",
+    "QCEvidence",
     "QAReport",
     "RunLayout",
     "WorkflowRun",

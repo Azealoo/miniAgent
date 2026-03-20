@@ -66,6 +66,15 @@ qc_gates:
       output_name: validated_manifest
     failure_policy: block
     description: Downstream QC can only run after a declared validated_manifest output exists.
+  - id: dataset-qc-policy-review
+    label: Evaluate attached dataset QC policy before interpretation
+    when: after_step
+    target:
+      source_type: step_output
+      step_id: preflight_check
+      output_name: validated_manifest
+    failure_policy: block
+    description: When the dataset manifest carries a reusable qc_policy plus qc_evidence, evaluate it and block interpretation on QC failures while preserving structured warnings.
 compliance_hooks:
   - id: privacy-preflight
     stage: before_execution

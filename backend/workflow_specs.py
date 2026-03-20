@@ -11,6 +11,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from artifacts.schemas import normalize_identifier
+from qc_policy import QCPolicyDefinition
 
 WORKFLOW_SPEC_VERSION = "1.0.0"
 
@@ -467,6 +468,7 @@ class QCGateDefinition(BaseModel):
     when: WorkflowQCGateStage
     target: BindingSource
     failure_policy: QCGateFailurePolicy
+    policy: QCPolicyDefinition | None = None
     description: str | None = None
 
     @field_validator("id")

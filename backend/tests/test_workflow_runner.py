@@ -1,6 +1,7 @@
 """Tests for the internal DAG workflow runner MVP."""
 
 import json
+import shutil
 import shlex
 import sys
 from pathlib import Path
@@ -13,6 +14,8 @@ from artifacts.registry import rebuild_artifact_registry  # noqa: E402
 from artifacts.schemas import SCHEMA_PACK_VERSION  # noqa: E402
 from workflow_runner import InternalDAGRunner  # noqa: E402
 from workflow_specs import WORKFLOW_SPEC_VERSION, validate_workflow_spec_payload  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _write_runner_module(base_dir: Path, module_name: str, source: str) -> str:
@@ -55,6 +58,37 @@ def _qa_report_output(source_step_id: str, source_output_name: str) -> dict:
             "output_name": source_output_name,
         },
     }
+
+
+def _stage_authored_rna_seq_workflow(base_dir: Path) -> str:
+    workflows_dir = base_dir / "workflows"
+    runners_dir = workflows_dir / "runners"
+    report_templates_dir = workflows_dir / "report_templates"
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+    runners_dir.mkdir(parents=True, exist_ok=True)
+    report_templates_dir.mkdir(parents=True, exist_ok=True)
+    (workflows_dir / "__init__.py").write_text('"""Temporary workflow package for tests."""\n', encoding="utf-8")
+    (runners_dir / "__init__.py").write_text('"""Temporary workflow runners for tests."""\n', encoding="utf-8")
+    shutil.copy2(REPO_ROOT / "workflows" / "rna-seq-qc.yaml", workflows_dir / "rna-seq-qc.yaml")
+    shutil.copy2(REPO_ROOT / "workflows" / "runners" / "rna_seq_qc.py", runners_dir / "rna_seq_qc.py")
+    shutil.copy2(
+        REPO_ROOT / "workflows" / "report_templates" / "rna_seq_qc_summary.md.j2",
+        report_templates_dir / "rna_seq_qc_summary.md.j2",
+    )
+
+    manifest_relpath = "manifests/dataset_manifest.yaml"
+    manifest_path = base_dir / manifest_relpath
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(REPO_ROOT / "backend" / "artifacts" / "examples" / "dataset_manifest.yaml", manifest_path)
+    for relpath in (
+        "data/norman/sample_sheet.tsv",
+        "data/norman/counts.h5ad",
+        "data/norman/metadata.tsv",
+    ):
+        target = base_dir / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("placeholder\n", encoding="utf-8")
+    return manifest_relpath
 
 
 class TestInternalDAGRunner:
@@ -796,6 +830,375 @@ def launch(_inputs, context):
         assert result.run.steps[0].status == "created"
         assert "QC gate dataset-manifest-required failed" in result.run.warnings[0]
         assert not (tmp_path / "execution_log.json").exists()
+
+    def test_runner_evaluates_structured_qc_policy_and_blocks_downstream_steps(self, tmp_path):
+        module_name = _write_runner_module(
+            tmp_path,
+            "qc_policy_demo",
+            """
+def collect_metrics(_inputs, _context):
+    return {
+        "qc_evidence_bundle": {
+            "assay_type": "perturb_seq",
+            "qc_evidence": {
+                "upstream_tools": ["multiqc"],
+                "metrics": [
+                    {
+                        "metric_name": "median_genes_per_cell",
+                        "observed_value": 180,
+                        "source_artifact": {
+                            "artifact_type": "qa_report",
+                            "path": "artifacts/qc-policy-demo/run-1/qa_report.json",
+                        },
+                    },
+                    {
+                        "metric_name": "pct_counts_mito",
+                        "observed_value": 27.5,
+                        "source_artifact": {
+                            "artifact_type": "qa_report",
+                            "path": "artifacts/qc-policy-demo/run-1/qa_report.json",
+                        },
+                    },
+                    {
+                        "metric_name": "donor_balance_ratio",
+                        "observed_value": 0.72,
+                        "source_artifact": {
+                            "artifact_type": "qa_report",
+                            "path": "artifacts/qc-policy-demo/run-1/qa_report.json",
+                        },
+                    },
+                ],
+            },
+        },
+    }
+
+
+def publish(_inputs, context):
+    (context.base_dir / "publish_ran.txt").write_text("published\\n", encoding="utf-8")
+    return {"submission_bundle": {"status": "published"}}
+""",
+        )
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "qc-policy-demo",
+                "version": "1.0.0",
+                "name": "QC Policy Demo",
+                "purpose": "Verify structured QC policy evaluation blocks downstream interpretation steps.",
+                "engine": "internal_dag_runner_v1",
+                "required_inputs": [
+                    {
+                        "name": "seed",
+                        "kind": "parameter",
+                        "data_type": "integer",
+                        "description": "Seed parameter for the demo workflow.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": _runtime_contract(["seed"]),
+                "outputs": [
+                    {
+                        "name": "submission_bundle",
+                        "kind": "value",
+                        "description": "Submission result.",
+                        "source": {
+                            "step_id": "publish",
+                            "output_name": "submission_bundle",
+                        },
+                    }
+                ],
+                "qc_gates": [
+                    {
+                        "id": "evaluate-scrna-policy",
+                        "label": "Evaluate reusable single-cell QC policy",
+                        "when": "after_step",
+                        "target": {
+                            "source_type": "step_output",
+                            "step_id": "collect_metrics",
+                            "output_name": "qc_evidence_bundle",
+                        },
+                        "failure_policy": "block",
+                        "policy": {
+                            "policy_id": "scrna-default-qc",
+                            "label": "Single-cell default QC policy",
+                            "version": "1.0.0",
+                            "assay_type": "scrna_seq",
+                            "required_upstream_tools": ["fastqc", "multiqc"],
+                            "checks": [
+                                {
+                                    "id": "median-genes-per-cell",
+                                    "label": "Median genes per cell",
+                                    "metric_name": "median_genes_per_cell",
+                                    "category": "technical",
+                                    "comparison": "minimum",
+                                    "pass_threshold": 300,
+                                    "warn_threshold": 200,
+                                },
+                                {
+                                    "id": "mitochondrial-percentage",
+                                    "label": "Mitochondrial fraction",
+                                    "metric_name": "pct_counts_mito",
+                                    "category": "technical",
+                                    "comparison": "maximum",
+                                    "pass_threshold": 20,
+                                    "warn_threshold": 25,
+                                },
+                                {
+                                    "id": "donor-balance",
+                                    "label": "Donor balance ratio",
+                                    "metric_name": "donor_balance_ratio",
+                                    "category": "batch_effect",
+                                    "comparison": "minimum",
+                                    "pass_threshold": 0.8,
+                                    "warn_threshold": 0.6,
+                                },
+                            ],
+                            "assay_overrides": [
+                                {
+                                    "assay_type": "perturb_seq",
+                                    "check_overrides": [
+                                        {
+                                            "check_id": "median-genes-per-cell",
+                                            "pass_threshold": 350,
+                                            "warn_threshold": 250,
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        "description": "Block publication if reusable QC policy detects technical failures.",
+                    }
+                ],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "collect_metrics",
+                        "label": "Collect metrics",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "collect_metrics",
+                        },
+                        "inputs": [
+                            {
+                                "name": "seed",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "seed",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "qc_evidence_bundle",
+                                "kind": "value",
+                                "description": "Structured QC evidence for policy evaluation.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    },
+                    {
+                        "id": "publish",
+                        "label": "Publish",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "publish",
+                        },
+                        "inputs": [
+                            {
+                                "name": "qc_evidence_bundle",
+                                "source": {
+                                    "source_type": "step_output",
+                                    "step_id": "collect_metrics",
+                                    "output_name": "qc_evidence_bundle",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "submission_bundle",
+                                "kind": "value",
+                                "description": "Submission result.",
+                            }
+                        ],
+                        "prerequisites": ["collect_metrics"],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    },
+                ],
+            }
+        )
+
+        events: list[dict] = []
+        result = InternalDAGRunner(tmp_path).run(spec, {"seed": 7}, event_callback=events.append)
+
+        assert result.run.lifecycle_status == "blocked"
+        assert result.run.steps[0].status == "completed"
+        assert result.run.steps[1].status == "blocked"
+        assert not (tmp_path / "publish_ran.txt").exists()
+        assert result.run.qc_status == "failed"
+        assert result.run.qc_policies[0].policy_id == "scrna-default-qc"
+        assert result.run.qc_policy_results[0].overall_status == "fail"
+        assert result.run.qc_policy_results[0].applied_assay_override == "perturb_seq"
+        assert "Technical failures" in result.run.qc_summary
+        assert "Batch-effect warnings" in result.run.qc_summary
+        assert any(detail.field_path == "pct_counts_mito" for detail in result.run.warning_details)
+        assert events[-1]["type"] == "workflow_done"
+        blocked_event = next(event for event in events if event["type"] == "workflow_blocked")
+        assert blocked_event["blocking_source"] == "qc_gate"
+        assert any(detail["field_path"] == "median_genes_per_cell" for detail in blocked_event["issue_details"])
+
+    def test_authored_rna_seq_workflow_evaluates_manifest_attached_qc_policy(self, tmp_path):
+        manifest_relpath = _stage_authored_rna_seq_workflow(tmp_path)
+
+        result = InternalDAGRunner(tmp_path).run(
+            tmp_path / "workflows" / "rna-seq-qc.yaml",
+            {"dataset_manifest": manifest_relpath},
+        )
+
+        assert result.run.lifecycle_status == "completed"
+        assert result.run.qc_status == "warning"
+        assert result.run.qc_policy_results
+        assert result.run.qc_policy_results[0].policy_id == "scrna-default-qc"
+        assert result.run.qc_policy_results[0].overall_status == "warn"
+        assert "Batch-effect warnings" in (result.run.qc_summary or "")
+
+    def test_runner_rejects_invalid_file_backed_qc_sources_instead_of_parsing_them_as_raw_yaml(self, tmp_path):
+        invalid_manifest = tmp_path / "manifests" / "not-a-manifest.yaml"
+        invalid_manifest.parent.mkdir(parents=True, exist_ok=True)
+        invalid_manifest.write_text(
+            json.dumps(
+                {
+                    "assay_type": "perturb_seq",
+                    "qc_evidence": {
+                        "upstream_tools": ["fastqc", "multiqc"],
+                        "metrics": [
+                            {
+                                "metric_name": "median_genes_per_cell",
+                                "observed_value": 500,
+                            }
+                        ],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        module_name = _write_runner_module(
+            tmp_path,
+            "invalid_qc_source_demo",
+            """
+def emit_invalid_manifest(_inputs, _context):
+    return {"dataset_manifest": "manifests/not-a-manifest.yaml"}
+""",
+        )
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "invalid-qc-source-demo",
+                "version": "1.0.0",
+                "name": "Invalid QC Source Demo",
+                "purpose": "Verify malformed file-backed QC sources fail closed.",
+                "engine": "internal_dag_runner_v1",
+                "required_inputs": [
+                    {
+                        "name": "seed",
+                        "kind": "parameter",
+                        "data_type": "integer",
+                        "description": "Seed parameter for the demo workflow.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": _runtime_contract(["seed"]),
+                "outputs": [
+                    {
+                        "name": "dataset_manifest",
+                        "kind": "artifact",
+                        "artifact_type": "dataset_manifest",
+                        "schema_ref": "artifact_schema:dataset_manifest@1.0.0",
+                        "description": "Emitted dataset manifest path.",
+                        "source": {
+                            "step_id": "emit_invalid_manifest",
+                            "output_name": "dataset_manifest",
+                        },
+                    }
+                ],
+                "qc_gates": [
+                    {
+                        "id": "evaluate-invalid-qc-source",
+                        "label": "Reject invalid file-backed QC sources",
+                        "when": "after_step",
+                        "target": {
+                            "source_type": "step_output",
+                            "step_id": "emit_invalid_manifest",
+                            "output_name": "dataset_manifest",
+                        },
+                        "failure_policy": "block",
+                        "policy": {
+                            "policy_id": "scrna-default-qc",
+                            "label": "Single-cell default QC policy",
+                            "version": "1.0.0",
+                            "required_upstream_tools": ["fastqc", "multiqc"],
+                            "checks": [
+                                {
+                                    "id": "median-genes-per-cell",
+                                    "label": "Median genes per cell",
+                                    "metric_name": "median_genes_per_cell",
+                                    "category": "technical",
+                                    "comparison": "minimum",
+                                    "pass_threshold": 300,
+                                    "warn_threshold": 200,
+                                }
+                            ],
+                        },
+                        "description": "Malformed artifacts should fail closed rather than be parsed as ad hoc QC records.",
+                    }
+                ],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "emit_invalid_manifest",
+                        "label": "Emit invalid manifest",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "emit_invalid_manifest",
+                        },
+                        "inputs": [
+                            {
+                                "name": "seed",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "seed",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "dataset_manifest",
+                                "kind": "artifact",
+                                "artifact_type": "dataset_manifest",
+                                "schema_ref": "artifact_schema:dataset_manifest@1.0.0",
+                                "description": "Malformed manifest path used to exercise fail-closed policy loading.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    }
+                ],
+            }
+        )
+
+        result = InternalDAGRunner(tmp_path).run(spec, {"seed": 1})
+
+        assert result.run.lifecycle_status == "blocked"
+        assert "QC gate evaluate-invalid-qc-source failed" in result.run.warnings[0]
+        assert result.run.qc_policy_results == []
 
     def test_runner_blocks_before_execution_when_required_compliance_hook_stops_run(self, tmp_path, monkeypatch):
         module_name = _write_runner_module(

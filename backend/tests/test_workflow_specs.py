@@ -274,6 +274,57 @@ class TestWorkflowSpecs:
 
         assert document.compliance_hooks[-1].step_id == "summarize_qc"
 
+    def test_qc_gates_accept_inline_policy_definitions(self):
+        payload = _base_payload()
+        payload["qc_gates"].append(
+            {
+                "id": "evaluate-scrna-policy",
+                "label": "Evaluate reusable single-cell QC policy",
+                "when": "after_step",
+                "target": {
+                    "source_type": "step_output",
+                    "step_id": "summarize_qc",
+                    "output_name": "qa_report",
+                },
+                "failure_policy": "block",
+                "policy": {
+                    "policy_id": "scrna-default-qc",
+                    "label": "Single-cell default QC policy",
+                    "version": "1.0.0",
+                    "assay_type": "scrna_seq",
+                    "required_upstream_tools": ["multiqc"],
+                    "checks": [
+                        {
+                            "id": "median-genes-per-cell",
+                            "label": "Median genes per cell",
+                            "metric_name": "median_genes_per_cell",
+                            "category": "technical",
+                            "comparison": "minimum",
+                            "pass_threshold": 300,
+                            "warn_threshold": 200,
+                        }
+                    ],
+                    "assay_overrides": [
+                        {
+                            "assay_type": "perturb_seq",
+                            "check_overrides": [
+                                {
+                                    "check_id": "median-genes-per-cell",
+                                    "pass_threshold": 350,
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "description": "Evaluate a reusable single-cell QC policy after summarization.",
+            }
+        )
+
+        document = validate_workflow_spec_payload(payload)
+
+        assert document.qc_gates[-1].policy is not None
+        assert document.qc_gates[-1].policy.policy_id == "scrna-default-qc"
+
     def test_python_executors_reject_invalid_module_paths(self):
         payload = _base_payload()
         payload["steps"][0]["executor"]["module"] = "workflows.runners.bad-module"

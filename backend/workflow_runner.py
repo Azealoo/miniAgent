@@ -22,6 +22,7 @@ import yaml
 
 from artifacts import (
     ArtifactReference,
+    DatasetManifest,
     RunLayout,
     SCHEMA_PACK_VERSION,
     WorkflowRun,
@@ -38,6 +39,7 @@ from artifacts import (
     validate_artifact_root,
 )
 from artifacts.schemas import WorkflowEnvironment, WorkflowIssueDetail, WorkflowStepRecord
+from qc_policy import QCPolicyDefinition, QCPolicyEvaluation, evaluate_qc_policy
 from workflow_specs import (
     ExternalEngineExecutor,
     LiteralBindingSource,
@@ -145,6 +147,24 @@ def _workflow_issue_details_from_exception(exc: Exception) -> list[WorkflowIssue
         for issue in raw_issues
         if (detail := _workflow_issue_detail_from_object(issue)) is not None
     ]
+    return _dedupe_workflow_issue_details(details)
+
+
+def _workflow_issue_details_from_qc_policy_evaluation(
+    evaluation: QCPolicyEvaluation,
+) -> list[WorkflowIssueDetail]:
+    details: list[WorkflowIssueDetail] = []
+    for check in evaluation.checks:
+        if check.status == "pass":
+            continue
+        details.append(
+            WorkflowIssueDetail(
+                code=f"qc-policy-{check.status}",
+                message=f"{evaluation.policy_id} {check.category}: {check.message}",
+                field_path=check.metric_name,
+                path=check.source_artifact.path if check.source_artifact is not None else None,
+            )
+        )
     return _dedupe_workflow_issue_details(details)
 
 
@@ -1355,7 +1375,45 @@ class InternalDAGRunner:
     ) -> WorkflowRun:
         try:
             value = self._resolve_binding_value(gate.target, resolved_inputs, step_output_values)
-            self._validate_gate_target_value(spec, gate.target, value)
+            policy = self._resolve_qc_policy_definition(gate.policy, value)
+            if policy is None:
+                self._validate_gate_target_value(spec, gate.target, value)
+                return run_document
+
+            evaluation = self._evaluate_qc_gate_policy(
+                gate=gate,
+                policy=policy,
+                value=value,
+                stage=stage,
+            )
+            run_document = self._record_qc_policy_evaluation(run_document, policy, evaluation)
+            issue_details = _workflow_issue_details_from_qc_policy_evaluation(evaluation)
+            if evaluation.overall_status == "pass":
+                return run_document
+            if evaluation.overall_status == "warn":
+                return self._record_policy_warning(
+                    run_document,
+                    evaluation.summary,
+                    current_step=current_step,
+                    issue_details=issue_details,
+                )
+            if gate.failure_policy == "warn":
+                return self._record_policy_warning(
+                    run_document,
+                    evaluation.summary,
+                    current_step=current_step,
+                    issue_details=issue_details,
+                )
+            return self._block_for_policy(
+                spec=spec,
+                run_document=run_document,
+                reason=evaluation.summary,
+                stage=stage,
+                current_step=current_step,
+                blocking_source="qc_gate",
+                issue_details=issue_details,
+                emitter=emitter,
+            )
         except Exception as exc:
             reason = f"QC gate {gate.id} failed: {exc}"
             if gate.failure_policy == "warn":
@@ -1369,6 +1427,108 @@ class InternalDAGRunner:
                 blocking_source="qc_gate",
                 emitter=emitter,
             )
+
+    def _resolve_qc_policy_definition(
+        self,
+        inline_policy: QCPolicyDefinition | None,
+        value: Any,
+    ) -> QCPolicyDefinition | None:
+        if inline_policy is not None:
+            return inline_policy
+        loaded_document = self._load_qc_policy_source_document(value)
+        if isinstance(loaded_document, DatasetManifest):
+            return loaded_document.qc_policy
+        if isinstance(loaded_document, Mapping):
+            raw_policy = loaded_document.get("qc_policy")
+            if isinstance(raw_policy, Mapping):
+                return QCPolicyDefinition.model_validate(raw_policy)
+        return None
+
+    def _evaluate_qc_gate_policy(
+        self,
+        *,
+        gate,
+        policy: QCPolicyDefinition,
+        value: Any,
+        stage: str,
+    ) -> QCPolicyEvaluation:
+        loaded_document = self._load_qc_policy_source_document(value)
+        assay_type: str | None = None
+        evidence_payload: Any = value
+        if isinstance(loaded_document, DatasetManifest):
+            assay_type = loaded_document.assay_type
+            evidence_payload = loaded_document.assay_extensions.get("qc_evidence")
+        elif isinstance(loaded_document, Mapping):
+            evidence_payload = self._extract_qc_evidence_payload(loaded_document)
+            assay_type = loaded_document.get("assay_type") if isinstance(loaded_document.get("assay_type"), str) else None
+
+        if evidence_payload is None:
+            raise ValueError("QC policy targets must provide qc_evidence metrics for evaluation.")
+        return evaluate_qc_policy(
+            policy,
+            evidence_payload,
+            assay_type=assay_type,
+            gate_id=gate.id,
+            stage=stage,
+        )
+
+    def _load_qc_policy_source_document(self, value: Any) -> Any:
+        candidate_path: str | None = None
+        if isinstance(value, Mapping) and isinstance(value.get("path"), str):
+            candidate_path = str(value["path"])
+        elif isinstance(value, str):
+            candidate_path = value
+        if candidate_path is None:
+            return value
+
+        try:
+            project_path = self._project_path(candidate_path)
+        except ValueError:
+            return value
+        if not project_path.exists() or not project_path.is_file():
+            return value
+        if project_path.suffix not in {".json", ".yaml", ".yml"}:
+            return value
+        return load_artifact_document(project_path)
+
+    def _extract_qc_evidence_payload(self, payload: Mapping[str, Any]) -> Any:
+        if "metrics" in payload and "upstream_tools" in payload:
+            return payload
+        raw_qc_evidence = payload.get("qc_evidence")
+        if isinstance(raw_qc_evidence, Mapping):
+            return raw_qc_evidence
+        assay_extensions = payload.get("assay_extensions")
+        if isinstance(assay_extensions, Mapping):
+            nested_qc_evidence = assay_extensions.get("qc_evidence")
+            if isinstance(nested_qc_evidence, Mapping):
+                return nested_qc_evidence
+        return None
+
+    def _record_qc_policy_evaluation(
+        self,
+        run_document: WorkflowRun,
+        policy: QCPolicyDefinition,
+        evaluation: QCPolicyEvaluation,
+    ) -> WorkflowRun:
+        policy_key = (policy.policy_id, policy.version)
+        existing_policy_keys = {(item.policy_id, item.version) for item in run_document.qc_policies}
+        if policy_key not in existing_policy_keys:
+            run_document.qc_policies.append(policy)
+
+        evaluation_key = (
+            evaluation.policy_id,
+            evaluation.version,
+            evaluation.gate_id,
+            evaluation.stage,
+        )
+        run_document.qc_policy_results = [
+            item
+            for item in run_document.qc_policy_results
+            if (item.policy_id, item.version, item.gate_id, item.stage) != evaluation_key
+        ]
+        run_document.qc_policy_results.append(evaluation)
+        summaries = [item.summary for item in run_document.qc_policy_results if item.summary]
+        run_document.qc_summary = "\n".join(summaries) if summaries else None
         return run_document
 
     def _apply_compliance_hook(
@@ -1541,13 +1701,22 @@ class InternalDAGRunner:
         message: str,
         *,
         current_step: WorkflowStepDefinition | None,
+        issue_details: list[WorkflowIssueDetail] | None = None,
     ) -> WorkflowRun:
         if message not in run_document.warnings:
             run_document.warnings.append(message)
+        if issue_details:
+            run_document.warning_details = _dedupe_workflow_issue_details(
+                [*run_document.warning_details, *issue_details]
+            )
         if current_step is not None:
             record = self._step_record(run_document, current_step.id)
             if message not in record.warnings:
                 record.warnings.append(message)
+            if issue_details:
+                record.warning_details = _dedupe_workflow_issue_details(
+                    [*record.warning_details, *issue_details]
+                )
         return run_document
 
     def _block_for_policy(
@@ -1559,17 +1728,31 @@ class InternalDAGRunner:
         stage: str,
         current_step: WorkflowStepDefinition | None,
         blocking_source: str,
+        issue_details: list[WorkflowIssueDetail] | None = None,
         emitter: _WorkflowRunStreamEmitter | None,
     ) -> WorkflowRun:
         run_document.lifecycle_status = "blocked"
         if reason not in run_document.warnings:
             run_document.warnings.append(reason)
+        if issue_details:
+            run_document.warning_details = _dedupe_workflow_issue_details(
+                [*run_document.warning_details, *issue_details]
+            )
 
         if current_step is not None and stage == "before_step":
             record = self._step_record(run_document, current_step.id)
             record.status = "blocked"
             if reason not in record.errors:
                 record.errors.append(reason)
+            if issue_details:
+                record.error_details = _dedupe_workflow_issue_details(
+                    [*record.error_details, *issue_details]
+                )
+        elif current_step is not None and issue_details:
+            record = self._step_record(run_document, current_step.id)
+            record.warning_details = _dedupe_workflow_issue_details(
+                [*record.warning_details, *issue_details]
+            )
 
         if current_step is not None and stage in {"before_step", "after_step"}:
             self._block_descendants(spec, run_document, failed_step_id=current_step.id, reason=reason)
@@ -1577,6 +1760,7 @@ class InternalDAGRunner:
         if emitter is not None:
             emitter.blocked(
                 reason=reason,
+                issue_details=issue_details,
                 stage=stage,
                 blocking_source=blocking_source,
                 step=current_step,
@@ -1682,9 +1866,10 @@ class InternalDAGRunner:
         return run_document
 
     def _sync_qc_status(self, run_document: WorkflowRun) -> WorkflowRun:
-        if run_document.lifecycle_status in {"failed", "blocked"}:
+        qc_result_statuses = [item.overall_status for item in run_document.qc_policy_results]
+        if run_document.lifecycle_status in {"failed", "blocked"} or "fail" in qc_result_statuses:
             run_document.qc_status = "failed"
-        elif run_document.warnings or any(record.warnings for record in run_document.steps):
+        elif "warn" in qc_result_statuses or run_document.warnings or any(record.warnings for record in run_document.steps):
             run_document.qc_status = "warning"
         elif self._all_steps_completed(run_document):
             run_document.qc_status = "passed"

@@ -33,3 +33,65 @@ design:
 source_files:
   - data/norman/counts.h5ad
   - data/norman/metadata.tsv
+qc_policy:
+  policy_id: scrna-default-qc
+  label: Single-cell default QC policy
+  version: "1.0.0"
+  assay_type: scrna_seq
+  required_upstream_tools:
+    - fastqc
+    - multiqc
+  checks:
+    - id: median-genes-per-cell
+      label: Median genes per cell
+      metric_name: median_genes_per_cell
+      category: technical
+      comparison: minimum
+      pass_threshold: 300
+      warn_threshold: 200
+      description: Single-cell libraries should retain enough detected genes per cell for downstream interpretation.
+    - id: mitochondrial-percentage
+      label: Mitochondrial fraction
+      metric_name: pct_counts_mito
+      category: technical
+      comparison: maximum
+      pass_threshold: 20
+      warn_threshold: 25
+      description: High mitochondrial content can indicate damaged or dying cells.
+    - id: donor-balance
+      label: Donor balance ratio
+      metric_name: donor_balance_ratio
+      category: batch_effect
+      comparison: minimum
+      pass_threshold: 0.8
+      warn_threshold: 0.6
+      description: Strong donor imbalance should be surfaced distinctly from technical QC failures.
+  assay_overrides:
+    - assay_type: perturb_seq
+      check_overrides:
+        - check_id: median-genes-per-cell
+          pass_threshold: 350
+          warn_threshold: 250
+  notes: Starting-point thresholds should be reviewed against assay-specific distributions before hard filtering.
+assay_extensions:
+  qc_evidence:
+    upstream_tools:
+      - fastqc
+      - multiqc
+    metrics:
+      - metric_name: median_genes_per_cell
+        observed_value: 412
+        source_artifact:
+          artifact_type: qa_report
+          path: artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/qa_report.json
+      - metric_name: pct_counts_mito
+        observed_value: 18.4
+        source_artifact:
+          artifact_type: qa_report
+          path: artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/qa_report.json
+      - metric_name: donor_balance_ratio
+        observed_value: 0.74
+        source_artifact:
+          artifact_type: qa_report
+          path: artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/qa_report.json
+    notes: Example QC evidence showing technical pass states with a batch-balance warning.

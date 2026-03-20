@@ -11,6 +11,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from qc_policy import QCPolicyDefinition, QCPolicyEvaluation
+
 from .naming import is_valid_run_id
 
 SCHEMA_PACK_VERSION = "1.0.0"
@@ -269,6 +271,7 @@ class DatasetManifest(ArtifactDocument):
     privacy_classification: PrivacyClassification
     design: DatasetDesign
     source_files: list[str] = Field(min_length=1)
+    qc_policy: QCPolicyDefinition | None = None
     assay_extensions: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("organism")
@@ -414,6 +417,9 @@ class WorkflowRun(ArtifactDocument):
     outputs: list[ArtifactReference]
     steps: list[WorkflowStepRecord] = Field(default_factory=list)
     provenance_exports: list[str] = Field(default_factory=list)
+    qc_policies: list[QCPolicyDefinition] = Field(default_factory=list)
+    qc_policy_results: list[QCPolicyEvaluation] = Field(default_factory=list)
+    qc_summary: str | None = None
     warnings: list[str] = Field(default_factory=list)
     warning_details: list[WorkflowIssueDetail] = Field(default_factory=list)
 
@@ -426,6 +432,13 @@ class WorkflowRun(ArtifactDocument):
     @classmethod
     def _validate_provenance_exports(cls, value: list[str]) -> list[str]:
         return [_normalize_relative_path(item) for item in value]
+
+    @field_validator("qc_summary")
+    @classmethod
+    def _validate_qc_summary(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="qc_summary")
 
 
 class ExtractedClaim(BaseModel):
