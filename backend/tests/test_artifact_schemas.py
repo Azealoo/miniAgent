@@ -11,12 +11,16 @@ from artifacts.naming import stable_artifact_name
 from artifacts.schemas import (  # noqa: E402
     SCHEMA_PACK_VERSION,
     ComplianceReport,
+    CountMatrix,
     DatasetManifest,
+    DifferentialExpressionResults,
+    DifferentialExpressionRun,
     EvidenceCard,
     FastQCMetrics,
     FastQCRun,
     MultiQCMetrics,
     MultiQCRun,
+    NormalizedCountMatrix,
     ProtocolRun,
     QAReport,
     WorkflowRun,
@@ -35,6 +39,10 @@ class TestArtifactSchemas:
     def test_schema_format_mapping_matches_reserved_filenames(self):
         for artifact_type, expected_format in {
             "dataset_manifest": "yaml",
+            "count_matrix": "json",
+            "normalized_count_matrix": "json",
+            "differential_expression_results": "json",
+            "differential_expression_run": "json",
             "workflow_run": "json",
             "evidence_card": "yaml",
             "compliance_report": "json",
@@ -56,6 +64,16 @@ class TestArtifactSchemas:
         assert artifact_model_for_type("multiqc_metrics") is MultiQCMetrics
         assert schema_format_for_artifact("multiqc_run") == "json"
         assert schema_format_for_artifact("multiqc_metrics") == "json"
+
+    def test_differential_expression_artifact_types_use_json_schema_format(self):
+        assert artifact_model_for_type("count_matrix") is CountMatrix
+        assert artifact_model_for_type("normalized_count_matrix") is NormalizedCountMatrix
+        assert artifact_model_for_type("differential_expression_results") is DifferentialExpressionResults
+        assert artifact_model_for_type("differential_expression_run") is DifferentialExpressionRun
+        assert schema_format_for_artifact("count_matrix") == "json"
+        assert schema_format_for_artifact("normalized_count_matrix") == "json"
+        assert schema_format_for_artifact("differential_expression_results") == "json"
+        assert schema_format_for_artifact("differential_expression_run") == "json"
 
     def test_dataset_manifest_rejects_absolute_source_paths(self):
         payload = {
@@ -617,6 +635,214 @@ class TestArtifactSchemas:
         assert isinstance(metrics_document, MultiQCMetrics)
         assert metrics_document.aggregate_metrics.report_sample_count == 2
 
+    def test_differential_expression_artifacts_validate_structured_outputs(self):
+        count_matrix_payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "count_matrix",
+            "id": "count-matrix-rnaseq-qc-de-quantification-run-20260319t210000z-deadbeef",
+            "run_id": "run-20260319T210000Z-deadbeef",
+            "created_at": "2026-03-19T21:10:00Z",
+            "source_workflow": "rnaseq_qc_de",
+            "related_artifacts": [],
+            "engine_name": "bioapex_deterministic_quantification",
+            "engine_version": "1.0.0",
+            "matrix_path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/quantification/gene_counts.tsv",
+            "matrix_format": "tsv",
+            "sample_sheet_path": "backend/artifacts/examples/rnaseq/sample_sheet.tsv",
+            "condition_field": "condition",
+            "batch_fields": ["batch"],
+            "sample_ids": ["control_rep1", "treated_rep1"],
+            "gene_ids": ["ENSG00000185745", "ENSG00000187608"],
+            "library_sizes": {"control_rep1": 12000, "treated_rep1": 14000},
+            "upstream_multiqc_run": {
+                "artifact_type": "multiqc_run",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/multiqc_run.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "upstream_multiqc_metrics": {
+                "artifact_type": "multiqc_metrics",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/multiqc_metrics.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+        }
+        normalized_count_matrix_payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "normalized_count_matrix",
+            "id": "normalized-count-matrix-rnaseq-qc-de-differential-expression-run-20260319t210000z-deadbeef",
+            "run_id": "run-20260319T210000Z-deadbeef",
+            "created_at": "2026-03-19T21:12:00Z",
+            "source_workflow": "rnaseq_qc_de",
+            "related_artifacts": [
+                {
+                    "artifact_type": "count_matrix",
+                    "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/count_matrix.json",
+                    "run_id": "run-20260319T210000Z-deadbeef",
+                }
+            ],
+            "engine_name": "bioapex_mean_centered_t_test",
+            "engine_version": "1.0.0",
+            "normalization_method": "median_library_size",
+            "matrix_path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/differential-expression/treated-vs-control.normalized_counts.tsv",
+            "matrix_format": "tsv",
+            "sample_ids": ["control_rep1", "treated_rep1"],
+            "gene_count": 2,
+            "library_size_factors": {"control_rep1": 0.95, "treated_rep1": 1.05},
+            "source_count_matrix": {
+                "artifact_type": "count_matrix",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/count_matrix.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+        }
+        results_payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "differential_expression_results",
+            "id": "differential-expression-results-rnaseq-qc-de-differential-expression-run-20260319t210000z-deadbeef",
+            "run_id": "run-20260319T210000Z-deadbeef",
+            "created_at": "2026-03-19T21:12:10Z",
+            "source_workflow": "rnaseq_qc_de",
+            "related_artifacts": [
+                {
+                    "artifact_type": "count_matrix",
+                    "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/count_matrix.json",
+                    "run_id": "run-20260319T210000Z-deadbeef",
+                }
+            ],
+            "engine_name": "bioapex_mean_centered_t_test",
+            "engine_version": "1.0.0",
+            "design": {
+                "design_formula": "~ batch + condition",
+                "modeled_factors": ["batch", "condition"],
+                "batch_fields_expected": ["batch"],
+                "batch_fields_modeled": ["batch"],
+                "missing_batch_fields": [],
+                "replicate_counts": {"control": 3, "treated": 3},
+                "minimum_condition_replicates": 3,
+            },
+            "contrast": {
+                "contrast_label": "treated-vs-control",
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+            "source_count_matrix": {
+                "artifact_type": "count_matrix",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/count_matrix.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "normalized_count_matrix": {
+                "artifact_type": "normalized_count_matrix",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/normalized_count_matrix.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "results_path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/differential-expression/treated-vs-control.tsv",
+            "result_format": "tsv",
+            "tested_gene_count": 2,
+            "significant_gene_count": 1,
+            "significance_threshold": 0.05,
+            "diagnostic_plots": [
+                {
+                    "artifact_type": "volcano_plot",
+                    "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/differential-expression/treated-vs-control.volcano.svg",
+                    "run_id": "run-20260319T210000Z-deadbeef",
+                },
+                {
+                    "artifact_type": "mean_difference_plot",
+                    "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/differential-expression/treated-vs-control.mean-difference.svg",
+                    "run_id": "run-20260319T210000Z-deadbeef",
+                },
+            ],
+            "warnings": [],
+        }
+        run_payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "differential_expression_run",
+            "id": "differential-expression-run-rnaseq-qc-de-differential-expression-run-20260319t210000z-deadbeef",
+            "run_id": "run-20260319T210000Z-deadbeef",
+            "created_at": "2026-03-19T21:12:15Z",
+            "source_workflow": "rnaseq_qc_de",
+            "related_artifacts": [
+                {
+                    "artifact_type": "differential_expression_results",
+                    "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/differential_expression_results.json",
+                    "run_id": "run-20260319T210000Z-deadbeef",
+                }
+            ],
+            "engine_name": "bioapex_mean_centered_t_test",
+            "engine_version": "1.0.0",
+            "design": {
+                "design_formula": "~ batch + condition",
+                "modeled_factors": ["batch", "condition"],
+                "batch_fields_expected": ["batch"],
+                "batch_fields_modeled": ["batch"],
+                "missing_batch_fields": [],
+                "replicate_counts": {"control": 3, "treated": 3},
+                "minimum_condition_replicates": 3,
+            },
+            "contrast": {
+                "contrast_label": "treated-vs-control",
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+            "parameters": {
+                "significance_threshold": 0.05,
+                "log2_effect_floor": 1.0,
+                "normalization_method": "median_library_size",
+            },
+            "batch_adjustment_method": "mean_center_by_batch",
+            "source_count_matrix": {
+                "artifact_type": "count_matrix",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/count_matrix.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "normalized_count_matrix": {
+                "artifact_type": "normalized_count_matrix",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/normalized_count_matrix.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "results_artifact": {
+                "artifact_type": "differential_expression_results",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/differential_expression_results.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "diagnostic_plots": [
+                {
+                    "artifact_type": "volcano_plot",
+                    "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/differential-expression/treated-vs-control.volcano.svg",
+                    "run_id": "run-20260319T210000Z-deadbeef",
+                },
+                {
+                    "artifact_type": "mean_difference_plot",
+                    "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/differential-expression/treated-vs-control.mean-difference.svg",
+                    "run_id": "run-20260319T210000Z-deadbeef",
+                },
+            ],
+            "summary": {
+                "tested_gene_count": 2,
+                "significant_gene_count": 1,
+                "upregulated_gene_count": 1,
+                "downregulated_gene_count": 0,
+                "maximum_absolute_log2_fold_change": 2.45,
+                "top_upregulated_gene": "IFIT1",
+                "top_downregulated_gene": None,
+            },
+            "warnings": [],
+        }
+
+        count_matrix_document = validate_artifact_payload(count_matrix_payload)
+        normalized_count_matrix_document = validate_artifact_payload(normalized_count_matrix_payload)
+        results_document = validate_artifact_payload(results_payload)
+        run_document = validate_artifact_payload(run_payload)
+
+        assert isinstance(count_matrix_document, CountMatrix)
+        assert count_matrix_document.library_sizes["treated_rep1"] == 14000
+        assert isinstance(normalized_count_matrix_document, NormalizedCountMatrix)
+        assert normalized_count_matrix_document.gene_count == 2
+        assert isinstance(results_document, DifferentialExpressionResults)
+        assert results_document.diagnostic_plots[0].artifact_type == "volcano_plot"
+        assert isinstance(run_document, DifferentialExpressionRun)
+        assert run_document.summary.top_upregulated_gene == "IFIT1"
+
     def test_dataset_manifest_accepts_embedded_qc_policy_and_workflow_run_persists_evaluation_summary(self):
         manifest_payload = {
             "schema_version": SCHEMA_PACK_VERSION,
@@ -815,6 +1041,10 @@ class TestArtifactSchemas:
         expected_types = {
             "dataset_manifest.yaml": DatasetManifest,
             "rnaseq_dataset_manifest.yaml": DatasetManifest,
+            "count_matrix.json": CountMatrix,
+            "normalized_count_matrix.json": NormalizedCountMatrix,
+            "differential_expression_results.json": DifferentialExpressionResults,
+            "differential_expression_run.json": DifferentialExpressionRun,
             "run.json": WorkflowRun,
             "evidence_card.yaml": EvidenceCard,
             "compliance_report.json": ComplianceReport,

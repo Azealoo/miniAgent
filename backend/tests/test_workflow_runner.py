@@ -355,6 +355,8 @@ def _write_bulk_rnaseq_manifest(
     multiqc_executable: str | None = None,
     sequencing_layout: str = "paired_end",
     sample_modes: dict[str, str] | None = None,
+    omit_batch_column: bool = False,
+    design_batch_fields: list[str] | None = None,
 ) -> str:
     manifest_relpath = "manifests/rnaseq_dataset_manifest.yaml"
     manifest_path = base_dir / manifest_relpath
@@ -369,8 +371,13 @@ def _write_bulk_rnaseq_manifest(
         ("treated_rep3", "treated", "batch_b"),
     ]
     sample_modes = sample_modes or {}
+    resolved_design_batch_fields = ["batch"] if design_batch_fields is None else list(design_batch_fields)
     source_files: list[str] = []
-    sample_sheet_lines = ["sample_id\tcondition\tbatch\tfastq_r1\tfastq_r2"]
+    headers = ["sample_id", "condition"]
+    if not omit_batch_column:
+        headers.append("batch")
+    headers.extend(["fastq_r1", "fastq_r2"])
+    sample_sheet_lines = ["\t".join(headers)]
     for sample_id, condition, batch in samples:
         mode = sample_modes.get(sample_id, "pass")
         read1_relpath = f"data/rnaseq/{sample_id}__{mode}_R1.fastq"
@@ -388,9 +395,11 @@ def _write_bulk_rnaseq_manifest(
         else:
             read2_relpath = ""
 
-        sample_sheet_lines.append(
-            "\t".join([sample_id, condition, batch, read1_relpath, read2_relpath])
-        )
+        values = [sample_id, condition]
+        if not omit_batch_column:
+            values.append(batch)
+        values.extend([read1_relpath, read2_relpath])
+        sample_sheet_lines.append("\t".join(values))
 
     assay_extensions: dict[str, object] = {}
     if fastqc_executable is not None:
@@ -416,10 +425,10 @@ def _write_bulk_rnaseq_manifest(
             "condition_summary": "Bulk RNA-seq pilot comparing treated and control libraries.",
             "analysis_kind": "comparative",
             "condition_fields": ["condition"],
-            "batch_fields": ["batch"],
+            "batch_fields": resolved_design_batch_fields,
             "replicate_structure": "3 control and 3 treated libraries",
             "timepoints": ["end_point"],
-            "factors": ["condition", "batch"],
+            "factors": ["condition", *resolved_design_batch_fields],
         },
         "source_files": source_files,
         "assay_extensions": assay_extensions,
@@ -2053,6 +2062,10 @@ def launch(inputs, _context):
         ]
         raw_qc_step = next(step for step in result.run.steps if step.id == "raw_qc")
         aggregated_qc_step = next(step for step in result.run.steps if step.id == "aggregated_qc")
+        quantification_step = next(step for step in result.run.steps if step.id == "quantification")
+        differential_expression_step = next(
+            step for step in result.run.steps if step.id == "differential_expression"
+        )
         assert {ref.artifact_type for ref in raw_qc_step.outputs_produced} == {
             "workflow_value",
             "fastqc_run",
@@ -2062,6 +2075,16 @@ def launch(inputs, _context):
             "workflow_value",
             "multiqc_run",
             "multiqc_metrics",
+        }
+        assert {ref.artifact_type for ref in quantification_step.outputs_produced} == {
+            "workflow_value",
+            "count_matrix",
+        }
+        assert {ref.artifact_type for ref in differential_expression_step.outputs_produced} == {
+            "workflow_value",
+            "normalized_count_matrix",
+            "differential_expression_results",
+            "differential_expression_run",
         }
         assert (result.run_dir / "outputs" / "generated" / "raw-qc" / "fastqc_run.json").exists()
         assert (result.run_dir / "outputs" / "generated" / "raw-qc" / "fastqc_metrics.json").exists()
@@ -2075,6 +2098,8 @@ def launch(inputs, _context):
             result.run_dir / "outputs" / "generated" / "aggregated-qc" / "multiqc" / "multiqc_report.html"
         ).exists()
         assert (result.run_dir / "outputs" / "generated" / "quantification" / "quantification_bundle.json").exists()
+        assert (result.run_dir / "outputs" / "generated" / "quantification" / "count_matrix.json").exists()
+        assert (result.run_dir / "outputs" / "generated" / "quantification" / "gene_counts.tsv").exists()
         assert (
             result.run_dir
             / "outputs"
@@ -2082,11 +2107,65 @@ def launch(inputs, _context):
             / "differential-expression"
             / "differential_expression_bundle.json"
         ).exists()
+        assert (
+            result.run_dir
+            / "outputs"
+            / "generated"
+            / "differential-expression"
+            / "normalized_count_matrix.json"
+        ).exists()
+        assert (
+            result.run_dir
+            / "outputs"
+            / "generated"
+            / "differential-expression"
+            / "differential_expression_results.json"
+        ).exists()
+        assert (
+            result.run_dir
+            / "outputs"
+            / "generated"
+            / "differential-expression"
+            / "differential_expression_run.json"
+        ).exists()
+        assert (
+            result.run_dir
+            / "outputs"
+            / "generated"
+            / "differential-expression"
+            / "treated-vs-control.normalized_counts.tsv"
+        ).exists()
+        assert (
+            result.run_dir
+            / "outputs"
+            / "generated"
+            / "differential-expression"
+            / "treated-vs-control.tsv"
+        ).exists()
+        assert (
+            result.run_dir
+            / "outputs"
+            / "generated"
+            / "differential-expression"
+            / "treated-vs-control.volcano.svg"
+        ).exists()
+        assert (
+            result.run_dir
+            / "outputs"
+            / "generated"
+            / "differential-expression"
+            / "treated-vs-control.mean-difference.svg"
+        ).exists()
         assert (result.run_dir / "outputs" / "generated" / "report-bundle" / "report_bundle_manifest.json").exists()
+        assert (result.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md").exists()
         assert (result.run_dir / "fastqc_run.json").exists()
         assert (result.run_dir / "fastqc_metrics.json").exists()
         assert (result.run_dir / "multiqc_run.json").exists()
         assert (result.run_dir / "multiqc_metrics.json").exists()
+        assert (result.run_dir / "count_matrix.json").exists()
+        assert (result.run_dir / "normalized_count_matrix.json").exists()
+        assert (result.run_dir / "differential_expression_results.json").exists()
+        assert (result.run_dir / "differential_expression_run.json").exists()
         assert (result.run_dir / "qa_report.json").exists()
 
         report_bundle_payload = json.loads(
@@ -2104,7 +2183,18 @@ def launch(inputs, _context):
         multiqc_metrics = load_artifact_document(
             result.run_dir / "outputs" / "generated" / "aggregated-qc" / "multiqc_metrics.json"
         )
+        count_matrix = load_artifact_document(result.run_dir / "count_matrix.json")
+        normalized_count_matrix = load_artifact_document(result.run_dir / "normalized_count_matrix.json")
+        differential_expression_results = load_artifact_document(
+            result.run_dir / "differential_expression_results.json"
+        )
+        differential_expression_run = load_artifact_document(
+            result.run_dir / "differential_expression_run.json"
+        )
         qa_report = load_artifact_document(result.run_dir / "qa_report.json")
+        report_bundle_markdown = (
+            result.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
+        ).read_text(encoding="utf-8")
 
         assert fastqc_run.tool_name == "fastqc"
         assert fastqc_metrics.aggregate_metrics.sample_count == 6
@@ -2113,6 +2203,21 @@ def launch(inputs, _context):
         assert multiqc_run.tool_name == "multiqc"
         assert multiqc_metrics.aggregate_metrics.report_sample_count == 6
         assert multiqc_metrics.aggregate_metrics.fastqc_pass_rate == 1.0
+        assert count_matrix.engine_name == "bioapex_deterministic_quantification"
+        assert len(count_matrix.sample_ids) == 6
+        assert len(count_matrix.gene_ids) == 10
+        assert normalized_count_matrix.engine_name == "bioapex_mean_centered_t_test"
+        assert normalized_count_matrix.gene_count == len(count_matrix.gene_ids)
+        assert differential_expression_results.engine_name == "bioapex_mean_centered_t_test"
+        assert differential_expression_results.significant_gene_count >= 1
+        assert differential_expression_run.summary.significant_gene_count >= 1
+        assert differential_expression_run.summary.top_upregulated_gene in {
+            "IFIT1",
+            "ISG15",
+            "OAS1",
+            "MX1",
+            "CXCL10",
+        }
         assert any(
             ref.artifact_type == "fastqc_run" and ref.path.endswith("/fastqc_run.json")
             for ref in result.run.outputs
@@ -2129,16 +2234,69 @@ def launch(inputs, _context):
             ref.artifact_type == "multiqc_metrics" and ref.path.endswith("/multiqc_metrics.json")
             for ref in result.run.outputs
         )
+        assert any(
+            ref.artifact_type == "count_matrix" and ref.path.endswith("/count_matrix.json")
+            for ref in result.run.outputs
+        )
+        assert any(
+            ref.artifact_type == "normalized_count_matrix"
+            and ref.path.endswith("/normalized_count_matrix.json")
+            for ref in result.run.outputs
+        )
+        assert any(
+            ref.artifact_type == "differential_expression_results"
+            and ref.path.endswith("/differential_expression_results.json")
+            for ref in result.run.outputs
+        )
+        assert any(
+            ref.artifact_type == "differential_expression_run"
+            and ref.path.endswith("/differential_expression_run.json")
+            for ref in result.run.outputs
+        )
         assert any(ref.artifact_type == "fastqc_run" for ref in result.run.related_artifacts)
         assert any(ref.artifact_type == "fastqc_metrics" for ref in result.run.related_artifacts)
         assert any(ref.artifact_type == "multiqc_run" for ref in result.run.related_artifacts)
         assert any(ref.artifact_type == "multiqc_metrics" for ref in result.run.related_artifacts)
+        assert any(ref.artifact_type == "count_matrix" for ref in result.run.related_artifacts)
+        assert any(ref.artifact_type == "normalized_count_matrix" for ref in result.run.related_artifacts)
+        assert any(
+            ref.artifact_type == "differential_expression_results" for ref in result.run.related_artifacts
+        )
+        assert any(ref.artifact_type == "differential_expression_run" for ref in result.run.related_artifacts)
         assert any(
             artifact["artifact_type"] == "fastqc_run"
             for artifact in report_bundle_payload["expected_artifacts"]
         )
         assert any(
+            artifact["artifact_type"] == "workflow_run" and artifact["path"].endswith("/run.json")
+            for artifact in report_bundle_payload["expected_artifacts"]
+        )
+        assert any(
             artifact["artifact_type"] == "multiqc_run"
+            for artifact in report_bundle_payload["expected_artifacts"]
+        )
+        assert any(
+            artifact["artifact_type"] == "count_matrix"
+            and artifact["path"].endswith("/count_matrix.json")
+            and "/outputs/generated/" not in artifact["path"]
+            for artifact in report_bundle_payload["expected_artifacts"]
+        )
+        assert any(
+            artifact["artifact_type"] == "normalized_count_matrix"
+            and artifact["path"].endswith("/normalized_count_matrix.json")
+            and "/outputs/generated/" not in artifact["path"]
+            for artifact in report_bundle_payload["expected_artifacts"]
+        )
+        assert any(
+            artifact["artifact_type"] == "differential_expression_results"
+            and artifact["path"].endswith("/differential_expression_results.json")
+            and "/outputs/generated/" not in artifact["path"]
+            for artifact in report_bundle_payload["expected_artifacts"]
+        )
+        assert any(
+            artifact["artifact_type"] == "differential_expression_run"
+            and artifact["path"].endswith("/differential_expression_run.json")
+            and "/outputs/generated/" not in artifact["path"]
             for artifact in report_bundle_payload["expected_artifacts"]
         )
         assert any(
@@ -2153,15 +2311,23 @@ def launch(inputs, _context):
             artifact["path"].endswith("outputs/generated/report-bundle/rnaseq_report_bundle.md")
             for artifact in report_bundle_payload["expected_artifacts"]
         )
-        assert qa_report.overall_status == "warning"
-        assert any(item.artifact_type == "count_matrix" for item in qa_report.missing_artifacts)
-        assert any(item.artifact_type == "report_bundle" for item in qa_report.missing_artifacts)
-        assert not any(item.artifact_type == "fastqc_run" for item in qa_report.missing_artifacts)
-        assert not any(item.artifact_type == "multiqc_run" for item in qa_report.missing_artifacts)
+        assert qa_report.overall_status == "passed"
+        assert qa_report.missing_artifacts == []
+        assert qa_report.warnings == []
+        assert any(item.artifact_type == "workflow_run" for item in qa_report.checklist_artifacts)
+        assert any(item.artifact_type == "count_matrix" for item in qa_report.checklist_artifacts)
         assert any(
-            item.expected_path is not None
-            and item.expected_path.endswith("outputs/generated/report-bundle/rnaseq_report_bundle.md")
-            for item in qa_report.missing_artifacts
+            item.artifact_type == "differential_expression_results"
+            for item in qa_report.checklist_artifacts
+        )
+        assert "Differential Expression Summary" in report_bundle_markdown
+        assert "## Workflow Version" in report_bundle_markdown
+        assert "## QC Summary" in report_bundle_markdown
+        assert "Workflow QC status: `passed`" in report_bundle_markdown
+        assert next(ref.path for ref in result.run.outputs if ref.artifact_type == "count_matrix") in report_bundle_markdown
+        assert (
+            next(ref.path for ref in result.run.outputs if ref.artifact_type == "differential_expression_run")
+            in report_bundle_markdown
         )
         assert {
             item.metric_name: item.value
@@ -2173,6 +2339,21 @@ def launch(inputs, _context):
             "min_per_base_quality": 31.5,
             "report_sample_count": 6,
         }
+        quantification_metrics = {
+            item.metric_name: item.value
+            for item in result.run.summary_metrics
+            if item.stage == "quantification"
+        }
+        differential_expression_metrics = {
+            item.metric_name: item.value
+            for item in result.run.summary_metrics
+            if item.stage == "differential_expression"
+        }
+        assert quantification_metrics == {"sample_count": 6, "gene_count": 10}
+        assert differential_expression_metrics["tested_gene_count"] == 10
+        assert differential_expression_metrics["minimum_condition_replicates"] == 3
+        assert differential_expression_metrics["missing_expected_batch_fields"] == 0
+        assert differential_expression_metrics["significant_gene_count"] >= 1
 
     def test_authored_rnaseq_workflow_skeleton_supports_single_end_fastqc_inputs(self, tmp_path):
         spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
@@ -2210,6 +2391,124 @@ def launch(inputs, _context):
         assert fastqc_metrics.aggregate_metrics.fastqc_pass_rate == 1.0
         assert multiqc_metrics.aggregate_metrics.fastqc_pass_rate == 1.0
         assert multiqc_metrics.aggregate_metrics.report_sample_count == 6
+
+    def test_authored_rnaseq_workflow_warns_when_expected_batch_field_is_missing(self, tmp_path):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        multiqc_executable = _write_fake_multiqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+            multiqc_executable=multiqc_executable,
+            omit_batch_column=True,
+            design_batch_fields=["batch"],
+        )
+
+        events: list[dict] = []
+        result = InternalDAGRunner(tmp_path).run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+            event_callback=events.append,
+        )
+
+        qa_report = load_artifact_document(result.run_dir / "qa_report.json")
+
+        assert result.run.lifecycle_status == "completed"
+        assert result.run.qc_status == "warning"
+        assert any("missing_expected_batch_fields" in warning for warning in result.run.warnings)
+        assert qa_report.overall_status == "warning"
+        assert qa_report.warnings
+        assert not any(event["type"] == "workflow_blocked" for event in events)
+        assert {
+            item.metric_name: item.value
+            for item in result.run.summary_metrics
+            if item.stage == "differential_expression"
+        }["missing_expected_batch_fields"] == 1
+
+    def test_authored_rnaseq_workflow_report_bundle_preserves_upstream_qc_warnings(self, tmp_path):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        multiqc_executable = _write_fake_multiqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+            multiqc_executable=multiqc_executable,
+            sample_modes={"treated_rep3": "qualitywarn"},
+        )
+
+        result = InternalDAGRunner(tmp_path).run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+        )
+
+        qa_report = load_artifact_document(result.run_dir / "qa_report.json")
+        report_bundle_markdown = (
+            result.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
+        ).read_text(encoding="utf-8")
+
+        assert result.run.lifecycle_status == "completed"
+        assert result.run.qc_status == "warning"
+        assert result.run.warnings
+        assert qa_report.overall_status == "warning"
+        assert qa_report.warnings == result.run.warnings
+        assert "Workflow QC status: `warning`" in report_bundle_markdown
+        for warning in result.run.warnings:
+            assert warning in report_bundle_markdown
+
+    def test_authored_rnaseq_workflow_blocks_when_multiple_expected_batch_fields_are_missing(self, tmp_path):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        multiqc_executable = _write_fake_multiqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+            multiqc_executable=multiqc_executable,
+            omit_batch_column=True,
+            design_batch_fields=["batch", "lane"],
+        )
+
+        events: list[dict] = []
+        result = InternalDAGRunner(tmp_path).run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+            event_callback=events.append,
+        )
+
+        assert result.run.lifecycle_status == "blocked"
+        assert result.run.qc_status == "failed"
+        assert [step.status for step in result.run.steps] == [
+            "completed",
+            "completed",
+            "completed",
+            "completed",
+            "completed",
+            "blocked",
+        ]
+        assert (result.run_dir / "count_matrix.json").exists()
+        assert (result.run_dir / "normalized_count_matrix.json").exists()
+        assert (result.run_dir / "differential_expression_results.json").exists()
+        assert (result.run_dir / "differential_expression_run.json").exists()
+        assert not (result.run_dir / "qa_report.json").exists()
+
+        blocked_event = next(event for event in events if event["type"] == "workflow_blocked")
+        assert blocked_event["blocking_source"] == "qc_gate"
+        assert blocked_event["stage"] == "after_step"
+        assert "missing_expected_batch_fields" in blocked_event["reason"]
 
     def test_authored_rnaseq_workflow_skeleton_blocks_on_aggregated_qc_gate(self, tmp_path):
         spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)

@@ -30,15 +30,15 @@
     },
     {
       "id": "quantification",
-      "name": "Quantification planning skeleton stage"
+      "name": "Quantification count-matrix stage"
     },
     {
       "id": "differential_expression",
-      "name": "Differential expression planning skeleton stage"
+      "name": "Differential expression analysis stage"
     },
     {
       "id": "report_bundle",
-      "name": "Report bundle skeleton stage"
+      "name": "Report bundle stage"
     }
   ],
   "expected_outputs": [
@@ -63,8 +63,24 @@
       "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/outputs/generated/quantification/quantification_bundle.json"
     },
     {
+      "name": "count_matrix",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/count_matrix.json"
+    },
+    {
       "name": "differential_expression_bundle",
       "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/outputs/generated/differential-expression/differential_expression_bundle.json"
+    },
+    {
+      "name": "normalized_count_matrix",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/normalized_count_matrix.json"
+    },
+    {
+      "name": "differential_expression_results",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/differential_expression_results.json"
+    },
+    {
+      "name": "differential_expression_run",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/differential_expression_run.json"
     },
     {
       "name": "report_bundle_manifest",

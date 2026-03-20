@@ -1,0 +1,85 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "differential_expression_run",
+  "id": "differential-expression-run-rnaseq-qc-de-differential-expression-run-20260319t210000z-deadbeef",
+  "run_id": "run-20260319T210000Z-deadbeef",
+  "created_at": "2026-03-19T21:12:15Z",
+  "source_workflow": "rnaseq_qc_de",
+  "related_artifacts": [
+    {
+      "artifact_type": "differential_expression_results",
+      "path": "backend/artifacts/examples/differential_expression_results.json",
+      "run_id": "run-20260319T210000Z-deadbeef"
+    }
+  ],
+  "engine_name": "bioapex_mean_centered_t_test",
+  "engine_version": "1.0.0",
+  "design": {
+    "design_formula": "~ batch + condition",
+    "modeled_factors": [
+      "batch",
+      "condition"
+    ],
+    "batch_fields_expected": [
+      "batch"
+    ],
+    "batch_fields_modeled": [
+      "batch"
+    ],
+    "missing_batch_fields": [],
+    "replicate_counts": {
+      "control": 3,
+      "treated": 3
+    },
+    "minimum_condition_replicates": 3
+  },
+  "contrast": {
+    "contrast_label": "treated-vs-control",
+    "condition_field": "condition",
+    "baseline_condition": "control",
+    "comparison_condition": "treated"
+  },
+  "parameters": {
+    "significance_threshold": 0.05,
+    "log2_effect_floor": 1.0,
+    "normalization_method": "median_library_size"
+  },
+  "batch_adjustment_method": "mean_center_by_batch",
+  "source_count_matrix": {
+    "artifact_type": "count_matrix",
+    "path": "backend/artifacts/examples/count_matrix.json",
+    "run_id": "run-20260319T210000Z-deadbeef"
+  },
+  "normalized_count_matrix": {
+    "artifact_type": "normalized_count_matrix",
+    "path": "backend/artifacts/examples/normalized_count_matrix.json",
+    "run_id": "run-20260319T210000Z-deadbeef"
+  },
+  "results_artifact": {
+    "artifact_type": "differential_expression_results",
+    "path": "backend/artifacts/examples/differential_expression_results.json",
+    "run_id": "run-20260319T210000Z-deadbeef"
+  },
+  "diagnostic_plots": [
+    {
+      "artifact_type": "volcano_plot",
+      "path": "backend/artifacts/examples/rnaseq/treated-vs-control.volcano.svg",
+      "run_id": "run-20260319T210000Z-deadbeef"
+    },
+    {
+      "artifact_type": "mean_difference_plot",
+      "path": "backend/artifacts/examples/rnaseq/treated-vs-control.mean-difference.svg",
+      "run_id": "run-20260319T210000Z-deadbeef"
+    }
+  ],
+  "summary": {
+    "tested_gene_count": 2,
+    "significant_gene_count": 1,
+    "upregulated_gene_count": 1,
+    "downregulated_gene_count": 0,
+    "maximum_absolute_log2_fold_change": 2.45,
+    "top_upregulated_gene": "IFIT1",
+    "top_downregulated_gene": null
+  },
+  "warnings": []
+}

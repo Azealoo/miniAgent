@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "count_matrix",
+  "id": "count-matrix-rnaseq-qc-de-quantification-run-20260319t210000z-deadbeef",
+  "run_id": "run-20260319T210000Z-deadbeef",
+  "created_at": "2026-03-19T21:10:00Z",
+  "source_workflow": "rnaseq_qc_de",
+  "related_artifacts": [],
+  "engine_name": "bioapex_deterministic_quantification",
+  "engine_version": "1.0.0",
+  "matrix_path": "backend/artifacts/examples/rnaseq/gene_counts.tsv",
+  "matrix_format": "tsv",
+  "sample_sheet_path": "backend/artifacts/examples/rnaseq/sample_sheet.tsv",
+  "condition_field": "condition",
+  "batch_fields": [
+    "batch"
+  ],
+  "sample_ids": [
+    "control_rep1",
+    "treated_rep1"
+  ],
+  "gene_ids": [
+    "ENSG00000185745",
+    "ENSG00000187608"
+  ],
+  "library_sizes": {
+    "control_rep1": 12000,
+    "treated_rep1": 14000
+  }
+}

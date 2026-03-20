@@ -87,6 +87,10 @@ class TestArtifactNaming:
         assert stable_artifact_name("fastqc_metrics") == "fastqc_metrics.json"
         assert stable_artifact_name("multiqc_run") == "multiqc_run.json"
         assert stable_artifact_name("multiqc_metrics") == "multiqc_metrics.json"
+        assert stable_artifact_name("count_matrix") == "count_matrix.json"
+        assert stable_artifact_name("normalized_count_matrix") == "normalized_count_matrix.json"
+        assert stable_artifact_name("differential_expression_results") == "differential_expression_results.json"
+        assert stable_artifact_name("differential_expression_run") == "differential_expression_run.json"
         assert stable_artifact_name("provenance") == "prov.json"
         assert stable_artifact_name("ro_crate") == "ro-crate"
 

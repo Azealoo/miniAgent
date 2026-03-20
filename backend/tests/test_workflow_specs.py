@@ -213,7 +213,11 @@ class TestWorkflowSpecs:
             "multiqc_run",
             "multiqc_metrics",
             "quantification_bundle",
+            "count_matrix",
             "differential_expression_bundle",
+            "normalized_count_matrix",
+            "differential_expression_results",
+            "differential_expression_run",
             "report_bundle_manifest",
             "qa_report",
         ]
@@ -236,6 +240,7 @@ class TestWorkflowSpecs:
             "dataset-manifest-required",
             "raw-qc-floor",
             "aggregated-qc-floor",
+            "differential-expression-design",
         }
         assert document.qc_gates[1].policy is not None
         assert document.qc_gates[1].policy.required_upstream_tools == ["fastqc"]
@@ -243,6 +248,15 @@ class TestWorkflowSpecs:
         assert document.qc_gates[2].policy is not None
         assert document.qc_gates[2].policy.required_upstream_tools == ["fastqc", "multiqc"]
         assert document.qc_gates[2].policy.checks[0].metric_name == "fastqc_pass_rate"
+        assert document.qc_gates[3].policy is not None
+        assert document.qc_gates[3].policy.required_upstream_tools == [
+            "bioapex_deterministic_quantification",
+            "bioapex_mean_centered_t_test",
+        ]
+        assert [check.metric_name for check in document.qc_gates[3].policy.checks] == [
+            "minimum_condition_replicates",
+            "missing_expected_batch_fields",
+        ]
 
     def test_rnaseq_example_manifest_and_workflow_plan_align_with_authored_contract(self):
         manifest = load_artifact_document(EXAMPLES_DIR / "rnaseq_dataset_manifest.yaml")
@@ -271,12 +285,22 @@ class TestWorkflowSpecs:
         ]
         assert workflow_plan["steps"][2]["name"] == "FastQC raw-read QC stage"
         assert workflow_plan["steps"][3]["name"] == "MultiQC aggregated QC stage"
+        assert workflow_plan["steps"][4]["name"] == "Quantification count-matrix stage"
+        assert workflow_plan["steps"][5]["name"] == "Differential expression analysis stage"
         assert workflow_plan["inputs"]["dataset_manifest"] == "backend/artifacts/examples/rnaseq_dataset_manifest.yaml"
         expected_outputs = {item["name"]: item["path"] for item in workflow_plan["expected_outputs"]}
         assert expected_outputs["fastqc_run"].endswith("fastqc_run.json")
         assert expected_outputs["fastqc_metrics"].endswith("fastqc_metrics.json")
         assert expected_outputs["multiqc_run"].endswith("multiqc_run.json")
         assert expected_outputs["multiqc_metrics"].endswith("multiqc_metrics.json")
+        assert expected_outputs["count_matrix"].endswith("count_matrix.json")
+        assert expected_outputs["normalized_count_matrix"].endswith("normalized_count_matrix.json")
+        assert expected_outputs["differential_expression_results"].endswith(
+            "differential_expression_results.json"
+        )
+        assert expected_outputs["differential_expression_run"].endswith(
+            "differential_expression_run.json"
+        )
         assert expected_outputs["differential_expression_bundle"].endswith(
             "outputs/generated/differential-expression/differential_expression_bundle.json"
         )

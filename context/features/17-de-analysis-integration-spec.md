@@ -19,6 +19,25 @@ Add the explicit differential expression stage to the RNA-seq workflow. This pha
 - Distinguish technical step failure from biologically questionable design.
 - Define expected downstream links into report bundles and QA review.
 
+## Authored Contract
+
+- Keep the workflow ID as `rnaseq_qc_de` and preserve the explicit `quantification` and `differential_expression` stage boundaries.
+- Materialize a durable `count_matrix` artifact plus gene-count TSV in `quantification` so DE consumes a concrete source matrix instead of a placeholder path.
+- Materialize durable `normalized_count_matrix`, `differential_expression_results`, and `differential_expression_run` artifacts in `differential_expression`, alongside concrete diagnostic plot files and the existing DE bundle value output.
+- Record the exact internal engines and parameters used:
+  - `bioapex_deterministic_quantification@1.0.0` for synthetic count-matrix generation
+  - `bioapex_mean_centered_t_test@1.0.0` for transparent normalized-count generation and DE scoring
+- Derive the explicit DE design model from the dataset manifest design metadata, sample-sheet columns, and requested contrast:
+  - persisted `design_formula`
+  - modeled factors
+  - expected/modeled/missing batch fields
+  - replicate counts per condition
+- Surface design-quality concerns through a post-DE QC gate instead of collapsing them into generic step failures:
+  - warn when one expected batch field is missing
+  - block when multiple expected batch fields are missing
+  - warn/block on low replicate counts according to the authored QC thresholds
+- Wire the report bundle stage to link the canonical count matrix, normalized counts, DE results table, DE run summary, and diagnostic plots, and keep QA review focused on remaining design warnings rather than placeholder missing artifacts.
+
 ## References
 
 - @backend/knowledge/pseudobulk-and-replicate-design.md

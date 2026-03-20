@@ -35,6 +35,10 @@ _REFERENCE_LIST_FIELDS = ("related_artifacts", "inputs", "outputs", "checklist_a
 
 _SCHEMA_ARTIFACT_TYPES = {
     "dataset_manifest",
+    "count_matrix",
+    "normalized_count_matrix",
+    "differential_expression_results",
+    "differential_expression_run",
     "workflow_run",
     "evidence_card",
     "compliance_report",
@@ -46,6 +50,10 @@ _ROOT_STABLE_FILENAMES_TO_TYPES: dict[str, str] = {
     RUN_RECORD_FILENAME: "workflow_run",
     CONTENT_HASH_MANIFEST_FILENAME: "content_hash_manifest",
     "dataset_manifest.yaml": "dataset_manifest",
+    "count_matrix.json": "count_matrix",
+    "normalized_count_matrix.json": "normalized_count_matrix",
+    "differential_expression_results.json": "differential_expression_results",
+    "differential_expression_run.json": "differential_expression_run",
     "workflow_plan.json": "workflow_plan",
     "compliance_report.json": "compliance_report",
     "evidence_card.yaml": "evidence_card",

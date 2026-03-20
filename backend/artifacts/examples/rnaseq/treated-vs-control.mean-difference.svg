@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="180" viewBox="0 0 240 180">
+  <rect width="240" height="180" fill="#f8f4ea" />
+  <circle cx="100" cy="70" r="6" fill="#c54122" />
+  <circle cx="150" cy="100" r="6" fill="#225d84" />
+  <text x="110" y="66" font-size="12" fill="#1f2933">IFIT1</text>
+  <text x="160" y="96" font-size="12" fill="#1f2933">ISG15</text>
+</svg>

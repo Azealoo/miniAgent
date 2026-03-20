@@ -25,6 +25,10 @@ ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
     "fastqc_metrics": "json",
     "multiqc_run": "json",
     "multiqc_metrics": "json",
+    "count_matrix": "json",
+    "normalized_count_matrix": "json",
+    "differential_expression_results": "json",
+    "differential_expression_run": "json",
     "workflow_run": "json",
     "evidence_card": "yaml",
     "compliance_report": "json",
@@ -87,6 +91,7 @@ EvidenceSourceDatabase = Literal["pubmed", "pmc", "uniprot", "ensembl", "doi", "
 FastQCSequencingLayout = Literal["single_end", "paired_end"]
 FastQCReadLabel = Literal["single", "read1", "read2"]
 FastQCModuleStatus = Literal["pass", "warn", "fail"]
+MatrixFormat = Literal["tsv"]
 
 
 def _require_non_empty(value: str, *, field_name: str) -> str:
@@ -712,6 +717,331 @@ class MultiQCMetrics(ArtifactDocument):
         return self
 
 
+class DifferentialExpressionContrast(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contrast_label: str
+    condition_field: str
+    baseline_condition: str
+    comparison_condition: str
+
+    @field_validator("contrast_label", "condition_field", "baseline_condition", "comparison_condition")
+    @classmethod
+    def _validate_required_text(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @model_validator(mode="after")
+    def _validate_distinct_conditions(self) -> "DifferentialExpressionContrast":
+        if self.baseline_condition == self.comparison_condition:
+            raise ValueError("baseline_condition and comparison_condition must differ.")
+        return self
+
+
+class DifferentialExpressionDesign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    design_formula: str
+    modeled_factors: list[str] = Field(default_factory=list)
+    batch_fields_expected: list[str] = Field(default_factory=list)
+    batch_fields_modeled: list[str] = Field(default_factory=list)
+    missing_batch_fields: list[str] = Field(default_factory=list)
+    replicate_counts: dict[str, int] = Field(default_factory=dict)
+    minimum_condition_replicates: int
+
+    @field_validator("design_formula")
+    @classmethod
+    def _validate_design_formula(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="design_formula")
+
+    @field_validator("modeled_factors", "batch_fields_expected", "batch_fields_modeled", "missing_batch_fields")
+    @classmethod
+    def _validate_identifier_lists(cls, value: list[str], info) -> list[str]:
+        return [_require_normalized_identifier(item, field_name=info.field_name.rstrip("s")) for item in value]
+
+    @field_validator("replicate_counts")
+    @classmethod
+    def _validate_replicate_counts(cls, value: dict[str, int]) -> dict[str, int]:
+        normalized: dict[str, int] = {}
+        for key, item in value.items():
+            condition = _require_non_empty(key, field_name="replicate_counts")
+            if item < 0:
+                raise ValueError("replicate_counts values must be non-negative.")
+            normalized[condition] = item
+        return normalized
+
+    @field_validator("minimum_condition_replicates")
+    @classmethod
+    def _validate_minimum_replicates(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("minimum_condition_replicates must be non-negative.")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_batch_field_consistency(self) -> "DifferentialExpressionDesign":
+        expected = set(self.batch_fields_expected)
+        modeled = set(self.batch_fields_modeled)
+        missing = set(self.missing_batch_fields)
+        if not modeled.issubset(expected):
+            raise ValueError("batch_fields_modeled must be a subset of batch_fields_expected.")
+        if not missing.issubset(expected):
+            raise ValueError("missing_batch_fields must be a subset of batch_fields_expected.")
+        if modeled & missing:
+            raise ValueError("batch fields may not be both modeled and missing.")
+        return self
+
+
+class CountMatrix(ArtifactDocument):
+    artifact_type: Literal["count_matrix"] = "count_matrix"
+    engine_name: str
+    engine_version: str
+    matrix_path: str
+    matrix_format: MatrixFormat = "tsv"
+    sample_sheet_path: str
+    condition_field: str
+    batch_fields: list[str] = Field(default_factory=list)
+    sample_ids: list[str] = Field(min_length=1)
+    gene_ids: list[str] = Field(min_length=1)
+    library_sizes: dict[str, int] = Field(default_factory=dict)
+    upstream_multiqc_run: ArtifactReference | None = None
+    upstream_multiqc_metrics: ArtifactReference | None = None
+
+    @field_validator("engine_name")
+    @classmethod
+    def _validate_engine_name(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="engine_name")
+
+    @field_validator("engine_version", "condition_field")
+    @classmethod
+    def _validate_required_text(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @field_validator("matrix_path", "sample_sheet_path")
+    @classmethod
+    def _validate_paths(cls, value: str) -> str:
+        return _normalize_relative_path(value)
+
+    @field_validator("batch_fields")
+    @classmethod
+    def _validate_batch_fields(cls, value: list[str]) -> list[str]:
+        return [_require_normalized_identifier(item, field_name="batch_field") for item in value]
+
+    @field_validator("sample_ids", "gene_ids")
+    @classmethod
+    def _validate_string_lists(cls, value: list[str], info) -> list[str]:
+        return [_require_non_empty(item, field_name=info.field_name.rstrip("s")) for item in value]
+
+    @field_validator("library_sizes")
+    @classmethod
+    def _validate_library_sizes(cls, value: dict[str, int]) -> dict[str, int]:
+        normalized: dict[str, int] = {}
+        for sample_id, size in value.items():
+            cleaned_sample_id = _require_non_empty(sample_id, field_name="sample_id")
+            if size < 0:
+                raise ValueError("library_sizes values must be non-negative.")
+            normalized[cleaned_sample_id] = size
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_uniqueness(self) -> "CountMatrix":
+        if len(self.sample_ids) != len(set(self.sample_ids)):
+            raise ValueError("sample_ids may not define duplicate entries.")
+        if len(self.gene_ids) != len(set(self.gene_ids)):
+            raise ValueError("gene_ids may not define duplicate entries.")
+        if set(self.library_sizes) - set(self.sample_ids):
+            raise ValueError("library_sizes keys must be present in sample_ids.")
+        return self
+
+
+class NormalizedCountMatrix(ArtifactDocument):
+    artifact_type: Literal["normalized_count_matrix"] = "normalized_count_matrix"
+    engine_name: str
+    engine_version: str
+    normalization_method: str
+    matrix_path: str
+    matrix_format: MatrixFormat = "tsv"
+    sample_ids: list[str] = Field(min_length=1)
+    gene_count: int
+    library_size_factors: dict[str, float] = Field(default_factory=dict)
+    source_count_matrix: ArtifactReference
+
+    @field_validator("engine_name")
+    @classmethod
+    def _validate_engine_name(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="engine_name")
+
+    @field_validator("engine_version", "normalization_method")
+    @classmethod
+    def _validate_required_text(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @field_validator("matrix_path")
+    @classmethod
+    def _validate_matrix_path(cls, value: str) -> str:
+        return _normalize_relative_path(value)
+
+    @field_validator("sample_ids")
+    @classmethod
+    def _validate_sample_ids(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="sample_id") for item in value]
+
+    @field_validator("gene_count")
+    @classmethod
+    def _validate_gene_count(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("gene_count must be at least 1.")
+        return value
+
+    @field_validator("library_size_factors")
+    @classmethod
+    def _validate_size_factors(cls, value: dict[str, float]) -> dict[str, float]:
+        normalized: dict[str, float] = {}
+        for sample_id, factor in value.items():
+            cleaned_sample_id = _require_non_empty(sample_id, field_name="sample_id")
+            if factor <= 0:
+                raise ValueError("library_size_factors values must be positive.")
+            normalized[cleaned_sample_id] = factor
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_samples(self) -> "NormalizedCountMatrix":
+        if len(self.sample_ids) != len(set(self.sample_ids)):
+            raise ValueError("sample_ids may not define duplicate entries.")
+        if set(self.library_size_factors) != set(self.sample_ids):
+            raise ValueError("library_size_factors must define one entry per sample_id.")
+        return self
+
+
+class DifferentialExpressionSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tested_gene_count: int
+    significant_gene_count: int
+    upregulated_gene_count: int
+    downregulated_gene_count: int
+    maximum_absolute_log2_fold_change: float
+    top_upregulated_gene: str | None = None
+    top_downregulated_gene: str | None = None
+
+    @field_validator("tested_gene_count", "significant_gene_count", "upregulated_gene_count", "downregulated_gene_count")
+    @classmethod
+    def _validate_counts(cls, value: int, info) -> int:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be non-negative.")
+        return value
+
+    @field_validator("maximum_absolute_log2_fold_change")
+    @classmethod
+    def _validate_max_log2fc(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("maximum_absolute_log2_fold_change must be non-negative.")
+        return value
+
+    @field_validator("top_upregulated_gene", "top_downregulated_gene")
+    @classmethod
+    def _validate_optional_gene(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class DifferentialExpressionResults(ArtifactDocument):
+    artifact_type: Literal["differential_expression_results"] = "differential_expression_results"
+    engine_name: str
+    engine_version: str
+    design: DifferentialExpressionDesign
+    contrast: DifferentialExpressionContrast
+    source_count_matrix: ArtifactReference
+    normalized_count_matrix: ArtifactReference | None = None
+    results_path: str
+    result_format: MatrixFormat = "tsv"
+    tested_gene_count: int
+    significant_gene_count: int
+    significance_threshold: float
+    diagnostic_plots: list[ArtifactReference] = Field(min_length=1)
+    warnings: list[str] = Field(default_factory=list)
+
+    @field_validator("engine_name")
+    @classmethod
+    def _validate_engine_name(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="engine_name")
+
+    @field_validator("engine_version")
+    @classmethod
+    def _validate_engine_version(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="engine_version")
+
+    @field_validator("results_path")
+    @classmethod
+    def _validate_results_path(cls, value: str) -> str:
+        return _normalize_relative_path(value)
+
+    @field_validator("tested_gene_count", "significant_gene_count")
+    @classmethod
+    def _validate_counts(cls, value: int, info) -> int:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be non-negative.")
+        return value
+
+    @field_validator("significance_threshold")
+    @classmethod
+    def _validate_significance_threshold(cls, value: float) -> float:
+        if value < 0 or value > 1:
+            raise ValueError("significance_threshold must be between 0 and 1.")
+        return value
+
+    @field_validator("warnings")
+    @classmethod
+    def _validate_warnings(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="warning") for item in value]
+
+    @model_validator(mode="after")
+    def _validate_plots(self) -> "DifferentialExpressionResults":
+        plot_paths = [item.path for item in self.diagnostic_plots]
+        if len(plot_paths) != len(set(plot_paths)):
+            raise ValueError("diagnostic_plots may not define duplicate paths.")
+        return self
+
+
+class DifferentialExpressionRun(ArtifactDocument):
+    artifact_type: Literal["differential_expression_run"] = "differential_expression_run"
+    engine_name: str
+    engine_version: str
+    design: DifferentialExpressionDesign
+    contrast: DifferentialExpressionContrast
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    batch_adjustment_method: str | None = None
+    source_count_matrix: ArtifactReference
+    normalized_count_matrix: ArtifactReference | None = None
+    results_artifact: ArtifactReference | None = None
+    diagnostic_plots: list[ArtifactReference] = Field(min_length=1)
+    summary: DifferentialExpressionSummary
+    warnings: list[str] = Field(default_factory=list)
+
+    @field_validator("engine_name")
+    @classmethod
+    def _validate_engine_name(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="engine_name")
+
+    @field_validator("engine_version", "batch_adjustment_method")
+    @classmethod
+    def _validate_optional_text(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @field_validator("warnings")
+    @classmethod
+    def _validate_warnings(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="warning") for item in value]
+
+    @model_validator(mode="after")
+    def _validate_plot_uniqueness(self) -> "DifferentialExpressionRun":
+        plot_paths = [item.path for item in self.diagnostic_plots]
+        if len(plot_paths) != len(set(plot_paths)):
+            raise ValueError("diagnostic_plots may not define duplicate paths.")
+        return self
+
+
 class WorkflowIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1264,6 +1594,10 @@ ArtifactModel = (
     | FastQCMetrics
     | MultiQCRun
     | MultiQCMetrics
+    | CountMatrix
+    | NormalizedCountMatrix
+    | DifferentialExpressionResults
+    | DifferentialExpressionRun
     | WorkflowRun
     | EvidenceCard
     | ComplianceReport
@@ -1277,6 +1611,10 @@ _ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
     "fastqc_metrics": FastQCMetrics,
     "multiqc_run": MultiQCRun,
     "multiqc_metrics": MultiQCMetrics,
+    "count_matrix": CountMatrix,
+    "normalized_count_matrix": NormalizedCountMatrix,
+    "differential_expression_results": DifferentialExpressionResults,
+    "differential_expression_run": DifferentialExpressionRun,
     "workflow_run": WorkflowRun,
     "evidence_card": EvidenceCard,
     "compliance_report": ComplianceReport,
