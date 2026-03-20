@@ -91,6 +91,7 @@ class TestArtifactNaming:
         assert stable_artifact_name("normalized_count_matrix") == "normalized_count_matrix.json"
         assert stable_artifact_name("differential_expression_results") == "differential_expression_results.json"
         assert stable_artifact_name("differential_expression_run") == "differential_expression_run.json"
+        assert stable_artifact_name("checklist_results") == "checklist_results.json"
         assert stable_artifact_name("provenance") == "prov.json"
         assert stable_artifact_name("biocompute") == "biocompute.json"
         assert stable_artifact_name("ro_crate") == "ro-crate"

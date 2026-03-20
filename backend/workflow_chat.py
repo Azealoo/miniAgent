@@ -15,7 +15,9 @@ from workflow_runner import InternalDAGRunner, WorkflowRunResult
 from workflow_specs import WorkflowInputDefinition, WorkflowSpec, load_workflow_spec
 from workflow_streaming import WORKFLOW_EVENT_CONTRACT_VERSION, normalize_workflow_stream_event
 
-_VALUE_TOKEN_RE = r"(?P<value>[A-Za-z0-9._/\-]+)"
+_RAW_VALUE_TOKEN_RE = r"[A-Za-z0-9._/\-]+"
+_VALUE_TOKEN_RE = rf"(?P<value>{_RAW_VALUE_TOKEN_RE})"
+_ARRAY_VALUE_TOKEN_RE = rf"(?P<value>{_RAW_VALUE_TOKEN_RE}(?:\s*,\s*{_RAW_VALUE_TOKEN_RE})*)"
 _ATTACHMENT_BINDING_RE = re.compile(r"^(?P<name>[A-Za-z0-9_ -]+)\s*(?:=|:)\s*(?P<value>.+)$")
 
 
@@ -342,6 +344,14 @@ def _find_workflow_spec_path(base_dir: Path, workflow_id: str) -> Path:
 
 
 def _parse_input_from_message(message: str, definition: WorkflowInputDefinition) -> Any | None:
+    if definition.data_type == "array":
+        raw_value = _extract_named_array_value(message, definition.name)
+        if raw_value is None:
+            return None
+        values = [item.strip() for item in raw_value.split(",")]
+        cleaned = [item for item in values if item]
+        return cleaned or None
+
     raw_value = _extract_named_value(message, definition.name)
     if raw_value is None:
         return None
@@ -364,6 +374,23 @@ def _parse_input_from_message(message: str, definition: WorkflowInputDefinition)
             return False
         return None
     return raw_value
+
+
+def _extract_named_array_value(message: str, input_name: str) -> str | None:
+    aliases = [input_name, input_name.replace("_", " ")]
+    for alias in aliases:
+        escaped = re.escape(alias)
+        patterns = [
+            rf"\b{escaped}\b\s*(?:=|:)\s*\[(?P<value>{_RAW_VALUE_TOKEN_RE}(?:\s*,\s*{_RAW_VALUE_TOKEN_RE})*)\]",
+            rf"\b{escaped}\b\s*(?:=|:)\s*{_ARRAY_VALUE_TOKEN_RE}",
+            rf"\b{escaped}\b\s+\[(?P<value>{_RAW_VALUE_TOKEN_RE}(?:\s*,\s*{_RAW_VALUE_TOKEN_RE})*)\]",
+            rf"\b{escaped}\b\s+{_ARRAY_VALUE_TOKEN_RE}",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, message, flags=re.IGNORECASE)
+            if match:
+                return match.group("value")
+    return None
 
 
 def _extract_named_value(message: str, input_name: str) -> str | None:

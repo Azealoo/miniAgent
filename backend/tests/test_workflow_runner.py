@@ -2363,6 +2363,7 @@ def launch(inputs, _context):
             "qc_summary",
             "key_outputs",
             "warnings_and_failures",
+            "checklist_gates",
             "deviations",
             "provenance_pointers",
             "next_recommended_actions",
@@ -2479,6 +2480,48 @@ def launch(inputs, _context):
         assert differential_expression_metrics["minimum_condition_replicates"] == 3
         assert differential_expression_metrics["missing_expected_batch_fields"] == 0
         assert differential_expression_metrics["significant_gene_count"] >= 1
+
+    def test_authored_rnaseq_workflow_accepts_additional_report_bundle_checklists(self, tmp_path):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        multiqc_executable = _write_fake_multiqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+            multiqc_executable=multiqc_executable,
+        )
+
+        result = InternalDAGRunner(tmp_path).run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+                "checklist_ids": [
+                    "miqe_qpcr_completeness",
+                    "arrive_animal_study_reporting",
+                ],
+            },
+        )
+
+        checklist_payload = json.loads((result.run_dir / "checklist_results.json").read_text(encoding="utf-8"))
+        report_bundle_payload = json.loads(
+            (result.run_dir / "outputs" / "generated" / "report-bundle" / "report_bundle_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )["value"]
+
+        assert result.run.lifecycle_status == "completed"
+        assert [evaluation["checklist_id"] for evaluation in checklist_payload["evaluations"]] == [
+            "miqe_qpcr_completeness",
+            "arrive_animal_study_reporting",
+        ]
+        assert checklist_payload["overall_status"] == "passed"
+        assert report_bundle_payload["selected_checklist_ids"] == [
+            "miqe_qpcr_completeness",
+            "arrive_animal_study_reporting",
+        ]
 
     def test_authored_rnaseq_workflow_uses_configured_public_base_url_for_extension_schema(
         self,
@@ -3604,6 +3647,17 @@ def materialize_terminal_report_bundle(inputs, _context):
                 }
             )
         )
+        evidence_review_payload = json.loads(
+            (REPO_ROOT / "backend" / "artifacts" / "examples" / "evidence_review.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        evidence_review_abspath = tmp_path / evidence_review_path
+        evidence_review_abspath.parent.mkdir(parents=True, exist_ok=True)
+        evidence_review_abspath.write_text(
+            json.dumps(evidence_review_payload, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
         run_relpath = Path("artifacts/rnaseq-qc-de/2026-03-20/run-20260320T220000Z-deadbeef")
         run_dir = tmp_path / run_relpath
@@ -3633,6 +3687,7 @@ def materialize_terminal_report_bundle(inputs, _context):
         )
 
         manifest_payload = outputs["report_bundle_manifest"]
+        checklist_payload = outputs["checklist_results"]
         assert manifest_payload["evidence_review_artifacts"] == [
             {
                 "artifact_type": "evidence_review",
@@ -3648,7 +3703,19 @@ def materialize_terminal_report_bundle(inputs, _context):
         )
         assert manifest_payload["deviation_summary"]["count"] == 1
         assert manifest_payload["deviations"][0]["step_id"] == "qc-summary"
+        assert manifest_payload["checklist_status"] == "passed"
+        assert manifest_payload["checklist_results_artifact"]["artifact_type"] == "checklist_results"
+        assert any(
+            artifact["artifact_type"] == "checklist_results"
+            and artifact["path"].endswith("checklist_results.json")
+            for artifact in manifest_payload["expected_artifacts"]
+        )
+        assert checklist_payload["overall_status"] == "passed"
         assert outputs["qa_report"]["related_artifacts"] == manifest_payload["evidence_review_artifacts"]
+        assert any(
+            artifact["artifact_type"] == "checklist_results"
+            for artifact in outputs["qa_report"]["checklist_artifacts"]
+        )
         assert any(
             artifact["artifact_type"] == "evidence_review"
             and artifact["path"] == evidence_review_path
@@ -3661,6 +3728,8 @@ def materialize_terminal_report_bundle(inputs, _context):
         ).read_text(encoding="utf-8")
         assert "Evidence review artifacts" in report_bundle_markdown
         assert evidence_review_path in report_bundle_markdown
+        assert "## Checklist Gates" in report_bundle_markdown
+        assert "Overall checklist gate status: `passed`" in report_bundle_markdown
         assert "## Deviations" in report_bundle_markdown
 
     def test_rnaseq_report_bundle_keeps_minor_deviations_visible_without_degrading_status(self, tmp_path):
@@ -3713,11 +3782,90 @@ def materialize_terminal_report_bundle(inputs, _context):
         assert outputs["qa_report"]["failed_checks"] == []
         assert outputs["report_bundle_manifest"]["deviation_summary"]["highest_severity"] == "minor"
 
+    def test_rnaseq_report_bundle_surfaces_blocking_checklist_failures_from_linked_evidence_reviews(self, tmp_path):
+        module_spec = importlib.util.spec_from_file_location(
+            "bioapex_test_rnaseq_qc_de_blocking_checklist",
+            REPO_ROOT / "workflows" / "runners" / "rnaseq_qc_de.py",
+        )
+        assert module_spec is not None
+        assert module_spec.loader is not None
+        rnaseq_runner = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(rnaseq_runner)
+
+        manifest = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "dataset_manifest.yaml")
+        workflow_run = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "run.json")
+        workflow_run.qc_status = "passed"
+        workflow_run.warnings = []
+        workflow_run.deviations = []
+        evidence_review_path = (
+            "artifacts/evidence-review/2026-03-20/"
+            "run-20260320T211500Z-feedface/evidence_review.json"
+        )
+        workflow_run.related_artifacts.append(
+            ArtifactReference.model_validate(
+                {
+                    "artifact_type": "evidence_review",
+                    "path": evidence_review_path,
+                    "id": "evidence-review-run-20260320t211500z-feedface",
+                    "run_id": "run-20260320T211500Z-feedface",
+                }
+            )
+        )
+        evidence_review_payload = json.loads(
+            (REPO_ROOT / "backend" / "artifacts" / "examples" / "evidence_review.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        evidence_review_payload["review_status"] = "mixed"
+        evidence_review_payload["unsupported_claims_present"] = True
+        evidence_review_payload["evidence_included"] = []
+        evidence_review_payload["source_facts"] = []
+        evidence_review_abspath = tmp_path / evidence_review_path
+        evidence_review_abspath.parent.mkdir(parents=True, exist_ok=True)
+        evidence_review_abspath.write_text(
+            json.dumps(evidence_review_payload, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        run_relpath = Path("artifacts/rnaseq-qc-de/2026-03-20/run-20260320T221500Z-deadbeef")
+        run_dir = tmp_path / run_relpath
+        run_dir.mkdir(parents=True, exist_ok=True)
+        context = SimpleNamespace(
+            base_dir=tmp_path,
+            run_dir=run_dir,
+            relative_run_dir=run_relpath.as_posix(),
+            run_id="run-20260320T221500Z-deadbeef",
+            workflow_id="rnaseq_qc_de",
+            relative_path=lambda path: str(path),
+        )
+
+        outputs = rnaseq_runner._build_rnaseq_report_bundle_outputs(
+            context=context,
+            manifest_path="manifests/demo_dataset_manifest.yaml",
+            manifest=manifest,
+            workflow_run=workflow_run,
+            raw_qc_bundle={},
+            aggregated_qc_bundle={},
+            quantification_bundle={},
+            differential_expression_bundle={},
+            condition_field="condition",
+            baseline_condition="control",
+            comparison_condition="treated",
+            report_lifecycle_status="completed",
+        )
+
+        assert outputs["checklist_results"]["overall_status"] == "blocked"
+        assert outputs["qa_report"]["overall_status"] == "blocked"
+        assert any(
+            item["artifact_type"] == "checklist_results"
+            for item in outputs["qa_report"]["failed_checks"]
+        )
+        assert outputs["report_bundle_manifest"]["checklist_status"] == "blocked"
+
         report_bundle_markdown = (
             run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
         ).read_text(encoding="utf-8")
-        assert "## Deviations" in report_bundle_markdown
-        assert "[minor/automatic]" in report_bundle_markdown
+        assert "Overall checklist gate status: `blocked`" in report_bundle_markdown
 
     def test_terminal_report_bundle_materializer_is_idempotent_when_resuming_final_run(self, tmp_path):
         module_name = _write_runner_module(

@@ -87,6 +87,10 @@
       "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/outputs/generated/report-bundle/report_bundle_manifest.json"
     },
     {
+      "name": "checklist_results",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/checklist_results.json"
+    },
+    {
       "name": "qa_report",
       "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/qa_report.json"
     }

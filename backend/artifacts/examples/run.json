@@ -39,6 +39,12 @@
   ],
   "outputs": [
     {
+      "artifact_type": "checklist_results",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/checklist_results.json",
+      "id": "checklist-results-rna-seq-qc-20260318",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
       "artifact_type": "qa_report",
       "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/qa_report.json",
       "id": "qa-rna-seq-qc-20260318",
@@ -79,6 +85,12 @@
         }
       ],
       "outputs_produced": [
+        {
+          "artifact_type": "checklist_results",
+          "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/checklist_results.json",
+          "id": "checklist-results-rna-seq-qc-20260318",
+          "run_id": "run-20260318T193000Z-deadbeef"
+        },
         {
           "artifact_type": "qa_report",
           "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/qa_report.json",

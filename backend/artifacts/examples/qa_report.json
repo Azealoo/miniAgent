@@ -47,6 +47,12 @@
   ],
   "checklist_artifacts": [
     {
+      "artifact_type": "checklist_results",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/checklist_results.json",
+      "id": "checklist-results-rnaseq-qc-de-report-bundle-run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
       "artifact_type": "compliance_report",
       "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/compliance_report.json",
       "id": "compliance-rna-seq-qc-20260318",

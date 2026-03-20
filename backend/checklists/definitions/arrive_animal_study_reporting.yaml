@@ -1,0 +1,34 @@
+checklist_id: arrive_animal_study_reporting
+family: arrive
+label: ARRIVE-style animal study reporting completeness
+version: "1.0.0"
+description: Minimum structured animal-study reporting checks for future BioAPEX report workflows.
+items:
+  - item_id: study_name_recorded
+    description: The study name is recorded in the dataset manifest.
+    severity: required
+    pass_criteria: dataset_manifest.design.study_name is present.
+    remediation_guidance: Record the animal-study name in the dataset manifest before QA review.
+    rule:
+      rule_type: field_present
+      source: dataset_manifest
+      field_path: design.study_name
+  - item_id: organism_recorded
+    description: The organism field is recorded.
+    severity: required
+    pass_criteria: dataset_manifest.organism is present.
+    remediation_guidance: Record the study organism before generating final reports.
+    rule:
+      rule_type: field_present
+      source: dataset_manifest
+      field_path: organism
+  - item_id: source_files_declared
+    description: Source files are declared for traceable downstream review.
+    severity: best_practice
+    pass_criteria: dataset_manifest.source_files contains at least one entry.
+    remediation_guidance: Add the primary animal-study source files to the dataset manifest for provenance.
+    rule:
+      rule_type: list_min_items
+      source: dataset_manifest
+      field_path: source_files
+      min_items: 1

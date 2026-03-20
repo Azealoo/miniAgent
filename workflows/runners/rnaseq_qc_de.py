@@ -17,7 +17,14 @@ from artifacts import (
     WorkflowRun,
     build_generated_output_relpath,
     load_artifact_document,
+    normalize_identifier,
     stable_artifact_name,
+)
+from checklists import (
+    build_checklist_results_payload,
+    checklist_failed_checks,
+    checklist_recommended_remediation,
+    checklist_warning_messages,
 )
 from dataset_intake import ensure_valid_dataset_intake_manifest
 from fastqc import (
@@ -37,6 +44,7 @@ _DIFFERENTIAL_EXPRESSION_ENGINE = "bioapex_mean_centered_t_test"
 _ENGINE_VERSION = "1.0.0"
 _DE_SIGNIFICANCE_THRESHOLD = 0.05
 _DE_LOG2_EFFECT_FLOOR = 1.0
+_CHECKLIST_RESULTS_ARTIFACT_TYPE = "checklist_results"
 _REPORT_BUNDLE_STEP_ID = "report_bundle"
 _REPORT_BUNDLE_FILENAME = "rnaseq_report_bundle.md"
 _REPORT_BUNDLE_WORKFLOW_OUTPUT_ARTIFACT_TYPES: tuple[str, ...] = (
@@ -56,6 +64,7 @@ _REPORT_BUNDLE_SECTIONS: tuple[str, ...] = (
     "qc_summary",
     "key_outputs",
     "warnings_and_failures",
+    "checklist_gates",
     "deviations",
     "provenance_pointers",
     "next_recommended_actions",
@@ -970,6 +979,7 @@ def build_report_bundle(inputs, context):
         baseline_condition=str(inputs["baseline_condition"]).strip(),
         comparison_condition=str(inputs["comparison_condition"]).strip(),
         report_lifecycle_status="completed",
+        selected_checklist_ids=_configured_report_bundle_checklist_ids(inputs.get("checklist_ids")),
     )
 
 
@@ -1005,6 +1015,7 @@ def materialize_terminal_report_bundle(inputs, context):
         baseline_condition=_optional_string(inputs.get("baseline_condition")),
         comparison_condition=_optional_string(inputs.get("comparison_condition")),
         report_lifecycle_status=workflow_run.lifecycle_status,
+        selected_checklist_ids=_configured_report_bundle_checklist_ids(inputs.get("checklist_ids")),
     )
 
 
@@ -1630,6 +1641,8 @@ def _render_rnaseq_report_bundle(
     workflow_warnings: Sequence[str],
     workflow_run_path: str,
     report_manifest_path: str,
+    checklist_results_path: str,
+    checklist_results_payload: Mapping[str, Any],
     provenance_exports: Sequence[str],
     canonical_artifacts_by_type: Mapping[str, Mapping[str, Any]],
     evidence_review_artifacts: Sequence[Mapping[str, Any]],
@@ -1736,6 +1749,20 @@ def _render_rnaseq_report_bundle(
         )
     else:
         lines.append("- All expected canonical workflow outputs for this report bundle were available.")
+    lines.extend(["", "## Checklist Gates"])
+    checklist_status = str(checklist_results_payload.get("overall_status", "not_applicable"))
+    lines.append(f"- Checklist results artifact: `{checklist_results_path}`")
+    lines.append(f"- Overall checklist gate status: `{checklist_status}`")
+    checklist_summaries = _report_bundle_checklist_summaries(checklist_results_payload)
+    if checklist_summaries:
+        for item in checklist_summaries:
+            lines.append(
+                f"- {item['label']} (`{item['checklist_id']}`): `{item['overall_status']}` from `{item['definition_path']}`"
+            )
+    else:
+        lines.append("- No applicable checklist definitions were selected for this report bundle.")
+    for warning in checklist_warning_messages(checklist_results_payload):
+        lines.append(f"- Checklist note: {warning}")
     lines.extend(["", "## Deviations"])
     if deviations:
         for item in deviations:
@@ -1783,6 +1810,7 @@ def _build_rnaseq_report_bundle_outputs(
     baseline_condition: str,
     comparison_condition: str,
     report_lifecycle_status: str,
+    selected_checklist_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     provenance_exports = _provenance_exports_for_workflow_run(context, workflow_run)
     generated_artifacts = _collect_declared_artifacts(
@@ -1821,31 +1849,151 @@ def _build_rnaseq_report_bundle_outputs(
         generated_artifacts,
         excluded_artifact_types=set(_REPORT_BUNDLE_WORKFLOW_OUTPUT_ARTIFACT_TYPES),
     )
-    warnings = _dedupe_text_entries(
+    workflow_review_warnings = _dedupe_text_entries(
         [*workflow_run.warnings, *_workflow_deviation_warning_lines(deviations)]
     )
     if manifest_load_error:
-        warnings.append(
+        workflow_review_warnings.append(
             f"Terminal report bundle used degraded manifest metadata because dataset_manifest could not be loaded: {manifest_load_error}"
         )
     report_qc_status = _report_bundle_display_qc_status(
         lifecycle_status=report_lifecycle_status,
         qc_status=workflow_run.qc_status,
-        warnings=warnings,
+        warnings=workflow_review_warnings,
     )
     qa_report_path = _run_relative_path(context, "qa_report.json")
+    checklist_results_path = _run_relative_path(
+        context,
+        stable_artifact_name(_CHECKLIST_RESULTS_ARTIFACT_TYPE),
+    )
     report_manifest_path = _generated_output_path(context, "report_bundle_manifest.json", step=_REPORT_BUNDLE_STEP_ID)
     missing_artifacts = _missing_report_bundle_artifacts(
         context,
         available_artifact_types=available_output_types,
     )
-    recommendations = _report_bundle_recommendations(
+    base_recommendations = _report_bundle_recommendations(
         lifecycle_status=report_lifecycle_status,
-        warnings=warnings,
+        warnings=workflow_review_warnings,
         missing_artifacts=missing_artifacts,
         deviations=deviations,
         differential_expression_bundle=differential_expression_bundle,
     )
+    manifest_ref = {
+        "artifact_type": "dataset_manifest",
+        "path": context.relative_path(manifest_path) if manifest_path else "n/a",
+        **({"id": manifest.id, "run_id": manifest.run_id} if manifest is not None else {}),
+    }
+    checklist_results_ref = _artifact_ref(
+        _CHECKLIST_RESULTS_ARTIFACT_TYPE,
+        checklist_results_path,
+        run_id=context.run_id,
+    )
+    report_bundle_manifest_preview = {
+        "bundle_version": "1.0.0",
+        "stage": _REPORT_BUNDLE_STEP_ID,
+        "workflow_id": context.workflow_id,
+        "workflow_version": _RNASEQ_WORKFLOW_VERSION,
+        "lifecycle_status": report_lifecycle_status,
+        "qc_status": report_qc_status,
+        "study_name": manifest.design.study_name if manifest is not None else "unknown-study",
+        "contrast": {
+            "condition_field": condition_field or "n/a",
+            "baseline_condition": baseline_condition or "n/a",
+            "comparison_condition": comparison_condition or "n/a",
+        },
+        "workflow_run_path": workflow_run_ref["path"],
+        "provenance_exports": provenance_exports,
+        "evidence_review_artifacts": evidence_review_artifacts,
+        "missing_artifacts": missing_artifacts,
+        "deviations": deviations,
+        "deviation_summary": deviation_summary,
+    }
+    checklist_ids = _report_bundle_checklist_ids(
+        evidence_review_artifacts=evidence_review_artifacts,
+        configured_checklist_ids=selected_checklist_ids,
+    )
+    report_bundle_manifest_preview["selected_checklist_ids"] = checklist_ids
+    checklist_payload = build_checklist_results_payload(
+        checklist_ids,
+        run_id=context.run_id,
+        source_workflow=context.workflow_id,
+        subject_type="report_bundle",
+        subject_label="RNA-seq report bundle",
+        evaluated_artifacts=[manifest_ref, workflow_run_ref, *evidence_review_artifacts],
+        dataset_manifest=manifest,
+        workflow_run=workflow_run,
+        report_bundle_manifest=report_bundle_manifest_preview,
+        base_dir=context.base_dir,
+    )
+    checklist_warnings = checklist_warning_messages(checklist_payload)
+    warnings = _dedupe_text_entries([*workflow_review_warnings, *checklist_warnings])
+    recommendations = _dedupe_text_entries(
+        [*base_recommendations, *checklist_recommended_remediation(checklist_payload)]
+    )
+    checklist_artifacts = _dedupe_artifacts(
+        [
+            checklist_results_ref,
+            manifest_ref,
+            workflow_run_ref,
+            *canonical_output_artifacts,
+            *supplementary_generated_artifacts,
+            *evidence_review_artifacts,
+        ]
+    )
+    overall_status = _combine_report_bundle_qa_status(
+        _report_bundle_qa_status(
+            lifecycle_status=report_lifecycle_status,
+            qc_status=workflow_run.qc_status,
+            warnings=workflow_review_warnings,
+        ),
+        str(checklist_payload.get("overall_status", "not_applicable")),
+    )
+    failed_checks = [
+        *_report_bundle_failed_checks(
+            lifecycle_status=report_lifecycle_status,
+            missing_artifacts=missing_artifacts,
+            deviations=deviations,
+        ),
+        *checklist_failed_checks(checklist_payload),
+    ]
+    report_bundle_manifest_payload = {
+        **report_bundle_manifest_preview,
+        "sections": list(_REPORT_BUNDLE_SECTIONS),
+        "report_markdown_path": "",
+        "checklist_status": checklist_payload["overall_status"],
+        "checklist_summary": checklist_payload["summary"],
+        "checklists_evaluated": _report_bundle_checklist_summaries(checklist_payload),
+        "checklist_results_artifact": checklist_results_ref,
+        "expected_artifacts": [
+            workflow_run_ref,
+            *canonical_output_artifacts,
+            *supplementary_generated_artifacts,
+            *evidence_review_artifacts,
+            {
+                "artifact_type": "report_bundle",
+                "path": "",
+                "description": "Human-readable RNA-seq report bundle linking the canonical QC, quantification, and DE outputs.",
+            },
+            {
+                "artifact_type": _CHECKLIST_RESULTS_ARTIFACT_TYPE,
+                "path": checklist_results_path,
+                "description": "Structured checklist gate results captured before QA finalization.",
+            },
+            {
+                "artifact_type": "qa_report",
+                "path": qa_report_path,
+                "description": "Structured QA report copied to the stable root artifact location.",
+            },
+        ],
+        "next_actions": recommendations,
+        "notes": [
+            "The report bundle links the canonical workflow run record and any stable workflow outputs that were actually materialized for this run.",
+            "Linked evidence-review artifacts are carried forward when available so downstream QA and report consumers can inspect literature-grounded claim support directly from the bundle.",
+            "Checklist gate results are materialized as a durable artifact so report and QA consumers can inspect which definition files were applied and why any gate failed or warned.",
+            "Structured workflow deviations are copied into the bundle so reviewers can inspect what changed, why it changed, and the likely downstream impact without reopening the raw run record.",
+            "Blocked or failed runs still emit a partial report bundle so users can inspect available artifacts and missing downstream outputs without reading the raw run record.",
+        ],
+    }
     report_bundle_relpath = _write_generated_text(
         context,
         step=_REPORT_BUNDLE_STEP_ID,
@@ -1869,6 +2017,8 @@ def _build_rnaseq_report_bundle_outputs(
             workflow_warnings=warnings,
             workflow_run_path=workflow_run_ref["path"],
             report_manifest_path=report_manifest_path,
+            checklist_results_path=checklist_results_path,
+            checklist_results_payload=checklist_payload,
             provenance_exports=provenance_exports,
             canonical_artifacts_by_type=canonical_artifacts_by_type,
             evidence_review_artifacts=evidence_review_artifacts,
@@ -1877,78 +2027,21 @@ def _build_rnaseq_report_bundle_outputs(
             recommendations=recommendations,
         ),
     )
-    checklist_artifacts = _dedupe_artifacts(
-        [
-            {
-                "artifact_type": "dataset_manifest",
-                "path": context.relative_path(manifest_path) if manifest_path else "n/a",
-                **({"id": manifest.id, "run_id": manifest.run_id} if manifest is not None else {}),
-            },
-            workflow_run_ref,
-            *canonical_output_artifacts,
-            *supplementary_generated_artifacts,
-            *evidence_review_artifacts,
-        ]
-    )
-    overall_status = _report_bundle_qa_status(
-        lifecycle_status=report_lifecycle_status,
-        qc_status=workflow_run.qc_status,
-        warnings=warnings,
-    )
+    report_bundle_manifest_payload["report_markdown_path"] = report_bundle_relpath
+    expected_artifacts = report_bundle_manifest_payload["expected_artifacts"]
+    if isinstance(expected_artifacts, list):
+        for artifact in expected_artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            if artifact.get("artifact_type") == "report_bundle":
+                artifact["path"] = report_bundle_relpath
 
     return {
-        "report_bundle_manifest": {
-            "bundle_version": "1.0.0",
-            "stage": _REPORT_BUNDLE_STEP_ID,
-            "workflow_id": context.workflow_id,
-            "workflow_version": _RNASEQ_WORKFLOW_VERSION,
-            "lifecycle_status": report_lifecycle_status,
-            "qc_status": report_qc_status,
-            "study_name": manifest.design.study_name if manifest is not None else "unknown-study",
-            "contrast": {
-                "condition_field": condition_field or "n/a",
-                "baseline_condition": baseline_condition or "n/a",
-                "comparison_condition": comparison_condition or "n/a",
-            },
-            "sections": list(_REPORT_BUNDLE_SECTIONS),
-            "workflow_run_path": workflow_run_ref["path"],
-            "report_markdown_path": report_bundle_relpath,
-            "provenance_exports": provenance_exports,
-            "evidence_review_artifacts": evidence_review_artifacts,
-            "expected_artifacts": [
-                workflow_run_ref,
-                *canonical_output_artifacts,
-                *supplementary_generated_artifacts,
-                *evidence_review_artifacts,
-                {
-                    "artifact_type": "report_bundle",
-                    "path": report_bundle_relpath,
-                    "description": "Human-readable RNA-seq report bundle linking the canonical QC, quantification, and DE outputs.",
-                },
-                {
-                    "artifact_type": "qa_report",
-                    "path": qa_report_path,
-                    "description": "Structured QA report copied to the stable root artifact location.",
-                },
-            ],
-            "missing_artifacts": missing_artifacts,
-            "deviations": deviations,
-            "deviation_summary": deviation_summary,
-            "next_actions": recommendations,
-            "notes": [
-                "The report bundle links the canonical workflow run record and any stable workflow outputs that were actually materialized for this run.",
-                "Linked evidence-review artifacts are carried forward when available so downstream QA and report consumers can inspect literature-grounded claim support directly from the bundle.",
-                "Structured workflow deviations are copied into the bundle so reviewers can inspect what changed, why it changed, and the likely downstream impact without reopening the raw run record.",
-                "Blocked or failed runs still emit a partial report bundle so users can inspect available artifacts and missing downstream outputs without reading the raw run record.",
-            ],
-        },
+        "report_bundle_manifest": report_bundle_manifest_payload,
+        "checklist_results": checklist_payload,
         "qa_report": {
             "overall_status": overall_status,
-            "failed_checks": _report_bundle_failed_checks(
-                lifecycle_status=report_lifecycle_status,
-                missing_artifacts=missing_artifacts,
-                deviations=deviations,
-            ),
+            "failed_checks": failed_checks,
             "warnings": warnings,
             "missing_artifacts": missing_artifacts,
             "recommended_remediation": recommendations,
@@ -1992,6 +2085,81 @@ def _dedupe_text_entries(values: Sequence[str]) -> list[str]:
         seen.add(key)
         cleaned.append(candidate)
     return cleaned
+
+
+def _configured_report_bundle_checklist_ids(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        candidates = list(value)
+    else:
+        raise ValueError("checklist_ids must be provided as a string or sequence of strings.")
+
+    selected: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        if not isinstance(item, str):
+            raise ValueError("checklist_ids entries must be strings.")
+        candidate = item.strip()
+        if not candidate:
+            continue
+        normalized = normalize_identifier(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        selected.append(normalized)
+    return selected
+
+
+def _report_bundle_checklist_ids(
+    *,
+    evidence_review_artifacts: Sequence[Mapping[str, Any]],
+    configured_checklist_ids: Sequence[str] | None = None,
+) -> list[str]:
+    selected: list[str] = []
+    if evidence_review_artifacts:
+        selected.append("prisma_literature_screening_completeness")
+    for checklist_id in configured_checklist_ids or ():
+        if checklist_id not in selected:
+            selected.append(checklist_id)
+    return selected
+
+
+def _combine_report_bundle_qa_status(base_status: str, checklist_status: str) -> str:
+    severity_rank = {
+        "passed": 0,
+        "not_applicable": 0,
+        "warning": 1,
+        "failed": 2,
+        "blocked": 3,
+    }
+    return base_status if severity_rank.get(base_status, 0) >= severity_rank.get(checklist_status, 0) else checklist_status
+
+
+def _report_bundle_checklist_summaries(
+    checklist_payload: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    summaries: list[dict[str, str]] = []
+    for evaluation in checklist_payload.get("evaluations", []):
+        if not isinstance(evaluation, Mapping):
+            continue
+        checklist_id = evaluation.get("checklist_id")
+        label = evaluation.get("label")
+        overall_status = evaluation.get("overall_status")
+        definition_path = evaluation.get("definition_path")
+        if not all(isinstance(value, str) and value.strip() for value in (checklist_id, label, overall_status, definition_path)):
+            continue
+        summaries.append(
+            {
+                "checklist_id": checklist_id.strip(),
+                "label": label.strip(),
+                "overall_status": overall_status.strip(),
+                "definition_path": definition_path.strip(),
+            }
+        )
+    return summaries
 
 
 def _workflow_deviation_entries(workflow_run: WorkflowRun) -> list[dict[str, Any]]:

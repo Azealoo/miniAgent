@@ -13,7 +13,7 @@
 - `run_id` uses the canonical format `run-YYYYMMDDTHHMMSSZ-xxxxxxxx`.
 - Each prepared run directory should materialize a root `run.json` record plus `content_hashes.json`.
 - User-supplied files belong under `inputs/user/`; generated files belong under `outputs/generated/` unless they are one of the reserved stable artifact names.
-- Stable artifact names include `dataset_manifest.yaml`, `workflow_plan.json`, `compliance_report.json`, `evidence_card.yaml`, `protocol_run.yaml`, `qa_report.json`, `prov.json`, and `ro-crate/`.
+- Stable artifact names include `dataset_manifest.yaml`, `workflow_plan.json`, `compliance_report.json`, `evidence_card.yaml`, `protocol_run.yaml`, `qa_report.json`, `checklist_results.json`, `prov.json`, and `ro-crate/`.
 
 ## Running jobs (Slurm)
 - Use `sbatch` with appropriate partition and resources (GPU, CPU, memory, time).

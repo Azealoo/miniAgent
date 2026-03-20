@@ -32,6 +32,7 @@ Each run directory reserves these top-level locations:
 - `evidence_review.json`
 - `protocol_run.yaml`
 - `qa_report.json`
+- `checklist_results.json`
 - `prov.json`
 - `biocompute.json`
 - `ro-crate/`

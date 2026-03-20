@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -53,7 +54,12 @@ async def _collect_sse_payloads(response) -> list[dict]:
     return payloads
 
 
-def _stage_selected_workflow(base_dir: Path, *, include_manifest: bool = True) -> str | None:
+def _stage_selected_workflow(
+    base_dir: Path,
+    *,
+    include_manifest: bool = True,
+    include_array_input: bool = False,
+) -> str | None:
     workflows_dir = base_dir / "workflows"
     runners_dir = workflows_dir / "runners"
     report_templates_dir = workflows_dir / "report_templates"
@@ -68,6 +74,27 @@ def _stage_selected_workflow(base_dir: Path, *, include_manifest: bool = True) -
         REPO_ROOT / "workflows" / "report_templates" / "rna_seq_qc_summary.md.j2",
         report_templates_dir / "rna_seq_qc_summary.md.j2",
     )
+    if include_array_input:
+        spec_path = workflows_dir / "rna-seq-qc.yaml"
+        spec_payload = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+        assert isinstance(spec_payload, dict)
+        optional_inputs = spec_payload.setdefault("optional_inputs", [])
+        assert isinstance(optional_inputs, list)
+        optional_inputs.append(
+            {
+                "name": "checklist_ids",
+                "kind": "metadata",
+                "data_type": "array",
+                "default": [],
+                "description": "Optional checklist identifiers for selected workflow chat tests.",
+            }
+        )
+        runtime = spec_payload.setdefault("runtime", {})
+        assert isinstance(runtime, dict)
+        provided_inputs = runtime.setdefault("provided_inputs", [])
+        assert isinstance(provided_inputs, list)
+        provided_inputs.append("checklist_ids")
+        spec_path.write_text(yaml.safe_dump(spec_payload, sort_keys=False), encoding="utf-8")
 
     if not include_manifest:
         return None
@@ -495,6 +522,52 @@ async def test_chat_stream_runs_selected_workflow_without_agent_stream(isolated_
     assert any(call["tool"] == "compliance_preflight" for call in assistant_messages[0]["tool_calls"])
     assert assistant_messages[0]["workflow_events"][0]["type"] == "workflow_start"
     assert assistant_messages[0]["workflow_events"][-1]["lifecycle_status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_selected_workflow_carries_array_metadata_inputs(isolated_chat_state):
+    from artifacts import load_artifact_document
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+    manifest_relpath = _stage_selected_workflow(
+        isolated_chat_state,
+        include_array_input=True,
+    )
+    assert manifest_relpath is not None
+
+    async def unexpected_astream(_message, _history):
+        if False:
+            yield {}
+        raise AssertionError("selected workflow chat should bypass agent_manager.astream")
+
+    with patch.object(agent_manager, "astream", unexpected_astream), patch(
+        "api.chat._generate_title_only",
+        new=AsyncMock(return_value=""),
+    ):
+        response = await chat(
+            ChatRequest(
+                message=(
+                    "Run the RNA-seq QC workflow with "
+                    "checklist_ids=[miqe_qpcr_completeness, arrive_animal_study_reporting]"
+                ),
+                session_id=session_id,
+                stream=True,
+                attached_identifiers=[manifest_relpath],
+                selected_workflow="rna-seq-qc",
+            )
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    workflow_done = next(item for item in payloads if item["type"] == "workflow_done")
+    run_document = load_artifact_document(isolated_chat_state / workflow_done["run_record_path"])
+
+    assert run_document.lifecycle_status == "completed"
+    assert run_document.parameters["checklist_ids"] == [
+        "miqe_qpcr_completeness",
+        "arrive_animal_study_reporting",
+    ]
 
 
 @pytest.mark.asyncio

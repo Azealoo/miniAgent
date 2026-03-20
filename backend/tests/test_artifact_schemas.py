@@ -14,6 +14,7 @@ from artifacts.schemas import (  # noqa: E402
     SCHEMA_PACK_VERSION,
     BioComputeArtifact,
     ClaimGraphArtifact,
+    ChecklistResultsArtifact,
     ComplianceReport,
     CountMatrix,
     DatasetManifest,
@@ -61,6 +62,7 @@ class TestArtifactSchemas:
             "compliance_report": "json",
             "protocol_run": "yaml",
             "qa_report": "json",
+            "checklist_results": "json",
         }.items():
             filename = stable_artifact_name(artifact_type)
             assert schema_format_for_artifact(artifact_type) == expected_format
@@ -1390,6 +1392,7 @@ class TestArtifactSchemas:
             "compliance_report.json": ComplianceReport,
             "protocol_run.yaml": ProtocolRun,
             "qa_report.json": QAReport,
+            "checklist_results.json": ChecklistResultsArtifact,
         }
 
         for filename, expected_model in expected_types.items():
@@ -1426,3 +1429,4 @@ class TestArtifactSchemas:
 
         assert isinstance(parsed, WorkflowRun)
         assert artifact_model_for_type("workflow_run") is WorkflowRun
+        assert artifact_model_for_type("checklist_results") is ChecklistResultsArtifact

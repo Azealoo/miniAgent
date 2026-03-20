@@ -39,6 +39,7 @@ ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
     "compliance_report": "json",
     "protocol_run": "yaml",
     "qa_report": "json",
+    "checklist_results": "json",
 }
 
 _NORMALIZED_IDENTIFIER_RE = re.compile(r"^[a-z0-9]+(?:[._:-][a-z0-9]+)*$")
@@ -82,6 +83,17 @@ DeviationSeverity = Literal["minor", "major", "critical"]
 DeviationOrigin = Literal["manual", "automatic"]
 QAOverallStatus = Literal["passed", "warning", "failed", "blocked"]
 QACheckSeverity = Literal["warning", "error", "critical"]
+ChecklistItemSeverity = Literal["required", "best_practice"]
+ChecklistItemStatus = Literal["pass", "fail", "not_applicable"]
+ChecklistOverallStatus = Literal["passed", "warning", "blocked", "not_applicable"]
+ChecklistSubjectType = Literal[
+    "workflow_run",
+    "report_bundle",
+    "protocol_run",
+    "evidence_review",
+    "qa_review",
+    "custom",
+]
 PrivacyClassification = Literal["public", "internal", "controlled", "restricted"]
 AnalysisKind = Literal["descriptive", "comparative"]
 AssayType = Literal[
@@ -2980,6 +2992,242 @@ class QACheck(BaseModel):
         return _require_normalized_identifier(value, field_name="artifact_type")
 
 
+class ChecklistItemResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str
+    description: str
+    severity: ChecklistItemSeverity
+    pass_criteria: str
+    remediation_guidance: str
+    status: ChecklistItemStatus
+    rationale: str
+    evidence_artifacts: list[ArtifactReference] = Field(default_factory=list)
+
+    @field_validator("item_id")
+    @classmethod
+    def _validate_item_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="item_id")
+
+    @field_validator("description", "pass_criteria", "remediation_guidance", "rationale")
+    @classmethod
+    def _validate_text_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class ChecklistEvaluationSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    total_items: int
+    passed_items: int
+    failed_required_items: int
+    failed_best_practice_items: int
+    not_applicable_items: int
+
+    @field_validator(
+        "total_items",
+        "passed_items",
+        "failed_required_items",
+        "failed_best_practice_items",
+        "not_applicable_items",
+    )
+    @classmethod
+    def _validate_non_negative_counts(cls, value: int, info) -> int:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be non-negative.")
+        return value
+
+
+class ChecklistEvaluation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    checklist_id: str
+    family: str
+    label: str
+    version: str
+    definition_path: str
+    overall_status: ChecklistOverallStatus
+    items: list[ChecklistItemResult] = Field(default_factory=list)
+    summary: ChecklistEvaluationSummary
+
+    @field_validator("checklist_id", "family")
+    @classmethod
+    def _validate_identifiers(cls, value: str, info) -> str:
+        return _require_normalized_identifier(value, field_name=info.field_name)
+
+    @field_validator("label", "version")
+    @classmethod
+    def _validate_text_fields(cls, value: str, info) -> str:
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @field_validator("definition_path")
+    @classmethod
+    def _validate_definition_path(cls, value: str) -> str:
+        return _normalize_relative_path(value)
+
+    @model_validator(mode="after")
+    def _validate_consistency(self) -> "ChecklistEvaluation":
+        item_ids = [item.item_id for item in self.items]
+        if len(item_ids) != len(set(item_ids)):
+            raise ValueError("Checklist evaluations may not contain duplicate item_id values.")
+
+        passed_items = sum(1 for item in self.items if item.status == "pass")
+        failed_required_items = sum(
+            1 for item in self.items if item.status == "fail" and item.severity == "required"
+        )
+        failed_best_practice_items = sum(
+            1 for item in self.items if item.status == "fail" and item.severity == "best_practice"
+        )
+        not_applicable_items = sum(1 for item in self.items if item.status == "not_applicable")
+
+        if self.summary.total_items != len(self.items):
+            raise ValueError("Checklist evaluation summary.total_items must match items.")
+        if self.summary.passed_items != passed_items:
+            raise ValueError("Checklist evaluation summary.passed_items must match items.")
+        if self.summary.failed_required_items != failed_required_items:
+            raise ValueError(
+                "Checklist evaluation summary.failed_required_items must match items."
+            )
+        if self.summary.failed_best_practice_items != failed_best_practice_items:
+            raise ValueError(
+                "Checklist evaluation summary.failed_best_practice_items must match items."
+            )
+        if self.summary.not_applicable_items != not_applicable_items:
+            raise ValueError(
+                "Checklist evaluation summary.not_applicable_items must match items."
+            )
+
+        if not self.items:
+            if self.overall_status != "not_applicable":
+                raise ValueError(
+                    "Checklist evaluations with no items must use overall_status 'not_applicable'."
+                )
+            return self
+
+        expected_status: ChecklistOverallStatus
+        if failed_required_items:
+            expected_status = "blocked"
+        elif failed_best_practice_items:
+            expected_status = "warning"
+        elif passed_items:
+            expected_status = "passed"
+        else:
+            expected_status = "not_applicable"
+        if self.overall_status != expected_status:
+            raise ValueError(
+                f"Checklist evaluation overall_status must be {expected_status!r} for the observed item results."
+            )
+        return self
+
+
+class ChecklistResultsSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evaluated_checklist_count: int
+    passed_checklist_count: int
+    warning_checklist_count: int
+    blocked_checklist_count: int
+    not_applicable_checklist_count: int
+    failed_required_item_count: int
+    failed_best_practice_item_count: int
+
+    @field_validator(
+        "evaluated_checklist_count",
+        "passed_checklist_count",
+        "warning_checklist_count",
+        "blocked_checklist_count",
+        "not_applicable_checklist_count",
+        "failed_required_item_count",
+        "failed_best_practice_item_count",
+    )
+    @classmethod
+    def _validate_non_negative_counts(cls, value: int, info) -> int:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be non-negative.")
+        return value
+
+
+class ChecklistResultsArtifact(ArtifactDocument):
+    artifact_type: Literal["checklist_results"] = "checklist_results"
+    subject_type: ChecklistSubjectType
+    subject_label: str
+    evaluated_artifacts: list[ArtifactReference] = Field(default_factory=list)
+    overall_status: ChecklistOverallStatus
+    evaluations: list[ChecklistEvaluation] = Field(default_factory=list)
+    summary: ChecklistResultsSummary
+    notes: list[str] = Field(default_factory=list)
+
+    @field_validator("subject_label")
+    @classmethod
+    def _validate_subject_label(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="subject_label")
+
+    @field_validator("notes")
+    @classmethod
+    def _validate_notes(cls, value: list[str]) -> list[str]:
+        return _clean_unique_text_list(value, field_name="note")
+
+    @model_validator(mode="after")
+    def _validate_consistency(self) -> "ChecklistResultsArtifact":
+        evaluated_count = len(self.evaluations)
+        passed_count = sum(1 for item in self.evaluations if item.overall_status == "passed")
+        warning_count = sum(1 for item in self.evaluations if item.overall_status == "warning")
+        blocked_count = sum(1 for item in self.evaluations if item.overall_status == "blocked")
+        not_applicable_count = sum(
+            1 for item in self.evaluations if item.overall_status == "not_applicable"
+        )
+        failed_required_item_count = sum(
+            item.summary.failed_required_items for item in self.evaluations
+        )
+        failed_best_practice_item_count = sum(
+            item.summary.failed_best_practice_items for item in self.evaluations
+        )
+
+        if self.summary.evaluated_checklist_count != evaluated_count:
+            raise ValueError(
+                "Checklist results summary.evaluated_checklist_count must match evaluations."
+            )
+        if self.summary.passed_checklist_count != passed_count:
+            raise ValueError(
+                "Checklist results summary.passed_checklist_count must match evaluations."
+            )
+        if self.summary.warning_checklist_count != warning_count:
+            raise ValueError(
+                "Checklist results summary.warning_checklist_count must match evaluations."
+            )
+        if self.summary.blocked_checklist_count != blocked_count:
+            raise ValueError(
+                "Checklist results summary.blocked_checklist_count must match evaluations."
+            )
+        if self.summary.not_applicable_checklist_count != not_applicable_count:
+            raise ValueError(
+                "Checklist results summary.not_applicable_checklist_count must match evaluations."
+            )
+        if self.summary.failed_required_item_count != failed_required_item_count:
+            raise ValueError(
+                "Checklist results summary.failed_required_item_count must match evaluations."
+            )
+        if self.summary.failed_best_practice_item_count != failed_best_practice_item_count:
+            raise ValueError(
+                "Checklist results summary.failed_best_practice_item_count must match evaluations."
+            )
+
+        expected_status: ChecklistOverallStatus
+        if blocked_count:
+            expected_status = "blocked"
+        elif warning_count:
+            expected_status = "warning"
+        elif passed_count:
+            expected_status = "passed"
+        else:
+            expected_status = "not_applicable"
+        if self.overall_status != expected_status:
+            raise ValueError(
+                f"Checklist results overall_status must be {expected_status!r} for the observed evaluations."
+            )
+        return self
+
+
 class MissingArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -3044,6 +3292,7 @@ ArtifactModel = (
     | ComplianceReport
     | ProtocolRun
     | QAReport
+    | ChecklistResultsArtifact
 )
 
 _ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
@@ -3066,6 +3315,7 @@ _ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
     "compliance_report": ComplianceReport,
     "protocol_run": ProtocolRun,
     "qa_report": QAReport,
+    "checklist_results": ChecklistResultsArtifact,
 }
 
 

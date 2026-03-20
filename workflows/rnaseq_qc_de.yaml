@@ -23,13 +23,19 @@ required_inputs:
     kind: metadata
     data_type: string
     description: Comparison condition label used as the numerator for the stubbed differential expression stage.
-optional_inputs: []
+optional_inputs:
+  - name: checklist_ids
+    kind: metadata
+    data_type: array
+    default: []
+    description: Optional additional checklist definition IDs to evaluate for the terminal report bundle alongside any automatic defaults.
 runtime:
   provided_inputs:
     - dataset_manifest
     - condition_field
     - baseline_condition
     - comparison_condition
+    - checklist_ids
   allowed_parameter_overrides: []
   generated_state:
     - run_id
@@ -124,6 +130,14 @@ outputs:
     source:
       step_id: report_bundle
       output_name: report_bundle_manifest
+  - name: checklist_results
+    kind: artifact
+    artifact_type: checklist_results
+    schema_ref: artifact_schema:checklist_results@1.0.0
+    description: Structured checklist gate results captured before QA finalization.
+    source:
+      step_id: report_bundle
+      output_name: checklist_results
   - name: qa_report
     kind: artifact
     artifact_type: qa_report
@@ -486,10 +500,19 @@ steps:
         source:
           source_type: workflow_input
           input_name: comparison_condition
+      - name: checklist_ids
+        source:
+          source_type: workflow_input
+          input_name: checklist_ids
     outputs:
       - name: report_bundle_manifest
         kind: value
         description: Structured manifest describing the report bundle sections and the expected artifacts it should gather.
+      - name: checklist_results
+        kind: artifact
+        artifact_type: checklist_results
+        schema_ref: artifact_schema:checklist_results@1.0.0
+        description: Structured checklist gate results captured before QA finalization.
       - name: qa_report
         kind: artifact
         artifact_type: qa_report

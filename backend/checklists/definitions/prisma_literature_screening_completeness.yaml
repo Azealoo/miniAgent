@@ -1,0 +1,55 @@
+checklist_id: prisma_literature_screening_completeness
+family: prisma
+label: PRISMA-style literature screening completeness
+version: "1.0.0"
+description: Checklist gate for evidence-review artifacts that will be reused in report bundles and downstream QA.
+items:
+  - item_id: evidence_review_artifact_present
+    description: At least one evidence_review artifact is available for checklist scoring.
+    severity: required
+    pass_criteria: An evidence_review artifact is linked into the evaluated report or run.
+    remediation_guidance: Materialize an evidence_review artifact before finalizing literature-grounded outputs.
+    rule:
+      rule_type: artifact_present
+      artifact_type: evidence_review
+      min_count: 1
+  - item_id: review_question_recorded
+    description: Each linked evidence review records the explicit review question.
+    severity: required
+    pass_criteria: evidence_review.review_question is present in each checked evidence_review artifact.
+    remediation_guidance: Record the exact literature review question in every evidence_review artifact.
+    rule:
+      rule_type: field_present
+      source: evidence_reviews
+      field_path: review_question
+  - item_id: included_evidence_logged
+    description: Each linked evidence review records at least one included evidence artifact.
+    severity: required
+    pass_criteria: evidence_review.evidence_included contains at least one entry in each checked evidence_review artifact.
+    remediation_guidance: Link at least one included evidence artifact into each evidence_review before publication.
+    rule:
+      rule_type: list_min_items
+      source: evidence_reviews
+      field_path: evidence_included
+      min_items: 1
+  - item_id: limitations_noted
+    description: Each linked evidence review records at least one limitation.
+    severity: required
+    pass_criteria: evidence_review.limitations contains at least one entry in each checked evidence_review artifact.
+    remediation_guidance: Record at least one evidence limitation so downstream users can assess scope and uncertainty.
+    rule:
+      rule_type: list_min_items
+      source: evidence_reviews
+      field_path: limitations
+      min_items: 1
+  - item_id: exclusion_log_present
+    description: At least one linked evidence review preserves a structured exclusion log.
+    severity: best_practice
+    pass_criteria: evidence_review.evidence_excluded contains at least one entry in at least one checked evidence_review artifact.
+    remediation_guidance: Record excluded evidence items and reasons so screening decisions remain inspectable.
+    rule:
+      rule_type: list_min_items
+      source: evidence_reviews
+      field_path: evidence_excluded
+      min_items: 1
+      minimum_matches: 1

@@ -49,6 +49,7 @@ _SCHEMA_ARTIFACT_TYPES = {
     "compliance_report",
     "protocol_run",
     "qa_report",
+    "checklist_results",
 }
 _STRUCTURED_ROOT_ARTIFACT_TYPES = {"content_hash_manifest", "workflow_plan", "provenance"}
 _ROOT_STABLE_FILENAMES_TO_TYPES: dict[str, str] = {
@@ -67,6 +68,7 @@ _ROOT_STABLE_FILENAMES_TO_TYPES: dict[str, str] = {
     "entity_grounding.json": "entity_grounding",
     "protocol_run.yaml": "protocol_run",
     "qa_report.json": "qa_report",
+    "checklist_results.json": "checklist_results",
     "prov.json": "provenance",
     "biocompute.json": "biocompute",
     "ro-crate": "ro_crate",
