@@ -148,6 +148,43 @@ def _write_evidence_card(base_dir: Path) -> None:
     )
 
 
+def _write_entity_grounding(base_dir: Path) -> None:
+    _write_json(
+        _run_dir(base_dir) / "entity_grounding.json",
+        {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "entity_grounding",
+            "id": "entity-grounding-demo-v1",
+            "run_id": RUN_ID,
+            "created_at": "2026-03-18T19:11:00Z",
+            "source_workflow": "entity-grounding",
+            "related_artifacts": [],
+            "input_mentions": ["TP53"],
+            "requested_species": "human",
+            "requested_entity_types": ["gene"],
+            "results": [
+                {
+                    "input_mention": "TP53",
+                    "requested_entity_types": ["gene"],
+                    "status": "resolved",
+                    "grounded_entity": {
+                        "entity_type": "gene",
+                        "source_database": "ensembl",
+                        "stable_identifier": "ensembl:ENSG00000141510",
+                        "identifier_version": "15",
+                        "preferred_label": "TP53",
+                        "aliases": ["TP53", "P53"],
+                        "species": "Homo sapiens",
+                        "taxon_id": "taxonomy:9606",
+                    },
+                    "candidate_entities": [],
+                    "cached_source_payload_paths": [],
+                }
+            ],
+        },
+    )
+
+
 def _workflow_plan_payload() -> dict:
     return {
         "schema_version": SCHEMA_PACK_VERSION,
@@ -478,6 +515,25 @@ class TestArtifactRegistryService:
         )
         assert refreshed.matched_count == 1
         assert refreshed.records[0].path == _run_dir_relpath("evidence_card.yaml")
+
+    def test_refresh_path_indexes_entity_grounding_artifact(self, isolated_registry_root):
+        rebuild_artifact_registry(isolated_registry_root)
+        _write_entity_grounding(isolated_registry_root)
+
+        record = refresh_artifact_registry_path(
+            isolated_registry_root,
+            _run_dir_relpath("entity_grounding.json"),
+        )
+        assert record is not None
+        assert record.status == "valid"
+        assert record.artifact_type == "entity_grounding"
+
+        refreshed = lookup_artifact_registry(
+            isolated_registry_root,
+            artifact_type="entity_grounding",
+        )
+        assert refreshed.matched_count == 1
+        assert refreshed.records[0].path == _run_dir_relpath("entity_grounding.json")
 
     def test_prepare_run_directory_registers_root_artifacts_immediately(self, tmp_path):
         prepare_run_directory(

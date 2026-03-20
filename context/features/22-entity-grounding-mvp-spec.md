@@ -19,6 +19,22 @@ Normalize biological entities so workflows, evidence cards, and future interpret
 - Make evidence cards and workflow artifacts able to reference normalized entities instead of plain text only.
 - Add caching or artifact persistence for grounding results so repeated lookups are not opaque.
 
+## Implementation Notes
+
+- Introduce a durable `entity_grounding` artifact that records:
+  - input mentions
+  - requested species context
+  - requested entity classes
+  - per-mention resolution status (`resolved`, `ambiguous`, `unresolved`)
+  - normalized grounded entities when resolution succeeds
+  - cached source-payload paths for the API calls used during grounding
+- Keep evidence-card compatibility by preserving `entity_tags` and adding normalized grounded entities additively rather than replacing the existing tag list.
+- Persist raw Ensembl and UniProt grounding payloads under the run’s generated-output cache so repeated lookups remain inspectable.
+- Default ambiguity handling should avoid overconfident linking:
+  - resolve directly when a single grounded entity is found
+  - mark the result ambiguous and require clarification when multiple plausible candidates remain
+  - record unresolved results explicitly when no supported match is available
+
 ## References
 
 - @backend/tools/uniprot_api_tool.py

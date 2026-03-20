@@ -5,14 +5,17 @@
 Not Started
 
 ## Goals
-<!-- Load the next feature to populate goals. -->
+<!-- Fill in for the next feature. -->
 
 ## Notes
-<!-- Load the next feature to populate notes. -->
+<!-- Fill in for the next feature. -->
 
 ## History
 <!-- Use this section to list completed work related to this feature. -->
 <!-- Keep it short and concrete: implemented pieces, verified behavior, follow-up changes, or fixes. -->
+- 2026-03-20: Completed Entity Grounding MVP after review signoff with shared grounded-entity and `entity_grounding` artifact support, deterministic Ensembl/UniProt-backed gene and protein grounding, additive evidence-card grounding integration, focused backend verification (`64 passed`), and reset `context/current-feature.md` for the next task.
+- 2026-03-20: Fixed the remaining Entity Grounding MVP evidence-integration review gap by filtering generic MeSH labels out of evidence-card grounding, propagating article species context into grounding requests, adding protein-name fallback support for UniProt-backed protein grounding, broadening evidence retrieval to issue per-mention typed grounding requests, and re-verifying via `/gpfs/home/yininz6/.conda/envs/miniAgent/bin/python -m pytest backend/tests/test_entity_grounding.py backend/tests/test_evidence_retrieval.py backend/tests/test_tool_output_contracts.py backend/tests/test_artifact_schemas.py backend/tests/test_artifact_registry.py` (`64 passed`).
+- 2026-03-20: Started Entity Grounding MVP implementation with a shared grounded-entity schema plus durable `entity_grounding.json` artifacts, reusable Ensembl/UniProt-backed grounding and cached source payload persistence, additive evidence-card `grounded_entities` integration plus an `entity_grounding` agent tool, updated examples/spec notes, and focused backend verification via `/gpfs/home/yininz6/.conda/envs/miniAgent/bin/python -m pytest backend/tests/test_entity_grounding.py backend/tests/test_evidence_retrieval.py backend/tests/test_tool_output_contracts.py backend/tests/test_artifact_schemas.py backend/tests/test_artifact_registry.py` (`57 passed`).
 - 2026-03-20: Completed Evidence Retrieval MVP after review signoff with a durable PubMed-backed evidence pipeline, versioned `evidence_card` artifacts plus raw XML/search/summary payload caching for success and no-card runs, frontend thought-chain support for the new tool, and passing focused backend verification via `/gpfs/home/yininz6/.conda/envs/miniAgent/bin/python -m pytest backend/tests/test_evidence_retrieval.py backend/tests/test_tool_output_contracts.py backend/tests/test_artifact_registry.py` (`27 passed`) plus successful frontend `npm run lint` and `npm run build`.
 - 2026-03-20: Closed the remaining Evidence Retrieval MVP provenance gap by materializing standalone retrieval-context runs for zero-hit and zero-card PubMed executions, exposing those artifact refs through the `evidence_retrieval` tool contract, broadening regression coverage for empty/all-failure paths, and re-verifying via `/gpfs/home/yininz6/.conda/envs/miniAgent/bin/python -m pytest backend/tests/test_evidence_retrieval.py backend/tests/test_tool_output_contracts.py backend/tests/test_artifact_registry.py`.
 - 2026-03-20: Started Evidence Retrieval MVP implementation with a deterministic PubMed-backed evidence pipeline under `backend/evidence/retrieval.py`, a new `evidence_retrieval` agent tool that materializes durable `evidence_card.yaml` artifacts plus cached raw PubMed XML payloads with prior-version traceability, and focused backend verification via `/gpfs/home/yininz6/.conda/envs/miniAgent/bin/python -m pytest backend/tests/test_evidence_retrieval.py backend/tests/test_tool_output_contracts.py backend/tests/test_artifact_registry.py` (`22 passed`).

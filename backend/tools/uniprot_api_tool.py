@@ -1,9 +1,10 @@
 """
 UniProt REST API helper: search and fetch protein entries by gene or ID.
 """
+from dataclasses import dataclass
 import json
 import urllib.parse
-from typing import Optional, Type
+from typing import Any, Optional, Type
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -22,8 +23,57 @@ _BASE = "https://rest.uniprot.org"
 _MAX = 50_000
 
 
+@dataclass(frozen=True)
+class UniprotApiResponse:
+    query: str
+    fields: str
+    format: str
+    url: str
+    status_code: int
+    text: str
+    json_payload: Any | None = None
+
+
+def fetch_uniprot_response(
+    *,
+    query: str,
+    fields: Optional[str] = None,
+    format: str = "json",
+    size: int = 5,
+) -> UniprotApiResponse:
+    resolved_fields = fields or "accession,gene_names,protein_name,organism_name,function"
+    url = (
+        f"{_BASE}/uniprotkb/search?query={urllib.parse.quote(query)}"
+        f"&fields={urllib.parse.quote(resolved_fields)}&format={format}&size={size}"
+    )
+
+    import httpx
+
+    response = httpx.get(url, timeout=25)
+    response.raise_for_status()
+    text = response.text
+    json_payload = None
+    if format == "json":
+        try:
+            json_payload = response.json()
+        except (json.JSONDecodeError, ValueError):
+            json_payload = None
+
+    return UniprotApiResponse(
+        query=query,
+        fields=resolved_fields,
+        format=format,
+        url=url,
+        status_code=response.status_code,
+        text=text,
+        json_payload=json_payload,
+    )
+
+
 class UniprotApiInput(BaseModel):
-    query: str = Field(description="Search query (e.g. gene_exact:TP53) or UniProt accession (e.g. P53_HUMAN).")
+    query: str = Field(
+        description="Search query (e.g. gene_exact:TP53), UniProt accession (e.g. P04637), or UniProt entry name (e.g. P53_HUMAN)."
+    )
     fields: Optional[str] = Field(
         default="accession,gene_names,protein_name,organism_name,function",
         description="Comma-separated fields to return (default: accession,gene_names,protein_name,organism_name,function)."
@@ -35,7 +85,7 @@ class UniprotApiTool(BaseTool):
     name: str = "uniprot_api"
     description: str = (
         "Query UniProt REST API for protein information. "
-        "Use query like gene_exact:TP53 or an accession. "
+        "Use query like gene_exact:TP53, a UniProt accession, or a UniProt entry name. "
         "Input: query, optional fields and format."
     )
     args_schema: Type[BaseModel] = UniprotApiInput
@@ -54,21 +104,30 @@ class UniprotApiTool(BaseTool):
                 metadata={"format": format},
             )
         fields = fields or "accession,gene_names,protein_name,organism_name,function"
-        url = (
-            f"{_BASE}/uniprotkb/search?query={urllib.parse.quote(query)}"
-            f"&fields={urllib.parse.quote(fields)}&format={format}&size=5"
-        )
+        url = ""
         try:
             import httpx
-            r = httpx.get(url, timeout=25)
-            r.raise_for_status()
-            text = r.text
+            response = fetch_uniprot_response(
+                query=query,
+                fields=fields,
+                format=format,
+                size=5,
+            )
+            url = response.url
+            text = response.text
             source_payload = None
             warnings: list[str] = []
 
-            if format == "json":
+            if format == "json" and response.json_payload is not None:
+                parsed = response.json_payload
+                summary, truncated = json_to_pretty_text(parsed, _MAX)
+                if truncated:
+                    warnings.append("output_truncated")
+                structured_payload = parsed
+                result_count = len(parsed.get("results", [])) if isinstance(parsed, dict) else None
+            elif format == "json":
                 try:
-                    parsed = r.json()
+                    parsed = json.loads(text)
                     summary, truncated = json_to_pretty_text(parsed, _MAX)
                     if truncated:
                         warnings.append("output_truncated")
@@ -101,7 +160,7 @@ class UniprotApiTool(BaseTool):
                 "fields": fields,
                 "format": format,
                 "request_url": url,
-                "http_status": r.status_code,
+                "http_status": response.status_code,
             }
             if result_count is not None:
                 metadata["result_count"] = result_count

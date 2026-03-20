@@ -21,6 +21,10 @@ from artifacts import (
     normalize_identifier,
     prepare_run_directory,
 )
+from entity_grounding import (
+    EntityGroundingMentionRequest,
+    materialize_entity_grounding_requests,
+)
 from tools.ncbi_eutils_tool import fetch_ncbi_eutils_response
 
 EVIDENCE_RETRIEVAL_WORKFLOW_NAME = "literature-retrieval"
@@ -50,6 +54,63 @@ _STUDY_TYPE_KEYWORDS: tuple[tuple[str, str], ...] = (
     ("review", "review_article"),
     ("protocol", "study_protocol"),
     ("observational study", "observational_study"),
+)
+_GENE_SYMBOL_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,23}$")
+_ENSEMBL_ENTITY_ID_RE = re.compile(r"^ENS[A-Z0-9]*[GTP]\d+(?:\.\d+)?$", re.IGNORECASE)
+_UNIPROT_ACCESSION_RE = re.compile(
+    r"^(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})(?:-\d+)?$",
+    re.IGNORECASE,
+)
+_UNIPROT_ENTRY_NAME_RE = re.compile(r"^[A-Z0-9]{1,10}_[A-Z0-9]{1,10}$", re.IGNORECASE)
+_MESH_SPECIES_TO_GROUNDING_SPECIES: dict[str, str] = {
+    "human": "human",
+    "humans": "human",
+    "homo sapiens": "human",
+    "mouse": "mouse",
+    "mice": "mouse",
+    "mus musculus": "mouse",
+    "rat": "rat",
+    "rats": "rat",
+    "rattus norvegicus": "rat",
+}
+_GENERIC_GROUNDING_LABELS = {
+    "adult",
+    "adults",
+    "adolescent",
+    "aged",
+    "animal",
+    "animals",
+    "child",
+    "children",
+    "female",
+    "human",
+    "humans",
+    "infant",
+    "male",
+    "mice",
+    "middle aged",
+    "mouse",
+    "pregnancy",
+    "rat",
+    "rats",
+    "young adult",
+}
+_PROTEIN_GROUNDING_KEYWORDS = (
+    "antigen",
+    "channel",
+    "cyclin",
+    "enzyme",
+    "factor",
+    "interleukin",
+    "kinase",
+    "ligase",
+    "myosin",
+    "peptide",
+    "phosphatase",
+    "protein",
+    "receptor",
+    "transferase",
+    "transporter",
 )
 
 
@@ -121,6 +182,8 @@ class RetrievedEvidenceCard:
     esearch_payload_relpath: str | None = None
     esummary_payload_path: Path | None = None
     esummary_payload_relpath: str | None = None
+    entity_grounding_path: Path | None = None
+    entity_grounding_relpath: str | None = None
 
 
 @dataclass(frozen=True)
@@ -455,6 +518,36 @@ def _materialize_evidence_card(
         retrieval_context,
         selected_pmid=pmid,
     )
+    grounding_artifact = None
+    grounding_ref: list[ArtifactReference] = []
+    grounded_entities: list[dict[str, Any]] = []
+    grounding_results: list[dict[str, Any]] = []
+    grounding_requires_clarification = False
+    grounding_species = _infer_grounding_species(entity_tags)
+    grounding_requests = _extract_grounding_requests(entity_tags)
+    if grounding_requests:
+        grounding_artifact = materialize_entity_grounding_requests(
+            layout,
+            mention_requests=grounding_requests,
+            species=grounding_species,
+        )
+        grounding_ref = [
+            ArtifactReference(
+                artifact_type="entity_grounding",
+                path=grounding_artifact.artifact_relpath,
+                id=grounding_artifact.artifact.id,
+                run_id=grounding_artifact.artifact.run_id,
+            )
+        ]
+        grounded_entities = [
+            entity.model_dump(mode="json")
+            for entity in grounding_artifact.resolved_entities
+        ]
+        grounding_results = [
+            result.model_dump(mode="json")
+            for result in grounding_artifact.artifact.results
+        ]
+        grounding_requires_clarification = grounding_artifact.artifact.requires_clarification
 
     card = EvidenceCard.model_validate(
         {
@@ -464,7 +557,10 @@ def _materialize_evidence_card(
             "run_id": layout.run_id,
             "created_at": layout.created_at,
             "source_workflow": EVIDENCE_RETRIEVAL_WORKFLOW_NAME,
-            "related_artifacts": [ref.model_dump(mode="json") for ref in [*prior_versions, *context_refs]],
+            "related_artifacts": [
+                ref.model_dump(mode="json")
+                for ref in [*prior_versions, *context_refs, *grounding_ref]
+            ],
             "source_database": PUBMED_SOURCE_DATABASE,
             "stable_identifier": f"pmid:{pmid}",
             "title": article["title"],
@@ -473,6 +569,9 @@ def _materialize_evidence_card(
             "confidence": confidence,
             "limitations": limitations,
             "entity_tags": entity_tags,
+            "grounded_entities": grounded_entities,
+            "grounding_results": grounding_results,
+            "grounding_requires_clarification": grounding_requires_clarification,
             "cached_raw_payload_path": raw_cache_relpath,
         }
     )
@@ -494,6 +593,12 @@ def _materialize_evidence_card(
         esearch_payload_relpath=persisted_context_paths["esearch_payload_relpath"],
         esummary_payload_path=persisted_context_paths["esummary_payload_path"],
         esummary_payload_relpath=persisted_context_paths["esummary_payload_relpath"],
+        entity_grounding_path=(
+            grounding_artifact.artifact_path if grounding_artifact is not None else None
+        ),
+        entity_grounding_relpath=(
+            grounding_artifact.artifact_relpath if grounding_artifact is not None else None
+        ),
     )
 
 
@@ -621,6 +726,94 @@ def _extract_entity_tags(mesh_terms: list[dict[str, str | None]]) -> list[dict[s
             }
         )
     return entity_tags
+
+
+def _extract_grounding_requests(
+    entity_tags: list[dict[str, str | None]],
+) -> list[EntityGroundingMentionRequest]:
+    requests: list[EntityGroundingMentionRequest] = []
+    for tag in entity_tags:
+        label = (tag.get("label") or "").strip()
+        entity_types = _classify_grounding_entity_types(label)
+        if entity_types is None:
+            continue
+        requests.append(
+            EntityGroundingMentionRequest(
+                mention=label,
+                entity_types=entity_types,
+            )
+        )
+    return requests
+
+
+def _infer_grounding_species(entity_tags: list[dict[str, str | None]]) -> str | None:
+    observed_species: list[str] = []
+    for tag in entity_tags:
+        normalized = _normalize_grounding_label(tag.get("label"))
+        if not normalized:
+            continue
+        species = _MESH_SPECIES_TO_GROUNDING_SPECIES.get(normalized)
+        if species is None or species in observed_species:
+            continue
+        observed_species.append(species)
+    if len(observed_species) == 1:
+        return observed_species[0]
+    return None
+
+
+def _classify_grounding_entity_types(label: str) -> list[str] | None:
+    normalized = _normalize_grounding_label(label)
+    if not normalized:
+        return None
+    if normalized in _GENERIC_GROUNDING_LABELS:
+        return None
+    if normalized in _MESH_SPECIES_TO_GROUNDING_SPECIES:
+        return None
+    if _ENSEMBL_ENTITY_ID_RE.fullmatch(label):
+        entity_match = re.search(r"ENS[A-Z0-9]*([GTP])\d", label, re.IGNORECASE)
+        entity_code = entity_match.group(1).upper() if entity_match is not None else "G"
+        if entity_code == "T":
+            return ["transcript"]
+        if entity_code == "P":
+            return ["protein"]
+        return ["gene"]
+    if _UNIPROT_ACCESSION_RE.fullmatch(label) or _UNIPROT_ENTRY_NAME_RE.fullmatch(label):
+        return ["protein"]
+    if _looks_like_gene_symbol_label(label, normalized=normalized):
+        return ["gene"]
+    if _looks_like_protein_name_label(label, normalized=normalized):
+        return ["protein"]
+    return None
+
+
+def _looks_like_gene_symbol_label(label: str, *, normalized: str) -> bool:
+    if not _GENE_SYMBOL_TOKEN_RE.fullmatch(label):
+        return False
+    if not any(character.isalpha() for character in label):
+        return False
+    if label.islower():
+        return False
+    if label.isalpha() and label.istitle() and len(label) > 4:
+        return False
+    if normalized in _GENERIC_GROUNDING_LABELS:
+        return False
+    return True
+
+
+def _looks_like_protein_name_label(label: str, *, normalized: str) -> bool:
+    if " " not in label:
+        return False
+    if len(label) > 80:
+        return False
+    if any(delimiter in label for delimiter in (",", ";", ":")):
+        return False
+    return any(keyword in normalized for keyword in _PROTEIN_GROUNDING_KEYWORDS)
+
+
+def _normalize_grounding_label(value: str | None) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
 def _infer_study_type(

@@ -29,4 +29,33 @@ entity_tags:
     identifier: GO:0060337
   - label: donor effect
     entity_type: study_factor
+grounded_entities:
+  - entity_type: gene
+    source_database: ensembl
+    stable_identifier: ensembl:ENSG00000111537
+    preferred_label: IFNG
+    aliases:
+      - IFNG
+      - interferon gamma
+    species: Homo sapiens
+    taxon_id: taxonomy:9606
+grounding_results:
+  - input_mention: IFNG
+    requested_entity_types:
+      - gene
+    status: resolved
+    grounded_entity:
+      entity_type: gene
+      source_database: ensembl
+      stable_identifier: ensembl:ENSG00000111537
+      preferred_label: IFNG
+      aliases:
+        - IFNG
+        - interferon gamma
+      species: Homo sapiens
+      taxon_id: taxonomy:9606
+    candidate_entities: []
+    cached_source_payload_paths:
+      - artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/entity-grounding-cache/ifng__gene__human__ensembl__lookup_symbol.json
+grounding_requires_clarification: false
 cached_raw_payload_path: backend/knowledge/cache/pubmed/12345678.md

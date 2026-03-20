@@ -33,6 +33,7 @@ ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
     "provenance": "json",
     "biocompute": "json",
     "evidence_card": "yaml",
+    "entity_grounding": "json",
     "compliance_report": "json",
     "protocol_run": "yaml",
     "qa_report": "json",
@@ -90,6 +91,9 @@ AssayType = Literal[
     "custom",
 ]
 EvidenceSourceDatabase = Literal["pubmed", "pmc", "uniprot", "ensembl", "doi", "custom"]
+GroundedEntityType = Literal["gene", "protein", "transcript"]
+GroundedEntitySourceDatabase = Literal["ensembl", "uniprot", "ncbigene", "custom"]
+GroundingResultStatus = Literal["resolved", "ambiguous", "unresolved"]
 FastQCSequencingLayout = Literal["single_end", "paired_end"]
 FastQCReadLabel = Literal["single", "read1", "read2"]
 FastQCModuleStatus = Literal["pass", "warn", "fail"]
@@ -155,6 +159,19 @@ def _normalize_relative_path(value: str | PurePosixPath) -> str:
     if any(part == ".." for part in candidate.parts):
         raise ValueError("Paths must not contain '..'.")
     return str(candidate)
+
+
+def _clean_unique_text_list(values: list[str], *, field_name: str) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        normalized = _require_non_empty(item, field_name=field_name)
+        key = normalized.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(normalized)
+    return cleaned
 
 
 def _normalize_timestamp(value: datetime, *, field_name: str) -> datetime:
@@ -1933,6 +1950,112 @@ class EntityTag(BaseModel):
         return _require_normalized_identifier(value, field_name="entity_type")
 
 
+class GroundedEntity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entity_type: GroundedEntityType
+    source_database: GroundedEntitySourceDatabase
+    stable_identifier: str
+    identifier_version: str | None = None
+    preferred_label: str
+    aliases: list[str] = Field(default_factory=list)
+    species: str | None = None
+    taxon_id: str | None = None
+
+    @field_validator("stable_identifier")
+    @classmethod
+    def _validate_stable_identifier(cls, value: str) -> str:
+        return _require_prefixed_identifier(value, field_name="stable_identifier")
+
+    @field_validator("identifier_version")
+    @classmethod
+    def _validate_identifier_version(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="identifier_version")
+
+    @field_validator("preferred_label")
+    @classmethod
+    def _validate_preferred_label(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="preferred_label")
+
+    @field_validator("aliases")
+    @classmethod
+    def _validate_aliases(cls, value: list[str]) -> list[str]:
+        return _clean_unique_text_list(value, field_name="alias")
+
+    @field_validator("species")
+    @classmethod
+    def _validate_species(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="species")
+
+    @field_validator("taxon_id")
+    @classmethod
+    def _validate_taxon_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_prefixed_identifier(value, field_name="taxon_id")
+
+
+class EntityGroundingResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_mention: str
+    requested_entity_types: list[GroundedEntityType] = Field(min_length=1)
+    status: GroundingResultStatus
+    requires_clarification: bool = False
+    grounded_entity: GroundedEntity | None = None
+    candidate_entities: list[GroundedEntity] = Field(default_factory=list)
+    note: str | None = None
+    cached_source_payload_paths: list[str] = Field(default_factory=list)
+
+    @field_validator("input_mention")
+    @classmethod
+    def _validate_input_mention(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="input_mention")
+
+    @field_validator("requested_entity_types")
+    @classmethod
+    def _validate_requested_entity_types(
+        cls, value: list[GroundedEntityType]
+    ) -> list[GroundedEntityType]:
+        return list(dict.fromkeys(value))
+
+    @field_validator("note")
+    @classmethod
+    def _validate_note(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="note")
+
+    @field_validator("cached_source_payload_paths")
+    @classmethod
+    def _validate_cached_source_payload_paths(cls, value: list[str]) -> list[str]:
+        return [_normalize_relative_path(item) for item in value]
+
+    @model_validator(mode="after")
+    def _validate_resolution_state(self) -> "EntityGroundingResult":
+        if self.status == "resolved":
+            if self.grounded_entity is None:
+                raise ValueError("Resolved grounding results require grounded_entity.")
+            if self.requires_clarification:
+                raise ValueError("Resolved grounding results cannot require clarification.")
+        elif self.grounded_entity is not None:
+            raise ValueError("Only resolved grounding results may include grounded_entity.")
+
+        if self.status == "ambiguous":
+            if not self.candidate_entities:
+                raise ValueError("Ambiguous grounding results require candidate_entities.")
+            if not self.requires_clarification:
+                raise ValueError("Ambiguous grounding results must require clarification.")
+        elif self.requires_clarification and self.status != "ambiguous":
+            raise ValueError("Only ambiguous grounding results may require clarification.")
+
+        return self
+
+
 class EvidenceCard(ArtifactDocument):
     artifact_type: Literal["evidence_card"] = "evidence_card"
     source_database: EvidenceSourceDatabase
@@ -1943,6 +2066,9 @@ class EvidenceCard(ArtifactDocument):
     confidence: ConfidenceLevel
     limitations: list[str] = Field(min_length=1)
     entity_tags: list[EntityTag] = Field(default_factory=list)
+    grounded_entities: list[GroundedEntity] = Field(default_factory=list)
+    grounding_results: list[EntityGroundingResult] = Field(default_factory=list)
+    grounding_requires_clarification: bool = False
     cached_raw_payload_path: str
 
     @field_validator("stable_identifier")
@@ -1966,6 +2092,60 @@ class EvidenceCard(ArtifactDocument):
     @classmethod
     def _validate_cached_raw_payload_path(cls, value: str) -> str:
         return _normalize_relative_path(value)
+
+    @model_validator(mode="after")
+    def _validate_grounding_state(self) -> "EvidenceCard":
+        observed_requires_clarification = any(
+            result.requires_clarification for result in self.grounding_results
+        )
+        if self.grounding_requires_clarification != observed_requires_clarification:
+            raise ValueError(
+                "grounding_requires_clarification must match the grounding_results clarification state."
+            )
+        return self
+
+
+class EntityGroundingArtifact(ArtifactDocument):
+    artifact_type: Literal["entity_grounding"] = "entity_grounding"
+    input_mentions: list[str] = Field(min_length=1)
+    requested_species: str | None = None
+    requested_entity_types: list[GroundedEntityType] = Field(min_length=1)
+    requires_clarification: bool = False
+    results: list[EntityGroundingResult] = Field(min_length=1)
+
+    @field_validator("input_mentions")
+    @classmethod
+    def _validate_input_mentions(cls, value: list[str]) -> list[str]:
+        return _clean_unique_text_list(value, field_name="input_mention")
+
+    @field_validator("requested_species")
+    @classmethod
+    def _validate_requested_species(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="requested_species")
+
+    @field_validator("requested_entity_types")
+    @classmethod
+    def _validate_requested_entity_types(
+        cls, value: list[GroundedEntityType]
+    ) -> list[GroundedEntityType]:
+        return list(dict.fromkeys(value))
+
+    @model_validator(mode="after")
+    def _validate_result_alignment(self) -> "EntityGroundingArtifact":
+        expected_mentions = {mention.casefold() for mention in self.input_mentions}
+        observed_mentions = {result.input_mention.casefold() for result in self.results}
+        if expected_mentions != observed_mentions:
+            raise ValueError("Entity grounding results must correspond to the declared input_mentions.")
+        observed_requires_clarification = any(
+            result.requires_clarification for result in self.results
+        )
+        if self.requires_clarification != observed_requires_clarification:
+            raise ValueError(
+                "requires_clarification must match the per-result clarification state."
+            )
+        return self
 
 
 class ComplianceRuleHit(BaseModel):
@@ -2307,7 +2487,9 @@ ArtifactModel = (
     | DifferentialExpressionRun
     | WorkflowRun
     | ProvenanceArtifact
+    | BioComputeArtifact
     | EvidenceCard
+    | EntityGroundingArtifact
     | ComplianceReport
     | ProtocolRun
     | QAReport
@@ -2327,6 +2509,7 @@ _ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
     "provenance": ProvenanceArtifact,
     "biocompute": BioComputeArtifact,
     "evidence_card": EvidenceCard,
+    "entity_grounding": EntityGroundingArtifact,
     "compliance_report": ComplianceReport,
     "protocol_run": ProtocolRun,
     "qa_report": QAReport,

@@ -1,7 +1,9 @@
 import sys
+import urllib.parse
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import httpx
 from langchain_core.messages import ToolMessage
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -171,6 +173,134 @@ def test_ensembl_api_contract_preserves_structured_payload():
     assert "ENSG00000141510" in summary
     assert artifact["tool_name"] == "ensembl_api"
     assert artifact["structured_payload"]["display_name"] == "TP53"
+
+
+def test_entity_grounding_tool_contract_reports_structured_results(tmp_path):
+    from tools.entity_grounding_tool import EntityGroundingTool
+
+    def _dispatch(url: str, timeout: int = 25, headers: dict | None = None):  # noqa: ARG001
+        parsed = urllib.parse.urlparse(url)
+        path = parsed.path.lstrip("/")
+        query = urllib.parse.parse_qs(parsed.query).get("query", [""])[0]
+
+        if parsed.netloc == "rest.ensembl.org":
+            if path == "lookup/symbol/homo_sapiens/TP53":
+                payload = {
+                    "id": "ENSG00000141510",
+                    "display_name": "TP53",
+                    "object_type": "Gene",
+                    "species": "homo_sapiens",
+                    "version": 15,
+                }
+                response = MagicMock()
+                response.text = '{"id":"ENSG00000141510","display_name":"TP53"}'
+                response.status_code = 200
+                response.headers = {"content-type": "application/json"}
+                response.raise_for_status = MagicMock()
+                response.json.return_value = payload
+                return response
+            request = httpx.Request("GET", url)
+            response = MagicMock()
+            response.text = ""
+            response.status_code = 404
+            response.headers = {"content-type": "application/json"}
+            response.raise_for_status.side_effect = httpx.HTTPStatusError(
+                "404 error",
+                request=request,
+                response=httpx.Response(404, request=request),
+            )
+            response.json.return_value = {}
+            return response
+
+        if parsed.netloc == "rest.uniprot.org" and 'gene:TP53 AND organism_name:"Mus musculus"' in query:
+            payload = {"results": []}
+            response = MagicMock()
+            response.text = '{"results":[]}'
+            response.status_code = 200
+            response.headers = {"content-type": "application/json"}
+            response.raise_for_status = MagicMock()
+            response.json.return_value = payload
+            return response
+
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    tool = EntityGroundingTool(base_dir=str(tmp_path))
+    with patch("httpx.get", side_effect=_dispatch):
+        summary, artifact = tool._run(mentions=["TP53"], entity_types=["gene"])
+
+    assert "Grounded 1 of 1 mention(s)" in summary
+    assert artifact["tool_name"] == "entity_grounding"
+    assert artifact["structured_payload"]["requires_clarification"] is False
+    assert artifact["metadata"]["requires_clarification"] is False
+    assert artifact["structured_payload"]["resolved_entities"][0]["stable_identifier"] == "ensembl:ENSG00000141510"
+    assert artifact["artifact_refs"][0]["artifact_type"] == "entity_grounding"
+
+
+def test_entity_grounding_tool_contract_reports_clarification_required_state(tmp_path):
+    from tools.entity_grounding_tool import EntityGroundingTool
+
+    def _dispatch(url: str, timeout: int = 25, headers: dict | None = None):  # noqa: ARG001
+        parsed = urllib.parse.urlparse(url)
+        path = parsed.path.lstrip("/")
+
+        if parsed.netloc == "rest.ensembl.org":
+            if path == "lookup/symbol/homo_sapiens/ACTB":
+                payload = {
+                    "id": "ENSG00000075624",
+                    "display_name": "ACTB",
+                    "object_type": "Gene",
+                    "species": "homo_sapiens",
+                    "version": 9,
+                }
+                response = MagicMock()
+                response.text = '{"id":"ENSG00000075624","display_name":"ACTB"}'
+                response.status_code = 200
+                response.headers = {"content-type": "application/json"}
+                response.raise_for_status = MagicMock()
+                response.json.return_value = payload
+                return response
+            if path == "lookup/symbol/mus_musculus/ACTB":
+                payload = {
+                    "id": "ENSMUSG00000029580",
+                    "display_name": "ACTB",
+                    "object_type": "Gene",
+                    "species": "mus_musculus",
+                    "version": 4,
+                }
+                response = MagicMock()
+                response.text = '{"id":"ENSMUSG00000029580","display_name":"ACTB"}'
+                response.status_code = 200
+                response.headers = {"content-type": "application/json"}
+                response.raise_for_status = MagicMock()
+                response.json.return_value = payload
+                return response
+            request = httpx.Request("GET", url)
+            response = MagicMock()
+            response.text = ""
+            response.status_code = 404
+            response.headers = {"content-type": "application/json"}
+            response.raise_for_status.side_effect = httpx.HTTPStatusError(
+                "404 error",
+                request=request,
+                response=httpx.Response(404, request=request),
+            )
+            response.json.return_value = {}
+            return response
+
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    tool = EntityGroundingTool(base_dir=str(tmp_path))
+    with patch("httpx.get", side_effect=_dispatch):
+        summary, artifact = tool._run(mentions=["ACTB"], entity_types=["gene"])
+
+    assert summary == "Grounding requires clarification for 1 of 1 mention(s)."
+    assert artifact["tool_name"] == "entity_grounding"
+    assert artifact["status"] == "success"
+    assert artifact["outcome"] == "success_empty"
+    assert artifact["structured_payload"]["requires_clarification"] is True
+    assert artifact["metadata"]["requires_clarification"] is True
+    assert artifact["structured_payload"]["results"][0]["status"] == "ambiguous"
+    assert len(artifact["structured_payload"]["results"][0]["candidate_entities"]) == 2
 
 
 def test_search_knowledge_contract_returns_structured_hits(tmp_path):

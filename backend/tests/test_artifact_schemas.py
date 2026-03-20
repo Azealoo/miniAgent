@@ -19,8 +19,10 @@ from artifacts.schemas import (  # noqa: E402
     DifferentialExpressionResults,
     DifferentialExpressionRun,
     EvidenceCard,
+    EntityGroundingArtifact,
     FastQCMetrics,
     FastQCRun,
+    GroundedEntity,
     MultiQCMetrics,
     MultiQCRun,
     NormalizedCountMatrix,
@@ -51,6 +53,7 @@ class TestArtifactSchemas:
             "provenance": "json",
             "biocompute": "json",
             "evidence_card": "yaml",
+            "entity_grounding": "json",
             "compliance_report": "json",
             "protocol_run": "yaml",
             "qa_report": "json",
@@ -158,6 +161,20 @@ class TestArtifactSchemas:
 
         with pytest.raises(ValueError, match="stable_identifier"):
             EvidenceCard.model_validate(payload)
+
+    def test_grounded_entities_require_prefixed_stable_identifiers(self):
+        payload = {
+            "entity_type": "gene",
+            "source_database": "ensembl",
+            "stable_identifier": "ENSG00000141510",
+            "preferred_label": "TP53",
+            "aliases": ["TP53"],
+            "species": "Homo sapiens",
+            "taxon_id": "taxonomy:9606",
+        }
+
+        with pytest.raises(ValueError, match="stable_identifier"):
+            GroundedEntity.model_validate(payload)
 
     def test_compliance_reports_keep_disposition_and_block_state_consistent(self):
         payload = {
@@ -1065,6 +1082,7 @@ class TestArtifactSchemas:
             "prov.json": ProvenanceArtifact,
             "biocompute.json": BioComputeArtifact,
             "evidence_card.yaml": EvidenceCard,
+            "entity_grounding.json": EntityGroundingArtifact,
             "compliance_report.json": ComplianceReport,
             "protocol_run.yaml": ProtocolRun,
             "qa_report.json": QAReport,

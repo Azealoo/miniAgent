@@ -105,6 +105,14 @@ class EvidenceRetrievalTool(BaseTool):
                     "claim_count": len(card.card.claims),
                     "limitation_count": len(card.card.limitations),
                     "entity_tags": card.card.entity_tags,
+                    "grounded_entities": [
+                        entity.model_dump(mode="json") for entity in card.card.grounded_entities
+                    ],
+                    "grounding_results": [
+                        result.model_dump(mode="json") for result in card.card.grounding_results
+                    ],
+                    "grounding_requires_clarification": card.card.grounding_requires_clarification,
+                    "entity_grounding_path": card.entity_grounding_relpath,
                 }
                 for card in result.cards
             ],
@@ -162,6 +170,15 @@ class EvidenceRetrievalTool(BaseTool):
                         path=str(card.esummary_payload_path),
                         label="ncbi_esummary_payload",
                         artifact_type="retrieval_summary_payload",
+                        identifier=card.card.run_id,
+                    )
+                )
+            if card.entity_grounding_path is not None:
+                refs.append(
+                    artifact_ref(
+                        path=str(card.entity_grounding_path),
+                        label="entity_grounding",
+                        artifact_type="entity_grounding",
                         identifier=card.card.run_id,
                     )
                 )

@@ -1,8 +1,9 @@
 """
 Ensembl REST API helper: lookup gene, transcript, or sequence.
 """
+from dataclasses import dataclass
 import json
-from typing import Optional, Type
+from typing import Any, Optional, Type
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -19,6 +20,47 @@ from .contracts import (
 
 _BASE = "https://rest.ensembl.org"
 _MAX = 50_000
+
+
+@dataclass(frozen=True)
+class EnsemblApiResponse:
+    endpoint: str
+    content_type: str
+    url: str
+    status_code: int
+    response_content_type: str | None
+    text: str
+    json_payload: Any | None = None
+
+
+def fetch_ensembl_response(
+    *,
+    endpoint: str,
+    content_type: str = "application/json",
+) -> EnsemblApiResponse:
+    resolved_endpoint = endpoint.lstrip("/")
+    url = f"{_BASE}/{resolved_endpoint}"
+
+    import httpx
+
+    response = httpx.get(url, headers={"Content-Type": content_type}, timeout=25)
+    response.raise_for_status()
+    text = response.text
+    json_payload = None
+    try:
+        json_payload = response.json()
+    except (json.JSONDecodeError, ValueError):
+        json_payload = None
+
+    return EnsemblApiResponse(
+        endpoint=resolved_endpoint,
+        content_type=content_type,
+        url=url,
+        status_code=response.status_code,
+        response_content_type=response.headers.get("content-type"),
+        text=text,
+        json_payload=json_payload,
+    )
 
 
 class EnsemblApiInput(BaseModel):
@@ -49,30 +91,33 @@ class EnsemblApiTool(BaseTool):
                 "endpoint is required.",
                 metadata={"content_type": content_type},
             )
-        endpoint = endpoint.lstrip("/")
-        url = f"{_BASE}/{endpoint}"
+        url = ""
         try:
             import httpx
-            r = httpx.get(url, headers={"Content-Type": content_type}, timeout=25)
-            r.raise_for_status()
-            text = r.text
+            response = fetch_ensembl_response(
+                endpoint=endpoint,
+                content_type=content_type,
+            )
+            endpoint = response.endpoint
+            url = response.url
+            text = response.text
             source_payload = None
             warnings: list[str] = []
 
-            try:
-                parsed = r.json()
+            if response.json_payload is not None:
+                parsed = response.json_payload
                 summary, truncated = json_to_pretty_text(parsed, _MAX)
                 if truncated:
                     warnings.append("output_truncated")
                 structured_payload = parsed
-            except (json.JSONDecodeError, ValueError):
+            else:
                 summary, truncated = truncate_text(text, _MAX)
                 if truncated:
                     warnings.append("output_truncated")
                 structured_payload = {
                     "endpoint": endpoint,
                     "content_type": content_type,
-                    "response_content_type": r.headers.get("content-type"),
+                    "response_content_type": response.response_content_type,
                 }
                 source_payload = summary
 
@@ -80,8 +125,8 @@ class EnsemblApiTool(BaseTool):
                 "endpoint": endpoint,
                 "content_type": content_type,
                 "request_url": url,
-                "http_status": r.status_code,
-                "response_content_type": r.headers.get("content-type"),
+                "http_status": response.status_code,
+                "response_content_type": response.response_content_type,
             }
 
             if not summary.strip():

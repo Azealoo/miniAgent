@@ -20,6 +20,7 @@ from .write_file_tool import WriteFileTool
 
 def get_all_tools(base_dir: Path) -> list:
     from .evidence_retrieval_tool import EvidenceRetrievalTool
+    from .entity_grounding_tool import EntityGroundingTool
 
     extra_roots = [str(p) for p in config.get_read_file_extra_roots(base_dir)]
     return [
@@ -29,6 +30,7 @@ def get_all_tools(base_dir: Path) -> list:
         HttpJsonTool(),
         NcbiEutilsTool(),
         EvidenceRetrievalTool(base_dir=str(base_dir)),
+        EntityGroundingTool(base_dir=str(base_dir)),
         UniprotApiTool(),
         EnsemblApiTool(),
         SlurmTool(base_dir=str(base_dir)),
