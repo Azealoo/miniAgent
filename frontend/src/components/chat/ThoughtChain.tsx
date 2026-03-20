@@ -35,6 +35,7 @@ const TOOL_ICONS: Record<string, ReactNode> = {
   search_knowledge_base: <Search size={12} />,
   slurm_tool: <Terminal size={12} />,
   ncbi_eutils: <Globe size={12} />,
+  evidence_retrieval: <Search size={12} />,
   uniprot_api: <Globe size={12} />,
   ensembl_api: <Globe size={12} />,
   write_file: <FileText size={12} />,

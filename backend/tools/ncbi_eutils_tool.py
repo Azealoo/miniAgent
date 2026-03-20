@@ -2,11 +2,12 @@
 NCBI E-utilities helper: esearch, efetch, esummary for PubMed, Gene, etc.
 Uses rate limit (no API key required; with API key can increase rate).
 """
+from dataclasses import dataclass
 import json
 import threading
 import time
 import urllib.parse
-from typing import Optional, Type
+from typing import Any, Optional, Type
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -34,6 +35,59 @@ def _rate_limit() -> None:
         if elapsed < _MIN_INTERVAL:
             time.sleep(_MIN_INTERVAL - elapsed)
         _LAST_CALL[0] = time.time()
+
+
+@dataclass(frozen=True)
+class NcbiEutilsResponse:
+    operation: str
+    db: str
+    retmode: str
+    url: str
+    status_code: int
+    text: str
+    json_payload: Any | None = None
+
+
+def fetch_ncbi_eutils_response(
+    *,
+    operation: str,
+    db: str,
+    term: Optional[str] = None,
+    id: Optional[str] = None,
+    retmax: Optional[int] = 20,
+    retmode: str = "json",
+) -> NcbiEutilsResponse:
+    params = {"db": db, "retmode": retmode}
+    if operation == "esearch":
+        params["term"] = term
+        params["retmax"] = min(retmax or 20, 100)
+    else:
+        params["id"] = id
+
+    url = f"{_BASE}/{operation}.fcgi?" + urllib.parse.urlencode(params)
+    _rate_limit()
+
+    import httpx
+
+    response = httpx.get(url, timeout=30)
+    response.raise_for_status()
+    text = response.text
+    json_payload = None
+    if retmode == "json":
+        try:
+            json_payload = response.json()
+        except (json.JSONDecodeError, ValueError):
+            json_payload = None
+
+    return NcbiEutilsResponse(
+        operation=operation,
+        db=db,
+        retmode=retmode,
+        url=url,
+        status_code=response.status_code,
+        text=text,
+        json_payload=json_payload,
+    )
 
 
 class NcbiEutilsInput(BaseModel):
@@ -86,29 +140,30 @@ class NcbiEutilsTool(BaseTool):
                 metadata={"operation": operation, "db": db, "retmode": retmode},
             )
 
-        params = {"db": db, "retmode": retmode}
-        if operation == "esearch":
-            params["term"] = term
-            params["retmax"] = min(retmax or 20, 100)
-        else:
-            params["id"] = id
-
-        url = f"{_BASE}/{operation}.fcgi?" + urllib.parse.urlencode(params)
-        _rate_limit()
-
         try:
             import httpx
-            r = httpx.get(url, timeout=30)
-            r.raise_for_status()
-            text = r.text
+            response = fetch_ncbi_eutils_response(
+                operation=operation,
+                db=db,
+                term=term,
+                id=id,
+                retmax=retmax,
+                retmode=retmode,
+            )
+            text = response.text
             source_payload = None
             warnings: list[str] = []
             structured_payload: object
             summary: str
 
-            if retmode == "json":
+            if retmode == "json" and response.json_payload is not None:
+                summary, truncated = json_to_pretty_text(response.json_payload, 80_000)
+                if truncated:
+                    warnings.append("output_truncated")
+                structured_payload = response.json_payload
+            elif retmode == "json":
                 try:
-                    parsed = r.json()
+                    parsed = json.loads(text)
                     summary, truncated = json_to_pretty_text(parsed, 80_000)
                     if truncated:
                         warnings.append("output_truncated")
@@ -131,8 +186,8 @@ class NcbiEutilsTool(BaseTool):
                 "db": db,
                 "retmax": min(retmax or 20, 100) if operation == "esearch" else None,
                 "retmode": retmode,
-                "request_url": url,
-                "http_status": r.status_code,
+                "request_url": response.url,
+                "http_status": response.status_code,
             }
             result_count = _extract_ncbi_result_count(operation, structured_payload)
             if result_count is not None:
@@ -160,12 +215,12 @@ class NcbiEutilsTool(BaseTool):
             return retriable_error_result(
                 self.name,
                 "NCBI request timed out.",
-                metadata={"operation": operation, "db": db, "request_url": url},
+                metadata={"operation": operation, "db": db},
             )
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
             message = f"HTTP {status_code}: {exc.response.reason_phrase}"
-            metadata = {"operation": operation, "db": db, "request_url": url, "http_status": status_code}
+            metadata = {"operation": operation, "db": db, "request_url": str(exc.request.url), "http_status": status_code}
             if status_code == 429 or status_code >= 500:
                 return retriable_error_result(self.name, message, metadata=metadata)
             if 400 <= status_code < 500:
@@ -175,13 +230,17 @@ class NcbiEutilsTool(BaseTool):
             return retriable_error_result(
                 self.name,
                 f"NCBI request failed: {exc}",
-                metadata={"operation": operation, "db": db, "request_url": url},
+                metadata={
+                    "operation": operation,
+                    "db": db,
+                    "request_url": str(exc.request.url) if exc.request is not None else None,
+                },
             )
         except Exception as exc:
             return execution_error_result(
                 self.name,
                 str(exc),
-                metadata={"operation": operation, "db": db, "request_url": url},
+                metadata={"operation": operation, "db": db},
             )
 
     async def _arun(
