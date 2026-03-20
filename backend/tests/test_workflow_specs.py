@@ -190,6 +190,7 @@ class TestWorkflowSpecs:
     def test_authored_rnaseq_workflow_skeleton_declares_required_stages_and_outputs(self):
         document = load_workflow_spec(WORKFLOWS_DIR / "rnaseq_qc_de.yaml")
         raw_qc_step = next(step for step in document.steps if step.id == "raw_qc")
+        aggregated_qc_step = next(step for step in document.steps if step.id == "aggregated_qc")
 
         assert document.workflow_id == "rnaseq_qc_de"
         assert [step.id for step in document.steps] == [
@@ -209,6 +210,8 @@ class TestWorkflowSpecs:
         assert [output.name for output in document.outputs] == [
             "fastqc_run",
             "fastqc_metrics",
+            "multiqc_run",
+            "multiqc_metrics",
             "quantification_bundle",
             "differential_expression_bundle",
             "report_bundle_manifest",
@@ -221,6 +224,13 @@ class TestWorkflowSpecs:
         ]
         assert raw_qc_step.outputs[1].artifact_type == "fastqc_run"
         assert raw_qc_step.outputs[2].artifact_type == "fastqc_metrics"
+        assert [output.name for output in aggregated_qc_step.outputs] == [
+            "aggregated_qc_bundle",
+            "multiqc_run",
+            "multiqc_metrics",
+        ]
+        assert aggregated_qc_step.outputs[1].artifact_type == "multiqc_run"
+        assert aggregated_qc_step.outputs[2].artifact_type == "multiqc_metrics"
         assert [hook.stage for hook in document.compliance_hooks] == ["before_execution"]
         assert {gate.id for gate in document.qc_gates} == {
             "dataset-manifest-required",
@@ -260,11 +270,13 @@ class TestWorkflowSpecs:
             "report_bundle",
         ]
         assert workflow_plan["steps"][2]["name"] == "FastQC raw-read QC stage"
-        assert workflow_plan["steps"][3]["name"] == "Aggregated QC placeholder stage"
+        assert workflow_plan["steps"][3]["name"] == "MultiQC aggregated QC stage"
         assert workflow_plan["inputs"]["dataset_manifest"] == "backend/artifacts/examples/rnaseq_dataset_manifest.yaml"
         expected_outputs = {item["name"]: item["path"] for item in workflow_plan["expected_outputs"]}
         assert expected_outputs["fastqc_run"].endswith("fastqc_run.json")
         assert expected_outputs["fastqc_metrics"].endswith("fastqc_metrics.json")
+        assert expected_outputs["multiqc_run"].endswith("multiqc_run.json")
+        assert expected_outputs["multiqc_metrics"].endswith("multiqc_metrics.json")
         assert expected_outputs["differential_expression_bundle"].endswith(
             "outputs/generated/differential-expression/differential_expression_bundle.json"
         )

@@ -26,6 +26,8 @@ STABLE_ARTIFACT_FILENAMES: dict[str, str] = {
     "evidence_card": "evidence_card.yaml",
     "fastqc_run": "fastqc_run.json",
     "fastqc_metrics": "fastqc_metrics.json",
+    "multiqc_run": "multiqc_run.json",
+    "multiqc_metrics": "multiqc_metrics.json",
     "protocol_run": "protocol_run.yaml",
     "qa_report": "qa_report.json",
     "provenance": "prov.json",

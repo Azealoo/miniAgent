@@ -6,7 +6,13 @@ import os
 from pathlib import PurePosixPath
 from typing import Any, Mapping, Sequence
 
-from artifacts import DatasetManifest, build_generated_output_relpath, load_artifact_document
+from artifacts import (
+    DatasetManifest,
+    FastQCMetrics,
+    FastQCRun,
+    build_generated_output_relpath,
+    load_artifact_document,
+)
 from dataset_intake import ensure_valid_dataset_intake_manifest
 from fastqc import (
     FastQCParsedReport,
@@ -16,6 +22,7 @@ from fastqc import (
     parse_fastqc_archive,
     run_fastqc,
 )
+from multiqc import inspect_multiqc_report, run_multiqc
 
 
 def validate_inputs(inputs, context):
@@ -244,7 +251,7 @@ def run_raw_qc(inputs, context):
         },
         "notes": [
             "Raw-read QC completed with FastQC and produced provenance-rich execution plus metrics artifacts.",
-            "Aggregated QC remains a placeholder stage until MultiQC integration lands.",
+            "The downstream aggregated QC stage will reuse these FastQC artifacts when MultiQC runs.",
         ],
     }
 
@@ -257,23 +264,181 @@ def run_raw_qc(inputs, context):
 
 def aggregate_qc(inputs, context):
     manifest = _load_manifest(context, inputs["dataset_manifest"])
-    aggregated_qc_stub = _stage_stub_config(manifest, "aggregated_qc")
-    multiqc_summary_path = _generated_output_path(context, "multiqc_summary.json", step="aggregated_qc")
-    multiqc_report_path = _generated_output_path(context, "multiqc_report.html", step="aggregated_qc")
-
     raw_qc_bundle = inputs["raw_qc_bundle"] if isinstance(inputs["raw_qc_bundle"], Mapping) else {}
-    aggregate_metrics = raw_qc_bundle.get("aggregate_metrics") if isinstance(raw_qc_bundle, Mapping) else {}
-    if not isinstance(aggregate_metrics, Mapping):
-        aggregate_metrics = {}
+    fastqc_run_ref = _require_artifact_ref(
+        raw_qc_bundle.get("fastqc_run_artifact"),
+        artifact_type="fastqc_run",
+        field_name="raw_qc_bundle.fastqc_run_artifact",
+    )
+    fastqc_metrics_ref = _require_artifact_ref(
+        raw_qc_bundle.get("fastqc_metrics_artifact"),
+        artifact_type="fastqc_metrics",
+        field_name="raw_qc_bundle.fastqc_metrics_artifact",
+    )
+    fastqc_run = _load_fastqc_run_document(context, fastqc_run_ref["path"])
+    fastqc_metrics = _load_fastqc_metrics_document(context, fastqc_metrics_ref["path"])
 
-    fastqc_pass_rate = _as_float(
-        aggregate_metrics.get("fastqc_pass_rate"),
-        default=_as_float(aggregated_qc_stub.get("fastqc_pass_rate"), default=1.0),
+    executable, extra_args = _multiqc_config(manifest)
+    multiqc_output_dir = _generated_subdir_relative_path(context, step="aggregated_qc", name="multiqc")
+    multiqc_output_dir_relpath = _join_run_relative(context, multiqc_output_dir)
+    multiqc_output_dir_abs = context.base_dir / multiqc_output_dir_relpath
+    multiqc_output_dir_abs.mkdir(parents=True, exist_ok=True)
+
+    command_result = run_multiqc(
+        executable=executable,
+        input_paths=[fastqc_run.output_directory],
+        output_dir=multiqc_output_dir_relpath,
+        report_filename="multiqc_report.html",
+        extra_args=extra_args,
+        base_dir=context.base_dir,
     )
-    libraries_aggregated = _as_float(
-        aggregate_metrics.get("sample_count"),
-        default=_as_float(aggregated_qc_stub.get("libraries_aggregated"), default=0.0),
+
+    stdout_relpath = _write_generated_text(
+        context,
+        step="aggregated_qc",
+        filename="multiqc.stdout.txt",
+        content=command_result.stdout,
     )
+    stderr_relpath = _write_generated_text(
+        context,
+        step="aggregated_qc",
+        filename="multiqc.stderr.txt",
+        content=command_result.stderr,
+    )
+
+    report_summary = inspect_multiqc_report(context.base_dir, multiqc_output_dir_relpath)
+    sample_metrics = _build_multiqc_sample_metrics(fastqc_metrics, report_summary.sample_names)
+    aggregate_metrics = _build_multiqc_aggregate_metrics(fastqc_metrics, report_summary, sample_metrics)
+
+    multiqc_run_ref = _artifact_ref(
+        "multiqc_run",
+        _generated_output_path(context, "multiqc_run.json", step="aggregated_qc"),
+        run_id=context.run_id,
+    )
+    multiqc_metrics_ref = _artifact_ref(
+        "multiqc_metrics",
+        _generated_output_path(context, "multiqc_metrics.json", step="aggregated_qc"),
+        run_id=context.run_id,
+    )
+    report_html_ref = _artifact_ref(
+        "multiqc_html_report",
+        command_result.report_html_path,
+        run_id=context.run_id,
+    )
+    data_dir_ref = (
+        _artifact_ref("multiqc_data_directory", command_result.data_directory_path, run_id=context.run_id)
+        if command_result.data_directory_path is not None
+        else None
+    )
+    summary_data_ref = (
+        _artifact_ref("multiqc_summary_data", report_summary.summary_data_path, run_id=context.run_id)
+        if report_summary.summary_data_path is not None
+        else None
+    )
+    stdout_ref = _artifact_ref("multiqc_stdout", stdout_relpath, run_id=context.run_id)
+    stderr_ref = _artifact_ref("multiqc_stderr", stderr_relpath, run_id=context.run_id)
+
+    generated_artifacts = _dedupe_artifacts(
+        [
+            multiqc_run_ref,
+            multiqc_metrics_ref,
+            report_html_ref,
+            stdout_ref,
+            stderr_ref,
+            *([data_dir_ref] if data_dir_ref is not None else []),
+            *([summary_data_ref] if summary_data_ref is not None else []),
+        ]
+    )
+    metrics_related_artifacts = _dedupe_artifacts(
+        [
+            multiqc_run_ref,
+            report_html_ref,
+            *([data_dir_ref] if data_dir_ref is not None else []),
+            *([summary_data_ref] if summary_data_ref is not None else []),
+            fastqc_run_ref,
+            fastqc_metrics_ref,
+        ]
+    )
+    run_related_artifacts = _dedupe_artifacts(
+        [
+            multiqc_metrics_ref,
+            report_html_ref,
+            stdout_ref,
+            stderr_ref,
+            *([data_dir_ref] if data_dir_ref is not None else []),
+            *([summary_data_ref] if summary_data_ref is not None else []),
+            fastqc_run_ref,
+            fastqc_metrics_ref,
+        ]
+    )
+
+    metrics_artifact = {
+        "tool_version": command_result.tool_version,
+        "sample_sheet_path": manifest.sample_sheet_path,
+        "run_artifact": multiqc_run_ref,
+        "upstream_fastqc_run": fastqc_run_ref,
+        "upstream_fastqc_metrics": fastqc_metrics_ref,
+        "report_html": report_html_ref,
+        "report_data_directory": data_dir_ref,
+        "report_summary_data": summary_data_ref,
+        "sample_names": list(report_summary.sample_names),
+        "report_modules": list(aggregate_metrics["report_modules"]),
+        "related_artifacts": metrics_related_artifacts,
+        "sample_metrics": sample_metrics,
+        "aggregate_metrics": aggregate_metrics,
+    }
+    run_artifact = {
+        "tool_version": command_result.tool_version,
+        "sample_sheet_path": manifest.sample_sheet_path,
+        "output_directory": multiqc_output_dir_relpath,
+        "input_directories": [fastqc_run.output_directory],
+        "command": list(command_result.command),
+        "parameters": {
+            "extra_args": list(extra_args),
+            "input_count": 1,
+            "report_filename": "multiqc_report.html",
+        },
+        "upstream_fastqc_run": fastqc_run_ref,
+        "upstream_fastqc_metrics": fastqc_metrics_ref,
+        "report_html": report_html_ref,
+        "report_data_directory": data_dir_ref,
+        "report_summary_data": summary_data_ref,
+        "stdout_path": stdout_relpath,
+        "stderr_path": stderr_relpath,
+        "metrics_artifact": multiqc_metrics_ref,
+        "related_artifacts": run_related_artifacts,
+    }
+    metrics_source = {
+        "artifact_type": "multiqc_metrics",
+        "path": multiqc_metrics_ref["path"],
+        "run_id": context.run_id,
+    }
+    summary_metrics = [
+        {
+            "stage": "aggregated_qc",
+            "metric_name": "fastqc_pass_rate",
+            "value": aggregate_metrics["fastqc_pass_rate"],
+            "source_artifact": metrics_source,
+        },
+        {
+            "stage": "aggregated_qc",
+            "metric_name": "total_reads_millions",
+            "value": aggregate_metrics["total_reads_millions"],
+            "source_artifact": metrics_source,
+        },
+        {
+            "stage": "aggregated_qc",
+            "metric_name": "min_per_base_quality",
+            "value": aggregate_metrics["min_per_base_quality"],
+            "source_artifact": metrics_source,
+        },
+        {
+            "stage": "aggregated_qc",
+            "metric_name": "report_sample_count",
+            "value": aggregate_metrics["report_sample_count"],
+            "source_artifact": metrics_source,
+        },
+    ]
 
     return {
         "aggregated_qc_bundle": {
@@ -282,44 +447,36 @@ def aggregate_qc(inputs, context):
             "study_name": manifest.design.study_name,
             "assay_type": manifest.assay_type,
             "upstream_stage": "raw_qc",
-            "expected_artifacts": [
-                {
-                    "artifact_type": "multiqc_summary",
-                    "path": multiqc_summary_path,
-                    "description": "Placeholder JSON summary for future MultiQC integration.",
-                },
-                {
-                    "artifact_type": "multiqc_report",
-                    "path": multiqc_report_path,
-                    "description": "Placeholder rendered MultiQC report artifact.",
-                },
-            ],
+            "source_fastqc_run_artifact": fastqc_run_ref,
+            "source_fastqc_metrics_artifact": fastqc_metrics_ref,
+            "multiqc_run_artifact": multiqc_run_ref,
+            "multiqc_metrics_artifact": multiqc_metrics_ref,
+            "generated_artifacts": generated_artifacts,
+            "aggregate_metrics": aggregate_metrics,
+            "summary_metrics": summary_metrics,
             "qc_evidence": {
                 "upstream_tools": ["fastqc", "multiqc"],
                 "metrics": [
                     {
-                        "metric_name": "fastqc_pass_rate",
-                        "observed_value": fastqc_pass_rate,
-                        "source_artifact": {
-                            "artifact_type": "multiqc_summary",
-                            "path": multiqc_summary_path,
-                        },
-                    },
-                    {
-                        "metric_name": "libraries_aggregated",
-                        "observed_value": libraries_aggregated,
-                        "source_artifact": {
-                            "artifact_type": "multiqc_summary",
-                            "path": multiqc_summary_path,
-                        },
-                    },
+                        "metric_name": item["metric_name"],
+                        "observed_value": item["value"],
+                        "source_artifact": item["source_artifact"],
+                    }
+                    for item in summary_metrics
                 ],
                 "notes": (
-                    "Aggregated QC remains a placeholder until MultiQC lands; the current stage carries forward "
-                    "library-level pass rates derived from upstream FastQC metrics."
+                    "MultiQC aggregated the persisted FastQC outputs and copied the key normalized summary "
+                    "metrics into a durable machine-readable artifact for workflow gating and inspection."
                 ),
             },
+            "notes": [
+                "Aggregated QC completed with MultiQC using the upstream FastQC report directory instead of rerunning raw QC.",
+                "The normalized MultiQC metrics artifact retains the gating metrics plus report-level module and sample metadata when the generated report data exposes it.",
+            ],
         }
+        ,
+        "multiqc_run": run_artifact,
+        "multiqc_metrics": metrics_artifact,
     }
 
 
@@ -348,7 +505,7 @@ def plan_quantification(inputs, context):
             ],
             "notes": [
                 "This workflow preserves the quantification stage boundary without invoking a concrete aligner or quantifier yet.",
-                "Upstream FastQC artifacts now land concretely, and later MultiQC and DE integrations can consume the declared bundle paths without reshaping the workflow graph.",
+                "Upstream FastQC and MultiQC artifacts now land concretely, and later DE integrations can consume the declared bundle paths without reshaping the workflow graph.",
             ],
         }
     }
@@ -396,10 +553,10 @@ def build_report_bundle(inputs, context):
     manifest = _load_manifest(context, inputs["dataset_manifest"])
     generated_artifacts = _collect_declared_artifacts(
         inputs["raw_qc_bundle"],
+        inputs["aggregated_qc_bundle"],
         field_name="generated_artifacts",
     )
     pending_artifacts = _collect_declared_artifacts(
-        inputs["aggregated_qc_bundle"],
         inputs["quantification_bundle"],
         inputs["differential_expression_bundle"],
         field_name="expected_artifacts",
@@ -408,7 +565,7 @@ def build_report_bundle(inputs, context):
     qa_report_path = _run_relative_path(context, "qa_report.json")
 
     warnings = [
-        "RNA-seq workflow executed with concrete FastQC raw QC and placeholder aggregated QC, quantification, and differential expression stages.",
+        "RNA-seq workflow executed with concrete FastQC raw QC and MultiQC aggregated QC, while quantification and differential expression remain placeholder stages.",
         "Downstream analysis artifacts remain declared for future integrations and are not materialized by the current workflow stage set.",
     ]
 
@@ -446,7 +603,7 @@ def build_report_bundle(inputs, context):
                 },
             ],
             "notes": [
-                "This manifest now includes materialized FastQC outputs alongside planned downstream bundle paths.",
+                "This manifest now includes materialized FastQC and MultiQC outputs alongside planned downstream bundle paths.",
                 "It remains the durable contract for later report-template and provenance integrations.",
             ],
         },
@@ -469,7 +626,6 @@ def build_report_bundle(inputs, context):
                 ]
             ],
             "recommended_remediation": [
-                "Replace the placeholder aggregated QC stage with concrete MultiQC integration.",
                 "Materialize the declared quantification, differential expression, report bundle, and provenance exports before publication.",
             ],
             "checklist_artifacts": [
@@ -488,6 +644,20 @@ def _load_manifest(context, manifest_path: str) -> DatasetManifest:
     document = load_artifact_document(context.resolve_path(manifest_path))
     if not isinstance(document, DatasetManifest):
         raise ValueError(f"Expected dataset_manifest artifact at {manifest_path!r}.")
+    return document
+
+
+def _load_fastqc_run_document(context, artifact_path: str) -> FastQCRun:
+    document = load_artifact_document(context.base_dir / artifact_path)
+    if not isinstance(document, FastQCRun):
+        raise ValueError(f"Expected fastqc_run artifact at {artifact_path!r}.")
+    return document
+
+
+def _load_fastqc_metrics_document(context, artifact_path: str) -> FastQCMetrics:
+    document = load_artifact_document(context.base_dir / artifact_path)
+    if not isinstance(document, FastQCMetrics):
+        raise ValueError(f"Expected fastqc_metrics artifact at {artifact_path!r}.")
     return document
 
 
@@ -513,6 +683,32 @@ def _fastqc_config(manifest: DatasetManifest) -> tuple[str, list[str]]:
     extra_args = [str(item).strip() for item in raw_extra_args]
     if any(not item for item in extra_args):
         raise ValueError("FastQC extra_args entries must not be empty.")
+
+    return executable_text, extra_args
+
+
+def _multiqc_config(manifest: DatasetManifest) -> tuple[str, list[str]]:
+    raw_config = manifest.assay_extensions.get("multiqc")
+    if raw_config is None:
+        raw_config = {}
+    if not isinstance(raw_config, Mapping):
+        raise ValueError("dataset_manifest.assay_extensions.multiqc must be a mapping when provided.")
+
+    executable = raw_config.get("executable")
+    if executable is None:
+        executable = os.environ.get("BIOAPEX_MULTIQC_BIN", "multiqc")
+    executable_text = str(executable).strip()
+    if not executable_text:
+        raise ValueError("MultiQC executable must not be empty.")
+
+    raw_extra_args = raw_config.get("extra_args", [])
+    if raw_extra_args is None:
+        raw_extra_args = []
+    if not isinstance(raw_extra_args, Sequence) or isinstance(raw_extra_args, (str, bytes)):
+        raise ValueError("dataset_manifest.assay_extensions.multiqc.extra_args must be a list of strings.")
+    extra_args = [str(item).strip() for item in raw_extra_args]
+    if any(not item for item in extra_args):
+        raise ValueError("MultiQC extra_args entries must not be empty.")
 
     return executable_text, extra_args
 
@@ -577,6 +773,98 @@ def _reports_sequencing_layout(parsed_reports: Sequence[FastQCParsedReport]) -> 
     return "paired_end" if "read2" in read_labels else "single_end"
 
 
+def _build_multiqc_sample_metrics(
+    fastqc_metrics: FastQCMetrics,
+    report_sample_names: Sequence[str],
+) -> list[dict[str, Any]]:
+    samples: dict[str, dict[str, Any]] = {}
+    for sample_metric in fastqc_metrics.sample_metrics:
+        entry = samples.setdefault(
+            sample_metric.sample_id,
+            {
+                "sample_id": sample_metric.sample_id,
+                "input_file_count": 0,
+                "total_reads": 0,
+                "min_per_base_quality_values": [],
+                "statuses": [],
+            },
+        )
+        entry["input_file_count"] += 1
+        if sample_metric.total_sequences is not None:
+            entry["total_reads"] += sample_metric.total_sequences
+        if sample_metric.min_per_base_quality is not None:
+            entry["min_per_base_quality_values"].append(sample_metric.min_per_base_quality)
+        entry["statuses"].append(sample_metric.overall_status)
+
+    selected_sample_ids = sorted(samples)
+    if report_sample_names:
+        report_sample_set = {item.strip() for item in report_sample_names if str(item).strip()}
+        missing_sample_ids = sorted(report_sample_set - set(samples))
+        if missing_sample_ids:
+            raise ValueError(
+                "MultiQC reported sample names that were not present in upstream FastQC metrics: "
+                + ", ".join(missing_sample_ids)
+            )
+        selected_sample_ids = [sample_id for sample_id in selected_sample_ids if sample_id in report_sample_set]
+
+    sample_summaries: list[dict[str, Any]] = []
+    for sample_id in selected_sample_ids:
+        entry = samples[sample_id]
+        total_reads = int(entry["total_reads"])
+        min_per_base_quality_values = entry["min_per_base_quality_values"]
+        statuses = entry["statuses"]
+        sample_summaries.append(
+            {
+                "sample_id": sample_id,
+                "input_file_count": int(entry["input_file_count"]),
+                "total_reads": total_reads,
+                "total_reads_millions": round(total_reads / 1_000_000, 4),
+                "min_per_base_quality": (
+                    min(min_per_base_quality_values) if min_per_base_quality_values else None
+                ),
+                "fastqc_status": _worst_status(statuses),
+            }
+        )
+    return sample_summaries
+
+
+def _build_multiqc_aggregate_metrics(
+    fastqc_metrics: FastQCMetrics,
+    report_summary,
+    sample_metrics: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    report_modules = list(report_summary.module_names)
+    if not report_modules:
+        report_modules = [
+            item.module_name
+            for item in fastqc_metrics.aggregate_metrics.module_status_counts
+        ]
+    report_modules = list(dict.fromkeys(report_modules))
+    report_sample_count = len(report_summary.sample_names) if report_summary.sample_names else len(sample_metrics)
+
+    sample_count = len(sample_metrics)
+    input_file_count = sum(int(item.get("input_file_count", 0)) for item in sample_metrics)
+    total_reads = sum(int(item.get("total_reads", 0)) for item in sample_metrics)
+    min_per_base_quality_values = [
+        float(value)
+        for value in (item.get("min_per_base_quality") for item in sample_metrics)
+        if value is not None
+    ]
+    passed_samples = sum(1 for item in sample_metrics if item.get("fastqc_status") == "pass")
+
+    return {
+        "sample_count": sample_count,
+        "input_file_count": input_file_count,
+        "total_reads": total_reads,
+        "total_reads_millions": round(total_reads / 1_000_000, 4),
+        "min_per_base_quality": min(min_per_base_quality_values) if min_per_base_quality_values else None,
+        "fastqc_pass_rate": round((passed_samples / sample_count) if sample_count else 0.0, 4),
+        "report_sample_count": report_sample_count,
+        "report_module_count": len(report_modules),
+        "report_modules": report_modules,
+    }
+
+
 def _write_generated_text(
     context,
     *,
@@ -623,6 +911,25 @@ def _artifact_ref(
     }
     if run_id is not None:
         payload["run_id"] = run_id
+    return payload
+
+
+def _require_artifact_ref(
+    value: Any,
+    *,
+    artifact_type: str,
+    field_name: str,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field_name} must be a mapping artifact reference.")
+    resolved_artifact_type = value.get("artifact_type")
+    path = value.get("path")
+    if resolved_artifact_type != artifact_type or not isinstance(path, str) or not path.strip():
+        raise ValueError(f"{field_name} must reference a {artifact_type} artifact with a valid path.")
+    payload = {"artifact_type": artifact_type, "path": path}
+    run_id = value.get("run_id")
+    if isinstance(run_id, str) and run_id.strip():
+        payload["run_id"] = run_id.strip()
     return payload
 
 

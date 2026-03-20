@@ -85,6 +85,8 @@ class TestArtifactNaming:
         assert stable_artifact_name("dataset_manifest") == "dataset_manifest.yaml"
         assert stable_artifact_name("fastqc_run") == "fastqc_run.json"
         assert stable_artifact_name("fastqc_metrics") == "fastqc_metrics.json"
+        assert stable_artifact_name("multiqc_run") == "multiqc_run.json"
+        assert stable_artifact_name("multiqc_metrics") == "multiqc_metrics.json"
         assert stable_artifact_name("provenance") == "prov.json"
         assert stable_artifact_name("ro_crate") == "ro-crate"
 

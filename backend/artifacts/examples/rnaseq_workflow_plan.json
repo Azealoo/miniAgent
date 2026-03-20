@@ -26,7 +26,7 @@
     },
     {
       "id": "aggregated_qc",
-      "name": "Aggregated QC placeholder stage"
+      "name": "MultiQC aggregated QC stage"
     },
     {
       "id": "quantification",
@@ -49,6 +49,14 @@
     {
       "name": "fastqc_metrics",
       "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/fastqc_metrics.json"
+    },
+    {
+      "name": "multiqc_run",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/multiqc_run.json"
+    },
+    {
+      "name": "multiqc_metrics",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/multiqc_metrics.json"
     },
     {
       "name": "quantification_bundle",

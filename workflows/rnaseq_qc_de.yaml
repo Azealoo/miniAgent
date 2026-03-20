@@ -58,6 +58,22 @@ outputs:
     source:
       step_id: raw_qc
       output_name: fastqc_metrics
+  - name: multiqc_run
+    kind: artifact
+    artifact_type: multiqc_run
+    schema_ref: artifact_schema:multiqc_run@1.0.0
+    description: Durable MultiQC execution artifact capturing the aggregated report, source FastQC artifacts, and command provenance.
+    source:
+      step_id: aggregated_qc
+      output_name: multiqc_run
+  - name: multiqc_metrics
+    kind: artifact
+    artifact_type: multiqc_metrics
+    schema_ref: artifact_schema:multiqc_metrics@1.0.0
+    description: Normalized MultiQC summary artifact extracted from the aggregated QC stage and copied into workflow-level outputs.
+    source:
+      step_id: aggregated_qc
+      output_name: multiqc_metrics
   - name: quantification_bundle
     kind: value
     description: Structured handle describing the expected count-generation outputs for the quantification stage.
@@ -223,7 +239,7 @@ steps:
       backoff_seconds: 0
     failure_policy: block_workflow
   - id: aggregated_qc
-    label: Aggregated QC placeholder stage
+    label: MultiQC aggregated QC stage
     executor:
       executor_type: python
       module: workflows.runners.rnaseq_qc_de
@@ -242,7 +258,17 @@ steps:
     outputs:
       - name: aggregated_qc_bundle
         kind: value
-        description: Structured placeholder output describing expected MultiQC artifacts and observed aggregated-QC evidence for gating.
+        description: Structured MultiQC stage output describing generated artifacts, normalized summary metrics, and aggregated-QC evidence for gating.
+      - name: multiqc_run
+        kind: artifact
+        artifact_type: multiqc_run
+        schema_ref: artifact_schema:multiqc_run@1.0.0
+        description: Durable MultiQC execution artifact capturing command provenance and aggregated report paths.
+      - name: multiqc_metrics
+        kind: artifact
+        artifact_type: multiqc_metrics
+        schema_ref: artifact_schema:multiqc_metrics@1.0.0
+        description: Normalized MultiQC metrics artifact extracted from the aggregated report and linked upstream FastQC artifacts.
     prerequisites:
       - dataset_intake
       - raw_qc

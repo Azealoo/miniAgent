@@ -38,7 +38,12 @@ from artifacts import (
     validate_artifact_payload,
     validate_artifact_root,
 )
-from artifacts.schemas import WorkflowEnvironment, WorkflowIssueDetail, WorkflowStepRecord
+from artifacts.schemas import (
+    WorkflowEnvironment,
+    WorkflowIssueDetail,
+    WorkflowStepRecord,
+    WorkflowSummaryMetric,
+)
 from qc_policy import QCPolicyDefinition, QCPolicyEvaluation, evaluate_qc_policy
 from workflow_specs import (
     ExternalEngineExecutor,
@@ -350,12 +355,15 @@ class InternalDAGRunner:
         inputs: Mapping[str, Any] | None = None,
         *,
         run_dir: Path | str | None = None,
+        restart_from_step: str | None = None,
         step_limit: int | None = None,
         created_at: datetime | None = None,
         event_callback: WorkflowEventCallback | None = None,
     ) -> WorkflowRunResult:
         if step_limit is not None and step_limit < 1:
             raise ValueError("step_limit must be at least 1 when provided.")
+        if restart_from_step is not None and run_dir is None:
+            raise ValueError("restart_from_step requires run_dir for an existing workflow run.")
 
         spec = self._load_workflow_spec(workflow)
         if run_dir is None:
@@ -391,6 +399,8 @@ class InternalDAGRunner:
             resolved_inputs = self._load_workflow_inputs(layout, spec, inputs)
             workflow_inputs_ref = self._workflow_inputs_ref(layout)
             run_document = self._prepare_resume_document(spec, layout, run_document, workflow_inputs_ref)
+            if restart_from_step is not None:
+                run_document = self._prepare_restart_document(layout, spec, run_document, restart_from_step)
             run_document = self._persist_run_document(layout, run_document)
             resumed = True
 
@@ -419,6 +429,7 @@ class InternalDAGRunner:
                 layout,
                 spec,
                 run_document,
+                step_output_values,
                 step_output_refs,
                 materialize_final_artifacts=True,
                 emitter=None,
@@ -434,6 +445,7 @@ class InternalDAGRunner:
             layout,
             spec,
             run_document,
+            step_output_values,
             step_output_refs,
             materialize_final_artifacts=False,
             emitter=None,
@@ -470,6 +482,7 @@ class InternalDAGRunner:
                 layout,
                 spec,
                 run_document,
+                step_output_values,
                 step_output_refs,
                 materialize_final_artifacts=run_document.lifecycle_status in _RUN_FINAL_STATUSES,
                 emitter=None,
@@ -500,6 +513,7 @@ class InternalDAGRunner:
                         layout,
                         spec,
                         run_document,
+                        step_output_values,
                         step_output_refs,
                         materialize_final_artifacts=True,
                         emitter=emitter,
@@ -664,6 +678,7 @@ class InternalDAGRunner:
                 for step in spec.steps
             ],
             provenance_exports=[],
+            summary_metrics=[],
             warnings=[],
         )
 
@@ -755,6 +770,133 @@ class InternalDAGRunner:
                 run_document.warnings.append("Run resumed after interruption.")
         run_document.related_artifacts = self._dedupe_refs([*run_document.related_artifacts, workflow_inputs_ref])
         return run_document
+
+    def _prepare_restart_document(
+        self,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        run_document: WorkflowRun,
+        restart_from_step: str,
+    ) -> WorkflowRun:
+        step_ids = {step.id for step in spec.steps}
+        if restart_from_step not in step_ids:
+            raise ValueError(
+                f"restart_from_step {restart_from_step!r} was not found in workflow {spec.workflow_id!r}."
+            )
+
+        reset_steps = {restart_from_step, *self._descendants(spec, restart_from_step)}
+        stale_ref_keys = self._stale_restart_ref_keys(layout, spec, run_document, reset_steps=reset_steps)
+        self._delete_materialized_workflow_outputs(layout, spec, reset_steps=reset_steps)
+        for record in run_document.steps:
+            if record.id not in reset_steps:
+                continue
+            record.status = "created"
+            record.start_time = None
+            record.end_time = None
+            record.inputs_resolved = []
+            record.outputs_produced = []
+            record.warnings = []
+            record.warning_details = []
+            record.errors = []
+            record.error_details = []
+
+        run_document.lifecycle_status = "waiting"
+        run_document.outputs = []
+        run_document.qc_policy_results = self._filter_retained_qc_policy_results(
+            spec,
+            run_document.qc_policy_results,
+            reset_steps=reset_steps,
+        )
+        retained_summaries = [item.summary for item in run_document.qc_policy_results if item.summary]
+        run_document.qc_summary = "\n".join(retained_summaries) if retained_summaries else None
+        run_document.warnings = []
+        run_document.warning_details = []
+        run_document.related_artifacts = [
+            ref for ref in run_document.related_artifacts if self._artifact_ref_key(ref) not in stale_ref_keys
+        ]
+        run_document.summary_metrics = [
+            metric
+            for metric in run_document.summary_metrics
+            if metric.stage not in reset_steps
+        ]
+        return run_document
+
+    def _stale_restart_ref_keys(
+        self,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        run_document: WorkflowRun,
+        *,
+        reset_steps: set[str],
+    ) -> set[tuple[str, str, str | None, str | None]]:
+        stale_keys: set[tuple[str, str, str | None, str | None]] = set()
+        for record in run_document.steps:
+            if record.id not in reset_steps:
+                continue
+            stale_keys.update(self._artifact_ref_key(ref) for ref in record.outputs_produced)
+
+        for workflow_output in spec.outputs:
+            if workflow_output.kind != "artifact" or workflow_output.source.step_id not in reset_steps:
+                continue
+            if workflow_output.artifact_type is None:
+                continue
+            stable_relpath = layout.stable_artifact_relpath(workflow_output.artifact_type).as_posix()
+            for ref in run_document.related_artifacts:
+                if ref.artifact_type != workflow_output.artifact_type or ref.path != stable_relpath:
+                    continue
+                stale_keys.add(self._artifact_ref_key(ref))
+        return stale_keys
+
+    def _delete_materialized_workflow_outputs(
+        self,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        *,
+        reset_steps: set[str],
+    ) -> None:
+        deleted_paths: set[str] = set()
+        for workflow_output in spec.outputs:
+            if workflow_output.kind != "artifact" or workflow_output.source.step_id not in reset_steps:
+                continue
+            if workflow_output.artifact_type is None:
+                continue
+            stable_relpath = layout.stable_artifact_relpath(workflow_output.artifact_type)
+            stable_key = stable_relpath.as_posix()
+            if stable_key in deleted_paths:
+                continue
+            target = resolve_artifact_path(layout.run_dir, stable_relpath.name)
+            if not target.exists():
+                continue
+            target.unlink()
+            try:
+                from artifacts.registry import refresh_artifact_registry_path
+
+                refresh_artifact_registry_path(layout.base_dir, stable_relpath)
+            except Exception:
+                pass
+            deleted_paths.add(stable_key)
+
+    def _filter_retained_qc_policy_results(
+        self,
+        spec: WorkflowSpec,
+        evaluations: list[QCPolicyEvaluation],
+        *,
+        reset_steps: set[str],
+    ) -> list[QCPolicyEvaluation]:
+        gates_by_id = {gate.id: gate for gate in spec.qc_gates}
+        retained: list[QCPolicyEvaluation] = []
+        for evaluation in evaluations:
+            if evaluation.stage == "before_publish":
+                continue
+            gate = gates_by_id.get(evaluation.gate_id or "")
+            if gate is None:
+                retained.append(evaluation)
+                continue
+            target = gate.target
+            if isinstance(target, StepOutputSource) and target.step_id in reset_steps:
+                continue
+            retained.append(evaluation)
+        return retained
 
     def _load_completed_step_outputs(
         self,
@@ -1253,6 +1395,7 @@ class InternalDAGRunner:
         layout: RunLayout,
         spec: WorkflowSpec,
         run_document: WorkflowRun,
+        step_output_values: Mapping[tuple[str, str], Any],
         step_output_refs: Mapping[tuple[str, str], ArtifactReference],
         *,
         materialize_final_artifacts: bool,
@@ -1270,7 +1413,59 @@ class InternalDAGRunner:
                     emitter.artifact(ref, scope="workflow_output", output_name=workflow_output.name)
             outputs.append(ref)
         run_document.outputs = self._dedupe_refs(outputs)
+        run_document.summary_metrics = self._collect_summary_metrics(step_output_values)
         return run_document
+
+    def _collect_summary_metrics(
+        self,
+        step_output_values: Mapping[tuple[str, str], Any],
+    ) -> list[WorkflowSummaryMetric]:
+        metrics: list[WorkflowSummaryMetric] = []
+        seen: set[tuple[str, str, str, str | None]] = set()
+
+        for value in step_output_values.values():
+            if not isinstance(value, Mapping):
+                continue
+            raw_metrics = value.get("summary_metrics")
+            if not isinstance(raw_metrics, list):
+                continue
+            for item in raw_metrics:
+                if not isinstance(item, Mapping):
+                    continue
+                stage = item.get("stage")
+                metric_name = item.get("metric_name")
+                if not isinstance(stage, str) or not stage.strip():
+                    continue
+                if not isinstance(metric_name, str) or not metric_name.strip():
+                    continue
+                source_artifact = item.get("source_artifact")
+                source_path: str | None = None
+                if isinstance(source_artifact, Mapping):
+                    raw_path = source_artifact.get("path")
+                    if isinstance(raw_path, str):
+                        source_path = raw_path
+                key = (
+                    stage.strip(),
+                    metric_name.strip(),
+                    json.dumps(_serialize_for_json(item.get("value")), sort_keys=True),
+                    source_path,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                metrics.append(
+                    WorkflowSummaryMetric(
+                        stage=stage.strip(),
+                        metric_name=metric_name.strip(),
+                        value=_serialize_for_json(item.get("value")),
+                        source_artifact=(
+                            ArtifactReference.model_validate(source_artifact)
+                            if isinstance(source_artifact, Mapping)
+                            else None
+                        ),
+                    )
+                )
+        return metrics
 
     def _materialize_final_artifact(
         self,
@@ -1969,12 +2164,15 @@ class InternalDAGRunner:
         deduped: list[ArtifactReference] = []
         seen: set[tuple[str, str, str | None, str | None]] = set()
         for ref in refs:
-            key = (ref.artifact_type, ref.path, ref.id, ref.run_id)
+            key = self._artifact_ref_key(ref)
             if key in seen:
                 continue
             deduped.append(ref)
             seen.add(key)
         return deduped
+
+    def _artifact_ref_key(self, ref: ArtifactReference) -> tuple[str, str, str | None, str | None]:
+        return (ref.artifact_type, ref.path, ref.id, ref.run_id)
 
     def _build_result(self, layout: RunLayout, run_document: WorkflowRun, *, resumed: bool) -> WorkflowRunResult:
         return WorkflowRunResult(

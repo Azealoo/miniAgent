@@ -23,6 +23,8 @@ ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
     "dataset_manifest": "yaml",
     "fastqc_run": "json",
     "fastqc_metrics": "json",
+    "multiqc_run": "json",
+    "multiqc_metrics": "json",
     "workflow_run": "json",
     "evidence_card": "yaml",
     "compliance_report": "json",
@@ -557,6 +559,159 @@ class FastQCMetrics(ArtifactDocument):
     def _validate_sample_sheet_path(cls, value: str) -> str:
         return _normalize_relative_path(value)
 
+
+class MultiQCSampleMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sample_id: str
+    input_file_count: int
+    total_reads: int
+    total_reads_millions: float
+    min_per_base_quality: float | None = None
+    fastqc_status: FastQCModuleStatus
+
+    @field_validator("sample_id")
+    @classmethod
+    def _validate_sample_id(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="sample_id")
+
+    @field_validator("input_file_count", "total_reads")
+    @classmethod
+    def _validate_counts(cls, value: int, info) -> int:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be non-negative.")
+        return value
+
+    @field_validator("total_reads_millions")
+    @classmethod
+    def _validate_total_reads_millions(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("total_reads_millions must be non-negative.")
+        return value
+
+
+class MultiQCAggregateMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sample_count: int
+    input_file_count: int
+    total_reads: int
+    total_reads_millions: float
+    min_per_base_quality: float | None = None
+    fastqc_pass_rate: float
+    report_sample_count: int
+    report_module_count: int
+    report_modules: list[str] = Field(default_factory=list)
+
+    @field_validator("sample_count", "input_file_count", "total_reads", "report_sample_count", "report_module_count")
+    @classmethod
+    def _validate_counts(cls, value: int, info) -> int:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be non-negative.")
+        return value
+
+    @field_validator("total_reads_millions", "fastqc_pass_rate")
+    @classmethod
+    def _validate_floats(cls, value: float, info) -> float:
+        if value < 0:
+            raise ValueError(f"{info.field_name} must be non-negative.")
+        if info.field_name == "fastqc_pass_rate" and value > 1:
+            raise ValueError("fastqc_pass_rate must be between 0 and 1.")
+        return value
+
+    @field_validator("report_modules")
+    @classmethod
+    def _validate_report_modules(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="report_modules") for item in value]
+
+    @model_validator(mode="after")
+    def _validate_unique_report_modules(self) -> "MultiQCAggregateMetrics":
+        if len(self.report_modules) != len(set(self.report_modules)):
+            raise ValueError("report_modules may not define duplicate entries.")
+        return self
+
+
+class MultiQCRun(ArtifactDocument):
+    artifact_type: Literal["multiqc_run"] = "multiqc_run"
+    tool_name: Literal["multiqc"] = "multiqc"
+    tool_version: str
+    sample_sheet_path: str
+    output_directory: str
+    input_directories: list[str] = Field(min_length=1)
+    command: list[str] = Field(min_length=1)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    upstream_fastqc_run: ArtifactReference | None = None
+    upstream_fastqc_metrics: ArtifactReference | None = None
+    report_html: ArtifactReference
+    report_data_directory: ArtifactReference | None = None
+    report_summary_data: ArtifactReference | None = None
+    stdout_path: str | None = None
+    stderr_path: str | None = None
+    metrics_artifact: ArtifactReference | None = None
+
+    @field_validator("tool_version")
+    @classmethod
+    def _validate_tool_version(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="tool_version")
+
+    @field_validator("sample_sheet_path", "output_directory", "stdout_path", "stderr_path")
+    @classmethod
+    def _validate_optional_paths(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _normalize_relative_path(value)
+
+    @field_validator("input_directories")
+    @classmethod
+    def _validate_input_directories(cls, value: list[str]) -> list[str]:
+        return [_normalize_relative_path(item) for item in value]
+
+    @field_validator("command")
+    @classmethod
+    def _validate_command(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="command") for item in value]
+
+
+class MultiQCMetrics(ArtifactDocument):
+    artifact_type: Literal["multiqc_metrics"] = "multiqc_metrics"
+    tool_name: Literal["multiqc"] = "multiqc"
+    tool_version: str
+    sample_sheet_path: str
+    run_artifact: ArtifactReference | None = None
+    upstream_fastqc_run: ArtifactReference | None = None
+    upstream_fastqc_metrics: ArtifactReference | None = None
+    report_html: ArtifactReference
+    report_data_directory: ArtifactReference | None = None
+    report_summary_data: ArtifactReference | None = None
+    sample_names: list[str] = Field(default_factory=list)
+    report_modules: list[str] = Field(default_factory=list)
+    sample_metrics: list[MultiQCSampleMetrics] = Field(min_length=1)
+    aggregate_metrics: MultiQCAggregateMetrics
+
+    @field_validator("tool_version")
+    @classmethod
+    def _validate_tool_version(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="tool_version")
+
+    @field_validator("sample_sheet_path")
+    @classmethod
+    def _validate_sample_sheet_path(cls, value: str) -> str:
+        return _normalize_relative_path(value)
+
+    @field_validator("sample_names", "report_modules")
+    @classmethod
+    def _validate_string_lists(cls, value: list[str], info) -> list[str]:
+        return [_require_non_empty(item, field_name=info.field_name) for item in value]
+
+    @model_validator(mode="after")
+    def _validate_unique_strings(self) -> "MultiQCMetrics":
+        if len(self.sample_names) != len(set(self.sample_names)):
+            raise ValueError("sample_names may not define duplicate entries.")
+        if len(self.report_modules) != len(set(self.report_modules)):
+            raise ValueError("report_modules may not define duplicate entries.")
+        return self
+
+
 class WorkflowIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -608,6 +763,25 @@ class WorkflowIssueDetail(BaseModel):
         if value is None:
             return None
         return _require_non_empty(value, field_name=info.field_name)
+
+
+class WorkflowSummaryMetric(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    stage: str
+    metric_name: str
+    value: Any
+    source_artifact: ArtifactReference | None = None
+
+    @field_validator("stage")
+    @classmethod
+    def _validate_stage(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="stage")
+
+    @field_validator("metric_name")
+    @classmethod
+    def _validate_metric_name(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="metric_name")
 
 
 class WorkflowStepRecord(BaseModel):
@@ -664,6 +838,7 @@ class WorkflowRun(ArtifactDocument):
     qc_policies: list[QCPolicyDefinition] = Field(default_factory=list)
     qc_policy_results: list[QCPolicyEvaluation] = Field(default_factory=list)
     qc_summary: str | None = None
+    summary_metrics: list[WorkflowSummaryMetric] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     warning_details: list[WorkflowIssueDetail] = Field(default_factory=list)
 
@@ -1083,12 +1258,25 @@ class QAReport(ArtifactDocument):
         return self
 
 
-ArtifactModel = DatasetManifest | FastQCRun | FastQCMetrics | WorkflowRun | EvidenceCard | ComplianceReport | ProtocolRun | QAReport
+ArtifactModel = (
+    DatasetManifest
+    | FastQCRun
+    | FastQCMetrics
+    | MultiQCRun
+    | MultiQCMetrics
+    | WorkflowRun
+    | EvidenceCard
+    | ComplianceReport
+    | ProtocolRun
+    | QAReport
+)
 
 _ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
     "dataset_manifest": DatasetManifest,
     "fastqc_run": FastQCRun,
     "fastqc_metrics": FastQCMetrics,
+    "multiqc_run": MultiQCRun,
+    "multiqc_metrics": MultiQCMetrics,
     "workflow_run": WorkflowRun,
     "evidence_card": EvidenceCard,
     "compliance_report": ComplianceReport,

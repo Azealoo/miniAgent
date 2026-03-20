@@ -15,6 +15,8 @@ from artifacts.schemas import (  # noqa: E402
     EvidenceCard,
     FastQCMetrics,
     FastQCRun,
+    MultiQCMetrics,
+    MultiQCRun,
     ProtocolRun,
     QAReport,
     WorkflowRun,
@@ -48,6 +50,12 @@ class TestArtifactSchemas:
         assert artifact_model_for_type("fastqc_metrics") is FastQCMetrics
         assert schema_format_for_artifact("fastqc_run") == "json"
         assert schema_format_for_artifact("fastqc_metrics") == "json"
+
+    def test_multiqc_artifact_types_use_json_schema_format(self):
+        assert artifact_model_for_type("multiqc_run") is MultiQCRun
+        assert artifact_model_for_type("multiqc_metrics") is MultiQCMetrics
+        assert schema_format_for_artifact("multiqc_run") == "json"
+        assert schema_format_for_artifact("multiqc_metrics") == "json"
 
     def test_dataset_manifest_rejects_absolute_source_paths(self):
         payload = {
@@ -466,6 +474,149 @@ class TestArtifactSchemas:
         assert isinstance(metrics_document, FastQCMetrics)
         assert metrics_document.aggregate_metrics.fastqc_pass_rate == 1.0
 
+    def test_multiqc_artifacts_validate_structured_provenance_and_metrics(self):
+        run_payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "multiqc_run",
+            "id": "multiqc-run-rnaseq-qc-de-aggregated-qc-run-20260319t210000z-deadbeef",
+            "run_id": "run-20260319T210000Z-deadbeef",
+            "created_at": "2026-03-19T21:05:00Z",
+            "source_workflow": "rnaseq_qc_de",
+            "related_artifacts": [
+                {
+                    "artifact_type": "multiqc_html_report",
+                    "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/aggregated-qc/multiqc/multiqc_report.html",
+                    "run_id": "run-20260319T210000Z-deadbeef",
+                }
+            ],
+            "tool_version": "multiqc, version 1.21",
+            "sample_sheet_path": "backend/artifacts/examples/rnaseq/sample_sheet.tsv",
+            "output_directory": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/aggregated-qc/multiqc",
+            "input_directories": [
+                "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/raw-qc/fastqc"
+            ],
+            "command": [
+                "multiqc",
+                "--outdir",
+                "artifacts/rnaseq-qc-de/.../multiqc",
+                "--filename",
+                "multiqc_report.html",
+                "--force",
+                "artifacts/rnaseq-qc-de/.../fastqc",
+            ],
+            "parameters": {"extra_args": [], "input_count": 1, "report_filename": "multiqc_report.html"},
+            "upstream_fastqc_run": {
+                "artifact_type": "fastqc_run",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/fastqc_run.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "upstream_fastqc_metrics": {
+                "artifact_type": "fastqc_metrics",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/fastqc_metrics.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "report_html": {
+                "artifact_type": "multiqc_html_report",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/aggregated-qc/multiqc/multiqc_report.html",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "report_data_directory": {
+                "artifact_type": "multiqc_data_directory",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/aggregated-qc/multiqc/multiqc_data",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "report_summary_data": {
+                "artifact_type": "multiqc_summary_data",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/aggregated-qc/multiqc/multiqc_data/bioapex_multiqc_summary.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "stdout_path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/aggregated-qc/multiqc.stdout.txt",
+            "stderr_path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/aggregated-qc/multiqc.stderr.txt",
+            "metrics_artifact": {
+                "artifact_type": "multiqc_metrics",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/aggregated-qc/multiqc_metrics.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+        }
+        metrics_payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "multiqc_metrics",
+            "id": "multiqc-metrics-rnaseq-qc-de-aggregated-qc-run-20260319t210000z-deadbeef",
+            "run_id": "run-20260319T210000Z-deadbeef",
+            "created_at": "2026-03-19T21:05:05Z",
+            "source_workflow": "rnaseq_qc_de",
+            "related_artifacts": [
+                {
+                    "artifact_type": "multiqc_run",
+                    "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/aggregated-qc/multiqc_run.json",
+                    "run_id": "run-20260319T210000Z-deadbeef",
+                }
+            ],
+            "tool_version": "multiqc, version 1.21",
+            "sample_sheet_path": "backend/artifacts/examples/rnaseq/sample_sheet.tsv",
+            "run_artifact": {
+                "artifact_type": "multiqc_run",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/aggregated-qc/multiqc_run.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "upstream_fastqc_run": {
+                "artifact_type": "fastqc_run",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/fastqc_run.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "upstream_fastqc_metrics": {
+                "artifact_type": "fastqc_metrics",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/fastqc_metrics.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "report_html": {
+                "artifact_type": "multiqc_html_report",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/aggregated-qc/multiqc/multiqc_report.html",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "report_data_directory": {
+                "artifact_type": "multiqc_data_directory",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/aggregated-qc/multiqc/multiqc_data",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "report_summary_data": {
+                "artifact_type": "multiqc_summary_data",
+                "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T210000Z-deadbeef/outputs/generated/aggregated-qc/multiqc/multiqc_data/bioapex_multiqc_summary.json",
+                "run_id": "run-20260319T210000Z-deadbeef",
+            },
+            "sample_names": ["control_rep1", "treated_rep1"],
+            "report_modules": ["FastQC"],
+            "sample_metrics": [
+                {
+                    "sample_id": "control_rep1",
+                    "input_file_count": 2,
+                    "total_reads": 2400000,
+                    "total_reads_millions": 2.4,
+                    "min_per_base_quality": 31.4,
+                    "fastqc_status": "pass",
+                }
+            ],
+            "aggregate_metrics": {
+                "sample_count": 1,
+                "input_file_count": 2,
+                "total_reads": 2400000,
+                "total_reads_millions": 2.4,
+                "min_per_base_quality": 31.4,
+                "fastqc_pass_rate": 1.0,
+                "report_sample_count": 2,
+                "report_module_count": 1,
+                "report_modules": ["FastQC"],
+            },
+        }
+
+        run_document = validate_artifact_payload(run_payload)
+        metrics_document = validate_artifact_payload(metrics_payload)
+
+        assert isinstance(run_document, MultiQCRun)
+        assert run_document.report_html.artifact_type == "multiqc_html_report"
+        assert isinstance(metrics_document, MultiQCMetrics)
+        assert metrics_document.aggregate_metrics.report_sample_count == 2
+
     def test_dataset_manifest_accepts_embedded_qc_policy_and_workflow_run_persists_evaluation_summary(self):
         manifest_payload = {
             "schema_version": SCHEMA_PACK_VERSION,
@@ -592,6 +743,17 @@ class TestArtifactSchemas:
                 }
             ],
             "qc_summary": "Single-cell default QC policy [warn] Technical warnings: median_genes_per_cell=260 did not meet >= 350.",
+            "summary_metrics": [
+                {
+                    "stage": "aggregated_qc",
+                    "metric_name": "fastqc_pass_rate",
+                    "value": 0.95,
+                    "source_artifact": {
+                        "artifact_type": "multiqc_metrics",
+                        "path": "artifacts/qc/run-1/multiqc_metrics.json",
+                    },
+                }
+            ],
             "steps": [],
             "provenance_exports": [],
             "warnings": ["QC thresholds should be reviewed before interpretation."],
@@ -603,6 +765,7 @@ class TestArtifactSchemas:
         assert run_document.qc_policies[0].policy_id == "scrna-default-qc"
         assert run_document.qc_policy_results[0].applied_assay_override == "perturb_seq"
         assert "Technical warnings" in run_document.qc_summary
+        assert run_document.summary_metrics[0].metric_name == "fastqc_pass_rate"
 
     def test_qc_policy_summary_distinguishes_batch_and_design_failures_from_warnings(self):
         policy = QCPolicyDefinition.model_validate(
