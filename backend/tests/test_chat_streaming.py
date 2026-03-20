@@ -166,8 +166,138 @@ async def test_chat_stream_includes_structured_tool_result_and_persists_it(isola
     assert assistant_messages
     tool_calls = assistant_messages[0]["tool_calls"]
     assert tool_calls[0]["tool"] == "compliance_preflight"
-    assert tool_calls[1]["run_id"] == "tool-run-1"
-    assert tool_calls[1]["result"]["tool_name"] == "read_file"
+    assert tool_calls[1]["tool"] == "evidence_review_gate"
+    assert tool_calls[2]["run_id"] == "tool-run-1"
+    assert tool_calls[2]["result"]["tool_name"] == "read_file"
+
+
+@pytest.mark.asyncio
+async def test_chat_requires_evidence_review_before_streaming_answer_tokens(isolated_chat_state):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    async def fake_astream(_message, _history):
+        yield {"type": "token", "content": "Unreviewed preamble that should be withheld."}
+        yield {
+            "type": "tool_start",
+            "tool": "evidence_review",
+            "input": '{"question":"Summarize the evidence for TP53 stress response"}',
+            "run_id": "tool-run-review-1",
+        }
+        yield {
+            "type": "tool_end",
+            "tool": "evidence_review",
+            "output": "Reviewed 1 evidence card(s); support status: supported; confidence: medium.",
+            "run_id": "tool-run-review-1",
+            "result": {
+                "contract_version": "tool_result.v1",
+                "tool_name": "evidence_review",
+                "summary": "Reviewed 1 evidence card(s); support status: supported; confidence: medium.",
+                "structured_payload": {
+                    "question": "Summarize the evidence for TP53 stress response",
+                    "review_status": "supported",
+                    "confidence": "medium",
+                    "unsupported_claims_present": False,
+                    "evidence_included": [
+                        {
+                            "artifact_type": "evidence_card",
+                            "path": "artifacts/literature-retrieval/demo/evidence_card.yaml",
+                        }
+                    ],
+                    "evidence_excluded": [],
+                    "limitations": [],
+                    "unresolved_conflicts": [],
+                    "source_facts": [
+                        {
+                            "statement": "TP53 mediates a stress response.",
+                            "claim_id": "claim-1",
+                        }
+                    ],
+                    "synthesized_conclusions": [
+                        {
+                            "statement": "Retrieved evidence supports a medium-confidence conclusion.",
+                            "support_status": "supported",
+                            "confidence": "medium",
+                        }
+                    ],
+                },
+                "artifact_refs": [
+                    {
+                        "path": "artifacts/evidence-review/demo/evidence_review.json",
+                        "artifact_type": "evidence_review",
+                    }
+                ],
+                "warnings": [],
+                "status": "success",
+                "outcome": "success",
+                "error": None,
+                "metadata": {"review_status": "supported"},
+                "source_payload": None,
+            },
+        }
+        yield {"type": "token", "content": "Reviewed answer only."}
+        yield {"type": "done"}
+
+    with patch.object(agent_manager, "astream", fake_astream), patch(
+        "api.chat._generate_title_only",
+        new=AsyncMock(return_value=""),
+    ):
+        response = await chat(
+            ChatRequest(
+                message="Summarize the evidence for TP53 stress response",
+                session_id=session_id,
+                stream=True,
+            )
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    token_text = " ".join(item["content"] for item in payloads if item["type"] == "token")
+    assert "Unreviewed preamble" not in token_text
+    assert "Reviewed answer only." in token_text
+
+    history = agent_manager.session_manager.load_session(session_id)
+    assistant_messages = [msg for msg in history if msg["role"] == "assistant"]
+    assert assistant_messages
+    assert assistant_messages[0]["content"] == "Reviewed answer only."
+    assert assistant_messages[0]["tool_calls"][1]["tool"] == "evidence_review_gate"
+    assert assistant_messages[0]["tool_calls"][2]["tool"] == "evidence_review"
+
+
+@pytest.mark.asyncio
+async def test_chat_withholds_answer_when_required_review_never_completes(isolated_chat_state):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    async def fake_astream(_message, _history):
+        yield {"type": "token", "content": "TP53 definitely controls stress response."}
+        yield {"type": "done"}
+
+    with patch.object(agent_manager, "astream", fake_astream), patch(
+        "api.chat._generate_title_only",
+        new=AsyncMock(return_value=""),
+    ):
+        response = await chat(
+            ChatRequest(
+                message="What is the evidence for TP53 stress response?",
+                session_id=session_id,
+                stream=True,
+            )
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    token_text = " ".join(item["content"] for item in payloads if item["type"] == "token")
+    assert "TP53 definitely controls stress response." not in token_text
+    assert "Evidence review is required before BioAPEX can provide a substantive answer" in token_text
+
+    history = agent_manager.session_manager.load_session(session_id)
+    assistant_messages = [msg for msg in history if msg["role"] == "assistant"]
+    assert assistant_messages
+    assert "unsupported claims are being withheld" in assistant_messages[0]["content"]
+    assert assistant_messages[0]["tool_calls"][1]["tool"] == "evidence_review_gate"
 
 
 @pytest.mark.asyncio

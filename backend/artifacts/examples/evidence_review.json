@@ -1,0 +1,77 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "evidence_review",
+  "id": "evidence-review-run-20260318t193000z-deadbeef",
+  "run_id": "run-20260318T193000Z-deadbeef",
+  "created_at": "2026-03-18T19:30:00Z",
+  "source_workflow": "evidence-review",
+  "related_artifacts": [
+    {
+      "artifact_type": "evidence_card",
+      "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/evidence_card.yaml",
+      "id": "evidence-pmid-12345678",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "workflow_run",
+      "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/run.json",
+      "id": "workflow-run-literature-retrieval-20260318",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "review_question": "What evidence supports a shared interferon-response program across donors?",
+  "review_status": "supported",
+  "confidence": "medium",
+  "evidence_included": [
+    {
+      "artifact_type": "evidence_card",
+      "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/evidence_card.yaml",
+      "id": "evidence-pmid-12345678",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "evidence_excluded": [
+    {
+      "evidence_id": "pmid:23456789",
+      "reason": "Retrieval failed before an evidence card could be materialized: HTTP 500 from upstream summary fetch."
+    }
+  ],
+  "limitations": [
+    "Cohort size was limited and not all perturbations replicated equally across batches."
+  ],
+  "unresolved_conflicts": [],
+  "source_facts": [
+    {
+      "statement": "Donor-matched perturb-seq profiles preserved a shared interferon-response program across replicates.",
+      "claim_id": "interferon-program-shared-across-donors",
+      "stable_identifier": "pmid:12345678",
+      "evidence": {
+        "artifact_type": "evidence_card",
+        "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/evidence_card.yaml",
+        "id": "evidence-pmid-12345678",
+        "run_id": "run-20260318T193000Z-deadbeef"
+      },
+      "confidence": "high"
+    }
+  ],
+  "synthesized_conclusions": [
+    {
+      "statement": "For the review question 'What evidence supports a shared interferon-response program across donors?', the retrieved evidence supports a medium-confidence conclusion consistent with the included source facts.",
+      "support_status": "supported",
+      "confidence": "medium",
+      "supporting_evidence": [
+        {
+          "artifact_type": "evidence_card",
+          "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/evidence_card.yaml",
+          "id": "evidence-pmid-12345678",
+          "run_id": "run-20260318T193000Z-deadbeef"
+        }
+      ],
+      "limitation_notes": [
+        "Cohort size was limited and not all perturbations replicated equally across batches."
+      ],
+      "conflict_notes": []
+    }
+  ],
+  "unsupported_claims_present": false
+}

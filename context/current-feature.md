@@ -5,14 +5,18 @@
 Not Started
 
 ## Goals
-<!-- Fill in for the next feature. -->
+<!-- Load the next feature to populate goals. -->
 
 ## Notes
-<!-- Fill in for the next feature. -->
+<!-- Load the next feature to populate notes. -->
 
 ## History
 <!-- Use this section to list completed work related to this feature. -->
 <!-- Keep it short and concrete: implemented pieces, verified behavior, follow-up changes, or fixes. -->
+- 2026-03-20: Completed Evidence Review Flow after review signoff, reset `context/current-feature.md` for the next task, and left the verified implementation ready for commit on top of the focused `149 passed` backend run plus successful frontend lint/build.
+- 2026-03-20: Fixed Evidence Review Flow review gaps by threading linked `evidence_review` artifact refs into RNA-seq report-bundle manifests, Markdown handoffs, and downstream `qa_report` payloads when available, narrowing the deterministic review gate to ignore common technical acronym/schema prompts while keeping gene-symbol questions reviewable, and adding focused regression coverage for both downstream linkage and gate false positives before re-verification.
+- 2026-03-20: Tightened the follow-up gate fix so output-format words like `JSON` no longer suppress evidence review for real biology evidence requests, while pure technical acronym/schema questions still stay out of review mode; added a mixed biology-plus-format regression to keep that boundary stable.
+- 2026-03-20: Started Evidence Review Flow implementation with a durable `evidence_review.json` artifact and `evidence_review` tool, deterministic `evidence_review_gate` chat enforcement that suppresses unsupported pre-review answer text, session-summary and thought-chain review markers for unsupported claims, example/schema/registry coverage for the new artifact type, focused backend verification via `/gpfs/home/yininz6/.conda/envs/miniAgent/bin/python -m pytest backend/tests/test_evidence_review.py backend/tests/test_chat_streaming.py backend/tests/test_artifact_schemas.py backend/tests/test_session_manager.py backend/tests/test_tool_output_contracts.py backend/tests/test_artifact_registry.py` (`98 passed`), and successful frontend `npm run lint` plus `npm run build`.
 - 2026-03-20: Completed Entity Grounding MVP after review signoff with shared grounded-entity and `entity_grounding` artifact support, deterministic Ensembl/UniProt-backed gene and protein grounding, additive evidence-card grounding integration, focused backend verification (`64 passed`), and reset `context/current-feature.md` for the next task.
 - 2026-03-20: Fixed the remaining Entity Grounding MVP evidence-integration review gap by filtering generic MeSH labels out of evidence-card grounding, propagating article species context into grounding requests, adding protein-name fallback support for UniProt-backed protein grounding, broadening evidence retrieval to issue per-mention typed grounding requests, and re-verifying via `/gpfs/home/yininz6/.conda/envs/miniAgent/bin/python -m pytest backend/tests/test_entity_grounding.py backend/tests/test_evidence_retrieval.py backend/tests/test_tool_output_contracts.py backend/tests/test_artifact_schemas.py backend/tests/test_artifact_registry.py` (`64 passed`).
 - 2026-03-20: Started Entity Grounding MVP implementation with a shared grounded-entity schema plus durable `entity_grounding.json` artifacts, reusable Ensembl/UniProt-backed grounding and cached source payload persistence, additive evidence-card `grounded_entities` integration plus an `entity_grounding` agent tool, updated examples/spec notes, and focused backend verification via `/gpfs/home/yininz6/.conda/envs/miniAgent/bin/python -m pytest backend/tests/test_entity_grounding.py backend/tests/test_evidence_retrieval.py backend/tests/test_tool_output_contracts.py backend/tests/test_artifact_schemas.py backend/tests/test_artifact_registry.py` (`57 passed`).

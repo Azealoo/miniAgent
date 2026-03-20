@@ -28,6 +28,7 @@ import type {
 
 const TOOL_ICONS: Record<string, ReactNode> = {
   compliance_preflight: <FileText size={12} />,
+  evidence_review_gate: <ShieldAlert size={12} />,
   terminal: <Terminal size={12} />,
   python_repl: <Code2 size={12} />,
   fetch_url: <Globe size={12} />,
@@ -36,6 +37,7 @@ const TOOL_ICONS: Record<string, ReactNode> = {
   slurm_tool: <Terminal size={12} />,
   ncbi_eutils: <Globe size={12} />,
   evidence_retrieval: <Search size={12} />,
+  evidence_review: <ShieldAlert size={12} />,
   uniprot_api: <Globe size={12} />,
   ensembl_api: <Globe size={12} />,
   write_file: <FileText size={12} />,
@@ -78,6 +80,11 @@ function complianceFinalDisposition(report: ComplianceReportArtifact | null): st
 
 function outcomeBadgeClass(result?: ToolResultEnvelope): string {
   if (!result) return "bg-gray-100 text-gray-500";
+  const reviewStatus = evidenceReviewStatus(result);
+  if (evidenceReviewRequired(result)) return "bg-amber-100 text-amber-700";
+  if (evidenceReviewUnsupported(result)) return "bg-red-100 text-red-700";
+  if (reviewStatus === "mixed") return "bg-amber-100 text-amber-700";
+  if (reviewStatus === "supported") return "bg-emerald-100 text-emerald-700";
   const complianceReport = getComplianceReport(result);
   const runtimeState = complianceRuntimeState(complianceReport);
   if (runtimeState === "approved_override") return "bg-sky-100 text-sky-700";
@@ -95,6 +102,10 @@ function outcomeBadgeClass(result?: ToolResultEnvelope): string {
 function outcomeBadgeText(call: ToolCall): string {
   const result = call.result;
   if (!result) return "";
+  if (evidenceReviewRequired(result)) return "review required";
+  if (evidenceReviewUnsupported(result)) return "unsupported claims";
+  const reviewStatus = evidenceReviewStatus(result);
+  if (reviewStatus) return humanizeUnderscoreValue(reviewStatus);
   const complianceReport = getComplianceReport(result);
   const runtimeState = complianceRuntimeState(complianceReport);
   if (runtimeState) {
@@ -136,6 +147,39 @@ function getAuditLogPath(result?: ToolResultEnvelope): string | null {
   return typeof auditLogPath === "string" ? auditLogPath : null;
 }
 
+function getEvidenceReviewPayload(
+  result?: ToolResultEnvelope
+): Record<string, JsonValue> | null {
+  const payload = result?.structured_payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const record = payload as Record<string, JsonValue>;
+  if (
+    typeof record.review_status === "string" ||
+    typeof record.requires_review === "boolean"
+  ) {
+    return record;
+  }
+  return null;
+}
+
+function evidenceReviewStatus(result?: ToolResultEnvelope): string | null {
+  const payload = getEvidenceReviewPayload(result);
+  const reviewStatus = payload?.review_status;
+  return typeof reviewStatus === "string" ? reviewStatus : null;
+}
+
+function evidenceReviewUnsupported(result?: ToolResultEnvelope): boolean {
+  const payload = getEvidenceReviewPayload(result);
+  return payload?.unsupported_claims_present === true;
+}
+
+function evidenceReviewRequired(result?: ToolResultEnvelope): boolean {
+  const payload = getEvidenceReviewPayload(result);
+  return payload?.requires_review === true;
+}
+
 function ToolIcon({ name }: { name: string }) {
   return (
     <span className="text-gray-500">
@@ -156,6 +200,7 @@ function SingleCall({ call }: SingleCallProps) {
   const sourcePayload = call.result?.source_payload;
   const complianceReport = getComplianceReport(call.result);
   const auditLogPath = getAuditLogPath(call.result);
+  const evidenceReview = getEvidenceReviewPayload(call.result);
 
   return (
     <div className="border border-gray-200 rounded-lg overflow-hidden">
@@ -261,6 +306,63 @@ function SingleCall({ call }: SingleCallProps) {
                   <div>
                     <span className="text-gray-400">Audit log:</span>{" "}
                     {auditLogPath}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          {evidenceReview && (
+            <div className="px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
+                Evidence Review
+              </p>
+              <div className="bg-slate-50 rounded p-2 text-xs text-gray-700 space-y-1">
+                {typeof evidenceReview.requires_review === "boolean" && (
+                  <div>
+                    <span className="text-gray-400">Required:</span>{" "}
+                    {evidenceReview.requires_review ? "yes" : "no"}
+                  </div>
+                )}
+                {typeof evidenceReview.review_status === "string" && (
+                  <div>
+                    <span className="text-gray-400">Status:</span>{" "}
+                    {humanizeUnderscoreValue(evidenceReview.review_status)}
+                  </div>
+                )}
+                {typeof evidenceReview.confidence === "string" && (
+                  <div>
+                    <span className="text-gray-400">Confidence:</span>{" "}
+                    {evidenceReview.confidence}
+                  </div>
+                )}
+                {typeof evidenceReview.question === "string" && (
+                  <div>
+                    <span className="text-gray-400">Question:</span>{" "}
+                    {evidenceReview.question}
+                  </div>
+                )}
+                {typeof evidenceReview.unsupported_claims_present === "boolean" && (
+                  <div>
+                    <span className="text-gray-400">Unsupported claims:</span>{" "}
+                    {evidenceReview.unsupported_claims_present ? "yes" : "no"}
+                  </div>
+                )}
+                {Array.isArray(evidenceReview.evidence_included) && (
+                  <div>
+                    <span className="text-gray-400">Included evidence:</span>{" "}
+                    {evidenceReview.evidence_included.length}
+                  </div>
+                )}
+                {Array.isArray(evidenceReview.evidence_excluded) && (
+                  <div>
+                    <span className="text-gray-400">Excluded evidence:</span>{" "}
+                    {evidenceReview.evidence_excluded.length}
+                  </div>
+                )}
+                {Array.isArray(evidenceReview.reasons) && evidenceReview.reasons.length > 0 && (
+                  <div>
+                    <span className="text-gray-400">Reasons:</span>{" "}
+                    {evidenceReview.reasons.join(", ")}
                   </div>
                 )}
               </div>

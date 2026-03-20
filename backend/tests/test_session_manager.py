@@ -175,6 +175,56 @@ class TestSessionSummaryHelpers:
         assert "Workflow reason: approval required before publish" in rendered
         assert "outputs/generated/summarize_qc/qa_report.json" in rendered
 
+    def test_format_messages_for_summary_includes_tool_artifacts_and_evidence_review_markers(self):
+        rendered = format_messages_for_summary(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "tool": "evidence_review_gate",
+                            "input": "What is the evidence for TP53 stress response?",
+                            "output": "Evidence review is required before answering this biology request.",
+                            "result": {
+                                "warnings": ["evidence_review_required"],
+                                "artifact_refs": [],
+                                "structured_payload": {
+                                    "requires_review": True,
+                                    "reasons": ["biology-signal", "factual-biology-question"],
+                                },
+                            },
+                        },
+                        {
+                            "tool": "evidence_review",
+                            "input": '{"question":"What is the evidence for TP53 stress response?"}',
+                            "output": "Reviewed 1 evidence card(s); support status: supported; confidence: medium.",
+                            "result": {
+                                "warnings": [],
+                                "artifact_refs": [
+                                    {
+                                        "artifact_type": "evidence_review",
+                                        "path": "artifacts/evidence-review/2026-03-20/run-20260320T210000Z-deadbeef/evidence_review.json",
+                                    }
+                                ],
+                                "structured_payload": {
+                                    "question": "What is the evidence for TP53 stress response?",
+                                    "review_status": "supported",
+                                    "unsupported_claims_present": False,
+                                },
+                            },
+                        },
+                    ],
+                }
+            ]
+        )
+
+        assert "Tool warning: evidence_review_required" in rendered
+        assert "Tool artifact: artifacts/evidence-review/2026-03-20/" in rendered
+        assert "Evidence review required: yes" in rendered
+        assert "Evidence review status: supported" in rendered
+        assert "Evidence review question: What is the evidence for TP53 stress response?" in rendered
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # create / basic CRUD

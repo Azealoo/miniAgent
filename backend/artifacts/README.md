@@ -29,6 +29,7 @@ Each run directory reserves these top-level locations:
 - `workflow_plan.json`
 - `compliance_report.json`
 - `evidence_card.yaml`
+- `evidence_review.json`
 - `protocol_run.yaml`
 - `qa_report.json`
 - `prov.json`

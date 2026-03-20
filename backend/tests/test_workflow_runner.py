@@ -1,5 +1,6 @@
 """Tests for the internal DAG workflow runner MVP."""
 
+import importlib.util
 import json
 import shutil
 import shlex
@@ -11,7 +12,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from artifacts import load_artifact_document, resolve_artifact_path  # noqa: E402
+from artifacts import ArtifactReference, load_artifact_document, resolve_artifact_path  # noqa: E402
 from artifacts.public_urls import public_raw_file_url  # noqa: E402
 from artifacts.registry import rebuild_artifact_registry  # noqa: E402
 from artifacts.schema_validation import validate_biocompute_payload_against_reference_schemas  # noqa: E402
@@ -3510,6 +3511,87 @@ def materialize_terminal_report_bundle(inputs, _context):
             )
         )["value"]
         assert manifest_payload["literal_note"] == "literal-note-preserved"
+
+    def test_rnaseq_report_bundle_links_related_evidence_reviews(self, tmp_path):
+        module_spec = importlib.util.spec_from_file_location(
+            "bioapex_test_rnaseq_qc_de",
+            REPO_ROOT / "workflows" / "runners" / "rnaseq_qc_de.py",
+        )
+        assert module_spec is not None
+        assert module_spec.loader is not None
+        rnaseq_runner = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(rnaseq_runner)
+
+        manifest = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "dataset_manifest.yaml")
+        workflow_run = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "run.json")
+        evidence_review_path = (
+            "artifacts/evidence-review/2026-03-20/"
+            "run-20260320T210000Z-feedface/evidence_review.json"
+        )
+        workflow_run.related_artifacts.append(
+            ArtifactReference.model_validate(
+                {
+                    "artifact_type": "evidence_review",
+                    "path": evidence_review_path,
+                    "id": "evidence-review-run-20260320t210000z-feedface",
+                    "run_id": "run-20260320T210000Z-feedface",
+                }
+            )
+        )
+
+        run_relpath = Path("artifacts/rnaseq-qc-de/2026-03-20/run-20260320T220000Z-deadbeef")
+        run_dir = tmp_path / run_relpath
+        run_dir.mkdir(parents=True, exist_ok=True)
+        context = SimpleNamespace(
+            base_dir=tmp_path,
+            run_dir=run_dir,
+            relative_run_dir=run_relpath.as_posix(),
+            run_id="run-20260320T220000Z-deadbeef",
+            workflow_id="rnaseq_qc_de",
+            relative_path=lambda path: str(path),
+        )
+
+        outputs = rnaseq_runner._build_rnaseq_report_bundle_outputs(
+            context=context,
+            manifest_path="manifests/demo_dataset_manifest.yaml",
+            manifest=manifest,
+            workflow_run=workflow_run,
+            raw_qc_bundle={},
+            aggregated_qc_bundle={},
+            quantification_bundle={},
+            differential_expression_bundle={},
+            condition_field="condition",
+            baseline_condition="control",
+            comparison_condition="treated",
+            report_lifecycle_status="completed",
+        )
+
+        manifest_payload = outputs["report_bundle_manifest"]
+        assert manifest_payload["evidence_review_artifacts"] == [
+            {
+                "artifact_type": "evidence_review",
+                "path": evidence_review_path,
+                "id": "evidence-review-run-20260320t210000z-feedface",
+                "run_id": "run-20260320T210000Z-feedface",
+            }
+        ]
+        assert any(
+            artifact["artifact_type"] == "evidence_review"
+            and artifact["path"] == evidence_review_path
+            for artifact in manifest_payload["expected_artifacts"]
+        )
+        assert outputs["qa_report"]["related_artifacts"] == manifest_payload["evidence_review_artifacts"]
+        assert any(
+            artifact["artifact_type"] == "evidence_review"
+            and artifact["path"] == evidence_review_path
+            for artifact in outputs["qa_report"]["checklist_artifacts"]
+        )
+
+        report_bundle_markdown = (
+            run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
+        ).read_text(encoding="utf-8")
+        assert "Evidence review artifacts" in report_bundle_markdown
+        assert evidence_review_path in report_bundle_markdown
 
     def test_terminal_report_bundle_materializer_is_idempotent_when_resuming_final_run(self, tmp_path):
         module_name = _write_runner_module(

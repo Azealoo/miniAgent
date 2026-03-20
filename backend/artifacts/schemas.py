@@ -33,6 +33,7 @@ ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
     "provenance": "json",
     "biocompute": "json",
     "evidence_card": "yaml",
+    "evidence_review": "json",
     "entity_grounding": "json",
     "compliance_report": "json",
     "protocol_run": "yaml",
@@ -91,6 +92,7 @@ AssayType = Literal[
     "custom",
 ]
 EvidenceSourceDatabase = Literal["pubmed", "pmc", "uniprot", "ensembl", "doi", "custom"]
+EvidenceReviewStatus = Literal["supported", "mixed", "insufficient_evidence"]
 GroundedEntityType = Literal["gene", "protein", "transcript"]
 GroundedEntitySourceDatabase = Literal["ensembl", "uniprot", "ncbigene", "custom"]
 GroundingResultStatus = Literal["resolved", "ambiguous", "unresolved"]
@@ -2105,6 +2107,107 @@ class EvidenceCard(ArtifactDocument):
         return self
 
 
+class ExcludedEvidenceItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str
+    artifact: ArtifactReference | None = None
+    reason: str
+
+    @field_validator("evidence_id")
+    @classmethod
+    def _validate_evidence_id(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="evidence_id")
+
+    @field_validator("reason")
+    @classmethod
+    def _validate_reason(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="reason")
+
+
+class EvidenceReviewSourceFact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    statement: str
+    claim_id: str
+    stable_identifier: str
+    evidence: ArtifactReference
+    confidence: ConfidenceLevel
+
+    @field_validator("statement")
+    @classmethod
+    def _validate_statement(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="statement")
+
+    @field_validator("claim_id")
+    @classmethod
+    def _validate_claim_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="claim_id")
+
+    @field_validator("stable_identifier")
+    @classmethod
+    def _validate_stable_identifier(cls, value: str) -> str:
+        return _require_prefixed_identifier(value, field_name="stable_identifier")
+
+
+class EvidenceReviewConclusion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    statement: str
+    support_status: EvidenceReviewStatus
+    confidence: ConfidenceLevel
+    supporting_evidence: list[ArtifactReference] = Field(default_factory=list)
+    limitation_notes: list[str] = Field(default_factory=list)
+    conflict_notes: list[str] = Field(default_factory=list)
+
+    @field_validator("statement")
+    @classmethod
+    def _validate_statement(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="statement")
+
+    @field_validator("limitation_notes", "conflict_notes")
+    @classmethod
+    def _validate_note_lists(cls, value: list[str], info) -> list[str]:
+        return _clean_unique_text_list(value, field_name=info.field_name)
+
+
+class EvidenceReviewArtifact(ArtifactDocument):
+    artifact_type: Literal["evidence_review"] = "evidence_review"
+    review_question: str
+    review_status: EvidenceReviewStatus
+    confidence: ConfidenceLevel
+    evidence_included: list[ArtifactReference] = Field(default_factory=list)
+    evidence_excluded: list[ExcludedEvidenceItem] = Field(default_factory=list)
+    limitations: list[str] = Field(min_length=1)
+    unresolved_conflicts: list[str] = Field(default_factory=list)
+    source_facts: list[EvidenceReviewSourceFact] = Field(default_factory=list)
+    synthesized_conclusions: list[EvidenceReviewConclusion] = Field(min_length=1)
+    unsupported_claims_present: bool = False
+
+    @field_validator("review_question")
+    @classmethod
+    def _validate_review_question(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="review_question")
+
+    @field_validator("limitations", "unresolved_conflicts")
+    @classmethod
+    def _validate_text_lists(cls, value: list[str], info) -> list[str]:
+        return _clean_unique_text_list(value, field_name=info.field_name)
+
+    @model_validator(mode="after")
+    def _validate_review_state(self) -> "EvidenceReviewArtifact":
+        if self.review_status == "supported" and not self.evidence_included:
+            raise ValueError("Supported evidence reviews must include at least one evidence artifact.")
+        expected_unsupported = self.review_status != "supported"
+        if self.unsupported_claims_present != expected_unsupported:
+            raise ValueError(
+                "unsupported_claims_present must be true when review_status is not 'supported'."
+            )
+        if self.evidence_included and not self.source_facts:
+            raise ValueError("Evidence reviews with included evidence must record source_facts.")
+        return self
+
+
 class EntityGroundingArtifact(ArtifactDocument):
     artifact_type: Literal["entity_grounding"] = "entity_grounding"
     input_mentions: list[str] = Field(min_length=1)
@@ -2489,6 +2592,7 @@ ArtifactModel = (
     | ProvenanceArtifact
     | BioComputeArtifact
     | EvidenceCard
+    | EvidenceReviewArtifact
     | EntityGroundingArtifact
     | ComplianceReport
     | ProtocolRun
@@ -2509,6 +2613,7 @@ _ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
     "provenance": ProvenanceArtifact,
     "biocompute": BioComputeArtifact,
     "evidence_card": EvidenceCard,
+    "evidence_review": EvidenceReviewArtifact,
     "entity_grounding": EntityGroundingArtifact,
     "compliance_report": ComplianceReport,
     "protocol_run": ProtocolRun,

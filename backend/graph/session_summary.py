@@ -181,6 +181,55 @@ def format_messages_for_summary(messages: Sequence[dict]) -> str:
             if tool_output:
                 parts.append(f"Tool output: {tool_output}")
 
+            tool_result = call.get("result")
+            if isinstance(tool_result, dict):
+                warnings = tool_result.get("warnings")
+                if isinstance(warnings, list):
+                    for warning in warnings:
+                        warning_text = _prepare_message_text(str(warning).strip(), limit=200)
+                        if warning_text:
+                            parts.append(f"Tool warning: {warning_text}")
+
+                artifact_refs = tool_result.get("artifact_refs")
+                if isinstance(artifact_refs, list):
+                    for artifact_ref in artifact_refs:
+                        if not isinstance(artifact_ref, dict):
+                            continue
+                        artifact_ref_path = _prepare_message_text(
+                            str(artifact_ref.get("path", "")).strip(),
+                            limit=600,
+                        )
+                        if artifact_ref_path:
+                            parts.append(f"Tool artifact: {artifact_ref_path}")
+
+                structured_payload = tool_result.get("structured_payload")
+                if isinstance(structured_payload, dict):
+                    review_status = _prepare_message_text(
+                        str(structured_payload.get("review_status", "")).strip(),
+                        limit=200,
+                    )
+                    if review_status:
+                        parts.append(f"Evidence review status: {review_status}")
+                    review_question = _prepare_message_text(
+                        str(structured_payload.get("question", "")).strip(),
+                        limit=400,
+                    )
+                    if review_question:
+                        parts.append(f"Evidence review question: {review_question}")
+                    requires_review = structured_payload.get("requires_review")
+                    if isinstance(requires_review, bool):
+                        parts.append(
+                            f"Evidence review required: {'yes' if requires_review else 'no'}"
+                        )
+                    unsupported_claims_present = structured_payload.get(
+                        "unsupported_claims_present"
+                    )
+                    if isinstance(unsupported_claims_present, bool):
+                        parts.append(
+                            "Unsupported claims present: "
+                            f"{'yes' if unsupported_claims_present else 'no'}"
+                        )
+
         workflow_events = message.get("workflow_events") or []
         for workflow_index, event in enumerate(workflow_events, start=1):
             event_type = str(event.get("type", "workflow_event")).strip() or "workflow_event"

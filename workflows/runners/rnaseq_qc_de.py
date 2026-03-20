@@ -1631,6 +1631,7 @@ def _render_rnaseq_report_bundle(
     report_manifest_path: str,
     provenance_exports: Sequence[str],
     canonical_artifacts_by_type: Mapping[str, Mapping[str, Any]],
+    evidence_review_artifacts: Sequence[Mapping[str, Any]],
     missing_artifacts: Sequence[Mapping[str, Any]],
     recommendations: Sequence[str],
 ) -> str:
@@ -1669,6 +1670,11 @@ def _render_rnaseq_report_bundle(
     canonical_normalized_count_matrix_ref = canonical_artifacts_by_type.get("normalized_count_matrix", {})
     canonical_de_results_ref = canonical_artifacts_by_type.get("differential_expression_results", {})
     canonical_de_run_ref = canonical_artifacts_by_type.get("differential_expression_run", {})
+    evidence_review_paths = [
+        str(item.get("path"))
+        for item in evidence_review_artifacts
+        if isinstance(item, Mapping) and isinstance(item.get("path"), str)
+    ]
     lines = [
         f"# RNA-seq Report Bundle for {study_name}",
         "",
@@ -1704,6 +1710,7 @@ def _render_rnaseq_report_bundle(
         f"- DE results TSV: `{differential_expression_bundle.get('results_path', 'n/a')}`",
         f"- DE run artifact: `{canonical_de_run_ref.get('path', 'n/a')}`",
         f"- Diagnostic plots: `{', '.join(plot_paths) if plot_paths else 'n/a'}`",
+        f"- Evidence review artifacts: `{', '.join(evidence_review_paths) if evidence_review_paths else 'n/a'}`",
         "",
         "## Differential Expression Summary",
         f"- Tested genes: `{de_summary.get('tested_gene_count', 'n/a')}`",
@@ -1787,6 +1794,10 @@ def _build_rnaseq_report_bundle_outputs(
         artifact["artifact_type"]: artifact for artifact in canonical_output_artifacts
     }
     workflow_run_ref = _canonical_artifact_ref(context, "workflow_run")
+    evidence_review_artifacts = _linked_workflow_artifacts(
+        workflow_run,
+        artifact_type="evidence_review",
+    )
     supplementary_generated_artifacts = _filter_artifacts_excluding_types(
         generated_artifacts,
         excluded_artifact_types=set(_REPORT_BUNDLE_WORKFLOW_OUTPUT_ARTIFACT_TYPES),
@@ -1838,6 +1849,7 @@ def _build_rnaseq_report_bundle_outputs(
             report_manifest_path=report_manifest_path,
             provenance_exports=provenance_exports,
             canonical_artifacts_by_type=canonical_artifacts_by_type,
+            evidence_review_artifacts=evidence_review_artifacts,
             missing_artifacts=missing_artifacts,
             recommendations=recommendations,
         ),
@@ -1852,6 +1864,7 @@ def _build_rnaseq_report_bundle_outputs(
             workflow_run_ref,
             *canonical_output_artifacts,
             *supplementary_generated_artifacts,
+            *evidence_review_artifacts,
         ]
     )
     overall_status = _report_bundle_qa_status(
@@ -1878,10 +1891,12 @@ def _build_rnaseq_report_bundle_outputs(
             "workflow_run_path": workflow_run_ref["path"],
             "report_markdown_path": report_bundle_relpath,
             "provenance_exports": provenance_exports,
+            "evidence_review_artifacts": evidence_review_artifacts,
             "expected_artifacts": [
                 workflow_run_ref,
                 *canonical_output_artifacts,
                 *supplementary_generated_artifacts,
+                *evidence_review_artifacts,
                 {
                     "artifact_type": "report_bundle",
                     "path": report_bundle_relpath,
@@ -1897,6 +1912,7 @@ def _build_rnaseq_report_bundle_outputs(
             "next_actions": recommendations,
             "notes": [
                 "The report bundle links the canonical workflow run record and any stable workflow outputs that were actually materialized for this run.",
+                "Linked evidence-review artifacts are carried forward when available so downstream QA and report consumers can inspect literature-grounded claim support directly from the bundle.",
                 "Blocked or failed runs still emit a partial report bundle so users can inspect available artifacts and missing downstream outputs without reading the raw run record.",
             ],
         },
@@ -1910,6 +1926,7 @@ def _build_rnaseq_report_bundle_outputs(
             "missing_artifacts": missing_artifacts,
             "recommended_remediation": recommendations,
             "checklist_artifacts": checklist_artifacts,
+            "related_artifacts": evidence_review_artifacts,
         },
     }
 
@@ -2438,6 +2455,20 @@ def _dedupe_artifacts(artifacts: Sequence[Mapping[str, Any]]) -> list[dict[str, 
         seen.add(key)
         deduped.append(dict(artifact))
     return deduped
+
+
+def _linked_workflow_artifacts(
+    workflow_run: WorkflowRun,
+    *,
+    artifact_type: str,
+) -> list[dict[str, Any]]:
+    return _dedupe_artifacts(
+        [
+            ref.model_dump(mode="json")
+            for ref in [*workflow_run.inputs, *workflow_run.outputs, *workflow_run.related_artifacts]
+            if ref.artifact_type == artifact_type
+        ]
+    )
 
 
 def _filter_artifacts_excluding_types(

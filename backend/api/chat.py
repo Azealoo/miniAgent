@@ -48,6 +48,15 @@ def _fire_and_forget(coro) -> None:
 _MAX_MESSAGE_LEN = 32_000  # ~8 k tokens; prevents context blowout and large session files
 
 
+def _evidence_review_required_response(message: str) -> str:
+    return (
+        "Evidence review is required before BioAPEX can provide a substantive answer to this "
+        "biology request. No reviewed evidence output was completed in this turn, so unsupported "
+        "claims are being withheld.\n\n"
+        f"Request requiring review: {message.strip()}"
+    )
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str
@@ -95,6 +104,11 @@ async def chat(request: ChatRequest):
             CompliancePreflightInput,
             run_compliance_preflight,
         )
+        from evidence.review_gate import (
+            EVIDENCE_REVIEW_GATE_TOOL_NAME,
+            EvidenceReviewGateInput,
+            run_evidence_review_gate,
+        )
 
         # Per-request accumulators
         segments: list[dict] = []          # [{content, tool_calls, workflow_events}]
@@ -103,6 +117,10 @@ async def chat(request: ChatRequest):
         current_workflow_events: list[dict] = []
         pending_tools: dict[str, dict] = {}  # run_id → {tool, input}
         user_msg_saved = False              # guard: save user message exactly once
+        review_required = False
+        review_completed = False
+        buffered_pre_review_tokens: list[str] = []
+        agent_history = list(history)
 
         def _flush_segment() -> None:
             content = "".join(current_content)
@@ -255,6 +273,51 @@ async def chat(request: ChatRequest):
                     yield payload
                 return
 
+            gate = run_evidence_review_gate(
+                EvidenceReviewGateInput(
+                    user_message=request.message,
+                    attached_identifiers=request.attached_identifiers,
+                    selected_workflow=request.selected_workflow,
+                )
+            )
+            gate_run_id = f"{EVIDENCE_REVIEW_GATE_TOOL_NAME}:{request.session_id}"
+            pending_tools[gate_run_id] = {
+                "tool": EVIDENCE_REVIEW_GATE_TOOL_NAME,
+                "input": gate.tool_input,
+            }
+            yield _sse(
+                {
+                    "type": "tool_start",
+                    "tool": EVIDENCE_REVIEW_GATE_TOOL_NAME,
+                    "input": gate.tool_input,
+                    "run_id": gate_run_id,
+                }
+            )
+            started = pending_tools.pop(
+                gate_run_id,
+                {"tool": EVIDENCE_REVIEW_GATE_TOOL_NAME, "input": gate.tool_input},
+            )
+            gate_call = {
+                "tool": started["tool"],
+                "input": started["input"],
+                "output": gate.tool_summary,
+                "run_id": gate_run_id,
+                "result": gate.tool_result,
+            }
+            current_tool_calls.append(gate_call)
+            yield _sse(
+                {
+                    "type": "tool_end",
+                    "tool": EVIDENCE_REVIEW_GATE_TOOL_NAME,
+                    "output": gate.tool_summary,
+                    "run_id": gate_run_id,
+                    "result": gate.tool_result,
+                }
+            )
+            review_required = gate.requires_review
+            if gate.system_message:
+                agent_history = agent_history + [{"role": "system", "content": gate.system_message}]
+
             if request.selected_workflow:
                 prepared_workflow = prepare_selected_workflow_run(
                     agent_manager.base_dir,
@@ -319,7 +382,7 @@ async def chat(request: ChatRequest):
                     yield payload
                 return
 
-            async for ev in agent_manager.astream(request.message, history):
+            async for ev in agent_manager.astream(request.message, agent_history):
                 t = ev["type"]
 
                 if t == "retrieval":
@@ -332,8 +395,11 @@ async def chat(request: ChatRequest):
                     )
 
                 elif t == "token":
-                    current_content.append(ev["content"])
-                    yield _sse({"type": "token", "content": ev["content"]})
+                    if review_required and not review_completed:
+                        buffered_pre_review_tokens.append(ev["content"])
+                    else:
+                        current_content.append(ev["content"])
+                        yield _sse({"type": "token", "content": ev["content"]})
 
                 elif t == "tool_start":
                     run_id = ev.get("run_id", ev["tool"])
@@ -368,6 +434,9 @@ async def chat(request: ChatRequest):
                     if ev.get("result") is not None:
                         payload["result"] = ev["result"]
                     yield _sse(payload)
+                    if ev["tool"] == "evidence_review":
+                        review_completed = True
+                        buffered_pre_review_tokens.clear()
 
                 elif is_workflow_stream_event_type(t):
                     workflow_event = normalize_workflow_stream_event(ev)
@@ -375,10 +444,26 @@ async def chat(request: ChatRequest):
                     yield _sse(workflow_event)
 
                 elif t == "new_response":
-                    _flush_segment()
-                    yield _sse({"type": "new_response"})
+                    if review_required and not review_completed:
+                        buffered_pre_review_tokens.clear()
+                    else:
+                        _flush_segment()
+                        yield _sse({"type": "new_response"})
 
                 elif t == "done":
+                    if review_required and not review_completed:
+                        fallback = _evidence_review_required_response(request.message)
+                        current_content.append(fallback)
+                        yield _sse({"type": "token", "content": fallback})
+                    elif review_required and review_completed and not any(
+                        segment["content"] for segment in segments
+                    ) and not current_content:
+                        post_review_note = (
+                            "Evidence review completed for this turn. Inspect the tool trace for "
+                            "the structured review outputs and artifact refs."
+                        )
+                        current_content.append(post_review_note)
+                        yield _sse({"type": "token", "content": post_review_note})
                     for payload in await _finalize_turn():
                         yield payload
 
