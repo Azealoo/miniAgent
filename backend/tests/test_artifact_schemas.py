@@ -505,6 +505,7 @@ class TestArtifactSchemas:
     def test_example_artifacts_validate_from_disk(self):
         expected_types = {
             "dataset_manifest.yaml": DatasetManifest,
+            "rnaseq_dataset_manifest.yaml": DatasetManifest,
             "run.json": WorkflowRun,
             "evidence_card.yaml": EvidenceCard,
             "compliance_report.json": ComplianceReport,

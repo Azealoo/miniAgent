@@ -1,0 +1,38 @@
+schema_version: "1.0.0"
+artifact_type: dataset_manifest
+id: ds-bulk-rnaseq-demo-v1
+run_id: run-20260319T200000Z-14aa00ff
+created_at: 2026-03-19T20:00:00Z
+source_workflow: dataset-intake
+related_artifacts: []
+assay_type: bulk_rna_seq
+organism: homo_sapiens
+reference_build: grch38
+sample_sheet_path: data/rnaseq/sample_sheet.tsv
+privacy_classification: controlled
+design:
+  study_name: interferon-rnaseq-pilot
+  experiment_type: bulk_rna_seq
+  condition_summary: Bulk RNA-seq pilot comparing treated and control libraries for differential expression.
+  analysis_kind: comparative
+  condition_fields:
+    - condition
+  batch_fields:
+    - batch
+  replicate_structure: 3 control and 3 treated libraries
+  timepoints:
+    - end_point
+  factors:
+    - condition
+    - batch
+source_files:
+  - data/rnaseq/counts.tsv
+  - data/rnaseq/metadata.tsv
+assay_extensions:
+  workflow_stub:
+    raw_qc:
+      min_per_base_quality: 32.4
+      total_reads_millions: 38.1
+    aggregated_qc:
+      fastqc_pass_rate: 1.0
+      libraries_aggregated: 6

@@ -1,12 +1,15 @@
 """Tests for typed workflow spec contracts."""
 
+import json
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from artifacts import load_artifact_document  # noqa: E402
 from workflow_specs import (  # noqa: E402
     WORKFLOW_SPEC_VERSION,
     WorkflowSpecDocument,
@@ -17,6 +20,7 @@ from workflow_specs import (  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WORKFLOWS_DIR = REPO_ROOT / "workflows"
+EXAMPLES_DIR = REPO_ROOT / "backend" / "artifacts" / "examples"
 
 
 def _base_payload() -> dict:
@@ -181,6 +185,72 @@ class TestWorkflowSpecs:
             document = load_workflow_spec(path)
             assert isinstance(document, WorkflowSpecDocument)
             assert document.schema_version == WORKFLOW_SPEC_VERSION
+
+    def test_authored_rnaseq_workflow_skeleton_declares_required_stages_and_outputs(self):
+        document = load_workflow_spec(WORKFLOWS_DIR / "rnaseq_qc_de.yaml")
+
+        assert document.workflow_id == "rnaseq_qc_de"
+        assert [step.id for step in document.steps] == [
+            "dataset_intake",
+            "raw_qc",
+            "aggregated_qc",
+            "quantification",
+            "differential_expression",
+            "report_bundle",
+        ]
+        assert [definition.name for definition in document.required_inputs] == [
+            "dataset_manifest",
+            "condition_field",
+            "baseline_condition",
+            "comparison_condition",
+        ]
+        assert [output.name for output in document.outputs] == [
+            "quantification_bundle",
+            "differential_expression_bundle",
+            "report_bundle_manifest",
+            "qa_report",
+        ]
+        assert [hook.stage for hook in document.compliance_hooks] == ["before_execution"]
+        assert {gate.id for gate in document.qc_gates} == {
+            "dataset-manifest-required",
+            "raw-qc-floor",
+            "aggregated-qc-floor",
+        }
+        assert document.qc_gates[1].policy is not None
+        assert document.qc_gates[1].policy.required_upstream_tools == ["fastqc"]
+        assert document.qc_gates[1].policy.checks[0].metric_name == "min_per_base_quality"
+        assert document.qc_gates[2].policy is not None
+        assert document.qc_gates[2].policy.required_upstream_tools == ["fastqc", "multiqc"]
+        assert document.qc_gates[2].policy.checks[0].metric_name == "fastqc_pass_rate"
+
+    def test_rnaseq_example_manifest_and_workflow_plan_align_with_authored_contract(self):
+        manifest = load_artifact_document(EXAMPLES_DIR / "rnaseq_dataset_manifest.yaml")
+        workflow_plan = json.loads((EXAMPLES_DIR / "rnaseq_workflow_plan.json").read_text(encoding="utf-8"))
+        workflow_spec = yaml.safe_load((WORKFLOWS_DIR / "rnaseq_qc_de.yaml").read_text(encoding="utf-8"))
+
+        assert manifest.assay_type == "bulk_rna_seq"
+        assert manifest.design.analysis_kind == "comparative"
+        assert manifest.assay_extensions["workflow_stub"]["raw_qc"]["min_per_base_quality"] == 32.4
+        assert manifest.assay_extensions["workflow_stub"]["aggregated_qc"]["fastqc_pass_rate"] == 1.0
+
+        assert workflow_plan["artifact_type"] == "workflow_plan"
+        assert workflow_plan["workflow_id"] == workflow_spec["workflow_id"] == "rnaseq_qc_de"
+        assert [step["id"] for step in workflow_plan["steps"]] == [
+            "dataset_intake",
+            "compliance_preflight",
+            "raw_qc",
+            "aggregated_qc",
+            "quantification",
+            "differential_expression",
+            "report_bundle",
+        ]
+        assert workflow_plan["inputs"]["dataset_manifest"] == "backend/artifacts/examples/rnaseq_dataset_manifest.yaml"
+        assert workflow_plan["expected_outputs"][1]["path"].endswith(
+            "outputs/generated/differential-expression/differential_expression_bundle.json"
+        )
+        assert workflow_plan["expected_outputs"][2]["path"].endswith(
+            "outputs/generated/report-bundle/report_bundle_manifest.json"
+        )
 
     def test_step_output_bindings_require_declared_prerequisite(self):
         payload = _base_payload()

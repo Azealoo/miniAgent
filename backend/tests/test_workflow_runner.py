@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from artifacts import load_artifact_document, resolve_artifact_path  # noqa: E402
@@ -84,6 +86,80 @@ def _stage_authored_rna_seq_workflow(base_dir: Path) -> str:
         "data/norman/sample_sheet.tsv",
         "data/norman/counts.h5ad",
         "data/norman/metadata.tsv",
+    ):
+        target = base_dir / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("placeholder\n", encoding="utf-8")
+    return manifest_relpath
+
+
+def _stage_authored_rnaseq_qc_de_workflow(base_dir: Path) -> Path:
+    workflows_dir = base_dir / "workflows"
+    runners_dir = workflows_dir / "runners"
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+    runners_dir.mkdir(parents=True, exist_ok=True)
+    (workflows_dir / "__init__.py").write_text('"""Temporary workflow package for tests."""\n', encoding="utf-8")
+    (runners_dir / "__init__.py").write_text('"""Temporary workflow runners for tests."""\n', encoding="utf-8")
+    shutil.copy2(REPO_ROOT / "workflows" / "rnaseq_qc_de.yaml", workflows_dir / "rnaseq_qc_de.yaml")
+    shutil.copy2(REPO_ROOT / "workflows" / "runners" / "rnaseq_qc_de.py", runners_dir / "rnaseq_qc_de.py")
+    return workflows_dir / "rnaseq_qc_de.yaml"
+
+
+def _write_bulk_rnaseq_manifest(
+    base_dir: Path,
+    *,
+    min_per_base_quality: float = 32.0,
+    fastqc_pass_rate: float = 1.0,
+) -> str:
+    manifest_relpath = "manifests/rnaseq_dataset_manifest.yaml"
+    manifest_path = base_dir / manifest_relpath
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": SCHEMA_PACK_VERSION,
+        "artifact_type": "dataset_manifest",
+        "id": "ds-rnaseq-skeleton-v1",
+        "run_id": "run-20260319T200000Z-14aa00ff",
+        "created_at": "2026-03-19T20:00:00Z",
+        "source_workflow": "dataset-intake",
+        "related_artifacts": [],
+        "assay_type": "bulk_rna_seq",
+        "organism": "homo_sapiens",
+        "reference_build": "grch38",
+        "sample_sheet_path": "data/rnaseq/sample_sheet.tsv",
+        "privacy_classification": "public",
+        "design": {
+            "study_name": "interferon-rnaseq-pilot",
+            "experiment_type": "bulk_rna_seq",
+            "condition_summary": "Bulk RNA-seq pilot comparing treated and control libraries.",
+            "analysis_kind": "comparative",
+            "condition_fields": ["condition"],
+            "batch_fields": ["batch"],
+            "replicate_structure": "3 control and 3 treated libraries",
+            "timepoints": ["end_point"],
+            "factors": ["condition", "batch"],
+        },
+        "source_files": [
+            "data/rnaseq/counts.tsv",
+            "data/rnaseq/metadata.tsv",
+        ],
+        "assay_extensions": {
+            "workflow_stub": {
+                "raw_qc": {
+                    "min_per_base_quality": min_per_base_quality,
+                    "total_reads_millions": 38.0,
+                },
+                "aggregated_qc": {
+                    "fastqc_pass_rate": fastqc_pass_rate,
+                    "libraries_aggregated": 6,
+                },
+            }
+        },
+    }
+    manifest_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    for relpath in (
+        "data/rnaseq/sample_sheet.tsv",
+        "data/rnaseq/counts.tsv",
+        "data/rnaseq/metadata.tsv",
     ):
         target = base_dir / relpath
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1681,6 +1757,97 @@ def launch(inputs, _context):
         assert result.run.workflow.slug == "demo-workflow"
         workflow_run_record = next(record for record in snapshot.records if record.artifact_type == "workflow_run")
         assert workflow_run_record.status == "valid"
+
+    def test_authored_rnaseq_workflow_skeleton_runs_and_emits_declared_outputs(self, tmp_path):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(tmp_path)
+
+        result = InternalDAGRunner(tmp_path).run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+        )
+
+        assert result.run.lifecycle_status == "completed"
+        assert [step.status for step in result.run.steps] == [
+            "completed",
+            "completed",
+            "completed",
+            "completed",
+            "completed",
+            "completed",
+        ]
+        assert (result.run_dir / "outputs" / "generated" / "quantification" / "quantification_bundle.json").exists()
+        assert (
+            result.run_dir
+            / "outputs"
+            / "generated"
+            / "differential-expression"
+            / "differential_expression_bundle.json"
+        ).exists()
+        assert (result.run_dir / "outputs" / "generated" / "report-bundle" / "report_bundle_manifest.json").exists()
+        assert (result.run_dir / "qa_report.json").exists()
+
+        report_bundle_payload = json.loads(
+            (result.run_dir / "outputs" / "generated" / "report-bundle" / "report_bundle_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )["value"]
+        qa_report = load_artifact_document(result.run_dir / "qa_report.json")
+
+        assert any(
+            artifact["path"].endswith("outputs/generated/differential-expression/treated-vs-control.tsv")
+            for artifact in report_bundle_payload["expected_artifacts"]
+        )
+        assert any(
+            artifact["path"].endswith("outputs/generated/report-bundle/rnaseq_report_bundle.md")
+            for artifact in report_bundle_payload["expected_artifacts"]
+        )
+        assert qa_report.overall_status == "warning"
+        assert any(item.artifact_type == "count_matrix" for item in qa_report.missing_artifacts)
+        assert any(item.artifact_type == "report_bundle" for item in qa_report.missing_artifacts)
+        assert any(
+            item.expected_path is not None
+            and item.expected_path.endswith("outputs/generated/report-bundle/rnaseq_report_bundle.md")
+            for item in qa_report.missing_artifacts
+        )
+
+    def test_authored_rnaseq_workflow_skeleton_blocks_on_aggregated_qc_gate(self, tmp_path):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(tmp_path, fastqc_pass_rate=0.7)
+
+        events: list[dict] = []
+        result = InternalDAGRunner(tmp_path).run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+            event_callback=events.append,
+        )
+
+        assert result.run.lifecycle_status == "blocked"
+        assert result.run.qc_status == "failed"
+        assert [step.status for step in result.run.steps] == [
+            "completed",
+            "completed",
+            "completed",
+            "blocked",
+            "blocked",
+            "blocked",
+        ]
+        assert not (result.run_dir / "qa_report.json").exists()
+
+        blocked_event = next(event for event in events if event["type"] == "workflow_blocked")
+        assert blocked_event["blocking_source"] == "qc_gate"
+        assert blocked_event["stage"] == "after_step"
+        assert "fastqc_pass_rate" in blocked_event["reason"]
 
     def test_runner_does_not_materialize_publish_ready_artifacts_when_before_publish_blocks(self, tmp_path, monkeypatch):
         module_name = _write_runner_module(

@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "workflow_plan",
+  "run_id": "run-20260319T200500Z-14aa00ff",
+  "created_at": "2026-03-19T20:05:00Z",
+  "source_workflow": "rnaseq_qc_de",
+  "workflow_id": "rnaseq_qc_de",
+  "inputs": {
+    "dataset_manifest": "backend/artifacts/examples/rnaseq_dataset_manifest.yaml",
+    "condition_field": "condition",
+    "baseline_condition": "control",
+    "comparison_condition": "treated"
+  },
+  "steps": [
+    {
+      "id": "dataset_intake",
+      "name": "Dataset intake and manifest validation"
+    },
+    {
+      "id": "compliance_preflight",
+      "name": "Compliance preflight"
+    },
+    {
+      "id": "raw_qc",
+      "name": "Raw QC skeleton stage"
+    },
+    {
+      "id": "aggregated_qc",
+      "name": "Aggregated QC skeleton stage"
+    },
+    {
+      "id": "quantification",
+      "name": "Quantification planning skeleton stage"
+    },
+    {
+      "id": "differential_expression",
+      "name": "Differential expression planning skeleton stage"
+    },
+    {
+      "id": "report_bundle",
+      "name": "Report bundle skeleton stage"
+    }
+  ],
+  "expected_outputs": [
+    {
+      "name": "quantification_bundle",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/outputs/generated/quantification/quantification_bundle.json"
+    },
+    {
+      "name": "differential_expression_bundle",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/outputs/generated/differential-expression/differential_expression_bundle.json"
+    },
+    {
+      "name": "report_bundle_manifest",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/outputs/generated/report-bundle/report_bundle_manifest.json"
+    },
+    {
+      "name": "qa_report",
+      "path": "artifacts/rnaseq-qc-de/2026-03-19/run-20260319T200500Z-14aa00ff/qa_report.json"
+    }
+  ]
+}
