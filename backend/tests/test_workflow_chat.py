@@ -141,6 +141,27 @@ def test_materialize_blocked_workflow_run_persists_run_record(tmp_path):
     assert (tmp_path / blocked.result.artifact_relpath).exists()
 
     run_document = load_artifact_document(blocked.result.artifact_path)
+    export_manifest_path = tmp_path / blocked.result.artifact_relpath.replace(
+        "run.json",
+        "outputs/generated/eln-export/eln_export.json",
+    )
+    export_archive_path = tmp_path / blocked.result.artifact_relpath.replace(
+        "run.json",
+        "outputs/generated/eln-export/eln_export_bundle.tar.gz",
+    )
+    eln_export_document = load_artifact_document(export_manifest_path)
     assert run_document.lifecycle_status == "blocked"
     assert run_document.warnings == [prepared.blocking_reason]
+    assert run_document.eln_exports == [
+        export_manifest_path.relative_to(tmp_path).as_posix(),
+        export_archive_path.relative_to(tmp_path).as_posix(),
+    ]
+    assert export_manifest_path.exists()
+    assert export_archive_path.exists()
+    assert eln_export_document.workflow_run.path == blocked.result.artifact_relpath
+    assert {item.artifact_type for item in eln_export_document.missing_artifacts} >= {
+        "dataset_manifest",
+        "report_bundle_manifest",
+        "report_bundle",
+    }
     assert any(ref.artifact_type == "workflow_input_bundle" for ref in run_document.related_artifacts)

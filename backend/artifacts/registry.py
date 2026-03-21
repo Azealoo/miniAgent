@@ -43,6 +43,7 @@ _SCHEMA_ARTIFACT_TYPES = {
     "slurm_job",
     "provenance",
     "biocompute",
+    "eln_export",
     "evidence_card",
     "evidence_review",
     "claim_graph",
@@ -160,6 +161,13 @@ def _infer_artifact_type(
 
     if artifact_relative_path.parts[:2] == USER_INPUTS_DIR.parts:
         return "user_input"
+
+    if artifact_relative_path.parts[:3] == (*GENERATED_OUTPUTS_DIR.parts, "eln-export"):
+        if not is_dir and artifact_relative_path.name == "eln_export.json":
+            return "eln_export"
+        if not is_dir and artifact_relative_path.name == "eln_export_bundle.tar.gz":
+            return "eln_export_archive"
+        return "generated_output_group" if is_dir else "generated_output"
 
     if (
         artifact_relative_path.parts[:3] == (*GENERATED_OUTPUTS_DIR.parts, "reproducibility-drills")

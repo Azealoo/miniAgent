@@ -33,6 +33,7 @@ ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
     "slurm_job": "json",
     "provenance": "json",
     "biocompute": "json",
+    "eln_export": "json",
     "evidence_card": "yaml",
     "evidence_review": "json",
     "claim_graph": "json",
@@ -1338,6 +1339,7 @@ class WorkflowRun(ArtifactDocument):
     steps: list[WorkflowStepRecord] = Field(default_factory=list)
     provenance_exports: list[str] = Field(default_factory=list)
     biocompute_exports: list[str] = Field(default_factory=list)
+    eln_exports: list[str] = Field(default_factory=list)
     qc_policies: list[QCPolicyDefinition] = Field(default_factory=list)
     qc_policy_results: list[QCPolicyEvaluation] = Field(default_factory=list)
     qc_summary: str | None = None
@@ -1375,6 +1377,11 @@ class WorkflowRun(ArtifactDocument):
     @field_validator("biocompute_exports")
     @classmethod
     def _validate_biocompute_exports(cls, value: list[str]) -> list[str]:
+        return [_normalize_relative_path(item) for item in value]
+
+    @field_validator("eln_exports")
+    @classmethod
+    def _validate_eln_exports(cls, value: list[str]) -> list[str]:
         return [_normalize_relative_path(item) for item in value]
 
     @field_validator("qc_summary")
@@ -2227,6 +2234,161 @@ class BioComputeArtifact(ArtifactDocument):
     @classmethod
     def _validate_usability_domain(cls, value: list[str]) -> list[str]:
         return [_require_non_empty(item, field_name="usability_domain") for item in value]
+
+
+class ELNExportIncludedArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: str
+    artifact_type: str
+    source_path: str
+    package_path: str
+    id: str | None = None
+    run_id: str | None = None
+    sha256: str
+    note: str | None = None
+
+    @field_validator("role", "artifact_type")
+    @classmethod
+    def _validate_identifiers(cls, value: str, info) -> str:
+        return _require_normalized_identifier(value, field_name=info.field_name)
+
+    @field_validator("source_path", "package_path")
+    @classmethod
+    def _validate_paths(cls, value: str, info) -> str:
+        return _normalize_relative_path(value)
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_normalized_identifier(value, field_name="id")
+
+    @field_validator("run_id")
+    @classmethod
+    def _validate_run_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not is_valid_run_id(value):
+            raise ValueError(f"Invalid run_id format: {value!r}")
+        return value
+
+    @field_validator("sha256")
+    @classmethod
+    def _validate_sha256(cls, value: str) -> str:
+        cleaned = _require_non_empty(value, field_name="sha256").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", cleaned):
+            raise ValueError("sha256 must be a 64-character lowercase hexadecimal digest.")
+        return cleaned
+
+    @field_validator("note")
+    @classmethod
+    def _validate_note(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="note")
+
+
+class ELNExportMissingArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_type: str
+    expected_source_path: str | None = None
+    expected_package_path: str
+    reason: str
+
+    @field_validator("artifact_type")
+    @classmethod
+    def _validate_artifact_type(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="artifact_type")
+
+    @field_validator("expected_source_path", "expected_package_path")
+    @classmethod
+    def _validate_paths(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _normalize_relative_path(value)
+
+    @field_validator("reason")
+    @classmethod
+    def _validate_reason(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="reason")
+
+
+class ELNUnsupportedField(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    field_name: str
+    reason: str
+
+    @field_validator("field_name")
+    @classmethod
+    def _validate_field_name(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="field_name")
+
+    @field_validator("reason")
+    @classmethod
+    def _validate_reason(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="reason")
+
+
+class ELNExportArtifact(ArtifactDocument):
+    artifact_type: Literal["eln_export"] = "eln_export"
+    bundle_version: str
+    scope: Literal["workflow_run_bundle"] = "workflow_run_bundle"
+    package_root: str
+    workflow_version: str | None = None
+    lifecycle_status: WorkflowLifecycleStatus
+    qc_status: WorkflowQCStatus
+    workflow_run: ArtifactReference
+    dataset_manifest: ArtifactReference | None = None
+    report_bundle_manifest: ArtifactReference | None = None
+    report_bundle: ArtifactReference | None = None
+    protocol_run: ArtifactReference | None = None
+    provenance_exports: list[ArtifactReference] = Field(default_factory=list)
+    biocompute_exports: list[ArtifactReference] = Field(default_factory=list)
+    evidence_review_artifacts: list[ArtifactReference] = Field(default_factory=list)
+    included_artifacts: list[ELNExportIncludedArtifact] = Field(min_length=1)
+    missing_artifacts: list[ELNExportMissingArtifact] = Field(default_factory=list)
+    unsupported_fields: list[ELNUnsupportedField] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+    @field_validator("bundle_version")
+    @classmethod
+    def _validate_bundle_version(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="bundle_version")
+
+    @field_validator("package_root")
+    @classmethod
+    def _validate_package_root(cls, value: str) -> str:
+        return _normalize_relative_directory(value)
+
+    @field_validator("workflow_version")
+    @classmethod
+    def _validate_workflow_version(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="workflow_version")
+
+    @field_validator("notes")
+    @classmethod
+    def _validate_notes(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="note") for item in value]
+
+    @model_validator(mode="after")
+    def _validate_export_refs(self) -> "ELNExportArtifact":
+        if self.workflow_run.artifact_type != "workflow_run":
+            raise ValueError("ELN export workflow_run reference must point to a workflow_run artifact.")
+        if self.dataset_manifest is not None and self.dataset_manifest.artifact_type != "dataset_manifest":
+            raise ValueError("ELN export dataset_manifest reference must point to a dataset_manifest artifact.")
+        if self.report_bundle_manifest is not None and self.report_bundle_manifest.artifact_type != "report_bundle_manifest":
+            raise ValueError("ELN export report_bundle_manifest reference must point to a report_bundle_manifest artifact.")
+        if self.report_bundle is not None and self.report_bundle.artifact_type != "report_bundle":
+            raise ValueError("ELN export report_bundle reference must point to a report_bundle artifact.")
+        if self.protocol_run is not None and self.protocol_run.artifact_type != "protocol_run":
+            raise ValueError("ELN export protocol_run reference must point to a protocol_run artifact.")
+        return self
 
 
 class ExtractedClaim(BaseModel):
@@ -3670,6 +3832,7 @@ ArtifactModel = (
     | SlurmJobArtifact
     | ProvenanceArtifact
     | BioComputeArtifact
+    | ELNExportArtifact
     | EvidenceCard
     | EvidenceReviewArtifact
     | ClaimGraphArtifact
@@ -3695,6 +3858,7 @@ _ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
     "slurm_job": SlurmJobArtifact,
     "provenance": ProvenanceArtifact,
     "biocompute": BioComputeArtifact,
+    "eln_export": ELNExportArtifact,
     "evidence_card": EvidenceCard,
     "evidence_review": EvidenceReviewArtifact,
     "claim_graph": ClaimGraphArtifact,

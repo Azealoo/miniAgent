@@ -5,6 +5,7 @@ import json
 import shutil
 import shlex
 import sys
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,9 +13,10 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import artifacts.eln_export as eln_export_module  # noqa: E402
 from artifacts import ArtifactReference, load_artifact_document, resolve_artifact_path  # noqa: E402
 from artifacts.public_urls import public_raw_file_url  # noqa: E402
-from artifacts.registry import rebuild_artifact_registry  # noqa: E402
+from artifacts.registry import lookup_artifact_registry, rebuild_artifact_registry  # noqa: E402
 from artifacts.schema_validation import validate_biocompute_payload_against_reference_schemas  # noqa: E402
 from artifacts.schemas import SCHEMA_PACK_VERSION  # noqa: E402
 import workflow_runner as workflow_runner_module  # noqa: E402
@@ -3314,7 +3316,8 @@ def launch(inputs, _context):
             multiqc_executable=multiqc_executable,
         )
 
-        result = InternalDAGRunner(tmp_path).run(
+        runner = InternalDAGRunner(tmp_path)
+        result = runner.run(
             spec_path,
             {
                 "dataset_manifest": manifest_relpath,
@@ -3472,11 +3475,18 @@ def launch(inputs, _context):
         expected_biocompute_exports = [
             f"{result.run_dir.relative_to(tmp_path).as_posix()}/biocompute.json",
         ]
+        expected_eln_exports = [
+            f"{result.run_dir.relative_to(tmp_path).as_posix()}/outputs/generated/eln-export/eln_export.json",
+            f"{result.run_dir.relative_to(tmp_path).as_posix()}/outputs/generated/eln-export/eln_export_bundle.tar.gz",
+        ]
         provenance_payload = json.loads((result.run_dir / "prov.json").read_text(encoding="utf-8"))
         ro_crate_payload = json.loads(
             (result.run_dir / "ro-crate" / "ro-crate-metadata.json").read_text(encoding="utf-8")
         )
         biocompute_artifact = load_artifact_document(result.run_dir / "biocompute.json")
+        eln_export_artifact = load_artifact_document(
+            result.run_dir / "outputs" / "generated" / "eln-export" / "eln_export.json"
+        )
         content_hash_manifest = json.loads((result.run_dir / "content_hashes.json").read_text(encoding="utf-8"))
         report_bundle_markdown = (
             result.run_dir / "outputs" / "generated" / "report-bundle" / "rnaseq_report_bundle.md"
@@ -3551,9 +3561,12 @@ def launch(inputs, _context):
         assert any(ref.artifact_type == "differential_expression_run" for ref in result.run.related_artifacts)
         assert result.run.provenance_exports == expected_provenance_exports
         assert result.run.biocompute_exports == expected_biocompute_exports
+        assert result.run.eln_exports == expected_eln_exports
         assert (result.run_dir / "prov.json").exists()
         assert (result.run_dir / "ro-crate" / "ro-crate-metadata.json").exists()
         assert (result.run_dir / "biocompute.json").exists()
+        assert (result.run_dir / "outputs" / "generated" / "eln-export" / "eln_export.json").exists()
+        assert (result.run_dir / "outputs" / "generated" / "eln-export" / "eln_export_bundle.tar.gz").exists()
         assert any(
             artifact["artifact_type"] == "fastqc_run"
             for artifact in report_bundle_payload["expected_artifacts"]
@@ -3675,12 +3688,43 @@ def launch(inputs, _context):
         }
         assert "prov.json" in content_hash_manifest["hashes"]
         assert "ro-crate/ro-crate-metadata.json" in content_hash_manifest["hashes"]
+        assert "outputs/generated/eln-export/eln_export.json" not in content_hash_manifest["hashes"]
+        assert "outputs/generated/eln-export/eln_export_bundle.tar.gz" not in content_hash_manifest["hashes"]
         assert any(entry.get("@id") == "../prov.json" for entry in ro_crate_payload["@graph"])
         assert any(
             entry.get("@type") == "CreateAction"
             and entry.get("actionStatus") == "CompletedActionStatus"
             for entry in ro_crate_payload["@graph"]
         )
+        assert eln_export_artifact.artifact_type == "eln_export"
+        assert eln_export_artifact.bundle_version == "1.0.0"
+        assert eln_export_artifact.scope == "workflow_run_bundle"
+        assert eln_export_artifact.workflow_run.path.endswith("/run.json")
+        assert eln_export_artifact.report_bundle_manifest is not None
+        assert eln_export_artifact.report_bundle is not None
+        assert eln_export_artifact.provenance_exports[0].path == expected_provenance_exports[0]
+        assert eln_export_artifact.provenance_exports[1].path == expected_provenance_exports[1]
+        assert any(item.package_path.endswith("/run.json") for item in eln_export_artifact.included_artifacts)
+        assert any(
+            item.package_path.endswith("/outputs/generated/report-bundle/report_bundle_manifest.json")
+            for item in eln_export_artifact.included_artifacts
+        )
+        assert any(item.package_path.endswith("/prov.json") for item in eln_export_artifact.included_artifacts)
+        assert eln_export_artifact.missing_artifacts == []
+        assert eln_export_artifact.unsupported_fields[0].field_name == "vendor_specific_eln_metadata"
+        with tarfile.open(
+            result.run_dir / "outputs" / "generated" / "eln-export" / "eln_export_bundle.tar.gz",
+            "r:gz",
+        ) as archive:
+            archive_names = set(archive.getnames())
+        export_archive_lookup = lookup_artifact_registry(tmp_path, artifact_type="eln_export_archive")
+        assert "bioapex-eln-export/manifest.json" in archive_names
+        assert f"bioapex-eln-export/{expected_provenance_exports[0]}" in archive_names
+        assert f"bioapex-eln-export/{expected_provenance_exports[1]}" in archive_names
+        assert any(name.endswith("/outputs/generated/report-bundle/report_bundle_manifest.json") for name in archive_names)
+        assert any(name.endswith("/count_matrix.json") for name in archive_names)
+        assert export_archive_lookup.matched_count == 1
+        assert export_archive_lookup.records[0].path == expected_eln_exports[1]
         assert biocompute_artifact.type == "rna_seq_differential_expression"
         empirical_error = biocompute_artifact.error_domain.empirical_error[
             "urn:bioapex:biocompute:error:observed-run-state:1.0.0"
@@ -3749,6 +3793,38 @@ def launch(inputs, _context):
         assert differential_expression_metrics["minimum_condition_replicates"] == 3
         assert differential_expression_metrics["missing_expected_batch_fields"] == 0
         assert differential_expression_metrics["significant_gene_count"] >= 1
+
+    def test_authored_rnaseq_workflow_rematerializes_byte_stable_eln_export_on_resume(self, tmp_path):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        multiqc_executable = _write_fake_multiqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+            multiqc_executable=multiqc_executable,
+        )
+
+        runner = InternalDAGRunner(tmp_path)
+        first = runner.run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+        )
+        manifest_path = first.run_dir / "outputs" / "generated" / "eln-export" / "eln_export.json"
+        archive_path = first.run_dir / "outputs" / "generated" / "eln-export" / "eln_export_bundle.tar.gz"
+        first_manifest_bytes = manifest_path.read_bytes()
+        first_archive_bytes = archive_path.read_bytes()
+
+        resumed = runner.run(spec_path, run_dir=first.run_dir)
+
+        assert resumed.resumed is True
+        assert resumed.run.lifecycle_status == "completed"
+        assert manifest_path.read_bytes() == first_manifest_bytes
+        assert archive_path.read_bytes() == first_archive_bytes
 
     def test_authored_rnaseq_workflow_accepts_additional_report_bundle_checklists(self, tmp_path):
         spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
@@ -3931,6 +4007,62 @@ def launch(inputs, _context):
             f"{first.run_dir.relative_to(tmp_path).as_posix()}/biocompute.json",
         ]
         assert (first.run_dir / "biocompute.json").exists()
+        assert not any(warning.startswith(failure_prefix) for warning in resumed.run.warnings)
+
+    def test_authored_rnaseq_workflow_clears_failed_eln_export_paths_until_export_succeeds(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        multiqc_executable = _write_fake_multiqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+            multiqc_executable=multiqc_executable,
+        )
+        failure_prefix = "ELN export could not be materialized deterministically:"
+
+        real_replace = eln_export_module.os.replace
+
+        def _failing_archive_publish(src, dst):
+            dst_path = Path(dst)
+            if dst_path.name == "eln_export_bundle.tar.gz":
+                raise RuntimeError("simulated ELN archive publish failure")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(eln_export_module.os, "replace", _failing_archive_publish)
+        runner = InternalDAGRunner(tmp_path)
+        first = runner.run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+        )
+
+        assert first.run.lifecycle_status == "completed"
+        assert first.run.eln_exports == []
+        assert not (first.run_dir / "outputs" / "generated" / "eln-export" / "eln_export.json").exists()
+        assert not (first.run_dir / "outputs" / "generated" / "eln-export" / "eln_export_bundle.tar.gz").exists()
+        assert lookup_artifact_registry(tmp_path, artifact_type="eln_export").matched_count == 0
+        assert lookup_artifact_registry(tmp_path, artifact_type="eln_export_archive").matched_count == 0
+        assert any(warning.startswith(failure_prefix) for warning in first.run.warnings)
+
+        monkeypatch.setattr(eln_export_module.os, "replace", real_replace)
+        resumed = runner.run(spec_path, run_dir=first.run_dir)
+
+        assert resumed.resumed is True
+        assert resumed.run.lifecycle_status == "completed"
+        assert resumed.run.eln_exports == [
+            f"{first.run_dir.relative_to(tmp_path).as_posix()}/outputs/generated/eln-export/eln_export.json",
+            f"{first.run_dir.relative_to(tmp_path).as_posix()}/outputs/generated/eln-export/eln_export_bundle.tar.gz",
+        ]
+        assert (first.run_dir / "outputs" / "generated" / "eln-export" / "eln_export.json").exists()
+        assert (first.run_dir / "outputs" / "generated" / "eln-export" / "eln_export_bundle.tar.gz").exists()
         assert not any(warning.startswith(failure_prefix) for warning in resumed.run.warnings)
 
     def test_authored_rnaseq_workflow_skeleton_supports_single_end_fastqc_inputs(self, tmp_path):

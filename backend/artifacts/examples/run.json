@@ -142,6 +142,7 @@
     "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/ro-crate/ro-crate-metadata.json"
   ],
   "biocompute_exports": [],
+  "eln_exports": [],
   "qc_policies": [
     {
       "policy_id": "scrna-default-qc",

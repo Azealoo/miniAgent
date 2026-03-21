@@ -54,6 +54,7 @@ from observability import (
 )
 from tools.slurm_tool import refresh_slurm_job_artifact, submit_slurm_job
 from artifacts.biocompute import expected_biocompute_export_paths, materialize_biocompute_bundle
+from artifacts.eln_export import expected_eln_export_paths, materialize_eln_export_bundle
 from artifacts.provenance import expected_provenance_export_paths, materialize_provenance_bundle
 from artifacts.schemas import (
     DeviationRecord,
@@ -90,6 +91,7 @@ _SLURM_FAILURE_STATUSES = {"failed", "cancelled", "timed_out"}
 _EXTERNAL_WORKFLOW_ADAPTER_VERSION = "external_workflow_adapter_v1"
 _STRUCTURED_EXTERNAL_ENGINES = {"nextflow", "snakemake"}
 _BIOCOMPUTE_MATERIALIZATION_WARNING_PREFIX = "Optional BioCompute export could not be materialized deterministically:"
+_ELN_EXPORT_MATERIALIZATION_WARNING_PREFIX = "ELN export could not be materialized deterministically:"
 _COMPLIANCE_HOOK_USER_MESSAGE_RE = re.compile(
     r"^Workflow (?P<workflow_id>[A-Za-z0-9._:-]+) compliance hook "
     r"(?P<hook_id>[A-Za-z0-9._:-]+) at stage (?P<stage>[A-Za-z0-9._:-]+)\."
@@ -912,6 +914,7 @@ class InternalDAGRunner:
             ],
             provenance_exports=[],
             biocompute_exports=[],
+            eln_exports=[],
             summary_metrics=[],
             warnings=[],
         )
@@ -2609,6 +2612,12 @@ class InternalDAGRunner:
             run_document,
             workflow_duration_seconds=workflow_duration_seconds,
         )
+        run_document = self._materialize_terminal_eln_export_if_needed(
+            layout=layout,
+            spec=spec,
+            run_document=run_document,
+            session_id=session_id,
+        )
         return self._persist_run_document(layout, run_document)
 
     def _sync_observability_summary_metrics(
@@ -3059,6 +3068,56 @@ class InternalDAGRunner:
             for existing in run_document.warnings
             if not existing.startswith(_BIOCOMPUTE_MATERIALIZATION_WARNING_PREFIX)
         ]
+        return self._persist_run_document(layout, run_document)
+
+    def _materialize_terminal_eln_export_if_needed(
+        self,
+        *,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        run_document: WorkflowRun,
+        session_id: str | None,
+    ) -> WorkflowRun:
+        if run_document.lifecycle_status not in _RUN_FINAL_STATUSES:
+            return run_document
+
+        expected = expected_eln_export_paths(layout)
+        previous_exports = list(run_document.eln_exports)
+        filtered_warnings = [
+            existing
+            for existing in run_document.warnings
+            if not existing.startswith(_ELN_EXPORT_MATERIALIZATION_WARNING_PREFIX)
+        ]
+        warnings_changed = filtered_warnings != run_document.warnings
+        if warnings_changed:
+            run_document.warnings = filtered_warnings
+        if run_document.eln_exports != expected or warnings_changed:
+            run_document.eln_exports = list(expected)
+            run_document = self._persist_run_document(layout, run_document)
+
+        try:
+            run_document.eln_exports = materialize_eln_export_bundle(
+                base_dir=self.base_dir,
+                layout=layout,
+                run_document=run_document,
+                workflow_version=spec.version,
+                session_id=session_id,
+            )
+        except Exception as exc:
+            warning = f"{_ELN_EXPORT_MATERIALIZATION_WARNING_PREFIX} {exc}"
+            run_document.eln_exports = (
+                list(expected)
+                if all(resolve_artifact_path(self.base_dir, path).exists() for path in expected)
+                else (
+                    list(previous_exports)
+                    if previous_exports
+                    and all(resolve_artifact_path(self.base_dir, path).exists() for path in previous_exports)
+                    else []
+                )
+            )
+            run_document.warnings.append(warning)
+            return self._persist_run_document(layout, run_document)
+
         return self._persist_run_document(layout, run_document)
 
     def _finalize_terminal_report_bundle_if_needed(
@@ -4417,6 +4476,10 @@ class InternalDAGRunner:
                 continue
             relative = path.relative_to(layout.run_dir).as_posix()
             if relative == "content_hashes.json":
+                continue
+            if relative == "outputs/generated/eln-export/eln_export.json":
+                continue
+            if relative == "outputs/generated/eln-export/eln_export_bundle.tar.gz":
                 continue
             entries[relative] = path.read_bytes()
         manifest = build_content_hash_manifest(

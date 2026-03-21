@@ -169,6 +169,7 @@ def materialize_blocked_workflow_run(
         ],
         provenance_exports=[],
         biocompute_exports=[],
+        eln_exports=[],
         warnings=[reason],
     )
     run_document = runner._sync_observability_summary_metrics(
@@ -176,6 +177,12 @@ def materialize_blocked_workflow_run(
         workflow_duration_seconds=max(0.0, time.perf_counter() - started_monotonic),
     )
     persisted_run = runner._persist_run_document(layout, run_document)
+    persisted_run = runner._materialize_terminal_eln_export_if_needed(
+        layout=layout,
+        spec=prepared.spec,
+        run_document=persisted_run,
+        session_id=session_id,
+    )
     append_workflow_started_event(
         base_path,
         run_id=layout.run_id,

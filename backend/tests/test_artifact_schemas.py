@@ -20,6 +20,7 @@ from artifacts.schemas import (  # noqa: E402
     DatasetManifest,
     DifferentialExpressionResults,
     DifferentialExpressionRun,
+    ELNExportArtifact,
     EvidenceCard,
     EvidenceReviewArtifact,
     EntityGroundingArtifact,
@@ -100,6 +101,10 @@ class TestArtifactSchemas:
     def test_biocompute_artifact_type_uses_json_schema_format(self):
         assert artifact_model_for_type("biocompute") is BioComputeArtifact
         assert schema_format_for_artifact("biocompute") == "json"
+
+    def test_eln_export_artifact_type_uses_json_schema_format(self):
+        assert artifact_model_for_type("eln_export") is ELNExportArtifact
+        assert schema_format_for_artifact("eln_export") == "json"
 
     def test_reproducibility_drill_report_uses_json_schema_format(self):
         assert artifact_model_for_type("reproducibility_drill_report") is ReproducibilityDrillReport
@@ -1461,6 +1466,7 @@ class TestArtifactSchemas:
             "slurm_job.json": SlurmJobArtifact,
             "prov.json": ProvenanceArtifact,
             "biocompute.json": BioComputeArtifact,
+            "eln_export.json": ELNExportArtifact,
             "evidence_card.yaml": EvidenceCard,
             "evidence_review.json": EvidenceReviewArtifact,
             "claim_graph.json": ClaimGraphArtifact,
@@ -1511,4 +1517,5 @@ class TestArtifactSchemas:
         assert artifact_model_for_type("workflow_run") is WorkflowRun
         assert artifact_model_for_type("slurm_job") is SlurmJobArtifact
         assert artifact_model_for_type("checklist_results") is ChecklistResultsArtifact
+        assert artifact_model_for_type("eln_export") is ELNExportArtifact
         assert artifact_model_for_type("reproducibility_drill_report") is ReproducibilityDrillReport

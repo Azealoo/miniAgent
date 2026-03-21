@@ -642,6 +642,65 @@ def _biocompute_payload() -> dict:
     }
 
 
+def _eln_export_payload() -> dict:
+    return {
+        "schema_version": SCHEMA_PACK_VERSION,
+        "artifact_type": "eln_export",
+        "id": f"eln-export-{WORKFLOW}-{RUN_ID.lower()}",
+        "run_id": RUN_ID,
+        "created_at": "2026-03-18T19:09:00Z",
+        "source_workflow": WORKFLOW,
+        "related_artifacts": [
+            {
+                "artifact_type": "workflow_run",
+                "path": _run_dir_relpath("run.json"),
+                "run_id": RUN_ID,
+            }
+        ],
+        "bundle_version": "1.0.0",
+        "scope": "workflow_run_bundle",
+        "package_root": "bioapex-eln-export",
+        "workflow_version": "1.0.0",
+        "lifecycle_status": "completed",
+        "qc_status": "passed",
+        "workflow_run": {
+            "artifact_type": "workflow_run",
+            "path": _run_dir_relpath("run.json"),
+            "run_id": RUN_ID,
+        },
+        "dataset_manifest": {
+            "artifact_type": "dataset_manifest",
+            "path": _run_dir_relpath("dataset_manifest.yaml"),
+            "id": DATASET_ID,
+            "run_id": RUN_ID,
+        },
+        "report_bundle_manifest": None,
+        "report_bundle": None,
+        "protocol_run": None,
+        "provenance_exports": [],
+        "biocompute_exports": [],
+        "evidence_review_artifacts": [],
+        "included_artifacts": [
+            {
+                "role": "workflow_run",
+                "artifact_type": "workflow_run",
+                "source_path": _run_dir_relpath("run.json"),
+                "package_path": _run_dir_relpath("run.json"),
+                "run_id": RUN_ID,
+                "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            }
+        ],
+        "missing_artifacts": [],
+        "unsupported_fields": [
+            {
+                "field_name": "vendor_specific_eln_metadata",
+                "reason": "Portable ELN export omits vendor-specific notebook metadata.",
+            }
+        ],
+        "notes": ["Generated from canonical on-disk artifacts only."],
+    }
+
+
 def _write_registry_fixture(base_dir: Path) -> None:
     _write_minimal_run_record(base_dir)
     _write_dataset_manifest(base_dir)
@@ -703,6 +762,21 @@ class TestArtifactRegistryService:
             "ro_crate",
             "ro_crate_entry",
         }
+
+    def test_rebuild_indexes_eln_export_manifest_and_archive(self, isolated_registry_root):
+        export_dir = _run_dir(isolated_registry_root) / "outputs" / "generated" / "eln-export"
+        _write_json(export_dir / "eln_export.json", _eln_export_payload())
+        (export_dir / "eln_export_bundle.tar.gz").write_bytes(b"bundle")
+
+        snapshot = rebuild_artifact_registry(isolated_registry_root)
+        records_by_path = {record.path: record for record in snapshot.records}
+
+        manifest_path = _run_dir_relpath("outputs/generated/eln-export/eln_export.json")
+        archive_path = _run_dir_relpath("outputs/generated/eln-export/eln_export_bundle.tar.gz")
+
+        assert records_by_path[manifest_path].artifact_type == "eln_export"
+        assert records_by_path[manifest_path].status == "valid"
+        assert records_by_path[archive_path].artifact_type == "eln_export_archive"
 
     def test_lookup_filters_by_run_workflow_type_and_dataset(self, isolated_registry_root):
         rebuild_artifact_registry(isolated_registry_root)
