@@ -10,10 +10,13 @@ import json
 import mimetypes
 from pathlib import Path
 
+from access_control import require_execution_access, require_inspection_access
+import config as cfg
 from audit.store import append_file_written_event
 from artifacts.public_urls import public_raw_file_url
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
+from hardening import is_secret_like_path
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -68,6 +71,9 @@ def _check_path(relative_path: str, *, write: bool = False) -> tuple[Path, str]:
             f"Access denied for {mode}. Allowed: {list(allowed_prefixes)} + {list(_ALLOWED_ROOT_FILES)}",
         )
 
+    if is_secret_like_path(clean):
+        raise HTTPException(403, "Credential / secret files are not accessible via this API.")
+
     return target, clean
 
 
@@ -107,7 +113,8 @@ def _read_raw_content(target: Path, clean_path: str) -> str:
 
 
 @router.get("/files")
-def read_file(path: str = Query(..., description="Relative file path")):
+def read_file(path: str = Query(..., description="Relative file path"), request: Request = None):
+    require_inspection_access(request)
     target, _ = _check_path(path, write=False)
     if not target.exists():
         raise HTTPException(404, f"File not found: {path}")
@@ -119,7 +126,8 @@ def read_file(path: str = Query(..., description="Relative file path")):
 
 
 @router.get("/files/raw")
-def read_raw_file(path: str = Query(..., description="Relative file path")):
+def read_raw_file(path: str = Query(..., description="Relative file path"), request: Request = None):
+    require_inspection_access(request)
     target, clean = _check_path(path, write=False)
     if not target.exists():
         raise HTTPException(404, f"File not found: {path}")
@@ -140,9 +148,22 @@ class SaveRequest(BaseModel):
 
 
 @router.post("/files")
-def save_file(body: SaveRequest):
+def save_file(body: SaveRequest, request: Request = None):
+    require_execution_access(request)
     base_dir = _base_dir()
     byte_count = len(body.content.encode("utf-8"))
+    policy = cfg.get_production_hardening_policy()
+    if not policy.api.files_write_enabled:
+        append_file_written_event(
+            base_dir,
+            path=body.path,
+            source="api.files",
+            outcome="blocked",
+            byte_count=byte_count,
+            reason="File editor writes disabled by production hardening policy.",
+        )
+        raise HTTPException(403, "File editor writes are disabled by production hardening policy.")
+
     if byte_count > _MAX_SAVE_BYTES:
         append_file_written_event(
             base_dir,
@@ -210,7 +231,8 @@ def save_file(body: SaveRequest):
 
 
 @router.get("/skills")
-def list_skills():
+def list_skills(request: Request = None):
+    require_inspection_access(request)
     base = _base_dir()
     from tools.skills_scanner import collect_skill_entries
 

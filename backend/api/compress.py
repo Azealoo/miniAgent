@@ -7,8 +7,9 @@ Compresses the oldest 50% of messages in a session:
 3. Generates a structured scientific continuity summary.
 4. Archives the messages + stores the summary in compressed_context.
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
+from access_control import require_execution_access
 from graph.session_summary import generate_structured_summary
 from graph.session_manager import _validate_session_id
 
@@ -16,7 +17,8 @@ router = APIRouter()
 
 
 @router.post("/sessions/{session_id}/compress")
-async def compress(session_id: str):
+async def compress(session_id: str, request: Request = None):
+    require_execution_access(request)
     try:
         _validate_session_id(session_id)
     except ValueError:

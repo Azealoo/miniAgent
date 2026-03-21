@@ -2,12 +2,13 @@
 Sandboxed file reader. The agent can read files under root_dir or under
 any path in extra_allowed_roots (for skills in .agents/skills or configurable dirs).
 """
-import re
 from pathlib import Path
 from typing import Type
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
+
+from hardening import is_secret_like_path
 
 from .contracts import (
     artifact_ref,
@@ -21,23 +22,6 @@ from .contracts import (
 _MAX_OUTPUT = 10_000
 
 # File name/extension patterns that must never be read (credential / secret files)
-_BLOCKED_FILENAMES = {".env"}
-_BLOCKED_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".crt", ".cer"}
-_BLOCKED_PATTERNS_RE = [
-    re.compile(r"^\.env(\..+)?$", re.I),  # .env, .env.local, .env.production, etc.
-    re.compile(r"^.*\.env$", re.I),        # any file ending with .env
-]
-
-
-def _is_credential_file(path: Path) -> bool:
-    name = path.name.lower()
-    if name in _BLOCKED_FILENAMES:
-        return True
-    if path.suffix.lower() in _BLOCKED_SUFFIXES:
-        return True
-    return any(p.match(path.name) for p in _BLOCKED_PATTERNS_RE)
-
-
 class ReadFileInput(BaseModel):
     path: str = Field(
         description="Path to the file: relative to project root, or absolute if under allowed roots."
@@ -82,7 +66,7 @@ class ReadFileTool(BaseTool):
                     metadata={"requested_path": path, "resolved_path": str(target)},
                 )
 
-            if _is_credential_file(target):
+            if is_secret_like_path(target):
                 return blocked_result(
                     self.name,
                     "Reading credential / secret files is not allowed.",

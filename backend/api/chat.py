@@ -19,8 +19,9 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
+from access_control import require_execution_access
 from audit.store import append_chat_request_event, append_tool_invocation_event
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from observability import append_metric_record, append_trace_record, chat_span_id
 from pydantic import BaseModel, Field, field_validator
@@ -78,7 +79,8 @@ class ChatRequest(BaseModel):
 
 
 @router.post("/chat")
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, http_request: Request = None):
+    require_execution_access(http_request)
     try:
         _validate_session_id(request.session_id)
     except ValueError:

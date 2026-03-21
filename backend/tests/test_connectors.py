@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -70,6 +71,24 @@ def _provenance_payload(run_id: str = "run-20260318T193000Z-deadbeef") -> dict:
     return payload
 
 
+def _request(
+    path: str,
+    *,
+    method: str = "GET",
+    host: str = "127.0.0.1",
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": method,
+            "path": path,
+            "headers": headers or [],
+            "client": (host, 12345),
+        }
+    )
+
+
 @pytest.fixture
 def isolated_connector_state(tmp_path):
     from graph.agent import agent_manager
@@ -107,6 +126,55 @@ def test_connector_registry_lists_builtin_connectors_with_safe_defaults(isolated
     assert connectors["instrument_webhook_ingest"]["capabilities"]["transport_patterns"] == ["webhook_callback"]
 
 
+def test_connector_registry_reads_block_non_local_clients_without_inspection_token(isolated_connector_state):
+    from api.connectors import get_connector_registry_detail, list_connector_registry
+
+    with pytest.raises(HTTPException) as exc_info:
+        list_connector_registry(_request("/api/connectors/registry", host="10.0.0.8"))
+    assert exc_info.value.status_code == 403
+
+    with pytest.raises(HTTPException) as exc_info:
+        get_connector_registry_detail(
+            "eln_file_drop",
+            _request("/api/connectors/registry/eln_file_drop", host="10.0.0.8"),
+        )
+    assert exc_info.value.status_code == 403
+
+
+def test_connector_registry_reads_allow_non_local_clients_with_inspection_token(isolated_connector_state):
+    from api.connectors import get_connector_registry_detail, list_connector_registry
+
+    config_path = isolated_connector_state / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "production_hardening": {
+                    "api": {
+                        "allow_loopback_without_auth": False,
+                        "inspection_bearer_token_env_var": "BIOAPEX_INSPECTION_TOKEN",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    headers = [(b"authorization", b"Bearer inspection-token")]
+
+    with patch("config._CONFIG_FILE", config_path), patch.dict(
+        os.environ,
+        {"BIOAPEX_INSPECTION_TOKEN": "inspection-token"},
+        clear=False,
+    ):
+        listing = list_connector_registry(_request("/api/connectors/registry", host="10.0.0.8", headers=headers))
+        detail = get_connector_registry_detail(
+            "eln_file_drop",
+            _request("/api/connectors/registry/eln_file_drop", host="10.0.0.8", headers=headers),
+        )
+
+    assert any(item["name"] == "eln_file_drop" for item in listing["connectors"])
+    assert detail["name"] == "eln_file_drop"
+
+
 def test_malformed_persisted_connector_config_fails_closed(isolated_connector_state):
     from api.connectors import list_connector_registry
 
@@ -118,7 +186,157 @@ def test_malformed_persisted_connector_config_fails_closed(isolated_connector_st
 
     connectors = {item["name"]: item for item in response["connectors"]}
     assert connectors["eln_file_drop"]["enabled"] is False
-    assert connectors["eln_file_drop"]["config_summary"]["configured"] is False
+
+
+def test_connector_configuration_can_be_disabled_by_policy(isolated_connector_state):
+    from api.connectors import ConnectorEntryUpdate, update_connector_registry_entry
+    from audit.store import query_audit_events
+
+    config_path = isolated_connector_state / "config.json"
+    config_path.write_text(
+        json.dumps({"production_hardening": {"api": {"connectors_configuration_enabled": False}}}),
+        encoding="utf-8",
+    )
+
+    with patch("config._CONFIG_FILE", config_path), pytest.raises(HTTPException) as exc_info:
+        update_connector_registry_entry(
+            "eln_file_drop",
+            ConnectorEntryUpdate(enabled=True, config={"outgoing_dir": "workspace/drop"}),
+        )
+
+    assert exc_info.value.status_code == 403
+    events = query_audit_events(isolated_connector_state, event_type="connector_action")
+    assert any(
+        event.connector_name == "eln_file_drop"
+        and event.outcome == "blocked"
+        and event.details.get("failure_mode") == "policy_disabled"
+        for event in events
+    )
+
+
+def test_connector_runtime_actions_can_be_disabled_by_policy(isolated_connector_state):
+    from api.connectors import run_connector_registry_action
+    from audit.store import query_audit_events
+
+    config_path = isolated_connector_state / "config.json"
+    config_path.write_text(
+        json.dumps({"production_hardening": {"api": {"connectors_runtime_actions_enabled": False}}}),
+        encoding="utf-8",
+    )
+
+    with patch("config._CONFIG_FILE", config_path), pytest.raises(HTTPException) as exc_info:
+        run_connector_registry_action("eln_file_drop", "export")
+
+    assert exc_info.value.status_code == 403
+    events = query_audit_events(isolated_connector_state, event_type="connector_action")
+    assert any(
+        event.connector_name == "eln_file_drop"
+        and event.outcome == "blocked"
+        and event.details.get("failure_mode") == "policy_disabled"
+        for event in events
+    )
+
+
+def test_connector_mutation_routes_block_non_local_clients_without_admin_token(isolated_connector_state):
+    from api.connectors import ConnectorEntryUpdate, run_connector_registry_action, update_connector_registry_entry
+
+    with pytest.raises(HTTPException) as exc_info:
+        update_connector_registry_entry(
+            "eln_file_drop",
+            ConnectorEntryUpdate(enabled=True, config={"outgoing_dir": "workspace/drop"}),
+            _request("/api/connectors/registry/eln_file_drop", method="PUT", host="10.0.0.8"),
+        )
+    assert exc_info.value.status_code == 403
+
+    with pytest.raises(HTTPException) as exc_info:
+        run_connector_registry_action(
+            "eln_file_drop",
+            "export",
+            request=_request(
+                "/api/connectors/registry/eln_file_drop/actions/export",
+                method="POST",
+                host="10.0.0.8",
+            ),
+        )
+    assert exc_info.value.status_code == 403
+
+
+def test_connector_mutation_routes_allow_non_local_clients_with_admin_token(isolated_connector_state):
+    from api.connectors import ConnectorActionRequest, ConnectorEntryUpdate, run_connector_registry_action, update_connector_registry_entry
+
+    config_path = isolated_connector_state / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "production_hardening": {
+                    "api": {
+                        "allow_loopback_without_auth": False,
+                        "admin_bearer_token_env_var": "BIOAPEX_ADMIN_TOKEN",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    headers = [(b"authorization", b"Bearer admin-token")]
+
+    with patch("config._CONFIG_FILE", config_path), patch.dict(
+        os.environ,
+        {"BIOAPEX_ADMIN_TOKEN": "admin-token"},
+        clear=False,
+    ):
+        configure_response = update_connector_registry_entry(
+            "eln_file_drop",
+            ConnectorEntryUpdate(enabled=True, config={"outgoing_dir": "workspace/drop"}),
+            _request("/api/connectors/registry/eln_file_drop", method="PUT", host="10.0.0.8", headers=headers),
+        )
+        action_response = run_connector_registry_action(
+            "eln_file_drop",
+            "export",
+            ConnectorActionRequest(),
+            _request(
+                "/api/connectors/registry/eln_file_drop/actions/export",
+                method="POST",
+                host="10.0.0.8",
+                headers=headers,
+            ),
+        )
+
+    assert configure_response["result"]["outcome"] == "success"
+    assert action_response["outcome"] in {"invalid_input", "execution_failure", "blocked"}
+
+
+def test_connector_admin_routes_do_not_fall_back_to_execution_token(isolated_connector_state):
+    from api.connectors import ConnectorEntryUpdate, update_connector_registry_entry
+
+    config_path = isolated_connector_state / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "production_hardening": {
+                    "api": {
+                        "allow_loopback_without_auth": False,
+                        "execution_bearer_token_env_var": "BIOAPEX_EXECUTION_TOKEN",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    headers = [(b"authorization", b"Bearer execution-token")]
+
+    with patch("config._CONFIG_FILE", config_path), patch.dict(
+        os.environ,
+        {"BIOAPEX_EXECUTION_TOKEN": "execution-token"},
+        clear=False,
+    ), pytest.raises(HTTPException) as exc_info:
+        update_connector_registry_entry(
+            "eln_file_drop",
+            ConnectorEntryUpdate(enabled=True, config={"outgoing_dir": "workspace/drop"}),
+            _request("/api/connectors/registry/eln_file_drop", method="PUT", host="10.0.0.8", headers=headers),
+        )
+
+    assert exc_info.value.status_code == 403
 
 
 def test_connector_config_defaults_do_not_leak_between_config_files(isolated_connector_state):

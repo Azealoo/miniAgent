@@ -64,7 +64,7 @@ class TestTerminalTool:
 
     def test_output_cap(self):
         # Generate output > 5000 chars
-        out = self.tool._run("python3 -c \"print('x' * 10000)\"")
+        out = self.tool._run("yes x | head -c 10000")
         assert len(out) <= 5001 + len("\n...[output truncated]")
         assert "[output truncated]" in out
 
@@ -75,6 +75,355 @@ class TestTerminalTool:
     def test_env_variable(self):
         out = self.tool._run("echo $HOME")
         assert out  # HOME is set in any normal environment
+
+    def test_private_key_read_blocked(self):
+        out = self.tool._run("cat id_rsa")
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "memory" / ".env.local").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("cat memory/.env.local")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_python_subprocess(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "memory" / ".env.term-probe").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("python3 -c \"print(open('memory/.env.term-probe').read())\"")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_glob_expansion(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.globprobe").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("cat .en[v].globprobe")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_shell_local_variable(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.varprobe").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("secret=.env.varprobe; cat $secret")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_command_substitution(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.cmdsubsplit").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("cat $(printf '%s%s' .en v.cmdsubsplit)")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_command_substitution_with_shell_vars(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.cmdsubsplit2").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("a=.en; b=v.cmdsubsplit2; cat $(printf '%s%s' \"$a\" \"$b\")")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_xargs_pipeline(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.xargsprobe").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("printf '%s%s' .en v.xargsprobe | xargs cat")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_while_read_pipeline(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.readloop").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("printf '%s%s\\n' .en v.readloop | while read p; do cat \"$p\"; done")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_process_substitution(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.procsub").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("sh <(printf '%s%s%s' 'cat ' .en v.procsub)")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_positional_parameters(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.positional").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("set -- .en v.positional; cat \"$1$2\"")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_for_loop_variables(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.loopprobe").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("for a in .en; do for b in v.loopprobe; do cat \"$a$b\"; done; done")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_declare_assignment(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.declareprobe").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("declare a=.en b=v.declareprobe; cat \"$a$b\"")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_printf_v_assignment(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.printfprobe").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("printf -v p '%s%s' .en v.printfprobe; cat \"$p\"")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_array_assignment(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.arrayprobe").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("parts=(.en v.arrayprobe); cat \"${parts[0]}${parts[1]}\"")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_sourcing(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".envsourceprobe").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run(". ./.envsourceprobe; echo \"$SECRET\"")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_env_fed_child_shell(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.envchild").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("env a=.en b=v.envchild sh -c 'cat \"$a$b\"'")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_inline_child_shell(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.inlinechild").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("sh -c 'a=.en; b=v.inlinechild; cat \"$a$b\"'")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_python_nested_child_shell(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.pychild").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run(
+            "python3 -c 'import os,subprocess; "
+            "os.environ[\"A\"]=\".en\"; "
+            "os.environ[\"B\"]=\"v.pychild\"; "
+            "print(subprocess.check_output([\"/bin/sh\",\"-lc\",\"cat \\\"$A$B\\\"\"]).decode())'"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_variable_hidden_child_shell(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.varshell").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run('s=sh; a=.en; b=v.varshell; "$s" -c "cat \\"$a$b\\""')
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_env_shell_variable_child_shell(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.shellenv").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run('SHELL=/bin/sh; a=.en; b=v.shellenv; "$SHELL" -c "cat \\"$a$b\\""')
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_python_variable_hidden_child_shell(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.pyvarsh").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run(
+            'python3 -c "s=\'sh\'; import os; a=\'.en\'; b=\'v.pyvarsh\'; '
+            'os.system(f\'{s} -c \\"cat \\\\\\"{a}{b}\\\\\\"\\"\')"'
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_python_heredoc_subprocess(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.heredocsub").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run(
+            "python3 <<'PYCODE'\n"
+            "import subprocess\n"
+            "s='sh'\n"
+            "a='.en'\n"
+            "b='v.heredocsub'\n"
+            "print(subprocess.check_output([s,'-lc',f'cat \\\"{a}{b}\\\"']).decode())\n"
+            "PYCODE"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_python_script_file(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.filescript").write_text("SECRET=1\n", encoding="utf-8")
+        (tmp_path / "reader.py").write_text(
+            "import subprocess\n"
+            "s='sh'\n"
+            "a='.en'\n"
+            "b='v.filescript'\n"
+            "print(subprocess.check_output([s, '-lc', f'cat \\\"{a}{b}\\\"']).decode())\n",
+            encoding="utf-8",
+        )
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("python3 reader.py")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_nested_shell_script_file(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.shellscript").write_text("SECRET=1\n", encoding="utf-8")
+        (tmp_path / "reader.sh").write_text("cat .env.shellscript\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("sh reader.sh")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_perl_interpreter(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.perlprobe").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run(
+            "perl -e 'my $p = \".en\" . \"v.perlprobe\"; "
+            "open my $fh, \"<\", $p or exit 1; my $line = <$fh>; print $line'"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_awk_interpreter(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.awkprobe").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run(
+            "awk 'BEGIN { p=\".en\" \"v.awkprobe\"; getline line < p; print line }'"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_make_recipe_launcher(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.makeprobe").write_text("SECRET=1\n", encoding="utf-8")
+        (tmp_path / "Makefile").write_text("leak:\n\tcat .env.makeprobe\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("make -f Makefile leak")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_npm_run_wrapper(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.npmprobe").write_text("SECRET=1\n", encoding="utf-8")
+        (tmp_path / "package.json").write_text(
+            '{"name":"probe","scripts":{"leak":"cat .env.npmprobe"}}\n',
+            encoding="utf-8",
+        )
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run("npm run leak")
+
+        assert "[BLOCKED]" in out
+
+    def test_env_variant_read_blocked_via_find_exec_nested_launcher(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        (tmp_path / ".env.findexec").write_text("SECRET=1\n", encoding="utf-8")
+        tool = TerminalTool(base_dir=str(tmp_path))
+
+        out = tool._run(
+            "find . -maxdepth 0 -exec perl -e "
+            "\"my $p = '.en' . 'v.findexec'; open my $fh, '<', $p or exit 1; my $line = <$fh>; print $line\" \\;"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_policy_can_disable_terminal(self, tmp_path):
+        from tools.terminal_tool import TerminalTool
+
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(
+            '{"production_hardening": {"tools": {"terminal_enabled": false}}}',
+            encoding="utf-8",
+        )
+
+        with patch("config._CONFIG_FILE", cfg_file):
+            tool = TerminalTool(base_dir=str(self.base))
+            out = tool._run("echo hello_world")
+
+        assert "[BLOCKED]" in out
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -144,6 +493,265 @@ class TestPythonReplTool:
         fresh._run("x = 1")
         assert fresh._repl is not None
 
+    def test_open_private_key_file_blocked(self):
+        out = self.tool._run("open('/tmp/id_rsa').read()")
+        assert "[BLOCKED]" in out
+
+    def test_open_env_variant_file_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.local"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(f"print(open({str(env_path)!r}).read())")
+
+        assert "[BLOCKED]" in out
+
+    def test_pathlib_secret_read_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.review-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(
+            "from pathlib import Path\n"
+            f"print(Path({str(env_path)!r}).read_text())"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_pathlib_variable_secret_read_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.variable-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(
+            "from pathlib import Path\n"
+            f"secret_path = Path({str(env_path)!r})\n"
+            "print(secret_path.read_text())"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_pathlib_persistent_variable_secret_read_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.persistent-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        tool._run(
+            "from pathlib import Path\n"
+            f"secret_path = Path({str(env_path)!r})"
+        )
+        out = tool._run("print(secret_path.read_text())")
+
+        assert "[BLOCKED]" in out
+
+    def test_os_open_secret_read_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.os-open-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(
+            "import os\n"
+            f"fd = os.open({str(env_path)!r}, os.O_RDONLY)\n"
+            "print(os.read(fd, 32).decode())"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_importlib_os_open_secret_read_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.importlib-os-open-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(
+            "import importlib\n"
+            "os_module = importlib.import_module('os')\n"
+            f"fd = os_module.open({str(env_path)!r}, os_module.O_RDONLY)\n"
+            "print(os_module.read(fd, 32).decode())"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_imported_builtins_open_secret_read_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.builtins-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(
+            "import builtins\n"
+            f"print(builtins.open({str(env_path)!r}).read())"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_sys_modules_os_open_secret_read_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.sysmodules-os-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(
+            "import sys\n"
+            "import os\n"
+            f"fd = sys.modules['os'].open({str(env_path)!r}, os.O_RDONLY)\n"
+            "print(sys.modules['os'].read(fd, 32).decode())"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_sys_modules_builtins_open_secret_read_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.sysmodules-builtins-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(
+            "import sys\n"
+            f"print(sys.modules['builtins'].open({str(env_path)!r}).read())"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_posix_open_secret_read_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.posix-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(
+            "import posix\n"
+            f"fd = posix.open({str(env_path)!r}, posix.O_RDONLY)\n"
+            "print(posix.read(fd, 32).decode())"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test__io_fileio_secret_read_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.raw-io-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(
+            "import _io\n"
+            f"print(_io.FileIO({str(env_path)!r}, 'r').read().decode())"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_ctypes_secret_read_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.ctypes-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(
+            "import ctypes\n"
+            "libc = ctypes.CDLL(None)\n"
+            f"fd = libc.open({str(env_path)!r}.encode(), 0)\n"
+            "buf = ctypes.create_string_buffer(32)\n"
+            "libc.read(fd, buf, 32)\n"
+            "print(buf.value.decode())"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_subprocess_secret_read_blocked_via_importlib_alias(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.subprocess-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(
+            "import importlib\n"
+            "sp = importlib.import_module('subprocess')\n"
+            f"print(sp.check_output(['cat', {str(env_path)!r}]).decode())"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_posix_spawn_secret_read_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.posix-spawn-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(
+            "import os\n"
+            f"pid = os.posix_spawn('/bin/sh', ['sh', '-lc', 'cat {str(env_path)}'], os.environ.copy())\n"
+            "print(pid)"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_asyncio_subprocess_secret_read_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.asyncio-subprocess-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(
+            "import asyncio\n"
+            "from asyncio.subprocess import PIPE, create_subprocess_exec\n"
+            "async def main():\n"
+            f"    proc = await create_subprocess_exec('cat', {str(env_path)!r}, stdout=PIPE)\n"
+            "    stdout, _ = await proc.communicate()\n"
+            "    print(stdout.decode())\n"
+            "asyncio.run(main())"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_pty_spawn_secret_read_blocked(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        env_path = tmp_path / ".env.pty-probe"
+        env_path.write_text("SECRET=1\n", encoding="utf-8")
+        tool = PythonReplTool()
+
+        out = tool._run(
+            "import pty\n"
+            f"pty.spawn(['cat', {str(env_path)!r}])"
+        )
+
+        assert "[BLOCKED]" in out
+
+    def test_policy_can_disable_python_repl(self, tmp_path):
+        from tools.python_repl_tool import PythonReplTool
+
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(
+            '{"production_hardening": {"tools": {"python_repl_enabled": false}}}',
+            encoding="utf-8",
+        )
+
+        with patch("config._CONFIG_FILE", cfg_file):
+            tool = PythonReplTool(base_dir=str(tmp_path))
+            out = tool._run("print(2 + 2)")
+
+        assert "[BLOCKED]" in out
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ReadFileTool
@@ -200,6 +808,16 @@ class TestReadFileTool:
         assert contract["tool_name"] == "read_file"
         assert contract["status"] == "success"
         assert contract["artifact_refs"][0]["path"].endswith("memory/MEMORY.md")
+
+    def test_secret_file_blocked(self):
+        secret_path = self.root / "memory" / ".env"
+        try:
+            secret_path.write_text("SECRET=1\n", encoding="utf-8")
+            out = _tool_summary(self.tool._run("memory/.env"))
+            assert "[BLOCKED]" in out
+        finally:
+            if secret_path.exists():
+                secret_path.unlink()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -356,3 +974,89 @@ class TestSearchKnowledgeBaseTool:
         assert contract is not None
         assert contract["tool_name"] == "search_knowledge_base"
         assert contract["outcome"] == "success_empty"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# WriteFileTool
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestWriteFileTool:
+    def test_write_allowed_path(self, tmp_path):
+        from tools.write_file_tool import WriteFileTool
+
+        for relpath in ("memory", "skills", "knowledge"):
+            (tmp_path / relpath).mkdir(parents=True, exist_ok=True)
+
+        tool = WriteFileTool(root_dir=str(tmp_path))
+        result = tool._run("memory/MEMORY.md", "# Updated\n")
+        contract = _tool_contract(result)
+
+        assert contract is not None
+        assert contract["status"] == "success"
+        assert (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8") == "# Updated\n"
+
+    def test_write_secret_file_blocked(self, tmp_path):
+        from tools.write_file_tool import WriteFileTool
+
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+        tool = WriteFileTool(root_dir=str(tmp_path))
+
+        out = _tool_summary(tool._run("memory/.env", "SECRET=1\n"))
+        assert "[BLOCKED]" in out
+        assert not (tmp_path / "memory" / ".env").exists()
+
+    def test_policy_can_disable_write_file(self, tmp_path):
+        from tools.write_file_tool import WriteFileTool
+
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(
+            '{"production_hardening": {"tools": {"write_file_enabled": false}}}',
+            encoding="utf-8",
+        )
+
+        with patch("config._CONFIG_FILE", cfg_file):
+            tool = WriteFileTool(root_dir=str(tmp_path))
+            out = _tool_summary(tool._run("memory/MEMORY.md", "# Updated\n"))
+
+        assert "[BLOCKED]" in out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SlurmTool
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestSlurmToolPolicy:
+    def test_policy_can_disable_legacy_commands(self, tmp_path):
+        from tools.slurm_tool import SlurmTool
+
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(
+            '{"production_hardening": {"tools": {"slurm_legacy_commands_enabled": false}}}',
+            encoding="utf-8",
+        )
+
+        with patch("config._CONFIG_FILE", cfg_file):
+            tool = SlurmTool(base_dir=str(tmp_path))
+            result = tool._run(command="sinfo")
+
+        contract = _tool_contract(result)
+        assert contract is not None
+        assert contract["outcome"] == "blocked"
+
+    def test_policy_can_disable_slurm_tool(self, tmp_path):
+        from tools.slurm_tool import SlurmTool
+
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(
+            '{"production_hardening": {"tools": {"slurm_enabled": false}}}',
+            encoding="utf-8",
+        )
+
+        with patch("config._CONFIG_FILE", cfg_file):
+            tool = SlurmTool(base_dir=str(tmp_path))
+            result = tool._run(command="sinfo")
+
+        contract = _tool_contract(result)
+        assert contract is not None
+        assert contract["outcome"] == "blocked"

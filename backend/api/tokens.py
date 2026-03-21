@@ -7,7 +7,9 @@ POST /api/tokens/files          — batch token count for file paths (whiteliste
 from pathlib import Path
 
 import tiktoken
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from access_control import require_inspection_access
+from hardening import is_secret_like_path
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -49,6 +51,8 @@ def _validate_token_path(rel_path: str, base: Path) -> Path | None:
     )
     if not allowed:
         return None
+    if is_secret_like_path(clean):
+        return None
     # Resolve and confirm it stays inside base_dir
     target = (base / clean).resolve()
     try:
@@ -59,7 +63,8 @@ def _validate_token_path(rel_path: str, base: Path) -> Path | None:
 
 
 @router.get("/tokens/session/{session_id}")
-def session_tokens(session_id: str):
+def session_tokens(session_id: str, request: Request = None):
+    require_inspection_access(request)
     from graph.session_manager import _validate_session_id
 
     try:
@@ -92,7 +97,8 @@ class FilesTokenRequest(BaseModel):
 
 
 @router.post("/tokens/files")
-def files_tokens(body: FilesTokenRequest):
+def files_tokens(body: FilesTokenRequest, request: Request = None):
+    require_inspection_access(request)
     if len(body.paths) > _MAX_PATHS:
         raise HTTPException(400, f"Too many paths: max {_MAX_PATHS} per request.")
     base = _base_dir()

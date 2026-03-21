@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.params import Query as QueryParam
 
+from access_control import require_inspection_access
 from audit.store import AuditEventType, audit_retention_policy, query_audit_events
 
 router = APIRouter()
@@ -33,7 +34,9 @@ def list_audit_events(
     connector_name: str | None = Query(None),
     outcome: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
+    request: Request = None,
 ):
+    require_inspection_access(request)
     resolved_limit = 100 if isinstance(limit, QueryParam) else limit
     events = query_audit_events(
         _base_dir(),

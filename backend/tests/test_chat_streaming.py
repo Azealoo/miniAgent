@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -6,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
+from fastapi import HTTPException
+from starlette.requests import Request
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -52,6 +55,24 @@ async def _collect_sse_payloads(response) -> list[dict]:
             if line.startswith("data: "):
                 payloads.append(json.loads(line[6:]))
     return payloads
+
+
+def _request(
+    path: str,
+    *,
+    method: str = "POST",
+    host: str = "127.0.0.1",
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": method,
+            "path": path,
+            "headers": headers or [],
+            "client": (host, 12345),
+        }
+    )
 
 
 def _stage_selected_workflow(
@@ -218,6 +239,65 @@ async def test_chat_stream_includes_structured_tool_result_and_persists_it(isola
     assert tool_calls[1]["tool"] == "evidence_review_gate"
     assert tool_calls[2]["run_id"] == "tool-run-1"
     assert tool_calls[2]["result"]["tool_name"] == "read_file"
+
+
+@pytest.mark.asyncio
+async def test_chat_blocks_non_local_clients_without_bearer_token(isolated_chat_state):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await chat(
+            ChatRequest(message="Read memory", session_id=session_id, stream=True),
+            _request("/api/chat", host="10.0.0.8"),
+        )
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_chat_allows_non_local_clients_with_execution_bearer_token(isolated_chat_state):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+    config_path = isolated_chat_state / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "production_hardening": {
+                    "api": {
+                        "allow_loopback_without_auth": False,
+                        "execution_bearer_token_env_var": "BIOAPEX_EXECUTION_TOKEN",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def fake_astream(_message, _history):
+        yield {"type": "token", "content": "Done"}
+        yield {"type": "done"}
+
+    headers = [(b"authorization", b"Bearer execution-token")]
+    with patch("config._CONFIG_FILE", config_path), patch.dict(
+        os.environ,
+        {"BIOAPEX_EXECUTION_TOKEN": "execution-token"},
+        clear=False,
+    ), patch.object(agent_manager, "astream", fake_astream), patch(
+        "api.chat._generate_title_only",
+        new=AsyncMock(return_value=""),
+    ):
+        response = await chat(
+            ChatRequest(message="Read memory", session_id=session_id, stream=True),
+            _request("/api/chat", host="10.0.0.8", headers=headers),
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    assert any(item["type"] == "done" for item in payloads)
 
 
 @pytest.mark.asyncio

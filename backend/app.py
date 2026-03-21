@@ -19,6 +19,7 @@ load_dotenv()  # Load .env before any other imports that read env vars
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import config as cfg
 
 BASE_DIR = Path(__file__).parent
 
@@ -78,9 +79,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_production_hardening_policy = cfg.get_production_hardening_policy()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_production_hardening_policy.api.cors_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

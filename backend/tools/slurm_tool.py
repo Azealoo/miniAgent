@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Mapping, Type
 
+import config
 from audit.store import append_job_submitted_event
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field, model_validator
@@ -933,6 +934,13 @@ class SlurmTool(BaseTool):
         stdout_path: str | None = None,
         stderr_path: str | None = None,
     ) -> tuple[str, dict]:
+        if self.base_dir:
+            policy = config.get_production_hardening_policy()
+            if not policy.tools.slurm_enabled:
+                return blocked_result(
+                    self.name,
+                    "Slurm tool is disabled by production hardening policy.",
+                )
         if command is not None:
             return self._run_legacy_command(command)
         if action == "submit":
@@ -1122,6 +1130,14 @@ class SlurmTool(BaseTool):
             return execution_error_result(self.name, str(exc))
 
     def _run_legacy_command(self, command: str) -> tuple[str, dict]:
+        if self.base_dir:
+            policy = config.get_production_hardening_policy()
+            if not policy.tools.slurm_legacy_commands_enabled:
+                return blocked_result(
+                    self.name,
+                    "Legacy Slurm commands are disabled by production hardening policy.",
+                    metadata={"command": command},
+                )
         try:
             parts = shlex.split(command.strip())
         except ValueError as exc:

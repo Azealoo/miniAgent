@@ -5,7 +5,9 @@ Path traversal is blocked. Used to update MEMORY.md, create/edit skills, or cach
 from pathlib import Path
 from typing import Type
 
+import config
 from audit.store import append_file_written_event
+from hardening import is_secret_like_path
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
@@ -47,6 +49,23 @@ class WriteFileTool(BaseTool):
             root = Path(self.root_dir).resolve()
             path_clean = path.strip().lstrip("/").removeprefix("./")
             byte_count = len(content.encode("utf-8"))
+            if self.root_dir:
+                policy = config.get_production_hardening_policy()
+                if not policy.tools.write_file_enabled:
+                    append_file_written_event(
+                        root,
+                        path=path_clean or path,
+                        source="write_file_tool",
+                        outcome="blocked",
+                        byte_count=byte_count,
+                        tool_name=self.name,
+                        reason="write_file tool disabled by production hardening policy.",
+                    )
+                    return blocked_result(
+                        self.name,
+                        "write_file tool is disabled by production hardening policy.",
+                        metadata={"requested_path": path, "sanitized_path": path_clean},
+                    )
 
             def _audit(outcome: str, *, reason: str | None = None, path_value: str | None = None) -> None:
                 append_file_written_event(
@@ -64,6 +83,14 @@ class WriteFileTool(BaseTool):
                 return blocked_result(
                     self.name,
                     "Path traversal (..) is not allowed.",
+                    metadata={"requested_path": path, "sanitized_path": path_clean},
+                )
+
+            if is_secret_like_path(path_clean):
+                _audit("blocked", reason="Writing credential / secret files is not allowed.")
+                return blocked_result(
+                    self.name,
+                    "Writing credential / secret files is not allowed.",
                     metadata={"requested_path": path, "sanitized_path": path_clean},
                 )
 

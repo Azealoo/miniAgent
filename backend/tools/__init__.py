@@ -27,7 +27,7 @@ def get_all_tools(base_dir: Path) -> list:
     extra_roots = [str(p) for p in config.get_read_file_extra_roots(base_dir)]
     return [
         TerminalTool(base_dir=str(base_dir)),
-        PythonReplTool(),
+        PythonReplTool(base_dir=str(base_dir)),
         FetchURLTool(),
         HttpJsonTool(),
         NcbiEutilsTool(),

@@ -6,8 +6,10 @@ PUT  /api/skills/registry/{name}  — enable or disable a skill by name
 """
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+
+from access_control import require_admin_access, require_inspection_access
 
 router = APIRouter()
 
@@ -36,7 +38,8 @@ def _scan_skills_meta(base_dir: Path) -> list[dict]:
 
 
 @router.get("/skills/registry")
-def list_registry():
+def list_registry(request: Request = None):
+    require_inspection_access(request)
     base = _base_dir()
     skills_meta = _scan_skills_meta(base)
     cfg_data = _load_config()
@@ -60,7 +63,8 @@ class SkillEntryUpdate(BaseModel):
 
 
 @router.put("/skills/registry/{skill_name}")
-def update_skill_entry(skill_name: str, body: SkillEntryUpdate):
+def update_skill_entry(skill_name: str, body: SkillEntryUpdate, request: Request = None):
+    require_admin_access(request)
     import config as cfg
     with cfg._config_lock:
         data = cfg._load()

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from access_control import require_admin_access, require_inspection_access
+import config as cfg
+from audit.store import append_connector_action_event
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from connectors.models import ConnectorActionRequest, ConnectorExecutionAction
@@ -26,6 +29,19 @@ def _base_dir():
     return agent_manager.base_dir
 
 
+def _policy_blocked(connector_name: str, *, action: str, policy_key: str) -> None:
+    append_connector_action_event(
+        _base_dir(),
+        connector_name=connector_name,
+        action=action,
+        outcome="blocked",
+        status="blocked",
+        failure_mode="policy_disabled",
+        details={"policy_key": policy_key},
+    )
+    raise HTTPException(403, f"{action} is disabled by production hardening policy.")
+
+
 class ConnectorEntryUpdate(BaseModel):
     enabled: bool
     config: dict[str, Any] | None = None
@@ -36,14 +52,16 @@ class ConnectorValidationRequest(BaseModel):
 
 
 @router.get("/connectors/registry")
-def list_connector_registry():
+def list_connector_registry(request: Request = None):
+    require_inspection_access(request)
     return {
         "connectors": [entry.model_dump(mode="json") for entry in list_connector_registry_entries()],
     }
 
 
 @router.get("/connectors/registry/{connector_name}")
-def get_connector_registry_detail(connector_name: str):
+def get_connector_registry_detail(connector_name: str, request: Request = None):
+    require_inspection_access(request)
     try:
         entry = get_connector_registry_entry(connector_name)
     except KeyError as exc:
@@ -52,7 +70,19 @@ def get_connector_registry_detail(connector_name: str):
 
 
 @router.put("/connectors/registry/{connector_name}")
-def update_connector_registry_entry(connector_name: str, body: ConnectorEntryUpdate):
+def update_connector_registry_entry(
+    connector_name: str,
+    body: ConnectorEntryUpdate,
+    request: Request = None,
+):
+    require_admin_access(request)
+    policy = cfg.get_production_hardening_policy()
+    if not policy.api.connectors_configuration_enabled:
+        _policy_blocked(
+            connector_name,
+            action="configure",
+            policy_key="production_hardening.api.connectors_configuration_enabled",
+        )
     try:
         entry, result = configure_connector_entry(
             connector_name,
@@ -72,12 +102,17 @@ def update_connector_registry_entry(connector_name: str, body: ConnectorEntryUpd
 
 
 @router.post("/connectors/registry/{connector_name}/validate")
-def validate_connector_registry_entry(connector_name: str, body: ConnectorValidationRequest | None = None):
-    request = body or ConnectorValidationRequest()
+def validate_connector_registry_entry(
+    connector_name: str,
+    body: ConnectorValidationRequest | None = None,
+    request: Request = None,
+):
+    require_admin_access(request)
+    request_body = body or ConnectorValidationRequest()
     try:
         result = validate_connector_entry(
             connector_name,
-            config=request.config,
+            config=request_body.config,
             base_dir=_base_dir(),
         )
     except KeyError as exc:
@@ -90,13 +125,22 @@ def run_connector_registry_action(
     connector_name: str,
     action: ConnectorExecutionAction,
     body: ConnectorActionRequest | None = None,
+    request: Request = None,
 ):
-    request = body or ConnectorActionRequest()
+    require_admin_access(request)
+    policy = cfg.get_production_hardening_policy()
+    if not policy.api.connectors_runtime_actions_enabled:
+        _policy_blocked(
+            connector_name,
+            action=action,
+            policy_key="production_hardening.api.connectors_runtime_actions_enabled",
+        )
+    request_body = body or ConnectorActionRequest()
     try:
         result = execute_connector_action(
             connector_name,
             action=action,
-            request=request,
+            request=request_body,
             base_dir=_base_dir(),
         )
     except KeyError as exc:

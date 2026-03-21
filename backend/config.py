@@ -6,6 +6,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from hardening import ProductionHardeningPolicy
+
 _CONFIG_FILE = Path(__file__).parent / "config.json"
 # Protects all read-modify-write operations so concurrent API calls can't
 # overwrite each other's changes.
@@ -148,6 +150,19 @@ def get_connector_entry(connector_name: str) -> dict[str, Any]:
         "enabled": bool(raw.get("enabled", False)),
         "config": dict(config_payload) if isinstance(config_payload, dict) else {},
     }
+
+
+def get_production_hardening_policy() -> ProductionHardeningPolicy:
+    cfg = _load()
+    if "production_hardening" not in cfg:
+        return ProductionHardeningPolicy()
+    raw = cfg.get("production_hardening", {})
+    if not isinstance(raw, dict):
+        return ProductionHardeningPolicy.fail_closed()
+    try:
+        return ProductionHardeningPolicy.model_validate(raw)
+    except Exception:
+        return ProductionHardeningPolicy.fail_closed()
 
 
 def set_connector_entry(connector_name: str, *, enabled: bool, config: dict[str, Any]) -> None:

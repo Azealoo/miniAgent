@@ -2,8 +2,9 @@
 
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
+from access_control import require_admin_access, require_inspection_access
 from artifacts.registry import lookup_artifact_registry, rebuild_artifact_registry
 
 router = APIRouter()
@@ -24,7 +25,9 @@ def list_artifact_registry(
     date: str | None = None,
     dataset_id: str | None = None,
     include_invalid: bool = False,
+    request: Request = None,
 ):
+    require_inspection_access(request)
     result = lookup_artifact_registry(
         _base_dir(),
         run_id=run_id,
@@ -38,6 +41,7 @@ def list_artifact_registry(
 
 
 @router.post("/artifacts/registry/rebuild")
-def rebuild_registry():
+def rebuild_registry(request: Request = None):
+    require_admin_access(request)
     snapshot = rebuild_artifact_registry(_base_dir())
     return snapshot.model_dump(mode="json")

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.params import Query as QueryParam
 
+from access_control import require_inspection_access
 from observability import (
     build_observability_overview,
     dashboard_definitions,
@@ -39,7 +40,9 @@ def list_observability_metrics(
     trace_id: str | None = Query(None),
     span_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
+    request: Request = None,
 ):
+    require_inspection_access(request)
     resolved_limit = 100 if isinstance(limit, QueryParam) else limit
     records = query_metric_records(
         _base_dir(),
@@ -74,7 +77,9 @@ def list_observability_traces(
     workflow_id: str | None = Query(None),
     status: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
+    request: Request = None,
 ):
+    require_inspection_access(request)
     resolved_limit = 100 if isinstance(limit, QueryParam) else limit
     records = query_trace_records(
         _base_dir(),
@@ -104,7 +109,9 @@ def get_observability_overview(
     session_id: str | None = Query(None),
     workflow_id: str | None = Query(None),
     limit: int = Query(5000, ge=1, le=20000),
+    request: Request = None,
 ):
+    require_inspection_access(request)
     resolved_days = 7 if isinstance(days, QueryParam) else days
     resolved_limit = 5000 if isinstance(limit, QueryParam) else limit
     return build_observability_overview(
@@ -118,7 +125,8 @@ def get_observability_overview(
 
 
 @router.get("/observability/dashboard-definitions")
-def get_observability_dashboard_definitions():
+def get_observability_dashboard_definitions(request: Request = None):
+    require_inspection_access(request)
     return {
         "dashboards": dashboard_definitions(),
         "retention_policy": observability_retention_policy(),
