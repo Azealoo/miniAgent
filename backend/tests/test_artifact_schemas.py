@@ -149,6 +149,74 @@ class TestArtifactSchemas:
         with pytest.raises(ValueError, match="run_id"):
             WorkflowRun.model_validate(payload)
 
+    def test_workflow_run_accepts_external_execution_metadata_on_step_records(self):
+        payload = {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "workflow_run",
+            "id": "workflow-run-external-adapter-v1",
+            "run_id": "run-20260320T193000Z-deadbeef",
+            "created_at": "2026-03-20T19:30:00Z",
+            "source_workflow": "perturb-seq-nextflow",
+            "related_artifacts": [],
+            "workflow": {"name": "Perturb-seq Nextflow", "slug": "perturb-seq-nextflow"},
+            "lifecycle_status": "completed",
+            "qc_status": "passed",
+            "engine": "external_workflow_adapter_v1",
+            "parameters": {"reference_build": "GRCh38"},
+            "environment": {},
+            "inputs": [],
+            "outputs": [],
+            "steps": [
+                {
+                    "id": "launch_nextflow",
+                    "name": "Launch perturb-seq pipeline in Nextflow",
+                    "status": "completed",
+                    "start_time": "2026-03-20T19:31:00Z",
+                    "end_time": "2026-03-20T19:35:00Z",
+                    "inputs_resolved": [],
+                    "outputs_produced": [],
+                    "warnings": [],
+                    "errors": [],
+                    "external_execution": {
+                        "adapter_version": "external_workflow_adapter_v1",
+                        "engine_name": "nextflow",
+                        "engine_version": "nextflow version 24.10.0",
+                        "execution_profile": "slurm",
+                        "entrypoint": "workflows/engines/perturb_seq/main.nf",
+                        "command": (
+                            "nextflow run workflows/engines/perturb_seq/main.nf -profile slurm "
+                            "--reference_build GRCh38"
+                        ),
+                        "argv": [
+                            "nextflow",
+                            "run",
+                            "workflows/engines/perturb_seq/main.nf",
+                            "-profile",
+                            "slurm",
+                            "--reference_build",
+                            "GRCh38",
+                        ],
+                        "working_directory": ".",
+                        "input_bindings": {"reference_build": "GRCh38"},
+                        "output_locations": [
+                            "artifacts/perturb-seq-nextflow/2026-03-20/run-20260320T193000Z-deadbeef/outputs/generated/external/perturb-seq/results"
+                        ],
+                        "environment_references": ["profile:slurm"],
+                        "environment_keys": ["BIOAPEX_RUN_ID", "BIOAPEX_INPUT_REFERENCE_BUILD"],
+                        "job_records": [],
+                        "normalized_status": "completed",
+                        "return_code": 0,
+                    },
+                }
+            ],
+        }
+
+        document = WorkflowRun.model_validate(payload)
+
+        assert document.steps[0].external_execution is not None
+        assert document.steps[0].external_execution.engine_name == "nextflow"
+        assert document.steps[0].external_execution.output_locations[0].endswith("/results")
+
     def test_evidence_cards_require_prefixed_stable_identifiers(self):
         payload = {
             "schema_version": SCHEMA_PACK_VERSION,
@@ -1431,6 +1499,9 @@ class TestArtifactSchemas:
         parsed = validate_artifact_payload(payload)
 
         assert isinstance(parsed, WorkflowRun)
+        assert parsed.steps[1].external_execution is not None
+        assert parsed.steps[1].external_execution.engine_name == "command"
+        assert parsed.steps[1].external_execution.execution_profile == "local"
         assert artifact_model_for_type("workflow_run") is WorkflowRun
         assert artifact_model_for_type("slurm_job") is SlurmJobArtifact
         assert artifact_model_for_type("checklist_results") is ChecklistResultsArtifact

@@ -46,6 +46,7 @@ from artifacts.biocompute import expected_biocompute_export_paths, materialize_b
 from artifacts.provenance import expected_provenance_export_paths, materialize_provenance_bundle
 from artifacts.schemas import (
     DeviationRecord,
+    ExternalExecutionRecord,
     WorkflowEnvironment,
     WorkflowIssueDetail,
     WorkflowStepRecord,
@@ -75,6 +76,8 @@ _WORKFLOW_INPUT_SNAPSHOT_NAME = "workflow_inputs.json"
 _STEP_INPUT_SNAPSHOT_NAME = "resolved_inputs.json"
 _STEP_OUTPUT_SNAPSHOT_NAME = "resolved_outputs.json"
 _SLURM_FAILURE_STATUSES = {"failed", "cancelled", "timed_out"}
+_EXTERNAL_WORKFLOW_ADAPTER_VERSION = "external_workflow_adapter_v1"
+_STRUCTURED_EXTERNAL_ENGINES = {"nextflow", "snakemake"}
 _BIOCOMPUTE_MATERIALIZATION_WARNING_PREFIX = "Optional BioCompute export could not be materialized deterministically:"
 _COMPLIANCE_HOOK_USER_MESSAGE_RE = re.compile(
     r"^Workflow (?P<workflow_id>[A-Za-z0-9._:-]+) compliance hook "
@@ -924,6 +927,7 @@ class InternalDAGRunner:
             record.warning_details = []
             record.errors = []
             record.error_details = []
+            record.external_execution = None
 
         run_document.lifecycle_status = "waiting"
         run_document.outputs = []
@@ -1254,6 +1258,7 @@ class InternalDAGRunner:
                 emitted_outputs.append((output.name, ref))
                 snapshot_payload[output.name] = ref.model_dump(mode="json")
             self._persist_step_output_snapshot(layout, step.id, snapshot_payload)
+            output_refs = self._sync_external_execution_job_records(record, output_refs)
             run_document.related_artifacts = self._dedupe_refs(
                 [
                     *run_document.related_artifacts,
@@ -1293,6 +1298,13 @@ class InternalDAGRunner:
             expected_outputs = ", ".join(output.name for output in step.outputs) or "no declared outputs"
             record.errors.append(error_message)
             record.error_details = _dedupe_workflow_issue_details([*record.error_details, *issue_details])
+            record.outputs_produced = self._sync_external_execution_job_records(record, record.outputs_produced)
+            run_document.related_artifacts = self._dedupe_refs(
+                [
+                    *run_document.related_artifacts,
+                    *[ref for ref in record.outputs_produced if ref.artifact_type == "slurm_job"],
+                ]
+            )
             record.end_time = _utcnow()
             if step.failure_policy == "continue_with_warning":
                 record.status = _STEP_COMPLETE_STATUS
@@ -1537,21 +1549,53 @@ class InternalDAGRunner:
                 spec=spec,
                 record=record,
             )
+        if self._structured_external_engine_uses_slurm_backend(executor):
+            return self._run_structured_slurm_external_command(
+                step=step,
+                executor=executor,
+                step_inputs=step_inputs,
+                context=context,
+                layout=layout,
+                spec=spec,
+                record=record,
+            )
 
         rendered_entrypoint = self._render_external_template(
             executor.entrypoint,
             step_inputs,
+            context=context,
             shell_quote=False,
         )
-        command_template = executor.command or f"{executor.engine_name} run {executor.entrypoint}"
-        command = self._render_external_template(command_template, step_inputs)
-        argv = shlex.split(command)
+        rendered_bindings = self._render_external_parameter_bindings(
+            executor.parameter_bindings,
+            step_inputs,
+            context=context,
+        )
+        rendered_output_locations = self._render_external_output_locations(
+            executor.output_locations,
+            step_inputs,
+            context=context,
+        )
+        command_cwd, working_directory = self._external_command_working_directory(
+            executor,
+            step_inputs,
+            context=context,
+        )
         env = os.environ.copy()
         env.update(self._external_executor_environment(step_inputs, context))
-        command_cwd = (
-            context.resolve_path(executor.working_directory)
-            if executor.working_directory is not None
-            else context.base_dir
+        engine_version = self._resolve_external_engine_version(
+            executor,
+            step_inputs,
+            context=context,
+            command_cwd=command_cwd,
+            env=env,
+        )
+        command, argv = self._build_external_command(
+            executor,
+            rendered_entrypoint=rendered_entrypoint,
+            rendered_parameter_bindings=rendered_bindings,
+            step_inputs=step_inputs,
+            context=context,
         )
         result = subprocess.run(
             argv,
@@ -1562,24 +1606,50 @@ class InternalDAGRunner:
             check=False,
             env=env,
         )
+        record.external_execution = self._build_external_execution_record(
+            executor=executor,
+            step_inputs=step_inputs,
+            rendered_entrypoint=rendered_entrypoint,
+            command=command,
+            argv=argv,
+            working_directory=working_directory,
+            rendered_output_locations=rendered_output_locations,
+            env=env,
+            normalized_status="completed" if result.returncode == 0 else "failed",
+            engine_version=engine_version,
+            return_code=result.returncode,
+            status_detail=result.stderr.strip() or result.stdout.strip() or None,
+        )
         if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"{command!r} failed.")
+            raise RuntimeError(
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"{executor.engine_name} external engine launch failed with exit code {result.returncode}."
+            )
         if len(step.outputs) != 1:
             raise ValueError("External engine executor currently requires exactly one declared output.")
         return {
             step.outputs[0].name: {
+                "adapter_version": _EXTERNAL_WORKFLOW_ADAPTER_VERSION,
                 "engine_name": executor.engine_name,
+                "engine_version": engine_version,
+                "execution_profile": executor.execution_profile,
                 "entrypoint": rendered_entrypoint,
                 "command": command,
                 "argv": argv,
+                "parameter_bindings": rendered_bindings,
+                "normalized_status": "completed",
                 "returncode": result.returncode,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "inputs": _serialize_for_json(dict(step_inputs)),
-                "working_directory": context.relative_path(command_cwd),
+                "working_directory": working_directory,
+                "environment_references": list(executor.environment_references),
                 "environment_keys": sorted(
                     key for key in env if key.startswith("BIOAPEX_")
                 ),
+                "output_locations": rendered_output_locations,
+                "job_records": [],
             }
         }
 
@@ -1607,6 +1677,27 @@ class InternalDAGRunner:
             existing_ref = self._load_step_output_ref(layout, step, declared_output.name)
             if existing_ref is not None:
                 record.outputs_produced = self._dedupe_refs([*record.outputs_produced, existing_ref])
+        rendered_entrypoint = self._render_external_template(
+            executor.entrypoint,
+            step_inputs,
+            context=context,
+            shell_quote=False,
+        )
+        rendered_output_locations = self._render_external_output_locations(
+            executor.output_locations,
+            step_inputs,
+            context=context,
+        )
+        rendered_working_directory = (
+            self._render_external_template(
+                executor.working_directory,
+                step_inputs,
+                context=context,
+                shell_quote=False,
+            )
+            if executor.working_directory is not None
+            else "."
+        )
         if existing_ref is not None:
             existing_path = resolve_artifact_path(self.base_dir, existing_ref.path)
             if not existing_path.exists():
@@ -1617,6 +1708,20 @@ class InternalDAGRunner:
             if not isinstance(existing_document, SlurmJobArtifact):
                 raise ValueError(f"Persisted artifact at {existing_ref.path} is not a slurm_job record.")
             refreshed = refresh_slurm_job_artifact(base_dir=self.base_dir, artifact=existing_document)
+            record.external_execution = self._build_external_execution_record(
+                executor=executor,
+                step_inputs=step_inputs,
+                rendered_entrypoint=rendered_entrypoint,
+                command=shlex.join(refreshed.artifact.submission_command),
+                argv=list(refreshed.artifact.submission_command),
+                working_directory=refreshed.artifact.working_directory,
+                rendered_output_locations=rendered_output_locations,
+                env_keys=refreshed.artifact.environment_keys,
+                normalized_status=refreshed.artifact.status,
+                engine_version=executor.engine_version,
+                status_detail=refreshed.summary,
+                job_records=[existing_ref],
+            )
             payload = refreshed.artifact.model_dump(mode="json")
             if refreshed.artifact.status in {"pending", "running"}:
                 return PendingStepOutputs(outputs={declared_output.name: payload}, reason=refreshed.summary)
@@ -1626,21 +1731,6 @@ class InternalDAGRunner:
                     f"Slurm job {refreshed.artifact.job_id} ended with status {refreshed.artifact.status}."
                 )
             return {declared_output.name: payload}
-
-        rendered_entrypoint = self._render_external_template(
-            executor.entrypoint,
-            step_inputs,
-            shell_quote=False,
-        )
-        rendered_working_directory = (
-            self._render_external_template(
-                executor.working_directory,
-                step_inputs,
-                shell_quote=False,
-            )
-            if executor.working_directory is not None
-            else None
-        )
         export_environment = self._external_executor_environment(step_inputs, context)
         submitted = submit_slurm_job(
             base_dir=self.base_dir,
@@ -1654,8 +1744,202 @@ class InternalDAGRunner:
             source_workflow=spec.workflow_id,
             export_environment=export_environment,
         )
+        record.external_execution = self._build_external_execution_record(
+            executor=executor,
+            step_inputs=step_inputs,
+            rendered_entrypoint=rendered_entrypoint,
+            command=shlex.join(submitted.artifact.submission_command),
+            argv=list(submitted.artifact.submission_command),
+            working_directory=submitted.artifact.working_directory,
+            rendered_output_locations=rendered_output_locations,
+            env=export_environment,
+            normalized_status=submitted.artifact.status,
+            engine_version=executor.engine_version,
+            status_detail=submitted.summary,
+        )
         return PendingStepOutputs(
             outputs={declared_output.name: submitted.artifact.model_dump(mode="json")},
+            reason=submitted.summary,
+        )
+
+    def _run_structured_slurm_external_command(
+        self,
+        *,
+        step: WorkflowStepDefinition,
+        executor: ExternalEngineExecutor,
+        step_inputs: Mapping[str, Any],
+        context: StepExecutionContext,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        record: WorkflowStepRecord,
+    ) -> dict[str, Any] | PendingStepOutputs:
+        if len(step.outputs) != 1:
+            raise ValueError("Structured Slurm-backed external engine executor requires exactly one declared output.")
+        declared_output = step.outputs[0]
+        if declared_output.kind != "value":
+            raise ValueError(
+                "Structured Slurm-backed external engine executor currently requires one declared value output."
+            )
+
+        rendered_entrypoint = self._render_external_template(
+            executor.entrypoint,
+            step_inputs,
+            context=context,
+            shell_quote=False,
+        )
+        rendered_bindings = self._render_external_parameter_bindings(
+            executor.parameter_bindings,
+            step_inputs,
+            context=context,
+        )
+        rendered_output_locations = self._render_external_output_locations(
+            executor.output_locations,
+            step_inputs,
+            context=context,
+        )
+        command_cwd, working_directory = self._external_command_working_directory(
+            executor,
+            step_inputs,
+            context=context,
+        )
+        env = self._external_executor_environment(step_inputs, context)
+        command, argv = self._build_external_command(
+            executor,
+            rendered_entrypoint=rendered_entrypoint,
+            rendered_parameter_bindings=rendered_bindings,
+            step_inputs=step_inputs,
+            context=context,
+        )
+
+        existing_job_refs = self._existing_external_job_refs(layout, step, record)
+        if existing_job_refs:
+            current_ref = existing_job_refs[0]
+            artifact_path = resolve_artifact_path(self.base_dir, current_ref.path)
+            if not artifact_path.exists():
+                raise ValueError(
+                    f"Expected persisted slurm_job artifact at {current_ref.path} while resuming step {step.id}."
+                )
+            current_document = load_artifact_document(artifact_path)
+            if not isinstance(current_document, SlurmJobArtifact):
+                raise ValueError(f"Persisted artifact at {current_ref.path} is not a slurm_job record.")
+            refreshed = refresh_slurm_job_artifact(base_dir=self.base_dir, artifact=current_document)
+            persisted_ref = self._persist_external_job_artifact(
+                layout=layout,
+                step_id=step.id,
+                artifact=refreshed.artifact,
+                existing_ref=current_ref,
+            )
+            bundle = self._build_structured_slurm_external_bundle(
+                executor=executor,
+                step_inputs=step_inputs,
+                rendered_entrypoint=rendered_entrypoint,
+                command=command,
+                argv=argv,
+                rendered_parameter_bindings=rendered_bindings,
+                working_directory=working_directory,
+                rendered_output_locations=rendered_output_locations,
+                engine_version=(record.external_execution.engine_version if record.external_execution else None)
+                or executor.engine_version,
+                artifact=refreshed.artifact,
+                status_detail=refreshed.summary,
+                job_refs=[persisted_ref],
+            )
+            record.external_execution = self._build_external_execution_record(
+                executor=executor,
+                step_inputs=step_inputs,
+                rendered_entrypoint=rendered_entrypoint,
+                command=command,
+                argv=argv,
+                working_directory=working_directory,
+                rendered_output_locations=rendered_output_locations,
+                env_keys=refreshed.artifact.environment_keys,
+                normalized_status=refreshed.artifact.status,
+                engine_version=bundle["engine_version"],
+                status_detail=refreshed.summary,
+                job_records=[persisted_ref],
+            )
+            if refreshed.artifact.status in {"pending", "running"}:
+                return PendingStepOutputs(outputs={declared_output.name: bundle}, reason=refreshed.summary)
+            if refreshed.artifact.status in _SLURM_FAILURE_STATUSES:
+                output_ref, _persisted_value = self._persist_step_output(
+                    layout=layout,
+                    spec=spec,
+                    step=step,
+                    output_name=declared_output.name,
+                    output_kind=declared_output.kind,
+                    artifact_type=declared_output.artifact_type,
+                    raw_value=bundle,
+                )
+                self._persist_step_output_snapshot(
+                    layout,
+                    step.id,
+                    {declared_output.name: output_ref.model_dump(mode="json")},
+                )
+                record.outputs_produced = self._sync_external_execution_job_records(record, [output_ref])
+                raise RuntimeError(
+                    f"Slurm job {refreshed.artifact.job_id} ended with status {refreshed.artifact.status}."
+                )
+            return {declared_output.name: bundle}
+
+        engine_version = self._resolve_external_engine_version(
+            executor,
+            step_inputs,
+            context=context,
+            command_cwd=command_cwd,
+            env={**os.environ, **env},
+        )
+        script_path = self._materialize_external_adapter_script(
+            layout=layout,
+            step_id=step.id,
+            argv=argv,
+        )
+        submitted = submit_slurm_job(
+            base_dir=self.base_dir,
+            run_id=context.run_id,
+            run_relative_dir=context.relative_run_dir,
+            script_path=script_path,
+            resource_request=executor.resource_request,
+            working_directory=working_directory,
+            job_name=_slugify_label(step.label),
+            run_record_ref=self._run_record_ref(layout),
+            source_workflow=spec.workflow_id,
+            export_environment=env,
+        )
+        persisted_ref = self._persist_external_job_artifact(
+            layout=layout,
+            step_id=step.id,
+            artifact=submitted.artifact,
+        )
+        record.external_execution = self._build_external_execution_record(
+            executor=executor,
+            step_inputs=step_inputs,
+            rendered_entrypoint=rendered_entrypoint,
+            command=command,
+            argv=argv,
+            working_directory=working_directory,
+            rendered_output_locations=rendered_output_locations,
+            env_keys=submitted.artifact.environment_keys,
+            normalized_status=submitted.artifact.status,
+            engine_version=engine_version,
+            status_detail=submitted.summary,
+            job_records=[persisted_ref],
+        )
+        bundle = self._build_structured_slurm_external_bundle(
+            executor=executor,
+            step_inputs=step_inputs,
+            rendered_entrypoint=rendered_entrypoint,
+            command=command,
+            argv=argv,
+            rendered_parameter_bindings=rendered_bindings,
+            working_directory=working_directory,
+            rendered_output_locations=rendered_output_locations,
+            engine_version=engine_version,
+            artifact=submitted.artifact,
+            status_detail=submitted.summary,
+            job_refs=[persisted_ref],
+        )
+        return PendingStepOutputs(
+            outputs={declared_output.name: bundle},
             reason=submitted.summary,
         )
 
@@ -3034,24 +3318,358 @@ class InternalDAGRunner:
             run_id=result.report.run_id,
         )
 
+    def _structured_external_engine_uses_slurm_backend(self, executor: ExternalEngineExecutor) -> bool:
+        if executor.engine_name not in _STRUCTURED_EXTERNAL_ENGINES:
+            return False
+        if executor.execution_profile is None or executor.resource_request is None:
+            return False
+        return executor.execution_profile.strip().casefold() == "slurm"
+
+    def _external_command_working_directory(
+        self,
+        executor: ExternalEngineExecutor,
+        step_inputs: Mapping[str, Any],
+        *,
+        context: StepExecutionContext,
+    ) -> tuple[Path, str]:
+        if executor.working_directory is not None:
+            rendered = self._render_external_template(
+                executor.working_directory,
+                step_inputs,
+                context=context,
+                shell_quote=False,
+            )
+            resolved = context.resolve_path(rendered)
+            return resolved, context.relative_path(resolved)
+        if executor.engine_name in _STRUCTURED_EXTERNAL_ENGINES:
+            return context.run_dir, context.relative_run_dir.as_posix()
+        return context.base_dir, "."
+
+    def _existing_external_job_refs(
+        self,
+        layout: RunLayout,
+        step: WorkflowStepDefinition,
+        record: WorkflowStepRecord,
+    ) -> list[ArtifactReference]:
+        refs: list[ArtifactReference] = []
+        if record.external_execution is not None:
+            refs.extend(record.external_execution.job_records)
+        refs.extend(ref for ref in record.outputs_produced if ref.artifact_type == "slurm_job")
+        if refs:
+            return self._dedupe_refs(refs)
+
+        output_ref = self._load_step_output_ref(layout, step, step.outputs[0].name)
+        if output_ref is None or output_ref.artifact_type != "workflow_value":
+            return []
+        bundle = self._load_output_value(step.outputs[0].kind, output_ref)
+        if not isinstance(bundle, Mapping):
+            return []
+        raw_refs = bundle.get("job_records")
+        if not isinstance(raw_refs, list):
+            return []
+        recovered: list[ArtifactReference] = []
+        for item in raw_refs:
+            if not isinstance(item, Mapping):
+                continue
+            try:
+                recovered.append(ArtifactReference.model_validate(item))
+            except Exception:
+                continue
+        return self._dedupe_refs(recovered)
+
+    def _persist_external_job_artifact(
+        self,
+        *,
+        layout: RunLayout,
+        step_id: str,
+        artifact: SlurmJobArtifact,
+        existing_ref: ArtifactReference | None = None,
+    ) -> ArtifactReference:
+        if existing_ref is not None:
+            existing_path = PurePosixPath(existing_ref.path)
+            try:
+                relative_path = existing_path.relative_to(layout.relative_run_dir)
+            except ValueError:
+                relative_path = build_generated_output_relpath("slurm_job.json", step=step_id)
+        else:
+            relative_path = build_generated_output_relpath("slurm_job.json", step=step_id)
+
+        self._write_text_under_run(
+            layout,
+            relative_path,
+            _dump_json(artifact.model_dump(mode="json")),
+        )
+        return ArtifactReference(
+            artifact_type="slurm_job",
+            path=(layout.relative_run_dir / relative_path).as_posix(),
+            id=artifact.id,
+            run_id=artifact.run_id,
+        )
+
+    def _build_structured_slurm_external_bundle(
+        self,
+        *,
+        executor: ExternalEngineExecutor,
+        step_inputs: Mapping[str, Any],
+        rendered_entrypoint: str,
+        command: str,
+        argv: list[str],
+        rendered_parameter_bindings: Mapping[str, str],
+        working_directory: str,
+        rendered_output_locations: list[str],
+        engine_version: str | None,
+        artifact: SlurmJobArtifact,
+        status_detail: str,
+        job_refs: list[ArtifactReference],
+    ) -> dict[str, Any]:
+        stdout_text = artifact.logs.runtime_stdout or artifact.logs.submission_stdout or ""
+        stderr_text = artifact.logs.runtime_stderr or artifact.logs.submission_stderr or ""
+        return {
+            "adapter_version": _EXTERNAL_WORKFLOW_ADAPTER_VERSION,
+            "engine_name": executor.engine_name,
+            "engine_version": engine_version,
+            "execution_profile": executor.execution_profile,
+            "entrypoint": rendered_entrypoint,
+            "command": command,
+            "argv": argv,
+            "parameter_bindings": dict(rendered_parameter_bindings),
+            "normalized_status": artifact.status,
+            "returncode": 0 if artifact.status == "completed" else None,
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "inputs": _serialize_for_json(dict(step_inputs)),
+            "working_directory": working_directory,
+            "environment_references": list(executor.environment_references),
+            "environment_keys": list(artifact.environment_keys),
+            "output_locations": rendered_output_locations,
+            "job_records": [ref.model_dump(mode="json") for ref in job_refs],
+            "status_detail": status_detail,
+        }
+
+    def _materialize_external_adapter_script(
+        self,
+        *,
+        layout: RunLayout,
+        step_id: str,
+        argv: list[str],
+    ) -> str:
+        relative_path = build_generated_output_relpath("external_adapter_launch.sh", step=step_id)
+        script_body = (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            f"exec {shlex.join(argv)}\n"
+        )
+        self._write_text_under_run(layout, relative_path, script_body)
+        target = resolve_artifact_path(layout.run_dir, relative_path)
+        target.chmod(0o755)
+        return (layout.relative_run_dir / relative_path).as_posix()
+
+    def _external_template_values(
+        self,
+        step_inputs: Mapping[str, Any],
+        context: StepExecutionContext,
+    ) -> dict[str, Any]:
+        values = dict(step_inputs)
+        values.setdefault("run_id", context.run_id)
+        values.setdefault("workflow_id", context.workflow_id)
+        values.setdefault("step_id", context.step_id)
+        values.setdefault("run_dir", context.relative_run_dir.as_posix())
+        values.setdefault("created_at", _isoformat_z(context.created_at))
+        return values
+
+    def _render_external_parameter_bindings(
+        self,
+        parameter_bindings: Mapping[str, str],
+        step_inputs: Mapping[str, Any],
+        *,
+        context: StepExecutionContext,
+    ) -> dict[str, str]:
+        return {
+            name: self._render_external_template(template, step_inputs, context=context, shell_quote=False)
+            for name, template in parameter_bindings.items()
+        }
+
+    def _render_external_output_locations(
+        self,
+        output_locations: list[str],
+        step_inputs: Mapping[str, Any],
+        *,
+        context: StepExecutionContext,
+    ) -> list[str]:
+        rendered: list[str] = []
+        for template in output_locations:
+            location = self._render_external_template(
+                template,
+                step_inputs,
+                context=context,
+                shell_quote=False,
+            )
+            if location not in rendered:
+                rendered.append(location)
+        return rendered
+
+    def _build_external_command(
+        self,
+        executor: ExternalEngineExecutor,
+        *,
+        rendered_entrypoint: str,
+        rendered_parameter_bindings: Mapping[str, str],
+        step_inputs: Mapping[str, Any],
+        context: StepExecutionContext,
+    ) -> tuple[str, list[str]]:
+        if executor.command is not None:
+            command = self._render_external_template(executor.command, step_inputs, context=context)
+            return command, shlex.split(command)
+
+        if executor.engine_name == "nextflow":
+            argv = ["nextflow", "run", context.resolve_path(rendered_entrypoint).as_posix()]
+            if executor.execution_profile is not None:
+                argv.extend(["-profile", executor.execution_profile])
+            for name, value in rendered_parameter_bindings.items():
+                argv.extend([f"--{name}", value])
+            return shlex.join(argv), argv
+
+        if executor.engine_name == "snakemake":
+            argv = ["snakemake", "--snakefile", context.resolve_path(rendered_entrypoint).as_posix()]
+            if executor.execution_profile is not None:
+                argv.extend(["--profile", executor.execution_profile])
+            if rendered_parameter_bindings:
+                argv.append("--config")
+                argv.extend(f"{name}={value}" for name, value in rendered_parameter_bindings.items())
+            return shlex.join(argv), argv
+
+        command_template = f"{executor.engine_name} run {executor.entrypoint}"
+        command = self._render_external_template(command_template, step_inputs, context=context)
+        return command, shlex.split(command)
+
+    def _resolve_external_engine_version(
+        self,
+        executor: ExternalEngineExecutor,
+        step_inputs: Mapping[str, Any],
+        *,
+        context: StepExecutionContext,
+        command_cwd: Path,
+        env: Mapping[str, str],
+    ) -> str | None:
+        if executor.engine_version is not None:
+            return executor.engine_version
+
+        version_command_template = executor.version_command
+        if version_command_template is None:
+            if executor.engine_name == "nextflow":
+                version_command_template = "nextflow -version"
+            elif executor.engine_name == "snakemake":
+                version_command_template = "snakemake --version"
+
+        if version_command_template is None:
+            return None
+
+        version_command = self._render_external_template(
+            version_command_template,
+            step_inputs,
+            context=context,
+        )
+        result = subprocess.run(
+            shlex.split(version_command),
+            cwd=command_cwd,
+            capture_output=True,
+            text=True,
+            shell=False,
+            check=False,
+            env=dict(env),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"Could not capture {executor.engine_name} version via {version_command!r}."
+            )
+
+        candidates = [
+            line.strip()
+            for line in [*result.stdout.splitlines(), *result.stderr.splitlines()]
+            if line.strip()
+        ]
+        if not candidates:
+            raise RuntimeError(f"{executor.engine_name} version command returned no output.")
+        for candidate in candidates:
+            if "version" in candidate.casefold():
+                return candidate
+        return candidates[0]
+
+    def _build_external_execution_record(
+        self,
+        *,
+        executor: ExternalEngineExecutor,
+        step_inputs: Mapping[str, Any],
+        rendered_entrypoint: str,
+        command: str,
+        argv: list[str],
+        working_directory: str,
+        rendered_output_locations: list[str],
+        normalized_status: str,
+        engine_version: str | None = None,
+        return_code: int | None = None,
+        status_detail: str | None = None,
+        env: Mapping[str, str] | None = None,
+        env_keys: list[str] | None = None,
+        job_records: list[ArtifactReference] | None = None,
+    ) -> ExternalExecutionRecord:
+        if env_keys is None:
+            env_keys = sorted(key for key in (env or {}) if key.startswith("BIOAPEX_"))
+        return ExternalExecutionRecord(
+            adapter_version=_EXTERNAL_WORKFLOW_ADAPTER_VERSION,
+            engine_name=executor.engine_name,
+            engine_version=engine_version,
+            execution_profile=executor.execution_profile,
+            entrypoint=rendered_entrypoint,
+            command=command,
+            argv=list(argv),
+            working_directory=working_directory,
+            input_bindings=_serialize_for_json(dict(step_inputs)),
+            output_locations=rendered_output_locations,
+            environment_references=list(executor.environment_references),
+            environment_keys=list(env_keys),
+            job_records=list(job_records or []),
+            normalized_status=normalized_status,
+            return_code=return_code,
+            status_detail=status_detail,
+        )
+
+    def _sync_external_execution_job_records(
+        self,
+        record: WorkflowStepRecord,
+        output_refs: list[ArtifactReference],
+    ) -> list[ArtifactReference]:
+        if record.external_execution is None:
+            return output_refs
+        job_refs = [ref for ref in output_refs if ref.artifact_type == "slurm_job"]
+        job_refs = self._dedupe_refs([*record.external_execution.job_records, *job_refs])
+        record.external_execution.job_records = self._dedupe_refs(
+            [*record.external_execution.job_records, *job_refs]
+        )
+        return self._dedupe_refs([*output_refs, *job_refs])
+
     def _render_external_template(
         self,
         template: str,
         step_inputs: Mapping[str, Any],
         *,
+        context: StepExecutionContext,
         shell_quote: bool = True,
     ) -> str:
         parts: list[str] = []
         formatter = Formatter()
+        available_values = self._external_template_values(step_inputs, context)
         for literal_text, field_name, format_spec, conversion in formatter.parse(template):
             parts.append(literal_text)
             if field_name is None:
                 continue
             if format_spec or conversion:
                 raise ValueError("External command templates do not support format specifiers or conversions.")
-            if field_name not in step_inputs:
+            if field_name not in available_values:
                 raise ValueError(f"External command template references unknown input {field_name!r}.")
-            rendered = self._stringify_external_value(step_inputs[field_name])
+            rendered = self._stringify_external_value(available_values[field_name])
             parts.append(shlex.quote(rendered) if shell_quote else rendered)
         return "".join(parts)
 

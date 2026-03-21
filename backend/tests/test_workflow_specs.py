@@ -333,6 +333,138 @@ class TestWorkflowSpecs:
         with pytest.raises(ValueError, match="entrypoint plus resource_request"):
             validate_workflow_spec_payload(payload)
 
+    def test_nextflow_external_engine_requires_structured_adapter_fields(self):
+        payload = _base_payload()
+        payload["engine"] = "external_workflow_adapter_v1"
+        payload["steps"] = [
+            {
+                "id": "launch_nextflow",
+                "label": "Launch Nextflow",
+                "executor": {
+                    "executor_type": "external_engine",
+                    "engine_name": "nextflow",
+                    "entrypoint": "workflows/engines/demo/main.nf",
+                    "version_command": "nextflow -version",
+                    "execution_profile": "slurm",
+                    "resource_request": {
+                        "cpus": 8,
+                        "memory": "64G",
+                        "wall_time": "04:00:00",
+                    },
+                    "parameter_bindings": {
+                        "dataset_manifest": "{dataset_manifest}",
+                        "min_genes": "{min_genes}",
+                    },
+                    "environment_references": ["profile:slurm"],
+                    "output_locations": [
+                        "{run_dir}/outputs/generated/external/demo/results",
+                    ],
+                },
+                "inputs": [
+                    {
+                        "name": "dataset_manifest",
+                        "source": {
+                            "source_type": "workflow_input",
+                            "input_name": "dataset_manifest",
+                        },
+                    },
+                    {
+                        "name": "min_genes",
+                        "source": {
+                            "source_type": "workflow_input",
+                            "input_name": "min_genes",
+                        },
+                    },
+                ],
+                "outputs": [
+                    {
+                        "name": "submission_bundle",
+                        "kind": "value",
+                        "description": "Structured external execution bundle.",
+                    }
+                ],
+                "prerequisites": [],
+                "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                "failure_policy": "fail_workflow",
+            }
+        ]
+        payload["outputs"] = [
+            {
+                "name": "submission_bundle",
+                "kind": "value",
+                "description": "Structured external execution bundle.",
+                "source": {"step_id": "launch_nextflow", "output_name": "submission_bundle"},
+            }
+        ]
+
+        document = validate_workflow_spec_payload(payload)
+
+        assert document.steps[0].executor.engine_name == "nextflow"
+        assert document.steps[0].executor.execution_profile == "slurm"
+        assert document.steps[0].executor.resource_request is not None
+        assert document.steps[0].executor.resource_request.cpus == 8
+        assert document.steps[0].executor.parameter_bindings == {
+            "dataset_manifest": "{dataset_manifest}",
+            "min_genes": "{min_genes}",
+        }
+        assert document.steps[0].executor.output_locations == [
+            "{run_dir}/outputs/generated/external/demo/results"
+        ]
+
+    def test_nextflow_slurm_profile_requires_resource_request(self):
+        payload = _base_payload()
+        payload["steps"][1]["executor"] = {
+            "executor_type": "external_engine",
+            "engine_name": "nextflow",
+            "entrypoint": "workflows/engines/demo/main.nf",
+            "version_command": "nextflow -version",
+            "execution_profile": "slurm",
+            "parameter_bindings": {"dataset_manifest": "{dataset_manifest}"},
+            "output_locations": ["{run_dir}/outputs/generated/external/demo/results"],
+        }
+        payload["steps"][1]["outputs"] = [
+            {
+                "name": "qa_report",
+                "kind": "artifact",
+                "artifact_type": "qa_report",
+                "schema_ref": "artifact_schema:qa_report@1.0.0",
+                "description": "Invalid nextflow test output.",
+            }
+        ]
+
+        with pytest.raises(ValueError, match="require resource_request"):
+            validate_workflow_spec_payload(payload)
+
+    def test_nextflow_external_engine_rejects_opaque_command_string(self):
+        payload = _base_payload()
+        payload["steps"][1]["executor"] = {
+            "executor_type": "external_engine",
+            "engine_name": "nextflow",
+            "entrypoint": "workflows/engines/demo/main.nf",
+            "command": "nextflow run workflows/engines/demo/main.nf -profile slurm",
+            "version_command": "nextflow -version",
+            "execution_profile": "slurm",
+            "resource_request": {
+                "cpus": 8,
+                "memory": "64G",
+                "wall_time": "04:00:00",
+            },
+            "parameter_bindings": {"dataset_manifest": "{dataset_manifest}"},
+            "output_locations": ["{run_dir}/outputs/generated/external/demo/results"],
+        }
+        payload["steps"][1]["outputs"] = [
+            {
+                "name": "qa_report",
+                "kind": "artifact",
+                "artifact_type": "qa_report",
+                "schema_ref": "artifact_schema:qa_report@1.0.0",
+                "description": "Invalid nextflow test output.",
+            }
+        ]
+
+        with pytest.raises(ValueError, match="instead of command"):
+            validate_workflow_spec_payload(payload)
+
     def test_rnaseq_example_manifest_and_workflow_plan_align_with_authored_contract(self):
         manifest = load_artifact_document(EXAMPLES_DIR / "rnaseq_dataset_manifest.yaml")
         workflow_plan = json.loads((EXAMPLES_DIR / "rnaseq_workflow_plan.json").read_text(encoding="utf-8"))

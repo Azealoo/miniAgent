@@ -126,7 +126,21 @@ steps:
       executor_type: external_engine
       engine_name: nextflow
       entrypoint: workflows/engines/perturb_seq/main.nf
-      command: nextflow run workflows/engines/perturb_seq/main.nf -profile slurm --dataset_manifest {dataset_manifest} --reference_build {reference_build}
+      version_command: nextflow -version
+      execution_profile: slurm
+      resource_request:
+        cpus: 8
+        memory: 64G
+        wall_time: 04:00:00
+      parameter_bindings:
+        dataset_manifest: "{dataset_manifest}"
+        reference_build: "{reference_build}"
+      environment_references:
+        - "profile:slurm"
+        - "workspace:workflows/engines/perturb_seq"
+      output_locations:
+        - "{run_dir}/outputs/generated/external/perturb-seq/results"
+        - "{run_dir}/outputs/generated/external/perturb-seq/logs"
     inputs:
       - name: dataset_manifest
         source:

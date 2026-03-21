@@ -101,7 +101,40 @@
       "warnings": [
         "median UMI count trended below reference baseline"
       ],
-      "errors": []
+      "errors": [],
+      "external_execution": {
+        "adapter_version": "external_workflow_adapter_v1",
+        "engine_name": "command",
+        "engine_version": "qc-summary-tool 1.2.0",
+        "execution_profile": "local",
+        "entrypoint": "workflows/runners/rna_seq_qc.py",
+        "command": "python -m workflows.runners.rna_seq_qc --dataset_manifest artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+        "argv": [
+          "python",
+          "-m",
+          "workflows.runners.rna_seq_qc",
+          "--dataset_manifest",
+          "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml"
+        ],
+        "working_directory": ".",
+        "input_bindings": {
+          "dataset_manifest": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml"
+        },
+        "output_locations": [
+          "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/checklist_results.json",
+          "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/qa_report.json"
+        ],
+        "environment_references": [
+          "profile:local"
+        ],
+        "environment_keys": [
+          "BIOAPEX_RUN_ID",
+          "BIOAPEX_INPUT_DATASET_MANIFEST"
+        ],
+        "job_records": [],
+        "normalized_status": "completed",
+        "return_code": 0
+      }
     }
   ],
   "provenance_exports": [

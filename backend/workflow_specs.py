@@ -17,6 +17,7 @@ WORKFLOW_SPEC_VERSION = "1.0.0"
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _PYTHON_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_STRUCTURED_EXTERNAL_ENGINES = {"nextflow", "snakemake"}
 
 InputKind = Literal["artifact", "parameter", "template", "metadata"]
 OutputKind = Literal["artifact", "value"]
@@ -76,6 +77,12 @@ def _validate_artifact_schema_ref(value: str, *, field_name: str, artifact_type:
     version = cleaned.removeprefix(prefix)
     _validate_semver(version, field_name=field_name)
     return cleaned
+
+
+def _uses_slurm_execution_profile(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().casefold() == "slurm"
 
 
 class WorkflowInputSource(BaseModel):
@@ -183,6 +190,12 @@ class ExternalEngineExecutor(BaseModel):
     engine_name: str
     entrypoint: str
     command: str | None = None
+    engine_version: str | None = None
+    version_command: str | None = None
+    execution_profile: str | None = None
+    parameter_bindings: dict[str, str] = Field(default_factory=dict)
+    environment_references: list[str] = Field(default_factory=list)
+    output_locations: list[str] = Field(default_factory=list)
     resource_request: SlurmResourceRequest | None = None
     working_directory: str | None = None
 
@@ -203,6 +216,35 @@ class ExternalEngineExecutor(BaseModel):
             return None
         return _require_non_empty(value, field_name="command")
 
+    @field_validator("engine_version", "version_command", "execution_profile")
+    @classmethod
+    def _validate_optional_text(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @field_validator("parameter_bindings")
+    @classmethod
+    def _validate_parameter_bindings(cls, value: dict[str, str]) -> dict[str, str]:
+        cleaned: dict[str, str] = {}
+        for key, template in value.items():
+            normalized_key = _require_normalized_identifier(str(key), field_name="parameter_bindings key")
+            cleaned[normalized_key] = _require_non_empty(
+                str(template),
+                field_name=f"parameter_bindings[{normalized_key}]",
+            )
+        return cleaned
+
+    @field_validator("environment_references")
+    @classmethod
+    def _validate_environment_references(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="environment_references") for item in value]
+
+    @field_validator("output_locations")
+    @classmethod
+    def _validate_output_locations(cls, value: list[str]) -> list[str]:
+        return [_normalize_relative_path(item, field_name="output_locations") for item in value]
+
     @field_validator("working_directory")
     @classmethod
     def _validate_working_directory(cls, value: str | None) -> str | None:
@@ -212,6 +254,10 @@ class ExternalEngineExecutor(BaseModel):
 
     @model_validator(mode="after")
     def _validate_executor_contract(self) -> "ExternalEngineExecutor":
+        structured_slurm_backend = (
+            self.engine_name in _STRUCTURED_EXTERNAL_ENGINES
+            and _uses_slurm_execution_profile(self.execution_profile)
+        )
         if self.engine_name == "slurm":
             if self.resource_request is None:
                 raise ValueError("Slurm external engines require resource_request.")
@@ -219,8 +265,31 @@ class ExternalEngineExecutor(BaseModel):
                 raise ValueError(
                     "Slurm external engines must use entrypoint plus resource_request instead of command."
                 )
-        elif self.resource_request is not None:
-            raise ValueError("resource_request is only supported for engine_name='slurm'.")
+        elif self.resource_request is not None and not structured_slurm_backend:
+            raise ValueError(
+                "resource_request is only supported for engine_name='slurm' or structured external "
+                "engines with execution_profile='slurm'."
+            )
+        if self.engine_name in _STRUCTURED_EXTERNAL_ENGINES:
+            if self.command is not None:
+                raise ValueError(
+                    f"{self.engine_name} external engines must use execution_profile plus parameter_bindings "
+                    "instead of command."
+                )
+            if self.execution_profile is None:
+                raise ValueError(f"{self.engine_name} external engines require execution_profile.")
+            if not self.parameter_bindings:
+                raise ValueError(f"{self.engine_name} external engines require parameter_bindings.")
+            if not self.output_locations:
+                raise ValueError(f"{self.engine_name} external engines require output_locations.")
+            if self.engine_version is None and self.version_command is None:
+                raise ValueError(
+                    f"{self.engine_name} external engines require engine_version or version_command."
+                )
+            if structured_slurm_backend and self.resource_request is None:
+                raise ValueError(
+                    f"{self.engine_name} external engines with execution_profile='slurm' require resource_request."
+                )
         return self
 
 

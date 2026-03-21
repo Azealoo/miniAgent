@@ -66,6 +66,15 @@ WorkflowLifecycleStatus = Literal[
 WorkflowQCStatus = Literal["pending", "passed", "warning", "failed", "not_applicable"]
 SlurmJobStatus = Literal["pending", "running", "completed", "failed", "cancelled", "timed_out"]
 SlurmStatusSource = Literal["submission", "squeue", "sacct", "scontrol"]
+ExternalExecutionStatus = Literal[
+    "submitted",
+    "pending",
+    "running",
+    "completed",
+    "failed",
+    "cancelled",
+    "timed_out",
+]
 ConfidenceLevel = Literal["low", "medium", "high"]
 ComplianceDisposition = Literal["allow", "allow_with_warning", "require_approval", "block"]
 ComplianceRuntimeState = Literal[
@@ -1213,6 +1222,64 @@ class WorkflowSummaryMetric(BaseModel):
         return _require_non_empty(value, field_name="metric_name")
 
 
+class ExternalExecutionRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    adapter_version: str
+    engine_name: str
+    engine_version: str | None = None
+    execution_profile: str | None = None
+    entrypoint: str
+    command: str
+    argv: list[str] = Field(default_factory=list)
+    working_directory: str
+    input_bindings: dict[str, Any] = Field(default_factory=dict)
+    output_locations: list[str] = Field(default_factory=list)
+    environment_references: list[str] = Field(default_factory=list)
+    environment_keys: list[str] = Field(default_factory=list)
+    job_records: list[ArtifactReference] = Field(default_factory=list)
+    normalized_status: ExternalExecutionStatus
+    return_code: int | None = None
+    status_detail: str | None = None
+
+    @field_validator("adapter_version", "engine_version", "execution_profile", "command", "status_detail")
+    @classmethod
+    def _validate_optional_text(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @field_validator("engine_name")
+    @classmethod
+    def _validate_engine_name(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="engine_name")
+
+    @field_validator("entrypoint")
+    @classmethod
+    def _validate_entrypoint(cls, value: str) -> str:
+        return _normalize_relative_path(value)
+
+    @field_validator("argv")
+    @classmethod
+    def _validate_argv(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="argv") for item in value]
+
+    @field_validator("working_directory")
+    @classmethod
+    def _validate_working_directory(cls, value: str) -> str:
+        return _normalize_relative_directory(value)
+
+    @field_validator("output_locations")
+    @classmethod
+    def _validate_output_locations(cls, value: list[str]) -> list[str]:
+        return [_normalize_relative_path(item) for item in value]
+
+    @field_validator("environment_references", "environment_keys")
+    @classmethod
+    def _validate_text_lists(cls, value: list[str], info) -> list[str]:
+        return [_require_non_empty(item, field_name=info.field_name) for item in value]
+
+
 class WorkflowStepRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1227,6 +1294,7 @@ class WorkflowStepRecord(BaseModel):
     warning_details: list[WorkflowIssueDetail] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     error_details: list[WorkflowIssueDetail] = Field(default_factory=list)
+    external_execution: ExternalExecutionRecord | None = None
 
     @field_validator("id")
     @classmethod

@@ -1208,7 +1208,12 @@ def summarize(inputs, context):
                             "executor_type": "external_engine",
                             "engine_name": "command",
                             "entrypoint": "workflows/engines/demo/main.sh",
+                            "engine_version": "test-engine 1.0.0",
+                            "execution_profile": "local",
                             "command": command,
+                            "parameter_bindings": {"sample_id": "{sample_id}"},
+                            "environment_references": ["profile:local"],
+                            "output_locations": ["{run_dir}/outputs/generated/external/demo/stdout.txt"],
                         },
                         "inputs": [
                             {
@@ -1246,7 +1251,547 @@ def summarize(inputs, context):
         assert payload["value"]["returncode"] == 0
         assert payload["value"]["argv"][-1] == "sample-001"
         assert payload["value"]["stdout"].splitlines() == ["sample-001", "sample-001"]
+        assert payload["value"]["adapter_version"] == "external_workflow_adapter_v1"
+        assert payload["value"]["engine_version"] == "test-engine 1.0.0"
+        assert payload["value"]["execution_profile"] == "local"
+        assert payload["value"]["parameter_bindings"] == {"sample_id": "sample-001"}
+        assert payload["value"]["job_records"] == []
         assert "BIOAPEX_INPUT_SAMPLE_ID" in payload["value"]["environment_keys"]
+        assert result.run.steps[0].external_execution is not None
+        assert result.run.steps[0].external_execution.engine_name == "command"
+        assert result.run.steps[0].external_execution.engine_version == "test-engine 1.0.0"
+        assert result.run.steps[0].external_execution.normalized_status == "completed"
+        assert result.run.steps[0].external_execution.input_bindings["sample_id"] == "sample-001"
+
+    def test_runner_routes_slurm_profiled_nextflow_through_structured_job_manager(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from tools.slurm_tool import SlurmJobOperationResult
+
+        template = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "slurm_job.json")
+        assert isinstance(template, workflow_runner_module.SlurmJobArtifact)
+
+        submit_calls = 0
+        refresh_calls = 0
+
+        def _submitted_artifact(run_id: str, *, script_path: str, working_directory: str, environment_keys: list[str]):
+            initial_status = template.status_history[0]
+            return workflow_runner_module.SlurmJobArtifact.model_validate(
+                template.model_copy(
+                    update={
+                        "id": f"slurm-job-12345-{run_id.lower()}",
+                        "run_id": run_id,
+                        "source_workflow": "structured-nextflow-demo",
+                        "source_tool": "slurm_tool",
+                        "related_artifacts": [],
+                        "script_path": script_path,
+                        "working_directory": working_directory,
+                        "environment_keys": environment_keys,
+                        "status": "pending",
+                        "completed_at": None,
+                        "latest_status": initial_status,
+                        "status_history": [initial_status],
+                    }
+                ).model_dump(mode="json")
+            )
+
+        def _completed_artifact(
+            run_id: str,
+            *,
+            script_path: str,
+            working_directory: str,
+            environment_keys: list[str],
+        ):
+            completed_status = template.status_history[-1]
+            completed_logs = template.logs.model_copy(
+                update={
+                    "runtime_stdout": "launch ok\n",
+                    "runtime_stderr": "warnings on stderr\n",
+                }
+            )
+            return workflow_runner_module.SlurmJobArtifact.model_validate(
+                template.model_copy(
+                    update={
+                        "id": f"slurm-job-12345-{run_id.lower()}",
+                        "run_id": run_id,
+                        "source_workflow": "structured-nextflow-demo",
+                        "source_tool": "slurm_tool",
+                        "related_artifacts": [],
+                        "script_path": script_path,
+                        "working_directory": working_directory,
+                        "environment_keys": environment_keys,
+                        "status": "completed",
+                        "completed_at": completed_status.observed_at,
+                        "latest_status": completed_status,
+                        "status_history": [template.status_history[0], completed_status],
+                        "logs": completed_logs,
+                    }
+                ).model_dump(mode="json")
+            )
+
+        def _fake_submit(**kwargs):
+            nonlocal submit_calls
+            submit_calls += 1
+            assert kwargs["working_directory"] == kwargs["run_relative_dir"].as_posix()
+            script_path = tmp_path / kwargs["script_path"]
+            script_text = script_path.read_text(encoding="utf-8")
+            assert "exec nextflow run " in script_text
+            assert str((tmp_path / "workflows" / "engines" / "demo" / "main.nf").resolve()) in script_text
+            assert "-profile slurm --sample_id sample-001" in script_text
+            artifact = _submitted_artifact(
+                kwargs["run_id"],
+                script_path=kwargs["script_path"],
+                working_directory=kwargs["working_directory"],
+                environment_keys=sorted(kwargs["export_environment"]),
+            )
+            return SlurmJobOperationResult(
+                artifact=artifact,
+                summary="Submitted Slurm job 12345 for structured Nextflow launch.",
+                raw_stdout="Submitted batch job 12345\n",
+                raw_stderr="",
+                commands=[["sbatch", kwargs["script_path"]]],
+            )
+
+        def _fake_refresh(*, artifact, **_kwargs):
+            nonlocal refresh_calls
+            refresh_calls += 1
+            completed = _completed_artifact(
+                artifact.run_id,
+                script_path=artifact.script_path,
+                working_directory=artifact.working_directory,
+                environment_keys=artifact.environment_keys,
+            )
+            return SlurmJobOperationResult(
+                artifact=completed,
+                summary="Job 12345 status: completed.",
+                raw_stdout="12345|COMPLETED\n",
+                raw_stderr="",
+                commands=[["sacct", "-j", "12345"]],
+            )
+
+        monkeypatch.setattr(workflow_runner_module, "submit_slurm_job", _fake_submit)
+        monkeypatch.setattr(workflow_runner_module, "refresh_slurm_job_artifact", _fake_refresh)
+
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "structured-nextflow-demo",
+                "version": "1.0.0",
+                "name": "Structured Nextflow Demo",
+                "purpose": "Verify slurm-profiled Nextflow routes through the Slurm run manager.",
+                "engine": "external_workflow_adapter_v1",
+                "required_inputs": [
+                    {
+                        "name": "sample_id",
+                        "kind": "metadata",
+                        "data_type": "string",
+                        "description": "Sample identifier forwarded to the workflow.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": _runtime_contract(["sample_id"]),
+                "outputs": [
+                    {
+                        "name": "submission_bundle",
+                        "kind": "value",
+                        "description": "Captured external execution bundle.",
+                        "source": {
+                            "step_id": "launch_nextflow",
+                            "output_name": "submission_bundle",
+                        },
+                    }
+                ],
+                "qc_gates": [],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "launch_nextflow",
+                        "label": "Launch Nextflow",
+                        "executor": {
+                            "executor_type": "external_engine",
+                            "engine_name": "nextflow",
+                            "entrypoint": "workflows/engines/demo/main.nf",
+                            "engine_version": "nextflow version 24.10.0",
+                            "execution_profile": "slurm",
+                            "resource_request": {
+                                "cpus": 8,
+                                "memory": "64G",
+                                "wall_time": "04:00:00",
+                            },
+                            "parameter_bindings": {"sample_id": "{sample_id}"},
+                            "environment_references": ["profile:slurm"],
+                            "output_locations": [
+                                "{run_dir}/outputs/generated/external/demo/results",
+                            ],
+                        },
+                        "inputs": [
+                            {
+                                "name": "sample_id",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "sample_id",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "submission_bundle",
+                                "kind": "value",
+                                "description": "Structured Nextflow execution bundle.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    }
+                ],
+            }
+        )
+
+        runner = InternalDAGRunner(tmp_path)
+        paused = runner.run(spec, {"sample_id": "sample-001"})
+
+        assert paused.run.lifecycle_status == "waiting"
+        assert paused.run.steps[0].status == "waiting"
+        assert submit_calls == 1
+        assert refresh_calls == 0
+
+        paused_output_path = resolve_artifact_path(tmp_path, paused.run.outputs[0].path)
+        paused_payload = json.loads(paused_output_path.read_text(encoding="utf-8"))["value"]
+        expected_run_dir = Path(paused.artifact_relpath).parent.as_posix()
+
+        assert paused_payload["engine_name"] == "nextflow"
+        assert paused_payload["engine_version"] == "nextflow version 24.10.0"
+        assert paused_payload["execution_profile"] == "slurm"
+        assert paused_payload["parameter_bindings"] == {"sample_id": "sample-001"}
+        assert paused_payload["normalized_status"] == "pending"
+        assert paused_payload["working_directory"] == expected_run_dir
+        assert paused_payload["output_locations"] == [
+            f"{expected_run_dir}/outputs/generated/external/demo/results"
+        ]
+        assert len(paused_payload["job_records"]) == 1
+        assert paused_payload["job_records"][0]["artifact_type"] == "slurm_job"
+        assert paused.run.steps[0].external_execution is not None
+        assert paused.run.steps[0].external_execution.job_records[0].artifact_type == "slurm_job"
+        assert any(ref.artifact_type == "slurm_job" for ref in paused.run.related_artifacts)
+
+        resumed = runner.run(spec, run_dir=paused.run_dir)
+
+        assert resumed.run.lifecycle_status == "completed"
+        assert resumed.run.steps[0].status == "completed"
+        assert submit_calls == 1
+        assert refresh_calls == 1
+
+        resumed_output_path = resolve_artifact_path(tmp_path, resumed.run.outputs[0].path)
+        resumed_payload = json.loads(resumed_output_path.read_text(encoding="utf-8"))["value"]
+
+        assert resumed_payload["normalized_status"] == "completed"
+        assert resumed_payload["stdout"] == "launch ok"
+        assert resumed_payload["stderr"] == "warnings on stderr"
+        assert len(resumed_payload["job_records"]) == 1
+        assert resumed.run.steps[0].external_execution is not None
+        assert resumed.run.steps[0].external_execution.normalized_status == "completed"
+        assert resumed.run.steps[0].external_execution.job_records[0].artifact_type == "slurm_job"
+        assert any(ref.artifact_type == "slurm_job" for ref in resumed.run.related_artifacts)
+
+    def test_runner_builds_structured_snakemake_command_with_run_scoped_working_directory(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        calls: list[dict[str, object]] = []
+
+        def _fake_run(argv, **kwargs):
+            calls.append({"argv": list(argv), **kwargs})
+            return SimpleNamespace(returncode=0, stdout="snakemake ok\n", stderr="")
+
+        monkeypatch.setattr(workflow_runner_module.subprocess, "run", _fake_run)
+
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "structured-snakemake-demo",
+                "version": "1.0.0",
+                "name": "Structured Snakemake Demo",
+                "purpose": "Verify local Snakemake command rendering and run-scoped working directory.",
+                "engine": "external_workflow_adapter_v1",
+                "required_inputs": [
+                    {
+                        "name": "sample_id",
+                        "kind": "metadata",
+                        "data_type": "string",
+                        "description": "Sample identifier forwarded to the workflow.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": _runtime_contract(["sample_id"]),
+                "outputs": [
+                    {
+                        "name": "submission_bundle",
+                        "kind": "value",
+                        "description": "Captured external execution bundle.",
+                        "source": {
+                            "step_id": "launch_snakemake",
+                            "output_name": "submission_bundle",
+                        },
+                    }
+                ],
+                "qc_gates": [],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "launch_snakemake",
+                        "label": "Launch Snakemake",
+                        "executor": {
+                            "executor_type": "external_engine",
+                            "engine_name": "snakemake",
+                            "entrypoint": "workflows/engines/demo/Snakefile",
+                            "engine_version": "snakemake 8.10.0",
+                            "execution_profile": "local",
+                            "parameter_bindings": {"sample_id": "{sample_id}"},
+                            "environment_references": ["profile:local"],
+                            "output_locations": [
+                                "{run_dir}/outputs/generated/external/demo/results",
+                            ],
+                        },
+                        "inputs": [
+                            {
+                                "name": "sample_id",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "sample_id",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "submission_bundle",
+                                "kind": "value",
+                                "description": "Structured Snakemake execution bundle.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    }
+                ],
+            }
+        )
+
+        runner = InternalDAGRunner(tmp_path)
+        result = runner.run(spec, {"sample_id": "sample-001"})
+
+        assert result.run.lifecycle_status == "completed"
+        assert [call["argv"] for call in calls] == [
+            [
+                "snakemake",
+                "--snakefile",
+                str((tmp_path / "workflows" / "engines" / "demo" / "Snakefile").resolve()),
+                "--profile",
+                "local",
+                "--config",
+                "sample_id=sample-001",
+            ]
+        ]
+        assert calls[0]["cwd"] == result.run_dir
+        assert calls[0]["env"]["BIOAPEX_INPUT_SAMPLE_ID"] == "sample-001"
+
+        output_path = resolve_artifact_path(tmp_path, result.run.outputs[0].path)
+        payload = json.loads(output_path.read_text(encoding="utf-8"))["value"]
+        expected_run_dir = Path(result.artifact_relpath).parent.as_posix()
+
+        assert payload["engine_name"] == "snakemake"
+        assert payload["engine_version"] == "snakemake 8.10.0"
+        assert payload["execution_profile"] == "local"
+        assert payload["working_directory"] == expected_run_dir
+        assert payload["job_records"] == []
+        assert result.run.steps[0].external_execution is not None
+        assert result.run.steps[0].external_execution.execution_profile == "local"
+        assert result.run.steps[0].external_execution.working_directory == expected_run_dir
+
+    def test_runner_normalizes_slurm_profiled_nextflow_failures_into_failed_steps(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from tools.slurm_tool import SlurmJobOperationResult
+
+        template = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "slurm_job.json")
+        assert isinstance(template, workflow_runner_module.SlurmJobArtifact)
+
+        def _submitted_artifact(run_id: str, *, script_path: str, working_directory: str):
+            initial_status = template.status_history[0]
+            return workflow_runner_module.SlurmJobArtifact.model_validate(
+                template.model_copy(
+                    update={
+                        "id": f"slurm-job-12345-{run_id.lower()}",
+                        "run_id": run_id,
+                        "source_workflow": "structured-nextflow-failure",
+                        "source_tool": "slurm_tool",
+                        "related_artifacts": [],
+                        "script_path": script_path,
+                        "working_directory": working_directory,
+                        "status": "pending",
+                        "completed_at": None,
+                        "latest_status": initial_status,
+                        "status_history": [initial_status],
+                    }
+                ).model_dump(mode="json")
+            )
+
+        def _failed_artifact(run_id: str, *, script_path: str, working_directory: str):
+            failed_status = template.status_history[-1].model_copy(
+                update={"normalized_status": "failed", "raw_state": "FAILED", "exit_code": "1:0"}
+            )
+            return workflow_runner_module.SlurmJobArtifact.model_validate(
+                template.model_copy(
+                    update={
+                        "id": f"slurm-job-12345-{run_id.lower()}",
+                        "run_id": run_id,
+                        "source_workflow": "structured-nextflow-failure",
+                        "source_tool": "slurm_tool",
+                        "related_artifacts": [],
+                        "script_path": script_path,
+                        "working_directory": working_directory,
+                        "status": "failed",
+                        "completed_at": failed_status.observed_at,
+                        "latest_status": failed_status,
+                        "status_history": [template.status_history[0], failed_status],
+                    }
+                ).model_dump(mode="json")
+            )
+
+        def _fake_submit(**kwargs):
+            artifact = _submitted_artifact(
+                kwargs["run_id"],
+                script_path=kwargs["script_path"],
+                working_directory=kwargs["working_directory"],
+            )
+            return SlurmJobOperationResult(
+                artifact=artifact,
+                summary="Submitted Slurm job 12345 for structured Nextflow launch.",
+                raw_stdout="Submitted batch job 12345\n",
+                raw_stderr="",
+                commands=[["sbatch", kwargs["script_path"]]],
+            )
+
+        def _fake_refresh(*, artifact, **_kwargs):
+            failed = _failed_artifact(
+                artifact.run_id,
+                script_path=artifact.script_path,
+                working_directory=artifact.working_directory,
+            )
+            return SlurmJobOperationResult(
+                artifact=failed,
+                summary="Job 12345 status: failed.",
+                raw_stdout="12345|FAILED|1:0\n",
+                raw_stderr="",
+                commands=[["sacct", "-j", "12345"]],
+            )
+
+        monkeypatch.setattr(workflow_runner_module, "submit_slurm_job", _fake_submit)
+        monkeypatch.setattr(workflow_runner_module, "refresh_slurm_job_artifact", _fake_refresh)
+
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "structured-nextflow-failure",
+                "version": "1.0.0",
+                "name": "Structured Nextflow Failure",
+                "purpose": "Verify slurm-profiled Nextflow failures normalize into workflow step failures.",
+                "engine": "external_workflow_adapter_v1",
+                "required_inputs": [
+                    {
+                        "name": "sample_id",
+                        "kind": "metadata",
+                        "data_type": "string",
+                        "description": "Sample identifier forwarded to the workflow.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": _runtime_contract(["sample_id"]),
+                "outputs": [
+                    {
+                        "name": "submission_bundle",
+                        "kind": "value",
+                        "description": "Captured external execution bundle.",
+                        "source": {
+                            "step_id": "launch_nextflow",
+                            "output_name": "submission_bundle",
+                        },
+                    }
+                ],
+                "qc_gates": [],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "launch_nextflow",
+                        "label": "Launch Nextflow",
+                        "executor": {
+                            "executor_type": "external_engine",
+                            "engine_name": "nextflow",
+                            "entrypoint": "workflows/engines/demo/main.nf",
+                            "engine_version": "nextflow version 24.10.0",
+                            "execution_profile": "slurm",
+                            "resource_request": {
+                                "cpus": 8,
+                                "memory": "64G",
+                                "wall_time": "04:00:00",
+                            },
+                            "parameter_bindings": {"sample_id": "{sample_id}"},
+                            "environment_references": ["profile:slurm"],
+                            "output_locations": [
+                                "{run_dir}/outputs/generated/external/demo/results",
+                            ],
+                        },
+                        "inputs": [
+                            {
+                                "name": "sample_id",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "sample_id",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "submission_bundle",
+                                "kind": "value",
+                                "description": "Structured Nextflow execution bundle.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    }
+                ],
+            }
+        )
+
+        runner = InternalDAGRunner(tmp_path)
+        paused = runner.run(spec, {"sample_id": "sample-001"})
+        result = runner.run(spec, run_dir=paused.run_dir)
+
+        assert paused.run.lifecycle_status == "waiting"
+        assert result.run.lifecycle_status == "failed"
+        assert result.run.steps[0].status == "failed"
+        assert len(result.run.outputs) == 1
+        failed_output_path = resolve_artifact_path(tmp_path, result.run.outputs[0].path)
+        failed_payload = json.loads(failed_output_path.read_text(encoding="utf-8"))["value"]
+
+        assert failed_payload["normalized_status"] == "failed"
+        assert len(failed_payload["job_records"]) == 1
+        assert failed_payload["job_records"][0]["artifact_type"] == "slurm_job"
+        assert result.run.steps[0].external_execution is not None
+        assert result.run.steps[0].external_execution.normalized_status == "failed"
+        assert result.run.steps[0].external_execution.status_detail == "Job 12345 status: failed."
+        assert any(ref.artifact_type == "slurm_job" for ref in result.run.related_artifacts)
+        assert "Slurm job 12345 ended with status failed." in result.run.steps[0].errors
 
     def test_runner_resumes_slurm_external_engine_from_persisted_job_record(self, tmp_path, monkeypatch):
         from tools.slurm_tool import SlurmJobOperationResult

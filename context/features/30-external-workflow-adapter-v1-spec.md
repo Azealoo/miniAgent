@@ -19,6 +19,20 @@ Connect the internal orchestration layer to an external workflow engine without 
 - Prevent the adapter from bypassing dataset intake, QC policy, or compliance gates.
 - Define how failures from the external engine are normalized into workflow step failures.
 
+## Implementation Notes
+
+- The v1 adapter contract should stay inside the existing `external_engine` executor surface rather than introducing a parallel orchestration layer.
+- Structured Nextflow and Snakemake adapters should declare:
+  - `engine_name`
+  - `entrypoint`
+  - `execution_profile`
+  - `parameter_bindings`
+  - `environment_references`
+  - `output_locations`
+  - `engine_version` or `version_command`
+- BioAPEX should persist launch metadata on the corresponding `workflow_run` step record so the workflow artifact remains the system of record even when the external engine is the one performing the computation.
+- When the execution profile delegates to Slurm, the adapter should reuse the structured `slurm_job` path instead of falling back to opaque shell submission.
+
 ## References
 
 - @backend/tools/slurm_tool.py
