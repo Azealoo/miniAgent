@@ -22,7 +22,9 @@ import yaml
 
 from artifacts import (
     ArtifactReference,
+    ComplianceReport,
     DatasetManifest,
+    QAReport,
     RunLayout,
     SCHEMA_PACK_VERSION,
     WorkflowRun,
@@ -70,6 +72,10 @@ _WORKFLOW_INPUT_SNAPSHOT_NAME = "workflow_inputs.json"
 _STEP_INPUT_SNAPSHOT_NAME = "resolved_inputs.json"
 _STEP_OUTPUT_SNAPSHOT_NAME = "resolved_outputs.json"
 _BIOCOMPUTE_MATERIALIZATION_WARNING_PREFIX = "Optional BioCompute export could not be materialized deterministically:"
+_COMPLIANCE_HOOK_USER_MESSAGE_RE = re.compile(
+    r"^Workflow (?P<workflow_id>[A-Za-z0-9._:-]+) compliance hook "
+    r"(?P<hook_id>[A-Za-z0-9._:-]+) at stage (?P<stage>[A-Za-z0-9._:-]+)\."
+)
 
 
 def _utcnow() -> datetime:
@@ -588,6 +594,13 @@ class InternalDAGRunner:
                     current_step=None,
                     emitter=emitter,
                 )
+                if run_document.lifecycle_status not in _RUN_FINAL_STATUSES:
+                    run_document = self._apply_qa_publication_gate(
+                        spec=spec,
+                        run_document=run_document,
+                        step_output_refs=step_output_refs,
+                        emitter=emitter,
+                    )
                 if run_document.lifecycle_status not in _RUN_FINAL_STATUSES:
                     run_document = self._sync_workflow_outputs(
                         layout,
@@ -1696,6 +1709,100 @@ class InternalDAGRunner:
 
         return run_document
 
+    def _apply_qa_publication_gate(
+        self,
+        *,
+        spec: WorkflowSpec,
+        run_document: WorkflowRun,
+        step_output_refs: Mapping[tuple[str, str], ArtifactReference],
+        emitter: _WorkflowRunStreamEmitter | None,
+    ) -> WorkflowRun:
+        qa_outputs = [
+            workflow_output
+            for workflow_output in spec.outputs
+            if workflow_output.kind == "artifact" and workflow_output.artifact_type == "qa_report"
+        ]
+        if not qa_outputs:
+            return run_document
+
+        steps_by_id = {step.id: step for step in spec.steps}
+        for workflow_output in qa_outputs:
+            source_key = (workflow_output.source.step_id, workflow_output.source.output_name)
+            source_step = steps_by_id.get(workflow_output.source.step_id)
+            ref = step_output_refs.get(source_key)
+            if ref is None:
+                return self._block_for_policy(
+                    spec=spec,
+                    run_document=run_document,
+                    reason=(
+                        f"QA reviewer output {workflow_output.name} was required before final publication but "
+                        "was not materialized."
+                    ),
+                    stage="before_publish",
+                    current_step=source_step,
+                    deviation_step_id=workflow_output.source.step_id,
+                    blocking_source="qa_review",
+                    emitter=emitter,
+                )
+
+            try:
+                document = load_artifact_document(resolve_artifact_path(self.base_dir, ref.path))
+            except Exception as exc:
+                return self._block_for_policy(
+                    spec=spec,
+                    run_document=run_document,
+                    reason=(
+                        f"QA reviewer output {workflow_output.name} could not be loaded during publication "
+                        f"gating: {exc}"
+                    ),
+                    stage="before_publish",
+                    current_step=source_step,
+                    deviation_step_id=workflow_output.source.step_id,
+                    blocking_source="qa_review",
+                    emitter=emitter,
+                )
+
+            if not isinstance(document, QAReport):
+                return self._block_for_policy(
+                    spec=spec,
+                    run_document=run_document,
+                    reason=(
+                        f"QA reviewer output {workflow_output.name} at {ref.path} was not a qa_report artifact."
+                    ),
+                    stage="before_publish",
+                    current_step=source_step,
+                    deviation_step_id=workflow_output.source.step_id,
+                    blocking_source="qa_review",
+                    emitter=emitter,
+                )
+
+            if document.overall_status not in {"failed", "blocked"}:
+                continue
+
+            failure_summary = "critical QA requirements were not satisfied."
+            if document.failed_checks:
+                failure_summary = document.failed_checks[0].description
+            elif document.missing_artifacts:
+                missing = document.missing_artifacts[0]
+                expected = f" at {missing.expected_path}" if missing.expected_path else ""
+                failure_summary = f"Missing required artifact {missing.artifact_type}{expected}."
+
+            return self._block_for_policy(
+                spec=spec,
+                run_document=run_document,
+                reason=(
+                    f"QA review blocked final publication because {workflow_output.name} reported overall_status "
+                    f"{document.overall_status!r}: {failure_summary}"
+                ),
+                stage="before_publish",
+                current_step=source_step,
+                deviation_step_id=workflow_output.source.step_id,
+                blocking_source="qa_review",
+                emitter=emitter,
+            )
+
+        return run_document
+
     def _finalize_terminal_artifacts(
         self,
         *,
@@ -2283,8 +2390,13 @@ class InternalDAGRunner:
             )
             result = run_compliance_preflight(self.base_dir, payload)
             compliance_ref = self._compliance_result_ref(result)
-            run_document.related_artifacts = self._dedupe_refs(
-                [*run_document.related_artifacts, compliance_ref]
+            run_document.related_artifacts = self._replace_related_compliance_ref_for_hook(
+                run_document.related_artifacts,
+                compliance_ref=compliance_ref,
+                workflow_id=spec.workflow_id,
+                session_id=layout.run_id,
+                hook_id=hook.id,
+                stage=hook.stage,
             )
             if emitter is not None:
                 emitter.artifact(compliance_ref, scope="related_artifact", step=current_step)
@@ -2323,6 +2435,67 @@ class InternalDAGRunner:
                 )
             return self._record_policy_warning(run_document, message, current_step=current_step)
         return run_document
+
+    def _replace_related_compliance_ref_for_hook(
+        self,
+        refs: list[ArtifactReference],
+        *,
+        compliance_ref: ArtifactReference,
+        workflow_id: str,
+        session_id: str,
+        hook_id: str,
+        stage: str,
+    ) -> list[ArtifactReference]:
+        retained: list[ArtifactReference] = []
+        for ref in refs:
+            if ref.artifact_type != "compliance_report":
+                retained.append(ref)
+                continue
+            if self._compliance_report_ref_matches_hook(
+                ref,
+                workflow_id=workflow_id,
+                session_id=session_id,
+                hook_id=hook_id,
+                stage=stage,
+            ):
+                continue
+            retained.append(ref)
+        return self._dedupe_refs([*retained, compliance_ref])
+
+    def _compliance_report_ref_matches_hook(
+        self,
+        ref: ArtifactReference,
+        *,
+        workflow_id: str,
+        session_id: str,
+        hook_id: str,
+        stage: str,
+    ) -> bool:
+        try:
+            document = load_artifact_document(resolve_artifact_path(self.base_dir, ref.path))
+        except Exception:
+            return False
+        if not isinstance(document, ComplianceReport):
+            return False
+        if document.request_context.selected_workflow != workflow_id:
+            return False
+        if document.request_context.session_id != session_id:
+            return False
+        return self._compliance_hook_identity_from_user_message(document.request_context.user_message) == (
+            workflow_id,
+            hook_id,
+            stage,
+        )
+
+    def _compliance_hook_identity_from_user_message(self, user_message: str) -> tuple[str, str, str] | None:
+        match = _COMPLIANCE_HOOK_USER_MESSAGE_RE.match(user_message.strip())
+        if match is None:
+            return None
+        return (
+            match.group("workflow_id"),
+            match.group("hook_id"),
+            match.group("stage"),
+        )
 
     def _hook_deviation_step_id(
         self,

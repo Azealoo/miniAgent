@@ -18,7 +18,7 @@ WorkflowStepStreamStatus = Literal[
     "completed",
     "blocked",
 ]
-WorkflowBlockingSource = Literal["qc_gate", "compliance_hook", "step_failure", "unknown"]
+WorkflowBlockingSource = Literal["qc_gate", "compliance_hook", "step_failure", "qa_review", "unknown"]
 WorkflowBlockStage = Literal["before_execution", "before_step", "after_step", "before_publish"]
 WorkflowArtifactScope = Literal["run_record", "step_output", "workflow_output", "related_artifact"]
 

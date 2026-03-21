@@ -66,6 +66,67 @@ def _qa_report_output(source_step_id: str, source_output_name: str) -> dict:
     }
 
 
+def _stage_example_compliance_report(
+    base_dir: Path,
+    artifact_relpath: str,
+    *,
+    final_disposition: str = "allow",
+    report_id: str | None = None,
+    run_id: str | None = None,
+    user_message: str | None = None,
+    selected_workflow: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, str]:
+    payload = json.loads(
+        (REPO_ROOT / "backend" / "artifacts" / "examples" / "compliance_report.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    if report_id is not None:
+        payload["id"] = report_id
+    if run_id is not None:
+        payload["run_id"] = run_id
+    request_context = payload.get("request_context")
+    if not isinstance(request_context, dict):
+        request_context = {}
+    if user_message is not None:
+        request_context["user_message"] = user_message
+    if selected_workflow is not None:
+        request_context["selected_workflow"] = selected_workflow
+    if session_id is not None:
+        request_context["session_id"] = session_id
+    payload["request_context"] = request_context
+    if final_disposition == "allow":
+        payload["risk_category"] = "none"
+        payload["triggered_rules"] = []
+        payload["runtime_state"] = "allowed"
+        payload["preflight_disposition"] = "allow"
+        payload["block_status"] = "not_blocked"
+        payload["human_approval_required"] = False
+        payload["approval_scope"] = None
+        payload["approval"] = None
+        payload["final_disposition"] = "allow"
+    elif final_disposition == "block":
+        payload["runtime_state"] = "blocked"
+        payload["preflight_disposition"] = "block"
+        payload["block_status"] = "blocked"
+        payload["human_approval_required"] = False
+        payload["approval_scope"] = None
+        payload["approval"] = None
+        payload["final_disposition"] = "block"
+    else:
+        raise ValueError(f"Unsupported example compliance final_disposition {final_disposition!r}.")
+    artifact_path = base_dir / artifact_relpath
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return {
+        "artifact_type": "compliance_report",
+        "path": artifact_relpath,
+        "id": str(payload["id"]),
+        "run_id": str(payload["run_id"]),
+    }
+
+
 def _stage_authored_rna_seq_workflow(base_dir: Path) -> str:
     workflows_dir = base_dir / "workflows"
     runners_dir = workflows_dir / "runners"
@@ -717,6 +778,111 @@ def summarize(inputs, _context):
         assert events[-1]["lifecycle_status"] == "completed"
         assert events[-1]["completed_steps"] == 2
         assert events[-1]["total_steps"] == 2
+
+    def test_runner_blocks_final_publication_when_qa_review_fails(self, tmp_path):
+        module_name = _write_runner_module(
+            tmp_path,
+            "qa_gate_demo",
+            """
+def summarize(inputs, _context):
+    return {
+        "qa_report": {
+            "source_agent": "qa-reviewer",
+            "overall_status": "blocked",
+            "failed_checks": [
+                {
+                    "id": "qa-review-missing-report-bundle",
+                    "description": "Report bundle was not approved for final publication.",
+                    "severity": "error",
+                    "artifact_type": "report_bundle",
+                    "remediation": "Resolve the QA blocker before final publication.",
+                }
+            ],
+            "warnings": [],
+            "missing_artifacts": [
+                {
+                    "artifact_type": "report_bundle",
+                    "rationale": "Human-readable report bundle was intentionally withheld by QA.",
+                }
+            ],
+            "recommended_remediation": ["Resolve the QA blocker before final publication."],
+            "checklist_artifacts": [],
+        }
+    }
+""",
+        )
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "runner-qa-gate-demo",
+                "version": "1.0.0",
+                "name": "Runner QA Gate Demo",
+                "purpose": "Verify that blocked QA reports stop final publication.",
+                "engine": "internal_dag_runner_v1",
+                "required_inputs": [
+                    {
+                        "name": "seed",
+                        "kind": "parameter",
+                        "data_type": "integer",
+                        "description": "Seed integer for the test workflow.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": _runtime_contract(["seed"]),
+                "outputs": [_qa_report_output("summarize", "qa_report")],
+                "qc_gates": [],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "summarize",
+                        "label": "Summarize Results",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": module_name,
+                            "function": "summarize",
+                        },
+                        "inputs": [
+                            {
+                                "name": "seed",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "seed",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "qa_report",
+                                "kind": "artifact",
+                                "artifact_type": "qa_report",
+                                "schema_ref": "artifact_schema:qa_report@1.0.0",
+                                "description": "QA artifact emitted by the workflow.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    }
+                ],
+            }
+        )
+
+        events: list[dict] = []
+        result = InternalDAGRunner(tmp_path).run(spec, {"seed": 3}, event_callback=events.append)
+
+        assert result.run.lifecycle_status == "blocked"
+        assert result.run.qc_status == "failed"
+        assert [record.status for record in result.run.steps] == ["completed"]
+        assert (result.run_dir / "outputs" / "generated" / "summarize" / "qa_report.json").exists()
+        assert not (result.run_dir / "qa_report.json").exists()
+        assert result.run.outputs[0].path.endswith("outputs/generated/summarize/qa_report.json")
+        assert any(deviation.step_id == "summarize" and deviation.severity == "critical" for deviation in result.run.deviations)
+
+        blocked_event = next(event for event in events if event["type"] == "workflow_blocked")
+        assert blocked_event["blocking_source"] == "qa_review"
+        assert blocked_event["stage"] == "before_publish"
+        assert "overall_status 'blocked'" in blocked_event["reason"]
 
     def test_runner_propagates_failures_to_descendants(self, tmp_path):
         module_name = _write_runner_module(
@@ -2349,6 +2515,15 @@ def launch(inputs, _context):
             artifact["path"].endswith("outputs/generated/report-bundle/rnaseq_report_bundle.md")
             for artifact in report_bundle_payload["expected_artifacts"]
         )
+        assert any(
+            artifact["artifact_type"] == "report_bundle_manifest"
+            and artifact["path"].endswith("outputs/generated/report-bundle/report_bundle_manifest.json")
+            for artifact in report_bundle_payload["expected_artifacts"]
+        )
+        assert any(
+            artifact["artifact_type"] == "compliance_report"
+            for artifact in report_bundle_payload["expected_artifacts"]
+        )
         assert report_bundle_payload["bundle_version"] == "1.0.0"
         assert report_bundle_payload["lifecycle_status"] == "completed"
         assert report_bundle_payload["qc_status"] == "passed"
@@ -2372,14 +2547,21 @@ def launch(inputs, _context):
         assert report_bundle_payload["deviations"] == []
         assert report_bundle_payload["deviation_summary"]["count"] == 0
         assert qa_report.overall_status == "passed"
+        assert qa_report.source_agent == "qa-reviewer"
         assert qa_report.missing_artifacts == []
         assert qa_report.warnings == []
         assert any(item.artifact_type == "workflow_run" for item in qa_report.checklist_artifacts)
+        assert any(item.artifact_type == "report_bundle" for item in qa_report.checklist_artifacts)
+        assert any(item.artifact_type == "report_bundle_manifest" for item in qa_report.checklist_artifacts)
+        assert any(item.artifact_type == "compliance_report" for item in qa_report.checklist_artifacts)
         assert any(item.artifact_type == "count_matrix" for item in qa_report.checklist_artifacts)
         assert any(
             item.artifact_type == "differential_expression_results"
             for item in qa_report.checklist_artifacts
         )
+        assert any(item.artifact_type == "report_bundle" for item in qa_report.related_artifacts)
+        assert any(item.artifact_type == "report_bundle_manifest" for item in qa_report.related_artifacts)
+        assert any(item.artifact_type == "compliance_report" for item in qa_report.related_artifacts)
         assert provenance_payload["artifact_type"] == "provenance"
         assert provenance_payload["workflow"]["version"] == "1.0.0"
         assert provenance_payload["workflow"]["lifecycle_status"] == "completed"
@@ -3245,6 +3427,100 @@ def launch(inputs, _context):
         assert rerun.run.lifecycle_status == "completed"
         assert all(item.step_id != "aggregated_qc" for item in rerun.run.deviations)
 
+    def test_authored_rnaseq_workflow_restart_replaces_stale_before_execution_compliance_report(
+        self, tmp_path, monkeypatch
+    ):
+        spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
+        fastqc_executable = _write_fake_fastqc_executable(tmp_path)
+        multiqc_executable = _write_fake_multiqc_executable(tmp_path)
+        manifest_relpath = _write_bulk_rnaseq_manifest(
+            tmp_path,
+            fastqc_executable=fastqc_executable,
+            multiqc_executable=multiqc_executable,
+        )
+        compliance_runs = [
+            (
+                "artifacts/compliance-preflight/2026-03-20/"
+                "run-20260320T231000Z-deadbeef/compliance_report.json",
+                "compliance-report-restart-1",
+                "run-20260320T231000Z-deadbeef",
+                "block",
+            ),
+            (
+                "artifacts/compliance-preflight/2026-03-20/"
+                "run-20260320T231500Z-feedface/compliance_report.json",
+                "compliance-report-restart-2",
+                "run-20260320T231500Z-feedface",
+                "allow",
+            ),
+        ]
+        invocation_index = 0
+
+        def _sequenced_preflight(_base_dir, _payload):
+            nonlocal invocation_index
+            artifact_relpath, report_id, report_run_id, final_disposition = compliance_runs[invocation_index]
+            invocation_index += 1
+            report_ref = _stage_example_compliance_report(
+                tmp_path,
+                artifact_relpath,
+                final_disposition=final_disposition,
+                report_id=report_id,
+                run_id=report_run_id,
+                user_message=_payload.user_message,
+                selected_workflow=_payload.selected_workflow,
+                session_id=_payload.session_id,
+            )
+            return SimpleNamespace(
+                report=SimpleNamespace(
+                    id=report_ref["id"],
+                    run_id=report_ref["run_id"],
+                ),
+                artifact_relpath=artifact_relpath,
+                tool_summary=f"Compliance preflight {final_disposition}.",
+                warning_text=None,
+                should_continue=final_disposition != "block",
+            )
+
+        monkeypatch.setattr("compliance.preflight.run_compliance_preflight", _sequenced_preflight)
+
+        runner = InternalDAGRunner(tmp_path)
+        first = runner.run(
+            spec_path,
+            {
+                "dataset_manifest": manifest_relpath,
+                "condition_field": "condition",
+                "baseline_condition": "control",
+                "comparison_condition": "treated",
+            },
+        )
+
+        assert first.run.lifecycle_status == "blocked"
+        assert (tmp_path / compliance_runs[0][0]).exists()
+
+        rerun = runner.run(
+            spec_path,
+            run_dir=first.run_dir,
+            restart_from_step="dataset_intake",
+        )
+
+        assert rerun.resumed is True
+        assert rerun.run.lifecycle_status == "completed"
+        assert (tmp_path / compliance_runs[0][0]).exists()
+        assert (tmp_path / compliance_runs[1][0]).exists()
+        assert invocation_index == 2
+
+        compliance_paths = [
+            ref.path for ref in rerun.run.related_artifacts if ref.artifact_type == "compliance_report"
+        ]
+        assert compliance_paths == [compliance_runs[1][0]]
+
+        qa_report = load_artifact_document(rerun.run_dir / "qa_report.json")
+        qa_report_compliance_paths = [
+            ref.path for ref in qa_report.related_artifacts if ref.artifact_type == "compliance_report"
+        ]
+        assert qa_report.overall_status == "passed"
+        assert qa_report_compliance_paths == [compliance_runs[1][0]]
+
     def test_authored_rnaseq_workflow_removes_stale_multiqc_root_outputs_when_rerun_fails(self, tmp_path):
         spec_path = _stage_authored_rnaseq_qc_de_workflow(tmp_path)
         fastqc_executable = _write_fake_fastqc_executable(tmp_path)
@@ -3633,6 +3909,13 @@ def materialize_terminal_report_bundle(inputs, _context):
 
         manifest = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "dataset_manifest.yaml")
         workflow_run = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "run.json")
+        compliance_report_path = (
+            "artifacts/compliance-preflight/2026-03-20/"
+            "run-20260320T215500Z-feedface/compliance_report.json"
+        )
+        workflow_run.related_artifacts.append(
+            ArtifactReference.model_validate(_stage_example_compliance_report(tmp_path, compliance_report_path))
+        )
         evidence_review_path = (
             "artifacts/evidence-review/2026-03-20/"
             "run-20260320T210000Z-feedface/evidence_review.json"
@@ -3711,9 +3994,27 @@ def materialize_terminal_report_bundle(inputs, _context):
             for artifact in manifest_payload["expected_artifacts"]
         )
         assert checklist_payload["overall_status"] == "passed"
-        assert outputs["qa_report"]["related_artifacts"] == manifest_payload["evidence_review_artifacts"]
+        assert outputs["qa_report"]["source_agent"] == "qa-reviewer"
+        assert any(
+            artifact["artifact_type"] == "compliance_report"
+            and artifact["path"] == compliance_report_path
+            for artifact in outputs["qa_report"]["related_artifacts"]
+        )
+        assert any(
+            artifact["artifact_type"] == "evidence_review"
+            and artifact["path"] == evidence_review_path
+            for artifact in outputs["qa_report"]["related_artifacts"]
+        )
+        assert any(
+            artifact["artifact_type"] == "evidence_card"
+            for artifact in outputs["qa_report"]["related_artifacts"]
+        )
         assert any(
             artifact["artifact_type"] == "checklist_results"
+            for artifact in outputs["qa_report"]["checklist_artifacts"]
+        )
+        assert any(
+            artifact["artifact_type"] == "report_bundle"
             for artifact in outputs["qa_report"]["checklist_artifacts"]
         )
         assert any(
@@ -3746,6 +4047,13 @@ def materialize_terminal_report_bundle(inputs, _context):
         workflow_run = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "run.json")
         workflow_run.qc_status = "passed"
         workflow_run.warnings = []
+        compliance_report_path = (
+            "artifacts/compliance-preflight/2026-03-20/"
+            "run-20260320T223500Z-feedface/compliance_report.json"
+        )
+        workflow_run.related_artifacts.append(
+            ArtifactReference.model_validate(_stage_example_compliance_report(tmp_path, compliance_report_path))
+        )
         workflow_run.deviations = [
             workflow_run.deviations[0].model_copy(update={"severity": "minor"})
         ]
@@ -3782,6 +4090,62 @@ def materialize_terminal_report_bundle(inputs, _context):
         assert outputs["qa_report"]["failed_checks"] == []
         assert outputs["report_bundle_manifest"]["deviation_summary"]["highest_severity"] == "minor"
 
+    def test_rnaseq_report_bundle_blocks_when_compliance_artifact_is_missing(self, tmp_path):
+        module_spec = importlib.util.spec_from_file_location(
+            "bioapex_test_rnaseq_qc_de_missing_compliance",
+            REPO_ROOT / "workflows" / "runners" / "rnaseq_qc_de.py",
+        )
+        assert module_spec is not None
+        assert module_spec.loader is not None
+        rnaseq_runner = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(rnaseq_runner)
+
+        manifest = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "dataset_manifest.yaml")
+        workflow_run = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "run.json")
+        workflow_run.qc_status = "passed"
+        workflow_run.warnings = []
+        workflow_run.deviations = []
+        workflow_run.related_artifacts = [
+            ref for ref in workflow_run.related_artifacts if ref.artifact_type != "compliance_report"
+        ]
+
+        run_relpath = Path("artifacts/rnaseq-qc-de/2026-03-20/run-20260320T224500Z-deadbeef")
+        run_dir = tmp_path / run_relpath
+        run_dir.mkdir(parents=True, exist_ok=True)
+        context = SimpleNamespace(
+            base_dir=tmp_path,
+            run_dir=run_dir,
+            relative_run_dir=run_relpath.as_posix(),
+            run_id="run-20260320T224500Z-deadbeef",
+            workflow_id="rnaseq_qc_de",
+            relative_path=lambda path: str(path),
+        )
+
+        outputs = rnaseq_runner._build_rnaseq_report_bundle_outputs(
+            context=context,
+            manifest_path="manifests/demo_dataset_manifest.yaml",
+            manifest=manifest,
+            workflow_run=workflow_run,
+            raw_qc_bundle={},
+            aggregated_qc_bundle={},
+            quantification_bundle={},
+            differential_expression_bundle={},
+            condition_field="condition",
+            baseline_condition="control",
+            comparison_condition="treated",
+            report_lifecycle_status="completed",
+        )
+
+        assert outputs["qa_report"]["overall_status"] == "blocked"
+        assert any(
+            item["artifact_type"] == "compliance_report"
+            for item in outputs["qa_report"]["missing_artifacts"]
+        )
+        assert any(
+            item["artifact_type"] == "compliance_report"
+            for item in outputs["qa_report"]["failed_checks"]
+        )
+
     def test_rnaseq_report_bundle_surfaces_blocking_checklist_failures_from_linked_evidence_reviews(self, tmp_path):
         module_spec = importlib.util.spec_from_file_location(
             "bioapex_test_rnaseq_qc_de_blocking_checklist",
@@ -3797,6 +4161,13 @@ def materialize_terminal_report_bundle(inputs, _context):
         workflow_run.qc_status = "passed"
         workflow_run.warnings = []
         workflow_run.deviations = []
+        compliance_report_path = (
+            "artifacts/compliance-preflight/2026-03-20/"
+            "run-20260320T221000Z-feedface/compliance_report.json"
+        )
+        workflow_run.related_artifacts.append(
+            ArtifactReference.model_validate(_stage_example_compliance_report(tmp_path, compliance_report_path))
+        )
         evidence_review_path = (
             "artifacts/evidence-review/2026-03-20/"
             "run-20260320T211500Z-feedface/evidence_review.json"

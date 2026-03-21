@@ -14,10 +14,32 @@
       "run_id": "run-20260318T193000Z-deadbeef"
     },
     {
+      "artifact_type": "report_bundle_manifest",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/report-bundle/report_bundle_manifest.json",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "report_bundle",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/report-bundle/rnaseq_report_bundle.md",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
       "artifact_type": "compliance_report",
       "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/compliance_report.json",
       "id": "compliance-rna-seq-qc-20260318",
       "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "evidence_review",
+      "path": "artifacts/evidence-review/2026-03-18/run-20260318T193500Z-cafefeed/evidence_review.json",
+      "id": "evidence-review-run-20260318t193500z-cafefeed",
+      "run_id": "run-20260318T193500Z-cafefeed"
+    },
+    {
+      "artifact_type": "evidence_card",
+      "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193500Z-cafefeed/evidence_card.yaml",
+      "id": "evidence-pmid-12345678",
+      "run_id": "run-20260318T193500Z-cafefeed"
     }
   ],
   "overall_status": "warning",
@@ -32,7 +54,8 @@
   ],
   "warnings": [
     "One donor replicate exceeded the ambient RNA warning threshold.",
-    "Major workflow deviation recorded at `qc-summary`: donor balance and ambient RNA metrics remained in the warning band."
+    "Major workflow deviation recorded at `qc-summary`: donor balance and ambient RNA metrics remained in the warning band.",
+    "Evidence review limitations should remain visible in the final report bundle."
   ],
   "missing_artifacts": [
     {
@@ -43,7 +66,8 @@
   "recommended_remediation": [
     "Regenerate the provenance export bundle.",
     "Review donor-specific QC thresholds before final report publication.",
-    "Review the logged workflow deviation before downstream interpretation or publication."
+    "Review the logged workflow deviation before downstream interpretation or publication.",
+    "Keep evidence-review limitations attached to any downstream interpretation claims."
   ],
   "checklist_artifacts": [
     {
@@ -53,10 +77,32 @@
       "run_id": "run-20260318T193000Z-deadbeef"
     },
     {
+      "artifact_type": "report_bundle_manifest",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/report-bundle/report_bundle_manifest.json",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "report_bundle",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/report-bundle/rnaseq_report_bundle.md",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
       "artifact_type": "compliance_report",
       "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/compliance_report.json",
       "id": "compliance-rna-seq-qc-20260318",
       "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "evidence_review",
+      "path": "artifacts/evidence-review/2026-03-18/run-20260318T193500Z-cafefeed/evidence_review.json",
+      "id": "evidence-review-run-20260318t193500z-cafefeed",
+      "run_id": "run-20260318T193500Z-cafefeed"
+    },
+    {
+      "artifact_type": "evidence_card",
+      "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193500Z-cafefeed/evidence_card.yaml",
+      "id": "evidence-pmid-12345678",
+      "run_id": "run-20260318T193500Z-cafefeed"
     }
   ]
 }

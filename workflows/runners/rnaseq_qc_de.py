@@ -9,8 +9,10 @@ from pathlib import PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from artifacts import (
+    ComplianceReport,
     CountMatrix,
     DatasetManifest,
+    EvidenceReviewArtifact,
     FastQCMetrics,
     FastQCRun,
     RUN_RECORD_FILENAME,
@@ -45,6 +47,7 @@ _ENGINE_VERSION = "1.0.0"
 _DE_SIGNIFICANCE_THRESHOLD = 0.05
 _DE_LOG2_EFFECT_FLOOR = 1.0
 _CHECKLIST_RESULTS_ARTIFACT_TYPE = "checklist_results"
+_QA_REVIEW_AGENT = "qa-reviewer"
 _REPORT_BUNDLE_STEP_ID = "report_bundle"
 _REPORT_BUNDLE_FILENAME = "rnaseq_report_bundle.md"
 _REPORT_BUNDLE_WORKFLOW_OUTPUT_ARTIFACT_TYPES: tuple[str, ...] = (
@@ -1867,6 +1870,7 @@ def _build_rnaseq_report_bundle_outputs(
         stable_artifact_name(_CHECKLIST_RESULTS_ARTIFACT_TYPE),
     )
     report_manifest_path = _generated_output_path(context, "report_bundle_manifest.json", step=_REPORT_BUNDLE_STEP_ID)
+    report_bundle_path = _generated_output_path(context, _REPORT_BUNDLE_FILENAME, step=_REPORT_BUNDLE_STEP_ID)
     missing_artifacts = _missing_report_bundle_artifacts(
         context,
         available_artifact_types=available_output_types,
@@ -1883,6 +1887,10 @@ def _build_rnaseq_report_bundle_outputs(
         "path": context.relative_path(manifest_path) if manifest_path else "n/a",
         **({"id": manifest.id, "run_id": manifest.run_id} if manifest is not None else {}),
     }
+    compliance_report_artifacts = _linked_workflow_artifacts(
+        workflow_run,
+        artifact_type="compliance_report",
+    )
     checklist_results_ref = _artifact_ref(
         _CHECKLIST_RESULTS_ARTIFACT_TYPE,
         checklist_results_path,
@@ -1926,21 +1934,11 @@ def _build_rnaseq_report_bundle_outputs(
         base_dir=context.base_dir,
     )
     checklist_warnings = checklist_warning_messages(checklist_payload)
-    warnings = _dedupe_text_entries([*workflow_review_warnings, *checklist_warnings])
-    recommendations = _dedupe_text_entries(
+    base_warnings = _dedupe_text_entries([*workflow_review_warnings, *checklist_warnings])
+    base_recommendations = _dedupe_text_entries(
         [*base_recommendations, *checklist_recommended_remediation(checklist_payload)]
     )
-    checklist_artifacts = _dedupe_artifacts(
-        [
-            checklist_results_ref,
-            manifest_ref,
-            workflow_run_ref,
-            *canonical_output_artifacts,
-            *supplementary_generated_artifacts,
-            *evidence_review_artifacts,
-        ]
-    )
-    overall_status = _combine_report_bundle_qa_status(
+    base_overall_status = _combine_qa_statuses(
         _report_bundle_qa_status(
             lifecycle_status=report_lifecycle_status,
             qc_status=workflow_run.qc_status,
@@ -1948,7 +1946,7 @@ def _build_rnaseq_report_bundle_outputs(
         ),
         str(checklist_payload.get("overall_status", "not_applicable")),
     )
-    failed_checks = [
+    base_failed_checks = [
         *_report_bundle_failed_checks(
             lifecycle_status=report_lifecycle_status,
             missing_artifacts=missing_artifacts,
@@ -1956,22 +1954,52 @@ def _build_rnaseq_report_bundle_outputs(
         ),
         *checklist_failed_checks(checklist_payload),
     ]
+    report_bundle_ref = _artifact_ref(
+        "report_bundle",
+        report_bundle_path,
+        run_id=context.run_id,
+    )
+    report_bundle_manifest_ref = _artifact_ref(
+        "report_bundle_manifest",
+        report_manifest_path,
+        run_id=context.run_id,
+    )
+    qa_review_payload = _build_rnaseq_qa_review_payload(
+        context=context,
+        workflow_run_ref=workflow_run_ref,
+        manifest_ref=manifest_ref,
+        report_bundle_ref=report_bundle_ref,
+        report_bundle_manifest_ref=report_bundle_manifest_ref,
+        compliance_report_artifacts=compliance_report_artifacts,
+        evidence_review_artifacts=evidence_review_artifacts,
+        canonical_output_artifacts=canonical_output_artifacts,
+        supplementary_generated_artifacts=supplementary_generated_artifacts,
+        checklist_results_ref=checklist_results_ref,
+        checklist_payload=checklist_payload,
+        missing_artifacts=missing_artifacts,
+        base_overall_status=base_overall_status,
+        base_failed_checks=base_failed_checks,
+        base_warnings=base_warnings,
+        base_recommendations=base_recommendations,
+    )
     report_bundle_manifest_payload = {
         **report_bundle_manifest_preview,
         "sections": list(_REPORT_BUNDLE_SECTIONS),
-        "report_markdown_path": "",
+        "report_markdown_path": report_bundle_path,
         "checklist_status": checklist_payload["overall_status"],
         "checklist_summary": checklist_payload["summary"],
         "checklists_evaluated": _report_bundle_checklist_summaries(checklist_payload),
         "checklist_results_artifact": checklist_results_ref,
         "expected_artifacts": [
             workflow_run_ref,
+            report_bundle_manifest_ref,
             *canonical_output_artifacts,
             *supplementary_generated_artifacts,
+            *compliance_report_artifacts,
             *evidence_review_artifacts,
             {
                 "artifact_type": "report_bundle",
-                "path": "",
+                "path": report_bundle_path,
                 "description": "Human-readable RNA-seq report bundle linking the canonical QC, quantification, and DE outputs.",
             },
             {
@@ -1985,9 +2013,11 @@ def _build_rnaseq_report_bundle_outputs(
                 "description": "Structured QA report copied to the stable root artifact location.",
             },
         ],
-        "next_actions": recommendations,
+        "next_actions": qa_review_payload["recommended_remediation"],
         "notes": [
             "The report bundle links the canonical workflow run record and any stable workflow outputs that were actually materialized for this run.",
+            "The structured report_bundle_manifest and the human-readable report bundle remain durable reviewer inputs so QA can be rerun from artifacts alone.",
+            "Compliance review remains a separate deterministic policy gate; the QA reviewer reuses linked compliance artifacts but does not replace policy approval decisions.",
             "Linked evidence-review artifacts are carried forward when available so downstream QA and report consumers can inspect literature-grounded claim support directly from the bundle.",
             "Checklist gate results are materialized as a durable artifact so report and QA consumers can inspect which definition files were applied and why any gate failed or warned.",
             "Structured workflow deviations are copied into the bundle so reviewers can inspect what changed, why it changed, and the likely downstream impact without reopening the raw run record.",
@@ -2014,7 +2044,7 @@ def _build_rnaseq_report_bundle_outputs(
             workflow_version=_RNASEQ_WORKFLOW_VERSION,
             workflow_lifecycle_status=report_lifecycle_status,
             workflow_qc_status=report_qc_status,
-            workflow_warnings=warnings,
+            workflow_warnings=qa_review_payload["warnings"],
             workflow_run_path=workflow_run_ref["path"],
             report_manifest_path=report_manifest_path,
             checklist_results_path=checklist_results_path,
@@ -2022,9 +2052,9 @@ def _build_rnaseq_report_bundle_outputs(
             provenance_exports=provenance_exports,
             canonical_artifacts_by_type=canonical_artifacts_by_type,
             evidence_review_artifacts=evidence_review_artifacts,
-            missing_artifacts=missing_artifacts,
+            missing_artifacts=qa_review_payload["missing_artifacts"],
             deviations=deviations,
-            recommendations=recommendations,
+            recommendations=qa_review_payload["recommended_remediation"],
         ),
     )
     report_bundle_manifest_payload["report_markdown_path"] = report_bundle_relpath
@@ -2039,15 +2069,7 @@ def _build_rnaseq_report_bundle_outputs(
     return {
         "report_bundle_manifest": report_bundle_manifest_payload,
         "checklist_results": checklist_payload,
-        "qa_report": {
-            "overall_status": overall_status,
-            "failed_checks": failed_checks,
-            "warnings": warnings,
-            "missing_artifacts": missing_artifacts,
-            "recommended_remediation": recommendations,
-            "checklist_artifacts": checklist_artifacts,
-            "related_artifacts": evidence_review_artifacts,
-        },
+        "qa_report": qa_review_payload,
     }
 
 
@@ -2127,7 +2149,481 @@ def _report_bundle_checklist_ids(
     return selected
 
 
-def _combine_report_bundle_qa_status(base_status: str, checklist_status: str) -> str:
+def _build_rnaseq_qa_review_payload(
+    *,
+    context,
+    workflow_run_ref: Mapping[str, Any],
+    manifest_ref: Mapping[str, Any],
+    report_bundle_ref: Mapping[str, Any],
+    report_bundle_manifest_ref: Mapping[str, Any],
+    compliance_report_artifacts: Sequence[Mapping[str, Any]],
+    evidence_review_artifacts: Sequence[Mapping[str, Any]],
+    canonical_output_artifacts: Sequence[Mapping[str, Any]],
+    supplementary_generated_artifacts: Sequence[Mapping[str, Any]],
+    checklist_results_ref: Mapping[str, Any],
+    checklist_payload: Mapping[str, Any],
+    missing_artifacts: Sequence[Mapping[str, Any]],
+    base_overall_status: str,
+    base_failed_checks: Sequence[Mapping[str, Any]],
+    base_warnings: Sequence[str],
+    base_recommendations: Sequence[str],
+) -> dict[str, Any]:
+    compliance_review = _qa_review_compliance_assessment(context, compliance_report_artifacts)
+    evidence_review = _qa_review_evidence_assessment(context, evidence_review_artifacts)
+    overall_status = _combine_qa_statuses(
+        base_overall_status,
+        str(compliance_review["status"]),
+        str(evidence_review["status"]),
+    )
+    failed_checks = _dedupe_failed_checks(
+        [
+            *base_failed_checks,
+            *compliance_review["failed_checks"],
+            *evidence_review["failed_checks"],
+        ]
+    )
+    missing_artifacts = _dedupe_missing_artifacts(
+        [
+            *missing_artifacts,
+            *compliance_review["missing_artifacts"],
+            *evidence_review["missing_artifacts"],
+        ]
+    )
+    warnings = _dedupe_text_entries(
+        [
+            *base_warnings,
+            *compliance_review["warnings"],
+            *evidence_review["warnings"],
+        ]
+    )
+    recommendations = _dedupe_text_entries(
+        [
+            *base_recommendations,
+            *compliance_review["recommended_remediation"],
+            *evidence_review["recommended_remediation"],
+        ]
+    )
+    related_artifacts = _dedupe_artifacts(
+        [
+            workflow_run_ref,
+            report_bundle_manifest_ref,
+            report_bundle_ref,
+            *compliance_review["related_artifacts"],
+            *evidence_review["related_artifacts"],
+        ]
+    )
+    checklist_artifacts = _dedupe_artifacts(
+        [
+            checklist_results_ref,
+            manifest_ref,
+            workflow_run_ref,
+            report_bundle_manifest_ref,
+            report_bundle_ref,
+            *canonical_output_artifacts,
+            *supplementary_generated_artifacts,
+            *compliance_review["related_artifacts"],
+            *evidence_review["related_artifacts"],
+        ]
+    )
+    return {
+        "source_agent": _QA_REVIEW_AGENT,
+        "overall_status": overall_status,
+        "failed_checks": failed_checks,
+        "warnings": warnings,
+        "missing_artifacts": missing_artifacts,
+        "recommended_remediation": recommendations,
+        "checklist_artifacts": checklist_artifacts,
+        "related_artifacts": related_artifacts,
+    }
+
+
+def _qa_review_compliance_assessment(
+    context,
+    compliance_report_artifacts: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    result = {
+        "status": "passed",
+        "failed_checks": [],
+        "warnings": [],
+        "missing_artifacts": [],
+        "recommended_remediation": [],
+        "related_artifacts": [],
+    }
+    if not compliance_report_artifacts:
+        result["status"] = "blocked"
+        result["failed_checks"].append(
+            _qa_review_failed_check(
+                check_id="qa-review-missing-compliance-report",
+                description="QA review requires a linked compliance_report artifact before final publication.",
+                severity="error",
+                artifact_type="compliance_report",
+                remediation=(
+                    "Re-run or link the deterministic compliance review so QA can confirm that policy review "
+                    "remains separate from artifact QA."
+                ),
+            )
+        )
+        result["missing_artifacts"].append(
+            _qa_review_missing_artifact(
+                "compliance_report",
+                rationale=(
+                    "No linked compliance_report artifact was available for QA review, so policy and QA "
+                    "responsibilities could not be audited separately."
+                ),
+            )
+        )
+        result["recommended_remediation"].append(
+            "Link or regenerate the compliance_report artifact before final publication or export."
+        )
+        return result
+
+    for artifact in compliance_report_artifacts:
+        artifact_ref = dict(artifact)
+        artifact_path = artifact_ref.get("path")
+        if not isinstance(artifact_path, str) or not artifact_path.strip():
+            result["status"] = _combine_qa_statuses(str(result["status"]), "blocked")
+            result["failed_checks"].append(
+                _qa_review_failed_check(
+                    check_id="qa-review-invalid-compliance-report-ref",
+                    description="QA review received a linked compliance_report reference without a usable path.",
+                    severity="error",
+                    artifact_type="compliance_report",
+                    remediation="Repair the compliance_report artifact reference before final publication.",
+                )
+            )
+            result["missing_artifacts"].append(
+                _qa_review_missing_artifact(
+                    "compliance_report",
+                    rationale="A linked compliance_report reference did not include a readable artifact path.",
+                )
+            )
+            continue
+
+        try:
+            document = load_artifact_document(context.base_dir / artifact_path)
+        except Exception as exc:
+            result["status"] = _combine_qa_statuses(str(result["status"]), "blocked")
+            result["failed_checks"].append(
+                _qa_review_failed_check(
+                    check_id=f"qa-review-unreadable-compliance-report-{artifact_path}",
+                    description=f"Linked compliance_report artifact could not be loaded from {artifact_path}.",
+                    severity="error",
+                    artifact_type="compliance_report",
+                    remediation="Repair or regenerate the linked compliance_report artifact before publication.",
+                )
+            )
+            result["missing_artifacts"].append(
+                _qa_review_missing_artifact(
+                    "compliance_report",
+                    expected_path=artifact_path,
+                    rationale=f"Artifact load failed during QA review: {exc}",
+                )
+            )
+            continue
+
+        if not isinstance(document, ComplianceReport):
+            result["status"] = _combine_qa_statuses(str(result["status"]), "blocked")
+            result["failed_checks"].append(
+                _qa_review_failed_check(
+                    check_id=f"qa-review-invalid-compliance-report-type-{artifact_path}",
+                    description=f"Linked artifact at {artifact_path} was not a compliance_report document.",
+                    severity="error",
+                    artifact_type="compliance_report",
+                    remediation="Replace the linked artifact with a valid compliance_report before publication.",
+                )
+            )
+            result["missing_artifacts"].append(
+                _qa_review_missing_artifact(
+                    "compliance_report",
+                    expected_path=artifact_path,
+                    rationale="The linked artifact was not a compliance_report document.",
+                )
+            )
+            continue
+
+        result["related_artifacts"].append(artifact_ref)
+        if document.final_disposition == "block":
+            result["status"] = _combine_qa_statuses(str(result["status"]), "blocked")
+            result["failed_checks"].append(
+                _qa_review_failed_check(
+                    check_id=f"qa-review-compliance-block-{document.id}",
+                    description=(
+                        "Compliance review remained in blocked disposition; QA review cannot override that policy "
+                        "decision for publication."
+                    ),
+                    severity="critical",
+                    artifact_type="compliance_report",
+                    remediation="Resolve the deterministic compliance block before final publication or export.",
+                )
+            )
+        elif document.final_disposition == "require_approval":
+            result["status"] = _combine_qa_statuses(str(result["status"]), "blocked")
+            result["failed_checks"].append(
+                _qa_review_failed_check(
+                    check_id=f"qa-review-compliance-approval-{document.id}",
+                    description=(
+                        "Compliance review still requires explicit approval; QA review does not replace that "
+                        "approval step."
+                    ),
+                    severity="error",
+                    artifact_type="compliance_report",
+                    remediation="Obtain and record the required compliance approval before final publication.",
+                )
+            )
+            result["recommended_remediation"].append(
+                "Obtain the required compliance approval before final publication or export."
+            )
+        elif document.final_disposition == "allow_with_warning":
+            result["status"] = _combine_qa_statuses(str(result["status"]), "warning")
+            result["warnings"].append(
+                "Compliance review allowed the run with warnings; QA review remains a separate check on artifact completeness and evidence grounding."
+            )
+
+    result["related_artifacts"] = _dedupe_artifacts(result["related_artifacts"])
+    return result
+
+
+def _qa_review_evidence_assessment(
+    context,
+    evidence_review_artifacts: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    result = {
+        "status": "passed",
+        "failed_checks": [],
+        "warnings": [],
+        "missing_artifacts": [],
+        "recommended_remediation": [],
+        "related_artifacts": [],
+    }
+    if not evidence_review_artifacts:
+        return result
+
+    loaded_reviews: list[EvidenceReviewArtifact] = []
+    for artifact in evidence_review_artifacts:
+        artifact_ref = dict(artifact)
+        artifact_path = artifact_ref.get("path")
+        if not isinstance(artifact_path, str) or not artifact_path.strip():
+            result["status"] = _combine_qa_statuses(str(result["status"]), "blocked")
+            result["failed_checks"].append(
+                _qa_review_failed_check(
+                    check_id="qa-review-invalid-evidence-review-ref",
+                    description="QA review received a linked evidence_review reference without a usable path.",
+                    severity="error",
+                    artifact_type="evidence_review",
+                    remediation="Repair the evidence_review artifact reference before final publication.",
+                )
+            )
+            result["missing_artifacts"].append(
+                _qa_review_missing_artifact(
+                    "evidence_review",
+                    rationale="A linked evidence_review reference did not include a readable artifact path.",
+                )
+            )
+            continue
+
+        try:
+            document = load_artifact_document(context.base_dir / artifact_path)
+        except Exception as exc:
+            result["status"] = _combine_qa_statuses(str(result["status"]), "blocked")
+            result["failed_checks"].append(
+                _qa_review_failed_check(
+                    check_id=f"qa-review-unreadable-evidence-review-{artifact_path}",
+                    description=f"Linked evidence_review artifact could not be loaded from {artifact_path}.",
+                    severity="error",
+                    artifact_type="evidence_review",
+                    remediation="Repair or regenerate the linked evidence_review artifact before publication.",
+                )
+            )
+            result["missing_artifacts"].append(
+                _qa_review_missing_artifact(
+                    "evidence_review",
+                    expected_path=artifact_path,
+                    rationale=f"Artifact load failed during QA review: {exc}",
+                )
+            )
+            continue
+
+        if not isinstance(document, EvidenceReviewArtifact):
+            result["status"] = _combine_qa_statuses(str(result["status"]), "blocked")
+            result["failed_checks"].append(
+                _qa_review_failed_check(
+                    check_id=f"qa-review-invalid-evidence-review-type-{artifact_path}",
+                    description=f"Linked artifact at {artifact_path} was not an evidence_review document.",
+                    severity="error",
+                    artifact_type="evidence_review",
+                    remediation="Replace the linked artifact with a valid evidence_review document before publication.",
+                )
+            )
+            result["missing_artifacts"].append(
+                _qa_review_missing_artifact(
+                    "evidence_review",
+                    expected_path=artifact_path,
+                    rationale="The linked artifact was not an evidence_review document.",
+                )
+            )
+            continue
+
+        loaded_reviews.append(document)
+        result["related_artifacts"].append(artifact_ref)
+        review_label = document.review_question.strip()
+        if document.review_status == "mixed":
+            result["status"] = _combine_qa_statuses(str(result["status"]), "failed")
+            result["failed_checks"].append(
+                _qa_review_failed_check(
+                    check_id=f"qa-review-mixed-evidence-{document.id}",
+                    description=(
+                        f"Evidence review '{review_label}' remained mixed, so interpretation claims should not be "
+                        "published as high-confidence findings."
+                    ),
+                    severity="error",
+                    artifact_type="evidence_review",
+                    remediation="Qualify or remove unsupported interpretation claims before final publication.",
+                )
+            )
+        elif document.review_status == "insufficient_evidence":
+            result["status"] = _combine_qa_statuses(str(result["status"]), "blocked")
+            result["failed_checks"].append(
+                _qa_review_failed_check(
+                    check_id=f"qa-review-insufficient-evidence-{document.id}",
+                    description=(
+                        f"Evidence review '{review_label}' remained insufficient, so QA blocked high-confidence "
+                        "publication."
+                    ),
+                    severity="critical",
+                    artifact_type="evidence_review",
+                    remediation="Gather stronger supporting evidence or remove the unsupported interpretation claims.",
+                )
+            )
+        if document.limitations:
+            result["status"] = _combine_qa_statuses(str(result["status"]), "warning")
+            result["warnings"].append(
+                f"Evidence review '{review_label}' recorded limitations that should stay visible in the final handoff."
+            )
+        if document.unresolved_conflicts:
+            result["status"] = _combine_qa_statuses(str(result["status"]), "warning")
+            result["warnings"].append(
+                f"Evidence review '{review_label}' retained unresolved conflicts that should be disclosed in downstream interpretation."
+            )
+
+    evidence_card_artifacts = _dedupe_artifacts(
+        [
+            artifact
+            for review in loaded_reviews
+            for artifact in _evidence_card_artifacts_for_review(review)
+        ]
+    )
+    result["related_artifacts"] = _dedupe_artifacts(
+        [*result["related_artifacts"], *evidence_card_artifacts]
+    )
+    if evidence_review_artifacts and not evidence_card_artifacts:
+        result["status"] = _combine_qa_statuses(str(result["status"]), "failed")
+        result["failed_checks"].append(
+            _qa_review_failed_check(
+                check_id="qa-review-missing-evidence-cards",
+                description="Evidence reviews were linked, but no evidence_card artifacts were available for grounding inspection.",
+                severity="error",
+                artifact_type="evidence_card",
+                remediation="Link the underlying evidence_card artifacts before final publication.",
+            )
+        )
+        result["missing_artifacts"].append(
+            _qa_review_missing_artifact(
+                "evidence_card",
+                rationale="Linked evidence_review artifacts did not expose any evidence_card references for QA grounding review.",
+            )
+        )
+        result["recommended_remediation"].append(
+            "Link the underlying evidence_card artifacts before final publication so evidence grounding stays inspectable."
+        )
+    return result
+
+
+def _evidence_card_artifacts_for_review(review: EvidenceReviewArtifact) -> list[dict[str, Any]]:
+    return _dedupe_artifacts(
+        [
+            ref.model_dump(mode="json")
+            for ref in [
+                *review.related_artifacts,
+                *review.evidence_included,
+                *(fact.evidence for fact in review.source_facts),
+                *(
+                    ref
+                    for conclusion in review.synthesized_conclusions
+                    for ref in conclusion.supporting_evidence
+                ),
+            ]
+            if ref.artifact_type == "evidence_card"
+        ]
+    )
+
+
+def _qa_review_failed_check(
+    *,
+    check_id: str,
+    description: str,
+    severity: str,
+    artifact_type: str,
+    remediation: str,
+) -> dict[str, str]:
+    return {
+        "id": normalize_identifier(check_id),
+        "description": description,
+        "severity": severity,
+        "artifact_type": artifact_type,
+        "remediation": remediation,
+    }
+
+
+def _qa_review_missing_artifact(
+    artifact_type: str,
+    *,
+    expected_path: str | None = None,
+    rationale: str | None = None,
+) -> dict[str, str]:
+    payload = {"artifact_type": artifact_type}
+    if expected_path is not None:
+        payload["expected_path"] = expected_path
+    if rationale is not None:
+        payload["rationale"] = rationale
+    return payload
+
+
+def _dedupe_failed_checks(checks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for check in checks:
+        check_id = check.get("id")
+        if not isinstance(check_id, str) or not check_id:
+            continue
+        if check_id in seen:
+            continue
+        seen.add(check_id)
+        deduped.append(dict(check))
+    return deduped
+
+
+def _dedupe_missing_artifacts(artifacts: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str | None, str | None]] = set()
+    for artifact in artifacts:
+        artifact_type = artifact.get("artifact_type")
+        expected_path = artifact.get("expected_path")
+        rationale = artifact.get("rationale")
+        if not isinstance(artifact_type, str) or not artifact_type:
+            continue
+        if expected_path is not None and not isinstance(expected_path, str):
+            continue
+        if rationale is not None and not isinstance(rationale, str):
+            continue
+        key = (artifact_type, expected_path, rationale)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(dict(artifact))
+    return deduped
+
+
+def _combine_qa_statuses(*statuses: str) -> str:
     severity_rank = {
         "passed": 0,
         "not_applicable": 0,
@@ -2135,7 +2631,15 @@ def _combine_report_bundle_qa_status(base_status: str, checklist_status: str) ->
         "failed": 2,
         "blocked": 3,
     }
-    return base_status if severity_rank.get(base_status, 0) >= severity_rank.get(checklist_status, 0) else checklist_status
+    worst_status = "passed"
+    for status in statuses:
+        if severity_rank.get(status, 0) > severity_rank.get(worst_status, 0):
+            worst_status = status
+    return worst_status
+
+
+def _combine_report_bundle_qa_status(base_status: str, checklist_status: str) -> str:
+    return _combine_qa_statuses(base_status, checklist_status)
 
 
 def _report_bundle_checklist_summaries(
