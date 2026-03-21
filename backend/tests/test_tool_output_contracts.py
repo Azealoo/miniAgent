@@ -116,6 +116,206 @@ def test_slurm_tool_contract_includes_job_id(tmp_path):
     assert artifact["structured_payload"]["returncode"] == 0
 
 
+def test_slurm_tool_structured_submit_persists_job_record(tmp_path):
+    from tools.slurm_tool import SlurmTool
+
+    script = tmp_path / "jobs" / "demo.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("#!/bin/bash\necho hi\n", encoding="utf-8")
+
+    completed = MagicMock()
+    completed.stdout = "Submitted batch job 12345\n"
+    completed.stderr = ""
+    completed.returncode = 0
+
+    tool = SlurmTool(base_dir=str(tmp_path))
+    with patch("tools.slurm_tool.subprocess.run", return_value=completed):
+        summary, artifact = tool._run(
+            action="submit",
+            script_path="jobs/demo.sh",
+            run_id="run-20260320T120000Z-deadbeef",
+            resource_request={"cpus": 4, "memory": "32G", "wall_time": "02:00:00"},
+        )
+
+    relpath = artifact["structured_payload"]["job_record_path"]
+    persisted = json.loads((tmp_path / relpath).read_text(encoding="utf-8"))
+
+    assert "Submitted Slurm job 12345" in summary
+    assert artifact["tool_name"] == "slurm_tool"
+    assert persisted["artifact_type"] == "slurm_job"
+    assert persisted["job_id"] == "12345"
+    assert persisted["resource_request"]["cpus"] == 4
+    assert artifact["artifact_refs"][0]["artifact_type"] == "slurm_job"
+    assert relpath == "artifacts/slurm-jobs/2026-03-20/run-20260320T120000Z-deadbeef/slurm_job.json"
+
+
+def test_slurm_tool_structured_status_updates_job_record(tmp_path):
+    from tools.slurm_tool import SlurmTool
+
+    run_dir = (
+        tmp_path
+        / "artifacts"
+        / "slurm-jobs"
+        / "2026-03-20"
+        / "run-20260320T120000Z-deadbeef"
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    job_record_path = run_dir / "slurm_job.json"
+    job_record_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0.0",
+                "artifact_type": "slurm_job",
+                "id": "slurm-job-12345-run-20260320t120000z-deadbeef",
+                "run_id": "run-20260320T120000Z-deadbeef",
+                "created_at": "2026-03-20T12:00:00Z",
+                "source_tool": "slurm_tool",
+                "related_artifacts": [],
+                "job_id": "12345",
+                "job_name": "demo",
+                "script_path": "jobs/demo.sh",
+                "working_directory": ".",
+                "submission_command": ["sbatch", "jobs/demo.sh"],
+                "resource_request": {"cpus": 4, "memory": "32G", "wall_time": "02:00:00"},
+                "status": "pending",
+                "submitted_at": "2026-03-20T12:00:00Z",
+                "completed_at": None,
+                "latest_status": {
+                    "observed_at": "2026-03-20T12:00:00Z",
+                    "source": "submission",
+                    "normalized_status": "pending",
+                    "raw_state": "SUBMITTED",
+                    "raw_reason": None,
+                    "exit_code": None,
+                },
+                "status_history": [
+                    {
+                        "observed_at": "2026-03-20T12:00:00Z",
+                        "source": "submission",
+                        "normalized_status": "pending",
+                        "raw_state": "SUBMITTED",
+                        "raw_reason": None,
+                        "exit_code": None,
+                    }
+                ],
+                "logs": {
+                    "stdout_path": "artifacts/slurm-jobs/2026-03-20/run-20260320T120000Z-deadbeef/outputs/generated/slurm/demo-12345.stdout.log",
+                    "stderr_path": "artifacts/slurm-jobs/2026-03-20/run-20260320T120000Z-deadbeef/outputs/generated/slurm/demo-12345.stderr.log",
+                    "submission_stdout": "Submitted batch job 12345\n",
+                    "submission_stderr": None,
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stdout_log_path = (
+        tmp_path
+        / "artifacts"
+        / "slurm-jobs"
+        / "2026-03-20"
+        / "run-20260320T120000Z-deadbeef"
+        / "outputs"
+        / "generated"
+        / "slurm"
+        / "demo-12345.stdout.log"
+    )
+    stderr_log_path = (
+        tmp_path
+        / "artifacts"
+        / "slurm-jobs"
+        / "2026-03-20"
+        / "run-20260320T120000Z-deadbeef"
+        / "outputs"
+        / "generated"
+        / "slurm"
+        / "demo-12345.stderr.log"
+    )
+    stdout_log_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout_log_path.write_text("runtime stdout\n", encoding="utf-8")
+    stderr_log_path.write_text("runtime stderr\n", encoding="utf-8")
+
+    squeue_result = MagicMock()
+    squeue_result.stdout = ""
+    squeue_result.stderr = ""
+    squeue_result.returncode = 0
+
+    sacct_result = MagicMock()
+    sacct_result.stdout = (
+        "12345|COMPLETED|0:0|00:40:00|02:00:00|None|"
+        f"{tmp_path}|"
+        f"{tmp_path}/artifacts/slurm-jobs/2026-03-20/run-20260320T120000Z-deadbeef/outputs/generated/slurm/demo-12345.stdout.log|"
+        f"{tmp_path}/artifacts/slurm-jobs/2026-03-20/run-20260320T120000Z-deadbeef/outputs/generated/slurm/demo-12345.stderr.log|"
+        "demo\n"
+    )
+    sacct_result.stderr = ""
+    sacct_result.returncode = 0
+
+    tool = SlurmTool(base_dir=str(tmp_path))
+    with patch("tools.slurm_tool.subprocess.run", side_effect=[squeue_result, sacct_result]):
+        summary, artifact = tool._run(
+            action="status",
+            job_record_path="artifacts/slurm-jobs/2026-03-20/run-20260320T120000Z-deadbeef/slurm_job.json",
+        )
+
+    updated = json.loads(job_record_path.read_text(encoding="utf-8"))
+
+    assert summary == "Job 12345 status: completed."
+    assert artifact["structured_payload"]["status"] == "completed"
+    assert artifact["structured_payload"]["runtime_stdout"] == "runtime stdout"
+    assert artifact["structured_payload"]["runtime_stderr"] == "runtime stderr"
+    assert updated["status"] == "completed"
+    assert updated["completed_at"] == updated["latest_status"]["observed_at"]
+    assert updated["logs"]["runtime_stdout"] == "runtime stdout"
+    assert updated["logs"]["runtime_stderr"] == "runtime stderr"
+
+
+def test_slurm_runtime_log_reader_caps_file_reads(monkeypatch):
+    import tools.slurm_tool as slurm_tool_module
+
+    read_sizes: list[int] = []
+
+    class _FakeReader:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, size: int = -1) -> str:
+            read_sizes.append(size)
+            if size < 0:
+                raise AssertionError("Runtime log reader should use a bounded read size.")
+            return "x" * size
+
+    class _FakePath:
+        def exists(self) -> bool:
+            return True
+
+        def is_file(self) -> bool:
+            return True
+
+        def open(self, mode: str = "r", encoding: str | None = None, errors: str | None = None):
+            assert mode == "r"
+            assert encoding == "utf-8"
+            assert errors == "replace"
+            return _FakeReader()
+
+    monkeypatch.setattr(
+        slurm_tool_module,
+        "_resolve_under_base",
+        lambda *args, **kwargs: (_FakePath(), "logs/demo.stdout.log"),
+    )
+
+    rendered = slurm_tool_module._read_runtime_log(Path("/tmp"), "logs/demo.stdout.log")
+
+    assert read_sizes == [slurm_tool_module._MAX_OUTPUT + 1]
+    assert rendered is not None
+    assert rendered.startswith("x" * slurm_tool_module._MAX_OUTPUT)
+    assert rendered.endswith("\n...[truncated]")
+
+
 def test_ncbi_eutils_contract_preserves_structured_payload():
     from tools.ncbi_eutils_tool import NcbiEutilsTool
 

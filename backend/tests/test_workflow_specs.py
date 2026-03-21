@@ -219,6 +219,7 @@ class TestWorkflowSpecs:
             "differential_expression_results",
             "differential_expression_run",
             "report_bundle_manifest",
+            "checklist_results",
             "qa_report",
         ]
         assert [output.name for output in raw_qc_step.outputs] == [
@@ -257,6 +258,80 @@ class TestWorkflowSpecs:
             "minimum_condition_replicates",
             "missing_expected_batch_fields",
         ]
+
+    def test_slurm_external_engine_requires_explicit_resource_request(self):
+        payload = _base_payload()
+        payload["steps"] = [
+            {
+                "id": "launch_slurm",
+                "label": "Launch Slurm Job",
+                "executor": {
+                    "executor_type": "external_engine",
+                    "engine_name": "slurm",
+                    "entrypoint": "workflows/engines/demo/launch.sh",
+                    "resource_request": {
+                        "cpus": 8,
+                        "memory": "64G",
+                        "wall_time": "04:00:00",
+                    },
+                },
+                "inputs": [],
+                "outputs": [
+                    {
+                        "name": "slurm_job",
+                        "kind": "artifact",
+                        "artifact_type": "slurm_job",
+                        "schema_ref": "artifact_schema:slurm_job@1.0.0",
+                        "description": "Durable Slurm job record.",
+                    }
+                ],
+                "prerequisites": [],
+                "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                "failure_policy": "block_workflow",
+            }
+        ]
+        payload["outputs"] = [
+            {
+                "name": "slurm_job",
+                "kind": "artifact",
+                "artifact_type": "slurm_job",
+                "schema_ref": "artifact_schema:slurm_job@1.0.0",
+                "description": "Durable Slurm job record.",
+                "source": {"step_id": "launch_slurm", "output_name": "slurm_job"},
+            }
+        ]
+
+        document = validate_workflow_spec_payload(payload)
+
+        assert document.steps[0].executor.engine_name == "slurm"
+        assert document.steps[0].executor.resource_request is not None
+        assert document.steps[0].executor.resource_request.cpus == 8
+
+    def test_slurm_external_engine_rejects_opaque_command_string(self):
+        payload = _base_payload()
+        payload["steps"][1]["executor"] = {
+            "executor_type": "external_engine",
+            "engine_name": "slurm",
+            "entrypoint": "workflows/engines/demo/launch.sh",
+            "command": "sbatch workflows/engines/demo/launch.sh",
+            "resource_request": {
+                "cpus": 8,
+                "memory": "64G",
+                "wall_time": "04:00:00",
+            },
+        }
+        payload["steps"][1]["outputs"] = [
+            {
+                "name": "qa_report",
+                "kind": "artifact",
+                "artifact_type": "qa_report",
+                "schema_ref": "artifact_schema:qa_report@1.0.0",
+                "description": "Invalid slurm test output.",
+            }
+        ]
+
+        with pytest.raises(ValueError, match="entrypoint plus resource_request"):
+            validate_workflow_spec_payload(payload)
 
     def test_rnaseq_example_manifest_and_workflow_plan_align_with_authored_contract(self):
         manifest = load_artifact_document(EXAMPLES_DIR / "rnaseq_dataset_manifest.yaml")

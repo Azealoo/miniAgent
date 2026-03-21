@@ -32,6 +32,7 @@ from artifacts.schemas import (  # noqa: E402
     ProtocolRun,
     ProvenanceArtifact,
     QAReport,
+    SlurmJobArtifact,
     WorkflowRun,
     artifact_model_for_type,
     load_artifact_document,
@@ -53,6 +54,7 @@ class TestArtifactSchemas:
             "differential_expression_results": "json",
             "differential_expression_run": "json",
             "workflow_run": "json",
+            "slurm_job": "json",
             "provenance": "json",
             "biocompute": "json",
             "evidence_card": "yaml",
@@ -1383,6 +1385,7 @@ class TestArtifactSchemas:
             "differential_expression_results.json": DifferentialExpressionResults,
             "differential_expression_run.json": DifferentialExpressionRun,
             "run.json": WorkflowRun,
+            "slurm_job.json": SlurmJobArtifact,
             "prov.json": ProvenanceArtifact,
             "biocompute.json": BioComputeArtifact,
             "evidence_card.yaml": EvidenceCard,
@@ -1429,4 +1432,5 @@ class TestArtifactSchemas:
 
         assert isinstance(parsed, WorkflowRun)
         assert artifact_model_for_type("workflow_run") is WorkflowRun
+        assert artifact_model_for_type("slurm_job") is SlurmJobArtifact
         assert artifact_model_for_type("checklist_results") is ChecklistResultsArtifact

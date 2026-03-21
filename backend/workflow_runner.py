@@ -27,6 +27,7 @@ from artifacts import (
     QAReport,
     RunLayout,
     SCHEMA_PACK_VERSION,
+    SlurmJobArtifact,
     WorkflowRun,
     build_content_hash_manifest,
     build_generated_output_relpath,
@@ -40,6 +41,7 @@ from artifacts import (
     validate_artifact_payload,
     validate_artifact_root,
 )
+from tools.slurm_tool import refresh_slurm_job_artifact, submit_slurm_job
 from artifacts.biocompute import expected_biocompute_export_paths, materialize_biocompute_bundle
 from artifacts.provenance import expected_provenance_export_paths, materialize_provenance_bundle
 from artifacts.schemas import (
@@ -67,10 +69,12 @@ from workflow_streaming import WORKFLOW_EVENT_CONTRACT_VERSION, normalize_workfl
 _RUN_FINAL_STATUSES = {"completed", "failed", "blocked"}
 _STEP_READY_STATUS = {"created", "waiting"}
 _STEP_COMPLETE_STATUS = "completed"
-_STEP_OUTPUT_PERSISTED_STATUSES = {_STEP_COMPLETE_STATUS, "blocked"}
+_STEP_OUTPUT_PERSISTED_STATUSES = {_STEP_COMPLETE_STATUS, "blocked", "waiting"}
+_STEP_OUTPUT_RECOVERY_STATUSES = _STEP_OUTPUT_PERSISTED_STATUSES | {"running"}
 _WORKFLOW_INPUT_SNAPSHOT_NAME = "workflow_inputs.json"
 _STEP_INPUT_SNAPSHOT_NAME = "resolved_inputs.json"
 _STEP_OUTPUT_SNAPSHOT_NAME = "resolved_outputs.json"
+_SLURM_FAILURE_STATUSES = {"failed", "cancelled", "timed_out"}
 _BIOCOMPUTE_MATERIALIZATION_WARNING_PREFIX = "Optional BioCompute export could not be materialized deterministically:"
 _COMPLIANCE_HOOK_USER_MESSAGE_RE = re.compile(
     r"^Workflow (?P<workflow_id>[A-Za-z0-9._:-]+) compliance hook "
@@ -92,6 +96,11 @@ def _dump_json(payload: Any) -> str:
 
 def _dump_yaml(payload: Any) -> str:
     return yaml.safe_dump(payload, sort_keys=False, allow_unicode=False)
+
+
+def _slugify_label(value: str) -> str:
+    candidate = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-._")
+    return candidate.lower() or "slurm-job"
 
 
 def _module_prefixes(module_name: str) -> list[str]:
@@ -257,6 +266,12 @@ class StepExecutionContext:
     def relative_path(self, value: str | Path) -> str:
         target = self.resolve_path(value)
         return target.relative_to(self.base_dir).as_posix()
+
+
+@dataclass(frozen=True)
+class PendingStepOutputs:
+    outputs: dict[str, Any]
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -578,6 +593,8 @@ class InternalDAGRunner:
             run_document = self._persist_run_document(layout, run_document)
             executed_steps += 1
 
+            if run_document.lifecycle_status == "waiting":
+                break
             if run_document.lifecycle_status in _RUN_FINAL_STATUSES:
                 break
 
@@ -874,6 +891,7 @@ class InternalDAGRunner:
             run_document.lifecycle_status = "waiting"
             if "Run resumed after interruption." not in run_document.warnings:
                 run_document.warnings.append("Run resumed after interruption.")
+        run_document = self._recover_persisted_step_outputs(layout, spec, run_document)
         run_document.related_artifacts = self._dedupe_refs([*run_document.related_artifacts, workflow_inputs_ref])
         return run_document
 
@@ -892,6 +910,7 @@ class InternalDAGRunner:
 
         reset_steps = {restart_from_step, *self._descendants(spec, restart_from_step)}
         stale_ref_keys = self._stale_restart_ref_keys(layout, spec, run_document, reset_steps=reset_steps)
+        self._delete_step_output_recovery_artifacts(layout, spec, reset_steps=reset_steps)
         self._delete_materialized_workflow_outputs(layout, spec, reset_steps=reset_steps)
         for record in run_document.steps:
             if record.id not in reset_steps:
@@ -1023,12 +1042,10 @@ class InternalDAGRunner:
             if record.status not in _STEP_OUTPUT_PERSISTED_STATUSES:
                 continue
             step = steps_by_id[record.id]
-            snapshot = self._load_step_output_snapshot(layout, step.id)
             for output in step.outputs:
-                raw_ref = snapshot.get(output.name)
-                if raw_ref is None:
+                ref = self._load_step_output_ref(layout, step, output.name)
+                if ref is None:
                     continue
-                ref = ArtifactReference.model_validate(raw_ref)
                 refs[(step.id, output.name)] = ref
                 values[(step.id, output.name)] = self._load_output_value(output.kind, ref)
         return values, refs
@@ -1043,6 +1060,96 @@ class InternalDAGRunner:
         if not isinstance(outputs, dict):
             raise ValueError(f"Invalid step output snapshot at {path}.")
         return outputs
+
+    def _generated_step_output_relpath(
+        self,
+        *,
+        step_id: str,
+        output_name: str,
+        output_kind: str,
+        artifact_type: str | None,
+    ) -> PurePosixPath:
+        if output_kind == "artifact":
+            if artifact_type is None:
+                raise ValueError(f"Artifact output {step_id}.{output_name} is missing artifact_type.")
+            file_format = schema_format_for_artifact(artifact_type)
+            extension = ".json" if file_format == "json" else ".yaml"
+        else:
+            extension = ".json"
+        return build_generated_output_relpath(f"{output_name}{extension}", step=step_id)
+
+    def _load_step_output_ref(
+        self,
+        layout: RunLayout,
+        step: WorkflowStepDefinition,
+        output_name: str,
+    ) -> ArtifactReference | None:
+        snapshot = self._load_step_output_snapshot(layout, step.id)
+        raw_ref = snapshot.get(output_name)
+        if raw_ref is None:
+            output = next((candidate for candidate in step.outputs if candidate.name == output_name), None)
+            if output is None:
+                raise ValueError(f"Step {step.id} does not declare output {output_name!r}.")
+            relative_path = self._generated_step_output_relpath(
+                step_id=step.id,
+                output_name=output.name,
+                output_kind=output.kind,
+                artifact_type=output.artifact_type,
+            )
+            path = resolve_artifact_path(layout.run_dir, relative_path)
+            if not path.exists():
+                return None
+            ref_path = (layout.relative_run_dir / relative_path).as_posix()
+            if output.kind == "artifact":
+                document = load_artifact_document(path)
+                if output.artifact_type is not None and document.artifact_type != output.artifact_type:
+                    raise ValueError(
+                        f"Recovered artifact at {ref_path} does not match expected type {output.artifact_type!r}."
+                    )
+                return ArtifactReference(
+                    artifact_type=document.artifact_type,
+                    path=ref_path,
+                    id=document.id,
+                    run_id=document.run_id,
+                )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or "value" not in payload:
+                raise ValueError(f"Workflow value snapshot at {path} is missing its 'value' payload.")
+            return ArtifactReference(
+                artifact_type="workflow_value",
+                path=ref_path,
+                id=normalize_identifier(f"{step.id}-{output.name}-{layout.run_id.lower()}"),
+                run_id=layout.run_id,
+            )
+        return ArtifactReference.model_validate(raw_ref)
+
+    def _recover_persisted_step_outputs(
+        self,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        run_document: WorkflowRun,
+    ) -> WorkflowRun:
+        steps_by_id = {step.id: step for step in spec.steps}
+        recovered_related_refs: list[ArtifactReference] = []
+        for record in run_document.steps:
+            if record.status not in _STEP_OUTPUT_RECOVERY_STATUSES:
+                continue
+            step = steps_by_id[record.id]
+            recovered_refs: list[ArtifactReference] = []
+            for output in step.outputs:
+                ref = self._load_step_output_ref(layout, step, output.name)
+                if ref is None:
+                    continue
+                recovered_refs.append(ref)
+            if not recovered_refs:
+                continue
+            record.outputs_produced = self._dedupe_refs([*record.outputs_produced, *recovered_refs])
+            recovered_related_refs.extend(ref for ref in recovered_refs if ref.artifact_type == "slurm_job")
+        if recovered_related_refs:
+            run_document.related_artifacts = self._dedupe_refs(
+                [*run_document.related_artifacts, *recovered_related_refs]
+            )
+        return run_document
 
     def _load_output_value(self, output_kind: str, ref: ArtifactReference) -> Any:
         if output_kind == "artifact":
@@ -1077,7 +1184,8 @@ class InternalDAGRunner:
     ) -> WorkflowRun:
         record = self._step_record(run_document, step.id)
         record.status = "running"
-        record.start_time = _utcnow()
+        if record.start_time is None:
+            record.start_time = _utcnow()
         record.end_time = None
         if emitter is not None:
             emitter.step_start(step)
@@ -1114,8 +1222,19 @@ class InternalDAGRunner:
                 if emitter is not None:
                     emitter.step_end(step, record)
                 return run_document
-            raw_outputs = self._run_step_executor(step, step_inputs, context)
-            output_values = self._normalize_executor_outputs(step, raw_outputs)
+            raw_outputs = self._run_step_executor(
+                step,
+                step_inputs,
+                context,
+                layout=layout,
+                spec=spec,
+                record=record,
+            )
+            pending_step = isinstance(raw_outputs, PendingStepOutputs)
+            output_values = self._normalize_executor_outputs(
+                step,
+                raw_outputs.outputs if pending_step else raw_outputs,
+            )
             output_refs: list[ArtifactReference] = []
             emitted_outputs: list[tuple[str, ArtifactReference]] = []
             snapshot_payload: dict[str, Any] = {}
@@ -1135,12 +1254,26 @@ class InternalDAGRunner:
                 emitted_outputs.append((output.name, ref))
                 snapshot_payload[output.name] = ref.model_dump(mode="json")
             self._persist_step_output_snapshot(layout, step.id, snapshot_payload)
+            run_document.related_artifacts = self._dedupe_refs(
+                [
+                    *run_document.related_artifacts,
+                    *[ref for ref in output_refs if ref.artifact_type == "slurm_job"],
+                ]
+            )
             record.outputs_produced = output_refs
-            record.status = _STEP_COMPLETE_STATUS
-            record.end_time = _utcnow()
+            if pending_step:
+                record.status = "waiting"
+                run_document.lifecycle_status = "waiting"
+            else:
+                record.status = _STEP_COMPLETE_STATUS
+                record.end_time = _utcnow()
             if emitter is not None:
                 for output_name, ref in emitted_outputs:
                     emitter.artifact(ref, scope="step_output", step=step, output_name=output_name)
+            if pending_step:
+                if emitter is not None:
+                    emitter.step_end(step, record)
+                return run_document
             run_document = self._apply_stage_policies(
                 layout=layout,
                 spec=spec,
@@ -1317,13 +1450,25 @@ class InternalDAGRunner:
         step: WorkflowStepDefinition,
         step_inputs: Mapping[str, Any],
         context: StepExecutionContext,
+        *,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        record: WorkflowStepRecord,
     ) -> Any:
         executor = step.executor
         if isinstance(executor, PythonExecutor):
             callable_obj = self._load_python_callable(context.base_dir, executor.module, executor.function)
             return self._invoke_python_callable(callable_obj, step_inputs, context)
         if isinstance(executor, ExternalEngineExecutor):
-            return self._run_external_command(step, executor, step_inputs, context)
+            return self._run_external_command(
+                step,
+                executor,
+                step_inputs,
+                context,
+                layout=layout,
+                spec=spec,
+                record=record,
+            )
         raise ValueError(
             f"Executor type {step.executor.executor_type!r} is not supported by the internal DAG runner MVP."
         )
@@ -1377,7 +1522,22 @@ class InternalDAGRunner:
         executor: ExternalEngineExecutor,
         step_inputs: Mapping[str, Any],
         context: StepExecutionContext,
+        *,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        record: WorkflowStepRecord,
     ) -> dict[str, Any]:
+        if executor.engine_name == "slurm":
+            return self._run_slurm_external_command(
+                step=step,
+                executor=executor,
+                step_inputs=step_inputs,
+                context=context,
+                layout=layout,
+                spec=spec,
+                record=record,
+            )
+
         rendered_entrypoint = self._render_external_template(
             executor.entrypoint,
             step_inputs,
@@ -1388,9 +1548,14 @@ class InternalDAGRunner:
         argv = shlex.split(command)
         env = os.environ.copy()
         env.update(self._external_executor_environment(step_inputs, context))
+        command_cwd = (
+            context.resolve_path(executor.working_directory)
+            if executor.working_directory is not None
+            else context.base_dir
+        )
         result = subprocess.run(
             argv,
-            cwd=context.base_dir,
+            cwd=command_cwd,
             capture_output=True,
             text=True,
             shell=False,
@@ -1411,11 +1576,88 @@ class InternalDAGRunner:
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "inputs": _serialize_for_json(dict(step_inputs)),
+                "working_directory": context.relative_path(command_cwd),
                 "environment_keys": sorted(
                     key for key in env if key.startswith("BIOAPEX_")
                 ),
             }
         }
+
+    def _run_slurm_external_command(
+        self,
+        *,
+        step: WorkflowStepDefinition,
+        executor: ExternalEngineExecutor,
+        step_inputs: Mapping[str, Any],
+        context: StepExecutionContext,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        record: WorkflowStepRecord,
+    ) -> dict[str, Any] | PendingStepOutputs:
+        if len(step.outputs) != 1:
+            raise ValueError("Slurm external engine executor requires exactly one declared output.")
+        declared_output = step.outputs[0]
+        if declared_output.kind != "artifact" or declared_output.artifact_type != "slurm_job":
+            raise ValueError(
+                "Slurm external engine executor requires one artifact output with artifact_type 'slurm_job'."
+            )
+
+        existing_ref = next((ref for ref in record.outputs_produced if ref.artifact_type == "slurm_job"), None)
+        if existing_ref is None:
+            existing_ref = self._load_step_output_ref(layout, step, declared_output.name)
+            if existing_ref is not None:
+                record.outputs_produced = self._dedupe_refs([*record.outputs_produced, existing_ref])
+        if existing_ref is not None:
+            existing_path = resolve_artifact_path(self.base_dir, existing_ref.path)
+            if not existing_path.exists():
+                raise ValueError(
+                    f"Expected persisted slurm_job artifact at {existing_ref.path} while resuming step {step.id}."
+                )
+            existing_document = load_artifact_document(existing_path)
+            if not isinstance(existing_document, SlurmJobArtifact):
+                raise ValueError(f"Persisted artifact at {existing_ref.path} is not a slurm_job record.")
+            refreshed = refresh_slurm_job_artifact(base_dir=self.base_dir, artifact=existing_document)
+            payload = refreshed.artifact.model_dump(mode="json")
+            if refreshed.artifact.status in {"pending", "running"}:
+                return PendingStepOutputs(outputs={declared_output.name: payload}, reason=refreshed.summary)
+            if refreshed.artifact.status in _SLURM_FAILURE_STATUSES:
+                existing_path.write_text(_dump_json(payload), encoding="utf-8")
+                raise RuntimeError(
+                    f"Slurm job {refreshed.artifact.job_id} ended with status {refreshed.artifact.status}."
+                )
+            return {declared_output.name: payload}
+
+        rendered_entrypoint = self._render_external_template(
+            executor.entrypoint,
+            step_inputs,
+            shell_quote=False,
+        )
+        rendered_working_directory = (
+            self._render_external_template(
+                executor.working_directory,
+                step_inputs,
+                shell_quote=False,
+            )
+            if executor.working_directory is not None
+            else None
+        )
+        export_environment = self._external_executor_environment(step_inputs, context)
+        submitted = submit_slurm_job(
+            base_dir=self.base_dir,
+            run_id=context.run_id,
+            run_relative_dir=context.relative_run_dir,
+            script_path=rendered_entrypoint,
+            resource_request=executor.resource_request,
+            working_directory=rendered_working_directory,
+            job_name=_slugify_label(step.label),
+            run_record_ref=self._run_record_ref(layout),
+            source_workflow=spec.workflow_id,
+            export_environment=export_environment,
+        )
+        return PendingStepOutputs(
+            outputs={declared_output.name: submitted.artifact.model_dump(mode="json")},
+            reason=submitted.summary,
+        )
 
     def _normalize_executor_outputs(
         self,
@@ -1502,12 +1744,15 @@ class InternalDAGRunner:
         payload["related_artifacts"] = related_artifacts
 
         artifact_document = validate_artifact_payload(payload)
-        file_format = schema_format_for_artifact(artifact_type)
-        extension = ".json" if file_format == "json" else ".yaml"
-        relative_path = build_generated_output_relpath(f"{output_name}{extension}", step=step.id)
+        relative_path = self._generated_step_output_relpath(
+            step_id=step.id,
+            output_name=output_name,
+            output_kind="artifact",
+            artifact_type=artifact_type,
+        )
         rendered = (
             _dump_json(artifact_document.model_dump(mode="json"))
-            if file_format == "json"
+            if relative_path.suffix == ".json"
             else _dump_yaml(artifact_document.model_dump(mode="json"))
         )
         self._write_text_under_run(layout, relative_path, rendered)
@@ -1527,7 +1772,12 @@ class InternalDAGRunner:
         output_name: str,
         raw_value: Any,
     ) -> tuple[ArtifactReference, Any]:
-        relative_path = build_generated_output_relpath(f"{output_name}.json", step=step_id)
+        relative_path = self._generated_step_output_relpath(
+            step_id=step_id,
+            output_name=output_name,
+            output_kind="value",
+            artifact_type=None,
+        )
         self._write_json_under_run(
             layout,
             relative_path,
@@ -1557,6 +1807,45 @@ class InternalDAGRunner:
             relative_path,
             {"step_id": step_id, "outputs": output_refs},
         )
+
+    def _delete_step_output_recovery_artifacts(
+        self,
+        layout: RunLayout,
+        spec: WorkflowSpec,
+        *,
+        reset_steps: set[str],
+    ) -> None:
+        deleted_paths: set[str] = set()
+        for step in spec.steps:
+            if step.id not in reset_steps:
+                continue
+            candidate_paths: list[PurePosixPath] = [
+                build_generated_output_relpath(_STEP_OUTPUT_SNAPSHOT_NAME, step=step.id)
+            ]
+            for output in step.outputs:
+                candidate_paths.append(
+                    self._generated_step_output_relpath(
+                        step_id=step.id,
+                        output_name=output.name,
+                        output_kind=output.kind,
+                        artifact_type=output.artifact_type,
+                    )
+                )
+            for relative_path in candidate_paths:
+                relative_key = relative_path.as_posix()
+                if relative_key in deleted_paths:
+                    continue
+                target = resolve_artifact_path(layout.run_dir, relative_path)
+                if not target.exists():
+                    continue
+                target.unlink()
+                try:
+                    from artifacts.registry import refresh_artifact_registry_path
+
+                    refresh_artifact_registry_path(layout.base_dir, layout.relative_run_dir / relative_path)
+                except Exception:
+                    pass
+                deleted_paths.add(relative_key)
 
     def _sync_workflow_outputs(
         self,

@@ -120,6 +120,68 @@ def _write_qa_report(base_dir: Path) -> None:
     )
 
 
+def _write_slurm_job(base_dir: Path) -> None:
+    _write_json(
+        _run_dir(base_dir) / "slurm_job.json",
+        {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "slurm_job",
+            "id": "slurm-job-12345-run-20260318t190203z-deadbeef",
+            "run_id": RUN_ID,
+            "created_at": "2026-03-18T19:06:00Z",
+            "source_tool": "slurm_tool",
+            "related_artifacts": [
+                {
+                    "artifact_type": "workflow_run",
+                    "path": _run_dir_relpath("run.json"),
+                    "run_id": RUN_ID,
+                }
+            ],
+            "job_id": "12345",
+            "job_name": "demo-job",
+            "script_path": "workflows/engines/demo/launch.sh",
+            "working_directory": ".",
+            "submission_command": ["sbatch", "workflows/engines/demo/launch.sh"],
+            "resource_request": {"cpus": 8, "memory": "64G", "wall_time": "04:00:00"},
+            "status": "completed",
+            "submitted_at": "2026-03-18T19:06:00Z",
+            "completed_at": "2026-03-18T19:16:00Z",
+            "latest_status": {
+                "observed_at": "2026-03-18T19:16:00Z",
+                "source": "sacct",
+                "normalized_status": "completed",
+                "raw_state": "COMPLETED",
+                "raw_reason": "None",
+                "exit_code": "0:0",
+            },
+            "status_history": [
+                {
+                    "observed_at": "2026-03-18T19:06:00Z",
+                    "source": "submission",
+                    "normalized_status": "pending",
+                    "raw_state": "SUBMITTED",
+                    "raw_reason": None,
+                    "exit_code": None,
+                },
+                {
+                    "observed_at": "2026-03-18T19:16:00Z",
+                    "source": "sacct",
+                    "normalized_status": "completed",
+                    "raw_state": "COMPLETED",
+                    "raw_reason": "None",
+                    "exit_code": "0:0",
+                },
+            ],
+            "logs": {
+                "stdout_path": _run_dir_relpath("outputs/generated/slurm/demo-job-12345.stdout.log"),
+                "stderr_path": _run_dir_relpath("outputs/generated/slurm/demo-job-12345.stderr.log"),
+                "submission_stdout": "Submitted batch job 12345\n",
+                "submission_stderr": None,
+            },
+        },
+    )
+
+
 def _write_evidence_card(base_dir: Path) -> None:
     _write_yaml(
         _run_dir(base_dir) / "evidence_card.yaml",
@@ -645,6 +707,25 @@ class TestArtifactRegistryService:
         )
         assert refreshed.matched_count == 1
         assert refreshed.records[0].path == _run_dir_relpath("entity_grounding.json")
+
+    def test_refresh_path_indexes_slurm_job_artifact(self, isolated_registry_root):
+        rebuild_artifact_registry(isolated_registry_root)
+        _write_slurm_job(isolated_registry_root)
+
+        record = refresh_artifact_registry_path(
+            isolated_registry_root,
+            _run_dir_relpath("slurm_job.json"),
+        )
+        assert record is not None
+        assert record.status == "valid"
+        assert record.artifact_type == "slurm_job"
+
+        refreshed = lookup_artifact_registry(
+            isolated_registry_root,
+            artifact_type="slurm_job",
+        )
+        assert refreshed.matched_count == 1
+        assert refreshed.records[0].path == _run_dir_relpath("slurm_job.json")
 
     def test_refresh_path_indexes_claim_graph_artifact(self, isolated_registry_root):
         rebuild_artifact_registry(isolated_registry_root)

@@ -30,6 +30,7 @@ ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
     "differential_expression_results": "json",
     "differential_expression_run": "json",
     "workflow_run": "json",
+    "slurm_job": "json",
     "provenance": "json",
     "biocompute": "json",
     "evidence_card": "yaml",
@@ -63,6 +64,8 @@ WorkflowLifecycleStatus = Literal[
     "blocked",
 ]
 WorkflowQCStatus = Literal["pending", "passed", "warning", "failed", "not_applicable"]
+SlurmJobStatus = Literal["pending", "running", "completed", "failed", "cancelled", "timed_out"]
+SlurmStatusSource = Literal["submission", "squeue", "sacct", "scontrol"]
 ConfidenceLevel = Literal["low", "medium", "high"]
 ComplianceDisposition = Literal["allow", "allow_with_warning", "require_approval", "block"]
 ComplianceRuntimeState = Literal[
@@ -185,6 +188,22 @@ def _normalize_relative_path(value: str | PurePosixPath) -> str:
     if any(part == ".." for part in candidate.parts):
         raise ValueError("Paths must not contain '..'.")
     return str(candidate)
+
+
+def _normalize_relative_directory(value: str | PurePosixPath) -> str:
+    raw = str(value).strip()
+    if not raw:
+        raise ValueError("Directory path must not be empty.")
+    if raw == ".":
+        return "."
+    return _normalize_relative_path(raw)
+
+
+def _require_slurm_field(value: str, *, field_name: str) -> str:
+    cleaned = _require_non_empty(value, field_name=field_name)
+    if any(ch.isspace() for ch in cleaned):
+        raise ValueError(f"{field_name} must not contain whitespace.")
+    return cleaned
 
 
 def _clean_unique_text_list(values: list[str], *, field_name: str) -> list[str]:
@@ -1300,6 +1319,141 @@ class WorkflowRun(ArtifactDocument):
                 raise ValueError("Workflow deviations must use the parent workflow run_id.")
             if deviation.step_id not in step_ids:
                 raise ValueError("Workflow deviations must reference an existing workflow step_id.")
+        return self
+
+
+class SlurmResourceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cpus: int | None = Field(default=None, ge=1)
+    memory: str | None = None
+    wall_time: str | None = None
+    gpus: int | None = Field(default=None, ge=0)
+    partition: str | None = None
+    qos: str | None = None
+    account: str | None = None
+    constraint: str | None = None
+
+    @field_validator("memory", "wall_time", "partition", "qos", "account", "constraint")
+    @classmethod
+    def _validate_optional_text_fields(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class SlurmJobLogCapture(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    stdout_path: str | None = None
+    stderr_path: str | None = None
+    submission_stdout: str | None = None
+    submission_stderr: str | None = None
+    runtime_stdout: str | None = None
+    runtime_stderr: str | None = None
+
+    @field_validator("stdout_path", "stderr_path")
+    @classmethod
+    def _validate_optional_paths(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _normalize_relative_path(value)
+
+    @field_validator("submission_stdout", "submission_stderr", "runtime_stdout", "runtime_stderr")
+    @classmethod
+    def _validate_optional_text(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class SlurmStatusObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    observed_at: datetime
+    source: SlurmStatusSource
+    normalized_status: SlurmJobStatus
+    raw_state: str | None = None
+    raw_reason: str | None = None
+    exit_code: str | None = None
+
+    @field_validator("observed_at")
+    @classmethod
+    def _validate_observed_at(cls, value: datetime) -> datetime:
+        return _normalize_timestamp(value, field_name="observed_at")
+
+    @field_validator("raw_state", "raw_reason", "exit_code")
+    @classmethod
+    def _validate_optional_text(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name=info.field_name)
+
+
+class SlurmJobArtifact(ArtifactDocument):
+    artifact_type: Literal["slurm_job"] = "slurm_job"
+    job_id: str
+    job_name: str | None = None
+    script_path: str
+    working_directory: str
+    submission_command: list[str] = Field(min_length=1)
+    environment_keys: list[str] = Field(default_factory=list)
+    resource_request: SlurmResourceRequest = Field(default_factory=SlurmResourceRequest)
+    status: SlurmJobStatus
+    submitted_at: datetime
+    completed_at: datetime | None = None
+    latest_status: SlurmStatusObservation
+    status_history: list[SlurmStatusObservation] = Field(default_factory=list)
+    logs: SlurmJobLogCapture = Field(default_factory=SlurmJobLogCapture)
+
+    @field_validator("job_id")
+    @classmethod
+    def _validate_job_id(cls, value: str) -> str:
+        return _require_slurm_field(value, field_name="job_id")
+
+    @field_validator("job_name")
+    @classmethod
+    def _validate_job_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name="job_name")
+
+    @field_validator("script_path")
+    @classmethod
+    def _validate_script_path(cls, value: str) -> str:
+        return _normalize_relative_path(value)
+
+    @field_validator("working_directory")
+    @classmethod
+    def _validate_working_directory(cls, value: str) -> str:
+        return _normalize_relative_directory(value)
+
+    @field_validator("submission_command")
+    @classmethod
+    def _validate_submission_command(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="submission_command") for item in value]
+
+    @field_validator("environment_keys")
+    @classmethod
+    def _validate_environment_keys(cls, value: list[str]) -> list[str]:
+        return [_require_non_empty(item, field_name="environment_keys") for item in value]
+
+    @field_validator("submitted_at", "completed_at")
+    @classmethod
+    def _validate_status_times(cls, value: datetime | None, info) -> datetime | None:
+        if value is None:
+            return None
+        return _normalize_timestamp(value, field_name=info.field_name)
+
+    @model_validator(mode="after")
+    def _validate_status_consistency(self) -> "SlurmJobArtifact":
+        terminal_statuses = {"completed", "failed", "cancelled", "timed_out"}
+        if self.latest_status.normalized_status != self.status:
+            raise ValueError("latest_status.normalized_status must match status.")
+        if self.status in terminal_statuses and self.completed_at is None:
+            raise ValueError("Terminal slurm_job records must include completed_at.")
+        if self.status not in terminal_statuses and self.completed_at is not None:
+            raise ValueError("Non-terminal slurm_job records may not include completed_at.")
         return self
 
 
@@ -3283,6 +3437,7 @@ ArtifactModel = (
     | DifferentialExpressionResults
     | DifferentialExpressionRun
     | WorkflowRun
+    | SlurmJobArtifact
     | ProvenanceArtifact
     | BioComputeArtifact
     | EvidenceCard
@@ -3306,6 +3461,7 @@ _ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
     "differential_expression_results": DifferentialExpressionResults,
     "differential_expression_run": DifferentialExpressionRun,
     "workflow_run": WorkflowRun,
+    "slurm_job": SlurmJobArtifact,
     "provenance": ProvenanceArtifact,
     "biocompute": BioComputeArtifact,
     "evidence_card": EvidenceCard,

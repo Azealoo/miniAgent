@@ -10,7 +10,7 @@ from typing import Annotated, Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from artifacts.schemas import normalize_identifier
+from artifacts.schemas import SlurmResourceRequest, normalize_identifier
 from qc_policy import QCPolicyDefinition
 
 WORKFLOW_SPEC_VERSION = "1.0.0"
@@ -183,6 +183,8 @@ class ExternalEngineExecutor(BaseModel):
     engine_name: str
     entrypoint: str
     command: str | None = None
+    resource_request: SlurmResourceRequest | None = None
+    working_directory: str | None = None
 
     @field_validator("engine_name")
     @classmethod
@@ -200,6 +202,26 @@ class ExternalEngineExecutor(BaseModel):
         if value is None:
             return None
         return _require_non_empty(value, field_name="command")
+
+    @field_validator("working_directory")
+    @classmethod
+    def _validate_working_directory(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_relative_path(value, field_name="working_directory")
+
+    @model_validator(mode="after")
+    def _validate_executor_contract(self) -> "ExternalEngineExecutor":
+        if self.engine_name == "slurm":
+            if self.resource_request is None:
+                raise ValueError("Slurm external engines require resource_request.")
+            if self.command is not None:
+                raise ValueError(
+                    "Slurm external engines must use entrypoint plus resource_request instead of command."
+                )
+        elif self.resource_request is not None:
+            raise ValueError("resource_request is only supported for engine_name='slurm'.")
+        return self
 
 
 StepExecutor = Annotated[

@@ -1248,6 +1248,543 @@ def summarize(inputs, context):
         assert payload["value"]["stdout"].splitlines() == ["sample-001", "sample-001"]
         assert "BIOAPEX_INPUT_SAMPLE_ID" in payload["value"]["environment_keys"]
 
+    def test_runner_resumes_slurm_external_engine_from_persisted_job_record(self, tmp_path, monkeypatch):
+        from tools.slurm_tool import SlurmJobOperationResult
+
+        script_path = tmp_path / "scripts" / "launch.sh"
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text("#!/bin/bash\necho run\n", encoding="utf-8")
+
+        template = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "slurm_job.json")
+        assert isinstance(template, workflow_runner_module.SlurmJobArtifact)
+
+        submit_calls = 0
+        refresh_calls = 0
+        submitted_kwargs: list[dict[str, object]] = []
+
+        def _submitted_artifact(run_id: str, *, environment_keys: list[str] | None = None):
+            initial_status = template.status_history[0]
+            return workflow_runner_module.SlurmJobArtifact.model_validate(
+                template.model_copy(
+                    update={
+                        "id": f"slurm-job-12345-{run_id.lower()}",
+                        "run_id": run_id,
+                        "source_workflow": "slurm-external-demo",
+                        "source_tool": "slurm_tool",
+                        "related_artifacts": [],
+                        "script_path": "scripts/launch.sh",
+                        "environment_keys": environment_keys or [],
+                        "status": "pending",
+                        "completed_at": None,
+                        "latest_status": initial_status,
+                        "status_history": [initial_status],
+                    }
+                ).model_dump(mode="json")
+            )
+
+        def _completed_artifact(run_id: str):
+            completed_status = template.status_history[-1]
+            return workflow_runner_module.SlurmJobArtifact.model_validate(
+                template.model_copy(
+                    update={
+                        "id": f"slurm-job-12345-{run_id.lower()}",
+                        "run_id": run_id,
+                        "source_workflow": "slurm-external-demo",
+                        "source_tool": "slurm_tool",
+                        "related_artifacts": [],
+                        "script_path": "scripts/launch.sh",
+                        "environment_keys": ["BIOAPEX_INPUT_SAMPLE_ID", "BIOAPEX_RUN_ID"],
+                        "status": "completed",
+                        "completed_at": completed_status.observed_at,
+                        "latest_status": completed_status,
+                        "status_history": [template.status_history[0], completed_status],
+                    }
+                ).model_dump(mode="json")
+            )
+
+        def _fake_submit(**kwargs):
+            nonlocal submit_calls
+            submit_calls += 1
+            submitted_kwargs.append(dict(kwargs))
+            artifact = _submitted_artifact(
+                kwargs["run_id"],
+                environment_keys=sorted(kwargs["export_environment"]),
+            )
+            return SlurmJobOperationResult(
+                artifact=artifact,
+                summary="Submitted Slurm job 12345 for scripts/launch.sh.",
+                raw_stdout="Submitted batch job 12345\n",
+                raw_stderr="",
+                commands=[["sbatch", "scripts/launch.sh"]],
+            )
+
+        def _fake_refresh(*, artifact, **_kwargs):
+            nonlocal refresh_calls
+            refresh_calls += 1
+            completed = _completed_artifact(artifact.run_id)
+            return SlurmJobOperationResult(
+                artifact=completed,
+                summary="Job 12345 status: completed.",
+                raw_stdout="12345|COMPLETED\n",
+                raw_stderr="",
+                commands=[["sacct", "-j", "12345"]],
+            )
+
+        monkeypatch.setattr(workflow_runner_module, "submit_slurm_job", _fake_submit)
+        monkeypatch.setattr(workflow_runner_module, "refresh_slurm_job_artifact", _fake_refresh)
+
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "slurm-external-demo",
+                "version": "1.0.0",
+                "name": "Slurm External Demo",
+                "purpose": "Verify that Slurm job records survive resume without resubmission.",
+                "engine": "external_workflow_adapter_v1",
+                "required_inputs": [
+                    {
+                        "name": "sample_id",
+                        "kind": "metadata",
+                        "data_type": "string",
+                        "description": "Sample identifier carried through the workflow contract.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": {
+                    "provided_inputs": ["sample_id"],
+                    "allowed_parameter_overrides": [],
+                    "generated_state": [
+                        "run_id",
+                        "created_at",
+                        "resolved_input_paths",
+                        "step_statuses",
+                        "artifact_paths",
+                    ],
+                    "state_artifact": "workflow_run",
+                    "artifact_root_template": "artifacts/{workflow_id}/{date}/{run_id}",
+                },
+                "outputs": [
+                    {
+                        "name": "slurm_job",
+                        "kind": "artifact",
+                        "artifact_type": "slurm_job",
+                        "schema_ref": "artifact_schema:slurm_job@1.0.0",
+                        "description": "Durable Slurm job record.",
+                        "source": {
+                            "step_id": "launch_slurm",
+                            "output_name": "slurm_job",
+                        },
+                    }
+                ],
+                "qc_gates": [],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "launch_slurm",
+                        "label": "Launch Slurm Job",
+                        "executor": {
+                            "executor_type": "external_engine",
+                            "engine_name": "slurm",
+                            "entrypoint": "scripts/launch.sh",
+                            "resource_request": {
+                                "cpus": 8,
+                                "memory": "64G",
+                                "wall_time": "04:00:00",
+                            },
+                        },
+                        "inputs": [
+                            {
+                                "name": "sample_id",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "sample_id",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "slurm_job",
+                                "kind": "artifact",
+                                "artifact_type": "slurm_job",
+                                "schema_ref": "artifact_schema:slurm_job@1.0.0",
+                                "description": "Durable Slurm job record.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "block_workflow",
+                    }
+                ],
+            }
+        )
+
+        runner = InternalDAGRunner(tmp_path)
+        paused = runner.run(spec, {"sample_id": "sample-001"})
+
+        assert paused.run.lifecycle_status == "waiting"
+        assert paused.run.steps[0].status == "waiting"
+        assert submit_calls == 1
+        assert refresh_calls == 0
+        assert paused.run.steps[0].outputs_produced[0].artifact_type == "slurm_job"
+        assert submitted_kwargs[0]["script_path"] == "scripts/launch.sh"
+        assert submitted_kwargs[0]["export_environment"]["BIOAPEX_INPUT_SAMPLE_ID"] == "sample-001"
+
+        persisted_pending = load_artifact_document(
+            resolve_artifact_path(tmp_path, paused.run.steps[0].outputs_produced[0].path)
+        )
+        assert isinstance(persisted_pending, workflow_runner_module.SlurmJobArtifact)
+        assert persisted_pending.status == "pending"
+        assert "BIOAPEX_INPUT_SAMPLE_ID" in persisted_pending.environment_keys
+
+        snapshot_path = resolve_artifact_path(
+            paused.run_dir,
+            workflow_runner_module.build_generated_output_relpath("resolved_outputs.json", step="launch_slurm"),
+        )
+        snapshot_path.unlink()
+
+        persisted_run_path = paused.run_dir / "run.json"
+        persisted_run_payload = json.loads(persisted_run_path.read_text(encoding="utf-8"))
+        persisted_run_payload["lifecycle_status"] = "running"
+        persisted_run_payload["related_artifacts"] = []
+        persisted_run_payload["steps"][0]["status"] = "running"
+        persisted_run_payload["steps"][0]["end_time"] = None
+        persisted_run_payload["steps"][0]["outputs_produced"] = []
+        persisted_run_path.write_text(json.dumps(persisted_run_payload, indent=2) + "\n", encoding="utf-8")
+
+        resumed = runner.run(spec, run_dir=paused.run_dir)
+
+        assert resumed.resumed is True
+        assert resumed.run.lifecycle_status == "completed"
+        assert resumed.run.steps[0].status == "completed"
+        assert submit_calls == 1
+        assert refresh_calls == 1
+        assert resumed.run.steps[0].outputs_produced[0].artifact_type == "slurm_job"
+        assert any(ref.artifact_type == "slurm_job" for ref in resumed.run.related_artifacts)
+
+        persisted_completed = load_artifact_document(
+            resolve_artifact_path(tmp_path, resumed.run.steps[0].outputs_produced[0].path)
+        )
+        assert isinstance(persisted_completed, workflow_runner_module.SlurmJobArtifact)
+        assert persisted_completed.status == "completed"
+
+    def test_runner_restart_from_step_resubmits_slurm_external_engine(self, tmp_path, monkeypatch):
+        from tools.slurm_tool import SlurmJobOperationResult
+
+        script_path = tmp_path / "scripts" / "launch.sh"
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text("#!/bin/bash\necho run\n", encoding="utf-8")
+
+        template = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "slurm_job.json")
+        assert isinstance(template, workflow_runner_module.SlurmJobArtifact)
+
+        submitted_job_ids: list[str] = []
+        refresh_calls = 0
+
+        def _submitted_artifact(run_id: str, job_id: str):
+            initial_status = template.status_history[0]
+            return workflow_runner_module.SlurmJobArtifact.model_validate(
+                template.model_copy(
+                    update={
+                        "id": f"slurm-job-{job_id}-{run_id.lower()}",
+                        "run_id": run_id,
+                        "job_id": job_id,
+                        "source_workflow": "slurm-external-restart-demo",
+                        "source_tool": "slurm_tool",
+                        "related_artifacts": [],
+                        "script_path": "scripts/launch.sh",
+                        "status": "pending",
+                        "completed_at": None,
+                        "latest_status": initial_status,
+                        "status_history": [initial_status],
+                    }
+                ).model_dump(mode="json")
+            )
+
+        def _fake_submit(**kwargs):
+            job_id = "12345" if not submitted_job_ids else "67890"
+            submitted_job_ids.append(job_id)
+            artifact = _submitted_artifact(kwargs["run_id"], job_id)
+            return SlurmJobOperationResult(
+                artifact=artifact,
+                summary=f"Submitted Slurm job {job_id} for scripts/launch.sh.",
+                raw_stdout=f"Submitted batch job {job_id}\n",
+                raw_stderr="",
+                commands=[["sbatch", "scripts/launch.sh"]],
+            )
+
+        def _fake_refresh(*, artifact, **_kwargs):
+            nonlocal refresh_calls
+            refresh_calls += 1
+            return SlurmJobOperationResult(
+                artifact=artifact,
+                summary=f"Job {artifact.job_id} status: pending.",
+                raw_stdout=f"{artifact.job_id}|PENDING\n",
+                raw_stderr="",
+                commands=[["squeue", "-j", artifact.job_id]],
+            )
+
+        monkeypatch.setattr(workflow_runner_module, "submit_slurm_job", _fake_submit)
+        monkeypatch.setattr(workflow_runner_module, "refresh_slurm_job_artifact", _fake_refresh)
+
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "slurm-external-restart-demo",
+                "version": "1.0.0",
+                "name": "Slurm External Restart Demo",
+                "purpose": "Verify restart_from_step forces a fresh Slurm submission.",
+                "engine": "external_workflow_adapter_v1",
+                "required_inputs": [
+                    {
+                        "name": "sample_id",
+                        "kind": "metadata",
+                        "data_type": "string",
+                        "description": "Sample identifier carried through the workflow contract.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": _runtime_contract(["sample_id"]),
+                "outputs": [
+                    {
+                        "name": "slurm_job",
+                        "kind": "artifact",
+                        "artifact_type": "slurm_job",
+                        "schema_ref": "artifact_schema:slurm_job@1.0.0",
+                        "description": "Durable Slurm job record.",
+                        "source": {
+                            "step_id": "launch_slurm",
+                            "output_name": "slurm_job",
+                        },
+                    }
+                ],
+                "qc_gates": [],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "launch_slurm",
+                        "label": "Launch Slurm Job",
+                        "executor": {
+                            "executor_type": "external_engine",
+                            "engine_name": "slurm",
+                            "entrypoint": "scripts/launch.sh",
+                            "resource_request": {
+                                "cpus": 8,
+                                "memory": "64G",
+                                "wall_time": "04:00:00",
+                            },
+                        },
+                        "inputs": [
+                            {
+                                "name": "sample_id",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "sample_id",
+                                },
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "slurm_job",
+                                "kind": "artifact",
+                                "artifact_type": "slurm_job",
+                                "schema_ref": "artifact_schema:slurm_job@1.0.0",
+                                "description": "Durable Slurm job record.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "block_workflow",
+                    }
+                ],
+            }
+        )
+
+        runner = InternalDAGRunner(tmp_path)
+        paused = runner.run(spec, {"sample_id": "sample-001"})
+        restarted = runner.run(spec, run_dir=paused.run_dir, restart_from_step="launch_slurm")
+
+        assert paused.run.lifecycle_status == "waiting"
+        assert restarted.resumed is True
+        assert restarted.run.lifecycle_status == "waiting"
+        assert restarted.run.steps[0].status == "waiting"
+        assert submitted_job_ids == ["12345", "67890"]
+        assert refresh_calls == 0
+
+        persisted_restarted = load_artifact_document(
+            resolve_artifact_path(tmp_path, restarted.run.steps[0].outputs_produced[0].path)
+        )
+        assert isinstance(persisted_restarted, workflow_runner_module.SlurmJobArtifact)
+        assert persisted_restarted.job_id == "67890"
+
+    def test_runner_blocks_when_resumed_slurm_job_finishes_in_failed_state(self, tmp_path, monkeypatch):
+        from tools.slurm_tool import SlurmJobOperationResult
+
+        script_path = tmp_path / "scripts" / "launch.sh"
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text("#!/bin/bash\necho run\n", encoding="utf-8")
+
+        template = load_artifact_document(REPO_ROOT / "backend" / "artifacts" / "examples" / "slurm_job.json")
+        assert isinstance(template, workflow_runner_module.SlurmJobArtifact)
+
+        submit_calls = 0
+        refresh_calls = 0
+
+        def _submitted_artifact(run_id: str):
+            initial_status = template.status_history[0]
+            return workflow_runner_module.SlurmJobArtifact.model_validate(
+                template.model_copy(
+                    update={
+                        "id": f"slurm-job-12345-{run_id.lower()}",
+                        "run_id": run_id,
+                        "source_workflow": "slurm-external-failure-demo",
+                        "source_tool": "slurm_tool",
+                        "related_artifacts": [],
+                        "script_path": "scripts/launch.sh",
+                        "status": "pending",
+                        "completed_at": None,
+                        "latest_status": initial_status,
+                        "status_history": [initial_status],
+                    }
+                ).model_dump(mode="json")
+            )
+
+        def _failed_artifact(run_id: str):
+            failed_status = template.status_history[-1].model_copy(
+                update={
+                    "normalized_status": "failed",
+                    "raw_state": "FAILED",
+                    "exit_code": "1:0",
+                }
+            )
+            return workflow_runner_module.SlurmJobArtifact.model_validate(
+                template.model_copy(
+                    update={
+                        "id": f"slurm-job-12345-{run_id.lower()}",
+                        "run_id": run_id,
+                        "source_workflow": "slurm-external-failure-demo",
+                        "source_tool": "slurm_tool",
+                        "related_artifacts": [],
+                        "script_path": "scripts/launch.sh",
+                        "status": "failed",
+                        "completed_at": failed_status.observed_at,
+                        "latest_status": failed_status,
+                        "status_history": [template.status_history[0], failed_status],
+                    }
+                ).model_dump(mode="json")
+            )
+
+        def _fake_submit(**kwargs):
+            nonlocal submit_calls
+            submit_calls += 1
+            artifact = _submitted_artifact(kwargs["run_id"])
+            return SlurmJobOperationResult(
+                artifact=artifact,
+                summary="Submitted Slurm job 12345 for scripts/launch.sh.",
+                raw_stdout="Submitted batch job 12345\n",
+                raw_stderr="",
+                commands=[["sbatch", "scripts/launch.sh"]],
+            )
+
+        def _fake_refresh(*, artifact, **_kwargs):
+            nonlocal refresh_calls
+            refresh_calls += 1
+            failed = _failed_artifact(artifact.run_id)
+            return SlurmJobOperationResult(
+                artifact=failed,
+                summary="Job 12345 status: failed.",
+                raw_stdout="12345|FAILED|1:0\n",
+                raw_stderr="",
+                commands=[["sacct", "-j", "12345"]],
+            )
+
+        monkeypatch.setattr(workflow_runner_module, "submit_slurm_job", _fake_submit)
+        monkeypatch.setattr(workflow_runner_module, "refresh_slurm_job_artifact", _fake_refresh)
+
+        spec = validate_workflow_spec_payload(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "slurm-external-failure-demo",
+                "version": "1.0.0",
+                "name": "Slurm External Failure Demo",
+                "purpose": "Verify failed Slurm jobs block the workflow on resume.",
+                "engine": "external_workflow_adapter_v1",
+                "required_inputs": [
+                    {
+                        "name": "sample_id",
+                        "kind": "metadata",
+                        "data_type": "string",
+                        "description": "Sample identifier carried through the workflow contract.",
+                    }
+                ],
+                "optional_inputs": [],
+                "runtime": _runtime_contract(["sample_id"]),
+                "outputs": [
+                    {
+                        "name": "slurm_job",
+                        "kind": "artifact",
+                        "artifact_type": "slurm_job",
+                        "schema_ref": "artifact_schema:slurm_job@1.0.0",
+                        "description": "Durable Slurm job record.",
+                        "source": {
+                            "step_id": "launch_slurm",
+                            "output_name": "slurm_job",
+                        },
+                    }
+                ],
+                "qc_gates": [],
+                "compliance_hooks": [],
+                "steps": [
+                    {
+                        "id": "launch_slurm",
+                        "label": "Launch Slurm Job",
+                        "executor": {
+                            "executor_type": "external_engine",
+                            "engine_name": "slurm",
+                            "entrypoint": "scripts/launch.sh",
+                            "resource_request": {
+                                "cpus": 8,
+                                "memory": "64G",
+                                "wall_time": "04:00:00",
+                            },
+                        },
+                        "inputs": [],
+                        "outputs": [
+                            {
+                                "name": "slurm_job",
+                                "kind": "artifact",
+                                "artifact_type": "slurm_job",
+                                "schema_ref": "artifact_schema:slurm_job@1.0.0",
+                                "description": "Durable Slurm job record.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "block_workflow",
+                    }
+                ],
+            }
+        )
+
+        runner = InternalDAGRunner(tmp_path)
+        paused = runner.run(spec, {"sample_id": "sample-001"})
+        resumed = runner.run(spec, run_dir=paused.run_dir)
+
+        assert paused.run.lifecycle_status == "waiting"
+        assert resumed.run.lifecycle_status == "blocked"
+        assert resumed.run.steps[0].status == "blocked"
+        assert submit_calls == 1
+        assert refresh_calls == 1
+        assert "status failed" in resumed.run.steps[0].errors[0]
+
+        persisted_failed = load_artifact_document(
+            resolve_artifact_path(tmp_path, resumed.run.steps[0].outputs_produced[0].path)
+        )
+        assert isinstance(persisted_failed, workflow_runner_module.SlurmJobArtifact)
+        assert persisted_failed.status == "failed"
+
     def test_runner_blocks_before_execution_when_qc_gate_fails(self, tmp_path):
         module_name = _write_runner_module(
             tmp_path,
