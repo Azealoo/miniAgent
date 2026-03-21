@@ -146,6 +146,22 @@ class TestCompliancePreflight:
         assert result.response_text is not None
         assert "Internal preflight error: boom" in result.response_text
 
+    def test_fallback_survives_unified_audit_write_failure(self, tmp_path):
+        with patch("compliance.preflight._load_ruleset", side_effect=RuntimeError("boom")), patch(
+            "audit.store.audit_log_path",
+            side_effect=OSError("disk full"),
+        ):
+            result = run_compliance_preflight(
+                tmp_path,
+                CompliancePreflightInput(user_message="Summarize this public scRNA-seq paper."),
+            )
+
+        assert result.report.final_disposition == "require_approval"
+        assert result.report.runtime_state == "approval_required"
+        assert result.report.decision_source == "safe_fallback"
+        audit_entries = _compliance_audit_entries(tmp_path)
+        assert audit_entries[-1]["final_disposition"] == "require_approval"
+
 
 @pytest.fixture
 def isolated_chat_state(tmp_path):

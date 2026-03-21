@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Mapping, Type
 
+from audit.store import append_job_submitted_event
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field, model_validator
 
@@ -453,6 +454,7 @@ def _parse_submission_job_id(stdout_text: str) -> str:
 def submit_slurm_job(
     *,
     base_dir: Path | str,
+    session_id: str | None = None,
     run_id: str,
     run_relative_dir: PurePosixPath,
     script_path: str,
@@ -465,6 +467,7 @@ def submit_slurm_job(
     extra_related_refs: list[ArtifactReference] | None = None,
     source_workflow: str | None = None,
     source_tool: str | None = "slurm_tool",
+    step_id: str | None = None,
     export_environment: Mapping[str, str] | None = None,
 ) -> SlurmJobOperationResult:
     base_path = Path(base_dir).resolve()
@@ -578,6 +581,20 @@ def submit_slurm_job(
             submission_stdout=_truncate_for_storage(completed.stdout),
             submission_stderr=_truncate_for_storage(completed.stderr),
         ),
+    )
+    append_job_submitted_event(
+        base_path,
+        session_id=session_id,
+        run_id=run_id,
+        job_id=job_id,
+        script_path=script_relpath,
+        working_directory=working_directory_relpath,
+        resource_request=resource_model.model_dump(mode="json"),
+        stdout_path=actual_stdout_path,
+        stderr_path=actual_stderr_path,
+        workflow_id=source_workflow,
+        step_id=step_id,
+        tool_name=source_tool,
     )
     return SlurmJobOperationResult(
         artifact=artifact,

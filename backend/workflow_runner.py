@@ -20,6 +20,7 @@ from typing import Any, Callable, Mapping
 
 import yaml
 
+from audit.store import append_workflow_finished_event, append_workflow_started_event
 from artifacts import (
     ArtifactReference,
     ComplianceReport,
@@ -259,6 +260,7 @@ class StepExecutionContext:
     created_at: datetime
     workflow_id: str
     step_id: str
+    session_id: str | None = None
 
     def resolve_path(self, value: str | Path) -> Path:
         raw_path = Path(str(value))
@@ -442,6 +444,7 @@ class InternalDAGRunner:
         step_limit: int | None = None,
         created_at: datetime | None = None,
         event_callback: WorkflowEventCallback | None = None,
+        session_id: str | None = None,
     ) -> WorkflowRunResult:
         if step_limit is not None and step_limit < 1:
             raise ValueError("step_limit must be at least 1 when provided.")
@@ -489,6 +492,13 @@ class InternalDAGRunner:
 
         emitter = _WorkflowRunStreamEmitter(spec=spec, layout=layout, callback=event_callback)
         emitter.start(resumed=resumed, lifecycle_status=run_document.lifecycle_status)
+        self._record_workflow_started_event(
+            spec=spec,
+            layout=layout,
+            run_document=run_document,
+            resumed=resumed,
+            session_id=session_id,
+        )
         emitter.artifact(self._run_record_ref(layout), scope="run_record")
 
         if run_document.lifecycle_status in _RUN_FINAL_STATUSES:
@@ -502,8 +512,15 @@ class InternalDAGRunner:
                 step_output_refs=step_output_refs,
                 workflow_inputs_ref=workflow_inputs_ref,
                 force_provenance_materialization=False,
+                session_id=session_id,
             )
             emitter.done(run_document)
+            self._record_workflow_finished_event(
+                spec=spec,
+                layout=layout,
+                run_document=run_document,
+                session_id=session_id,
+            )
             return self._build_result(layout, run_document, resumed=resumed)
 
         step_output_values, step_output_refs = self._load_completed_step_outputs(layout, spec, run_document)
@@ -540,8 +557,15 @@ class InternalDAGRunner:
                 step_output_refs=step_output_refs,
                 workflow_inputs_ref=workflow_inputs_ref,
                 force_provenance_materialization=True,
+                session_id=session_id,
             )
             emitter.done(run_document)
+            self._record_workflow_finished_event(
+                spec=spec,
+                layout=layout,
+                run_document=run_document,
+                session_id=session_id,
+            )
             return self._build_result(layout, run_document, resumed=resumed)
 
         run_document.lifecycle_status = "preflight_checked"
@@ -581,6 +605,7 @@ class InternalDAGRunner:
                 step_output_values=step_output_values,
                 step_output_refs=step_output_refs,
                 emitter=emitter,
+                session_id=session_id,
             )
             run_document = self._sync_workflow_outputs(
                 layout,
@@ -648,9 +673,16 @@ class InternalDAGRunner:
                 step_output_refs=step_output_refs,
                 workflow_inputs_ref=workflow_inputs_ref,
                 force_provenance_materialization=True,
+                session_id=session_id,
             )
 
         emitter.done(run_document)
+        self._record_workflow_finished_event(
+            spec=spec,
+            layout=layout,
+            run_document=run_document,
+            session_id=session_id,
+        )
         return self._build_result(layout, run_document, resumed=resumed)
 
     def _load_workflow_spec(self, workflow: WorkflowSpec | Path | str) -> WorkflowSpec:
@@ -806,6 +838,52 @@ class InternalDAGRunner:
             biocompute_exports=[],
             summary_metrics=[],
             warnings=[],
+        )
+
+    def _record_workflow_started_event(
+        self,
+        *,
+        spec: WorkflowSpec,
+        layout: RunLayout,
+        run_document: WorkflowRun,
+        resumed: bool,
+        session_id: str | None,
+    ) -> None:
+        append_workflow_started_event(
+            self.base_dir,
+            run_id=layout.run_id,
+            workflow_id=spec.workflow_id,
+            workflow_name=spec.name,
+            run_record_path=layout.run_record_relpath.as_posix(),
+            lifecycle_status=run_document.lifecycle_status,
+            resumed=resumed,
+            session_id=session_id,
+        )
+
+    def _record_workflow_finished_event(
+        self,
+        *,
+        spec: WorkflowSpec,
+        layout: RunLayout,
+        run_document: WorkflowRun,
+        session_id: str | None,
+    ) -> None:
+        completed_steps = sum(1 for record in run_document.steps if record.status == "completed")
+        warning_count = len(run_document.warnings) + sum(len(record.warnings) for record in run_document.steps)
+        append_workflow_finished_event(
+            self.base_dir,
+            run_id=layout.run_id,
+            workflow_id=spec.workflow_id,
+            workflow_name=spec.name,
+            run_record_path=layout.run_record_relpath.as_posix(),
+            lifecycle_status=run_document.lifecycle_status,
+            completed_steps=completed_steps,
+            total_steps=len(run_document.steps),
+            warning_count=warning_count,
+            output_artifact_paths=[ref.path for ref in run_document.outputs],
+            provenance_exports=list(run_document.provenance_exports),
+            biocompute_exports=list(run_document.biocompute_exports),
+            session_id=session_id,
         )
 
     def _workflow_environment(self) -> WorkflowEnvironment:
@@ -1185,6 +1263,7 @@ class InternalDAGRunner:
         step_output_values: dict[tuple[str, str], Any],
         step_output_refs: dict[tuple[str, str], ArtifactReference],
         emitter: _WorkflowRunStreamEmitter | None,
+        session_id: str | None,
     ) -> WorkflowRun:
         record = self._step_record(run_document, step.id)
         record.status = "running"
@@ -1202,6 +1281,7 @@ class InternalDAGRunner:
             created_at=layout.created_at,
             workflow_id=spec.workflow_id,
             step_id=step.id,
+            session_id=session_id,
         )
 
         try:
@@ -1734,6 +1814,7 @@ class InternalDAGRunner:
         export_environment = self._external_executor_environment(step_inputs, context)
         submitted = submit_slurm_job(
             base_dir=self.base_dir,
+            session_id=context.session_id,
             run_id=context.run_id,
             run_relative_dir=context.relative_run_dir,
             script_path=rendered_entrypoint,
@@ -1742,6 +1823,7 @@ class InternalDAGRunner:
             job_name=_slugify_label(step.label),
             run_record_ref=self._run_record_ref(layout),
             source_workflow=spec.workflow_id,
+            step_id=step.id,
             export_environment=export_environment,
         )
         record.external_execution = self._build_external_execution_record(
@@ -1895,6 +1977,7 @@ class InternalDAGRunner:
         )
         submitted = submit_slurm_job(
             base_dir=self.base_dir,
+            session_id=context.session_id,
             run_id=context.run_id,
             run_relative_dir=context.relative_run_dir,
             script_path=script_path,
@@ -1903,6 +1986,7 @@ class InternalDAGRunner:
             job_name=_slugify_label(step.label),
             run_record_ref=self._run_record_ref(layout),
             source_workflow=spec.workflow_id,
+            step_id=step.id,
             export_environment=env,
         )
         persisted_ref = self._persist_external_job_artifact(
@@ -2387,6 +2471,7 @@ class InternalDAGRunner:
         step_output_refs: dict[tuple[str, str], ArtifactReference],
         workflow_inputs_ref: ArtifactReference,
         force_provenance_materialization: bool,
+        session_id: str | None,
     ) -> WorkflowRun:
         run_document, provenance_exports_changed = self._ensure_terminal_provenance_exports(layout, run_document)
         run_document = self._finalize_terminal_report_bundle_if_needed(
@@ -2404,6 +2489,7 @@ class InternalDAGRunner:
             spec=spec,
             run_document=run_document,
             force=force_provenance_materialization,
+            session_id=session_id,
         )
         run_document = self._record_terminal_output_deviations(
             layout=layout,
@@ -2434,6 +2520,7 @@ class InternalDAGRunner:
         spec: WorkflowSpec,
         run_document: WorkflowRun,
         force: bool,
+        session_id: str | None,
     ) -> WorkflowRun:
         if run_document.lifecycle_status not in _RUN_FINAL_STATUSES:
             return run_document
@@ -2444,18 +2531,21 @@ class InternalDAGRunner:
                 layout=layout,
                 spec=spec,
                 run_document=run_document,
+                session_id=session_id,
             )
         run_document.provenance_exports = materialize_provenance_bundle(
             base_dir=self.base_dir,
             layout=layout,
             run_document=run_document,
             workflow_version=spec.version,
+            session_id=session_id,
         )
         run_document = self._persist_run_document(layout, run_document)
         return self._materialize_terminal_biocompute_if_needed(
             layout=layout,
             spec=spec,
             run_document=run_document,
+            session_id=session_id,
         )
 
     def _materialize_terminal_biocompute_if_needed(
@@ -2464,6 +2554,7 @@ class InternalDAGRunner:
         layout: RunLayout,
         spec: WorkflowSpec,
         run_document: WorkflowRun,
+        session_id: str | None,
     ) -> WorkflowRun:
         if run_document.lifecycle_status not in _RUN_FINAL_STATUSES:
             return run_document
@@ -2485,6 +2576,7 @@ class InternalDAGRunner:
                 layout=layout,
                 run_document=run_document,
                 spec=spec,
+                session_id=session_id,
             )
         except Exception as exc:
             warning = f"{_BIOCOMPUTE_MATERIALIZATION_WARNING_PREFIX} {exc}"

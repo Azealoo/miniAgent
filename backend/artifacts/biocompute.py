@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 from uuid import NAMESPACE_URL, uuid5
 
+from audit.store import append_export_generated_event
 from workflow_specs import ExternalEngineExecutor, PythonExecutor, ToolExecutor, WorkflowSpec
 
 from .naming import (
@@ -88,6 +89,7 @@ def materialize_biocompute_bundle(
     layout: RunLayout,
     run_document: WorkflowRun,
     spec: WorkflowSpec,
+    session_id: str | None = None,
 ) -> list[str]:
     workflow_id = run_document.source_workflow or layout.workflow
     config = _SUPPORTED_BIOCOMPUTE_WORKFLOWS.get(workflow_id)
@@ -203,6 +205,15 @@ def materialize_biocompute_bundle(
     target.write_text(
         json.dumps(serialized, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
+    )
+    append_export_generated_event(
+        base_dir,
+        export_type="biocompute_bundle",
+        session_id=session_id,
+        run_id=run_document.run_id,
+        workflow_id=run_document.source_workflow or spec.workflow_id,
+        artifact_paths=export_paths,
+        lifecycle_status=run_document.lifecycle_status,
     )
     return export_paths
 

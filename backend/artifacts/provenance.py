@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from audit.store import append_export_generated_event
+
 from .naming import (
     RunLayout,
     build_artifact_header,
@@ -44,6 +46,7 @@ def materialize_provenance_bundle(
     layout: RunLayout,
     run_document: WorkflowRun,
     workflow_version: str | None = None,
+    session_id: str | None = None,
 ) -> list[str]:
     exported_at = _utcnow()
     export_paths = expected_provenance_export_paths(layout)
@@ -256,6 +259,15 @@ def materialize_provenance_bundle(
         activities=activities,
     )
     ro_crate_target.write_text(json.dumps(ro_crate_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    append_export_generated_event(
+        base_dir,
+        export_type="provenance_bundle",
+        session_id=session_id,
+        run_id=run_document.run_id,
+        workflow_id=run_document.source_workflow or layout.workflow,
+        artifact_paths=export_paths,
+        lifecycle_status=run_document.lifecycle_status,
+    )
     return export_paths
 
 

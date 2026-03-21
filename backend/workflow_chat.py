@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from audit.store import append_workflow_finished_event, append_workflow_started_event
 from artifacts import SCHEMA_PACK_VERSION, WorkflowRun, normalize_identifier, prepare_run_directory
 from artifacts.naming import build_run_directory, generate_run_id
 from artifacts.schemas import WorkflowStepRecord
@@ -111,6 +112,7 @@ def materialize_blocked_workflow_run(
     *,
     reason: str,
     now: datetime | None = None,
+    session_id: str | None = None,
 ) -> MaterializedBlockedWorkflowChatRun:
     base_path = Path(base_dir).resolve()
     runner = InternalDAGRunner(base_path)
@@ -167,6 +169,31 @@ def materialize_blocked_workflow_run(
         warnings=[reason],
     )
     persisted_run = runner._persist_run_document(layout, run_document)
+    append_workflow_started_event(
+        base_path,
+        run_id=layout.run_id,
+        workflow_id=prepared.spec.workflow_id,
+        workflow_name=prepared.spec.name,
+        run_record_path=layout.run_record_relpath.as_posix(),
+        lifecycle_status="created",
+        resumed=False,
+        session_id=session_id,
+    )
+    append_workflow_finished_event(
+        base_path,
+        run_id=layout.run_id,
+        workflow_id=prepared.spec.workflow_id,
+        workflow_name=prepared.spec.name,
+        run_record_path=layout.run_record_relpath.as_posix(),
+        lifecycle_status="blocked",
+        completed_steps=0,
+        total_steps=len(persisted_run.steps),
+        warning_count=len(persisted_run.warnings),
+        output_artifact_paths=[ref.path for ref in persisted_run.outputs],
+        provenance_exports=list(persisted_run.provenance_exports),
+        biocompute_exports=list(persisted_run.biocompute_exports),
+        session_id=session_id,
+    )
     workflow_events = _build_blocked_workflow_events_for_run(
         prepared,
         reason=reason,

@@ -10,6 +10,7 @@ import json
 import mimetypes
 from pathlib import Path
 
+from audit.store import append_file_written_event
 from artifacts.public_urls import public_raw_file_url
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
@@ -140,14 +141,47 @@ class SaveRequest(BaseModel):
 
 @router.post("/files")
 def save_file(body: SaveRequest):
-    if len(body.content.encode("utf-8")) > _MAX_SAVE_BYTES:
+    base_dir = _base_dir()
+    byte_count = len(body.content.encode("utf-8"))
+    if byte_count > _MAX_SAVE_BYTES:
+        append_file_written_event(
+            base_dir,
+            path=body.path,
+            source="api.files",
+            outcome="invalid_input",
+            byte_count=byte_count,
+            reason=f"Content too large: max {_MAX_SAVE_BYTES // 1000} KB.",
+        )
         raise HTTPException(
             400, f"Content too large: max {_MAX_SAVE_BYTES // 1000} KB."
         )
 
-    target, clean = _check_path(body.path, write=True)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(body.content, encoding="utf-8")
+    try:
+        target, clean = _check_path(body.path, write=True)
+    except HTTPException as exc:
+        append_file_written_event(
+            base_dir,
+            path=body.path,
+            source="api.files",
+            outcome="blocked" if exc.status_code == 403 else "invalid_input",
+            byte_count=byte_count,
+            reason=str(exc.detail),
+        )
+        raise
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body.content, encoding="utf-8")
+    except Exception as exc:
+        append_file_written_event(
+            base_dir,
+            path=clean,
+            source="api.files",
+            outcome="execution_failure",
+            byte_count=byte_count,
+            reason=str(exc),
+        )
+        raise
 
     # Rebuild memory index if MEMORY.md was updated.
     # Compare against the *normalized* path to handle ./memory/MEMORY.md, etc.
@@ -160,6 +194,13 @@ def save_file(body: SaveRequest):
         except Exception:
             pass
 
+    append_file_written_event(
+        base_dir,
+        path=clean,
+        source="api.files",
+        outcome="written",
+        byte_count=byte_count,
+    )
     return {"path": body.path, "saved": True}
 
 

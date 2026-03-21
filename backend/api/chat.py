@@ -16,6 +16,7 @@ import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 
+from audit.store import append_chat_request_event, append_tool_invocation_event
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
@@ -113,6 +114,14 @@ async def chat(request: ChatRequest):
             ProtocolExecutorInput,
             classify_protocol_execution_request,
             run_protocol_executor,
+        )
+
+        append_chat_request_event(
+            agent_manager.base_dir,
+            session_id=request.session_id,
+            message=request.message,
+            attached_identifiers=request.attached_identifiers,
+            selected_workflow=request.selected_workflow,
         )
 
         # Per-request accumulators
@@ -253,6 +262,15 @@ async def chat(request: ChatRequest):
                 "result": preflight.tool_result,
             }
             current_tool_calls.append(preflight_call)
+            append_tool_invocation_event(
+                agent_manager.base_dir,
+                session_id=request.session_id,
+                workflow_id=request.selected_workflow,
+                tool_name=started["tool"],
+                tool_run_id=preflight_run_id,
+                tool_input=started["input"],
+                result=preflight.tool_result,
+            )
             yield _sse(
                 {
                     "type": "tool_end",
@@ -323,6 +341,15 @@ async def chat(request: ChatRequest):
                     "result": protocol_result.tool_result,
                 }
                 current_tool_calls.append(protocol_call)
+                append_tool_invocation_event(
+                    agent_manager.base_dir,
+                    session_id=request.session_id,
+                    workflow_id=request.selected_workflow,
+                    tool_name=started["tool"],
+                    tool_run_id=protocol_run_id,
+                    tool_input=started["input"],
+                    result=protocol_result.tool_result,
+                )
                 yield _sse(
                     {
                         "type": "tool_end",
@@ -370,6 +397,15 @@ async def chat(request: ChatRequest):
                 "result": gate.tool_result,
             }
             current_tool_calls.append(gate_call)
+            append_tool_invocation_event(
+                agent_manager.base_dir,
+                session_id=request.session_id,
+                workflow_id=request.selected_workflow,
+                tool_name=started["tool"],
+                tool_run_id=gate_run_id,
+                tool_input=started["input"],
+                result=gate.tool_result,
+            )
             yield _sse(
                 {
                     "type": "tool_end",
@@ -396,6 +432,7 @@ async def chat(request: ChatRequest):
                         agent_manager.base_dir,
                         prepared_workflow,
                         reason=prepared_workflow.blocking_reason,
+                        session_id=request.session_id,
                     )
                     for workflow_event in blocked_run.workflow_events:
                         current_workflow_events.append(workflow_event)
@@ -424,6 +461,7 @@ async def chat(request: ChatRequest):
                         prepared_workflow.spec_path,
                         prepared_workflow.inputs,
                         event_callback=_on_workflow_event,
+                        session_id=request.session_id,
                     )
 
                     while True:
@@ -490,6 +528,15 @@ async def chat(request: ChatRequest):
                     if ev.get("result") is not None:
                         call["result"] = ev["result"]
                     current_tool_calls.append(call)
+                    append_tool_invocation_event(
+                        agent_manager.base_dir,
+                        session_id=request.session_id,
+                        workflow_id=request.selected_workflow,
+                        tool_name=ev["tool"],
+                        tool_run_id=run_id,
+                        tool_input=started["input"],
+                        result=ev.get("result"),
+                    )
                     payload = {
                         "type": "tool_end",
                         "tool": ev["tool"],

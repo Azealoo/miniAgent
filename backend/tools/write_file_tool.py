@@ -5,6 +5,7 @@ Path traversal is blocked. Used to update MEMORY.md, create/edit skills, or cach
 from pathlib import Path
 from typing import Type
 
+from audit.store import append_file_written_event
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
@@ -45,8 +46,21 @@ class WriteFileTool(BaseTool):
         try:
             root = Path(self.root_dir).resolve()
             path_clean = path.strip().lstrip("/").removeprefix("./")
+            byte_count = len(content.encode("utf-8"))
+
+            def _audit(outcome: str, *, reason: str | None = None, path_value: str | None = None) -> None:
+                append_file_written_event(
+                    root,
+                    path=path_value or path_clean or path,
+                    source="write_file_tool",
+                    outcome=outcome,
+                    byte_count=byte_count,
+                    tool_name=self.name,
+                    reason=reason,
+                )
 
             if ".." in path_clean.split("/"):
+                _audit("blocked", reason="Path traversal (..) is not allowed.")
                 return blocked_result(
                     self.name,
                     "Path traversal (..) is not allowed.",
@@ -54,6 +68,13 @@ class WriteFileTool(BaseTool):
                 )
 
             if not any(path_clean.startswith(p) for p in _ALLOWED_PREFIXES):
+                _audit(
+                    "blocked",
+                    reason=(
+                        f"Path must be under one of: {list(_ALLOWED_PREFIXES)}. "
+                        f"Got: {path_clean!r}"
+                    ),
+                )
                 return blocked_result(
                     self.name,
                     (
@@ -69,6 +90,11 @@ class WriteFileTool(BaseTool):
             try:
                 target.relative_to(root)
             except ValueError:
+                _audit(
+                    "blocked",
+                    reason="Resolved path is outside the project directory.",
+                    path_value=str(target),
+                )
                 return blocked_result(
                     self.name,
                     "Resolved path is outside the project directory.",
@@ -76,6 +102,10 @@ class WriteFileTool(BaseTool):
                 )
 
             if len(content) > _MAX_CONTENT:
+                _audit(
+                    "invalid_input",
+                    reason=f"Content exceeds maximum length ({_MAX_CONTENT} characters).",
+                )
                 return invalid_input_result(
                     self.name,
                     f"Content exceeds maximum length ({_MAX_CONTENT} characters).",
@@ -109,6 +139,7 @@ class WriteFileTool(BaseTool):
                 except Exception:
                     pass
 
+            _audit("written")
             return success_result(
                 self.name,
                 f"Wrote {path_clean} ({len(content)} characters).",
@@ -124,6 +155,15 @@ class WriteFileTool(BaseTool):
                 metadata={"requested_path": path},
             )
         except Exception as exc:
+            append_file_written_event(
+                Path(self.root_dir).resolve(),
+                path=path,
+                source="write_file_tool",
+                outcome="execution_failure",
+                byte_count=len(content.encode("utf-8")),
+                tool_name=self.name,
+                reason=str(exc),
+            )
             return execution_error_result(
                 self.name,
                 str(exc),
