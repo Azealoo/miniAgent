@@ -9,6 +9,7 @@ import React, {
   useState,
 } from "react";
 import * as api from "./api";
+import { getLatestSelectedWorkflow } from "./session-status";
 import { uid } from "./utils";
 import type {
   Message,
@@ -28,6 +29,7 @@ interface AppContextValue {
   messages: Message[];
   isStreaming: boolean;
   ragMode: boolean;
+  selectedWorkflow: string | null;
 
   // Actions
   refreshSessions: () => Promise<void>;
@@ -58,6 +60,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [ragMode, setRagModeState] = useState(false);
+  const [selectedWorkflow, setSelectedWorkflow] = useState<string | null>(null);
 
   // Ref to current streaming message ID (avoids stale closure issues)
   const streamingIdRef = useRef<string | null>(null);
@@ -74,7 +77,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setSessions(sessionList);
         setRagModeState(ragCfg.rag_mode);
         if (sessionList.length > 0) {
-          await _loadSession(sessionList[0].id, setMessages, setCurrentSessionId);
+          await _loadSession(
+            sessionList[0].id,
+            setMessages,
+            setCurrentSessionId,
+            setSelectedWorkflow
+          );
         }
       } catch {
         // Backend not ready yet — that's fine
@@ -94,11 +102,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setSessions((prev) => [session, ...prev]);
     setCurrentSessionId(session.id);
     setMessages([]);
+    setSelectedWorkflow(null);
   }, []);
 
   const selectSession = useCallback(async (id: string) => {
     if (id === currentSessionId) return;
-    await _loadSession(id, setMessages, setCurrentSessionId);
+    await _loadSession(id, setMessages, setCurrentSessionId, setSelectedWorkflow);
   }, [currentSessionId]);
 
   const deleteSession = useCallback(
@@ -108,6 +117,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (id === currentSessionId) {
         setCurrentSessionId(null);
         setMessages([]);
+        setSelectedWorkflow(null);
       }
     },
     [currentSessionId]
@@ -136,6 +146,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const history = await api.getHistory(currentSessionId);
     const msgs = _historyToMessages(history as RawMessage[]);
     setMessages(msgs);
+    setSelectedWorkflow(getLatestSelectedWorkflow(msgs));
     await refreshSessions();
   }, [currentSessionId, refreshSessions]);
 
@@ -168,6 +179,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
       setIsStreaming(true);
+      setSelectedWorkflow(context?.selectedWorkflow ?? null);
 
       await api.streamChat(content, sessionId, {
         onRetrieval: (query, results) => {
@@ -235,6 +247,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         onWorkflowEvent: (event) => {
           const id = streamingIdRef.current;
           if (!id) return;
+          if (
+            event.type === "workflow_start" ||
+            event.type === "workflow_blocked" ||
+            event.type === "workflow_done"
+          ) {
+            setSelectedWorkflow(event.workflow_id);
+          }
           setMessages((prev) =>
             prev.map((m) =>
               m.id === id
@@ -323,6 +342,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         messages,
         isStreaming,
         ragMode,
+        selectedWorkflow,
         refreshSessions,
         createSession,
         selectSession,
@@ -366,13 +386,17 @@ function _historyToMessages(raw: RawMessage[]): Message[] {
 async function _loadSession(
   id: string,
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
-  setCurrentSessionId: React.Dispatch<React.SetStateAction<string | null>>
+  setCurrentSessionId: React.Dispatch<React.SetStateAction<string | null>>,
+  setSelectedWorkflow: React.Dispatch<React.SetStateAction<string | null>>
 ) {
   setCurrentSessionId(id);
   try {
     const history = await api.getHistory(id);
-    setMessages(_historyToMessages(history as RawMessage[]));
+    const messages = _historyToMessages(history as RawMessage[]);
+    setMessages(messages);
+    setSelectedWorkflow(getLatestSelectedWorkflow(messages));
   } catch {
     setMessages([]);
+    setSelectedWorkflow(null);
   }
 }

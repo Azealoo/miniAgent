@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
 import { BookOpen, Brain, RefreshCw, Save } from "lucide-react";
 import { getSessionTokens, listSkills, readFile, saveFile } from "@/lib/api";
+import { getWorkflowSummary } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type { Message, Skill, TokenStats, WorkflowStreamEvent } from "@/lib/types";
@@ -19,77 +20,6 @@ const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
 
 type Tab = "files" | "sources" | "memory" | "skills" | "usage";
 const MEMORY_PATH = "memory/MEMORY.md";
-
-function getWorkflowSummary(messages: Message[]) {
-  const events = messages.flatMap((message) => message.workflow_events ?? []);
-  const latestRunId = events.at(-1)?.run_id ?? null;
-  const runEvents = latestRunId
-    ? events.filter((event) => event.run_id === latestRunId)
-    : [];
-  const startedSteps = new Map<string, string>();
-  const finishedSteps = new Map<string, { label: string; status: string }>();
-
-  let workflowName: string | null = null;
-  let status: "idle" | "running" | "blocked" | "completed" = "idle";
-  let currentStep: string | null = null;
-  let totalSteps: number | null = null;
-  let completedSteps = 0;
-
-  for (const event of runEvents) {
-    if (event.type === "workflow_start") {
-      workflowName = event.workflow_name;
-      status = event.lifecycle_status === "blocked" ? "blocked" : "running";
-    }
-
-    if (event.type === "workflow_step_start") {
-      startedSteps.set(event.step_id, event.step_label);
-      currentStep = event.step_label;
-      status = "running";
-    }
-
-    if (event.type === "workflow_step_end") {
-      finishedSteps.set(event.step_id, {
-        label: event.step_label,
-        status: event.status,
-      });
-
-      if (currentStep === event.step_label) {
-        currentStep = null;
-      }
-
-      if (event.status === "blocked") {
-        status = "blocked";
-      }
-    }
-
-    if (event.type === "workflow_blocked") {
-      status = "blocked";
-      currentStep = event.step_label ?? currentStep;
-    }
-
-    if (event.type === "workflow_done") {
-      status = event.lifecycle_status === "blocked" ? "blocked" : "completed";
-      totalSteps = event.total_steps;
-      completedSteps = event.completed_steps;
-      currentStep = null;
-    }
-  }
-
-  const observedSteps = Math.max(startedSteps.size, finishedSteps.size);
-  const observedCompletedSteps = Array.from(finishedSteps.values()).filter(
-    (step) => step.status === "completed"
-  ).length;
-
-  return {
-    workflowName,
-    status,
-    totalSteps,
-    completedSteps: totalSteps === null ? observedCompletedSteps : completedSteps,
-    observedSteps,
-    currentStep,
-    events: runEvents,
-  };
-}
 
 function collectArtifacts(events: WorkflowStreamEvent[]) {
   const items = new Map<
