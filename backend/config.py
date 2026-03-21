@@ -1,8 +1,10 @@
+import copy
 import json
 import os
 import tempfile
 import threading
 from pathlib import Path
+from typing import Any
 
 _CONFIG_FILE = Path(__file__).parent / "config.json"
 # Protects all read-modify-write operations so concurrent API calls can't
@@ -14,6 +16,9 @@ _DEFAULT: dict = {
         "extra_dirs": [],
         "entries": {},
     },
+    "connectors": {
+        "entries": {},
+    },
     "read_file_extra_roots": [],
 }
 
@@ -22,17 +27,33 @@ def _load() -> dict:
     if _CONFIG_FILE.exists():
         try:
             data = json.loads(_CONFIG_FILE.read_text())
+            if not isinstance(data, dict):
+                return copy.deepcopy(_DEFAULT)
             # Merge with defaults so new keys exist
-            merged = dict(_DEFAULT)
-            merged.update(data)
+            merged = copy.deepcopy(_DEFAULT)
+            for key, value in data.items():
+                if key in {"skills", "connectors"}:
+                    continue
+                merged[key] = value
             if "skills" in data and isinstance(data["skills"], dict):
                 merged.setdefault("skills", {}).setdefault("extra_dirs", [])
                 merged.setdefault("skills", {}).setdefault("entries", {})
-                merged["skills"].update(data["skills"])
+                skills_payload = dict(data["skills"])
+                if not isinstance(skills_payload.get("extra_dirs"), list):
+                    skills_payload.pop("extra_dirs", None)
+                if not isinstance(skills_payload.get("entries"), dict):
+                    skills_payload.pop("entries", None)
+                merged["skills"].update(skills_payload)
+            if "connectors" in data and isinstance(data["connectors"], dict):
+                merged.setdefault("connectors", {}).setdefault("entries", {})
+                connector_payload = dict(data["connectors"])
+                if not isinstance(connector_payload.get("entries"), dict):
+                    connector_payload.pop("entries", None)
+                merged["connectors"].update(connector_payload)
             return merged
         except Exception:
             pass
-    return dict(_DEFAULT)
+    return copy.deepcopy(_DEFAULT)
 
 
 def _save(cfg: dict) -> None:
@@ -108,3 +129,36 @@ def get_read_file_extra_roots(base_dir: Path) -> list[Path]:
     if agents_skills.exists() and repo_root not in result:
         result.append(repo_root)
     return result
+
+
+def get_connector_entry(connector_name: str) -> dict[str, Any]:
+    """Return connector config entry. Missing entries default to disabled."""
+    cfg = _load()
+    connectors = cfg.get("connectors", {})
+    if not isinstance(connectors, dict):
+        connectors = {}
+    entries = connectors.get("entries", {})
+    if not isinstance(entries, dict):
+        entries = {}
+    raw = entries.get(connector_name, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    config_payload = raw.get("config")
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "config": dict(config_payload) if isinstance(config_payload, dict) else {},
+    }
+
+
+def set_connector_entry(connector_name: str, *, enabled: bool, config: dict[str, Any]) -> None:
+    with _config_lock:
+        data = _load()
+        if "connectors" not in data or not isinstance(data["connectors"], dict):
+            data["connectors"] = {"entries": {}}
+        if "entries" not in data["connectors"] or not isinstance(data["connectors"]["entries"], dict):
+            data["connectors"]["entries"] = {}
+        data["connectors"]["entries"][connector_name] = {
+            "enabled": enabled,
+            "config": dict(config),
+        }
+        _save(data)

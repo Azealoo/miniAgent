@@ -30,6 +30,7 @@ AuditEventType = Literal[
     "workflow_started",
     "workflow_finished",
     "tool_invoked",
+    "connector_action",
     "file_written",
     "job_submitted",
     "export_generated",
@@ -51,6 +52,7 @@ class AuditEventRecord(BaseModel):
     job_id: str | None = None
     workflow_id: str | None = None
     tool_name: str | None = None
+    connector_name: str | None = None
     actor: str = "system"
     artifact_paths: list[str] = Field(default_factory=list)
     external_systems: list[str] = Field(default_factory=list)
@@ -109,6 +111,7 @@ def append_audit_event(
     job_id: str | None = None,
     workflow_id: str | None = None,
     tool_name: str | None = None,
+    connector_name: str | None = None,
     actor: str = "system",
     artifact_paths: list[str] | None = None,
     external_systems: list[str] | None = None,
@@ -129,6 +132,7 @@ def append_audit_event(
             job_id=_clean_optional_text(job_id),
             workflow_id=_clean_optional_text(workflow_id),
             tool_name=_clean_optional_text(tool_name),
+            connector_name=_clean_optional_text(connector_name),
             actor=_clean_optional_text(actor) or "system",
             artifact_paths=_normalize_path_list(base_path, artifact_paths or []),
             external_systems=_normalize_string_list(external_systems or []),
@@ -141,7 +145,7 @@ def append_audit_event(
     except Exception:
         logger.warning(
             "Non-fatal audit append failure for event_type=%s outcome=%s session_id=%s run_id=%s "
-            "step_id=%s job_id=%s workflow_id=%s tool_name=%s",
+            "step_id=%s job_id=%s workflow_id=%s tool_name=%s connector_name=%s",
             event_type,
             _clean_optional_text(outcome),
             _clean_optional_text(session_id),
@@ -150,6 +154,7 @@ def append_audit_event(
             _clean_optional_text(job_id),
             _clean_optional_text(workflow_id),
             _clean_optional_text(tool_name),
+            _clean_optional_text(connector_name),
             exc_info=True,
         )
         return None
@@ -183,6 +188,7 @@ def query_audit_events(
     job_id: str | None = None,
     workflow_id: str | None = None,
     tool_name: str | None = None,
+    connector_name: str | None = None,
     outcome: str | None = None,
     limit: int = 100,
 ) -> list[AuditEventRecord]:
@@ -202,6 +208,7 @@ def query_audit_events(
         "job_id": _clean_optional_text(job_id),
         "workflow_id": _clean_optional_text(workflow_id),
         "tool_name": _clean_optional_text(tool_name),
+        "connector_name": _clean_optional_text(connector_name),
         "outcome": _clean_optional_text(outcome),
     }
 
@@ -295,6 +302,49 @@ def append_tool_invocation_event(
             "artifact_count": len(artifact_paths),
             "metadata": normalized_metadata,
         },
+    )
+
+
+def append_connector_action_event(
+    base_dir: Path | str,
+    *,
+    connector_name: str,
+    action: str,
+    outcome: str,
+    status: str,
+    failure_mode: str | None,
+    session_id: str | None = None,
+    run_id: str | None = None,
+    workflow_id: str | None = None,
+    artifact_paths: list[str] | None = None,
+    external_systems: list[str] | None = None,
+    details: Mapping[str, Any] | None = None,
+) -> Path | None:
+    resolved_failure_mode = _clean_optional_text(failure_mode)
+    summary = (
+        f"Connector {connector_name} {action} completed successfully."
+        if outcome == "success"
+        else f"Connector {connector_name} {action} ended with outcome {outcome}."
+    )
+    merged_details = {
+        "action": _clean_optional_text(action),
+        "status": _clean_optional_text(status),
+        "failure_mode": resolved_failure_mode,
+    }
+    if details:
+        merged_details.update(details)
+    return append_audit_event(
+        base_dir,
+        event_type="connector_action",
+        summary=summary,
+        outcome=outcome,
+        session_id=session_id,
+        run_id=run_id,
+        workflow_id=workflow_id,
+        connector_name=connector_name,
+        artifact_paths=artifact_paths or [],
+        external_systems=external_systems or [],
+        details=merged_details,
     )
 
 
@@ -612,6 +662,7 @@ __all__ = [
     "AuditEventType",
     "append_audit_event",
     "append_chat_request_event",
+    "append_connector_action_event",
     "append_export_generated_event",
     "append_file_written_event",
     "append_job_submitted_event",

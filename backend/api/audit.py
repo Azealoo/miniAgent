@@ -30,6 +30,7 @@ def list_audit_events(
     job_id: str | None = Query(None),
     workflow_id: str | None = Query(None),
     tool_name: str | None = Query(None),
+    connector_name: str | None = Query(None),
     outcome: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
 ):
@@ -43,6 +44,7 @@ def list_audit_events(
         job_id=_query_default_to_none(job_id),
         workflow_id=_query_default_to_none(workflow_id),
         tool_name=_query_default_to_none(tool_name),
+        connector_name=_query_default_to_none(connector_name),
         outcome=_query_default_to_none(outcome),
         limit=resolved_limit,
     )

@@ -456,7 +456,10 @@ def summarize(inputs, _context):
 
     started = next(event for event in workflow_events if event.event_type == "workflow_started")
     finished = next(event for event in workflow_events if event.event_type == "workflow_finished")
-    export_event = next(event for event in workflow_events if event.event_type == "export_generated")
+    export_events = [event for event in workflow_events if event.event_type == "export_generated"]
+    provenance_event = next(
+        event for event in export_events if event.details.get("export_type") == "provenance_bundle"
+    )
 
     assert result.run.lifecycle_status == "completed"
     assert started.session_id == "session-workflow-1"
@@ -464,6 +467,5 @@ def summarize(inputs, _context):
     assert finished.session_id == "session-workflow-1"
     assert finished.outcome == "completed"
     assert finished.artifact_paths[0].endswith("/run.json")
-    assert export_event.session_id == "session-workflow-1"
-    assert export_event.details["export_type"] == "provenance_bundle"
-    assert any(path.endswith("/prov.json") for path in export_event.artifact_paths)
+    assert provenance_event.session_id == "session-workflow-1"
+    assert any(path.endswith("/prov.json") for path in provenance_event.artifact_paths)
