@@ -43,19 +43,42 @@ class MemoryIndexer:
         Fast path: if the persisted index exists and its stored MD5 matches the current
         file, load from disk (no re-embedding). Slow path: parse, embed, persist.
         """
-        from llama_index.core import (
-            Document,
-            StorageContext,
-            VectorStoreIndex,
-            load_index_from_storage,
-        )
-        from llama_index.core.node_parser import SentenceSplitter
-
         current_md5 = self._file_md5()
         md5_file = self._storage_path / "md5.txt"
 
+        if not self.memory_path.exists():
+            self._index = None
+            self._nodes = []
+            self._last_md5 = current_md5  # empty/missing file is a valid "built" state
+            return
+
+        content = self.memory_path.read_text(encoding="utf-8").strip()
+        if not content:
+            self._index = None
+            self._nodes = []
+            self._last_md5 = current_md5  # empty file is also valid
+            return
+
+        # Record the observed file hash before optional indexing work so callers
+        # do not repeatedly retrigger rebuild attempts when LlamaIndex or the
+        # embedding backend is unavailable.
+        self._index = None
+        self._nodes = []
+        self._last_md5 = current_md5
+
+        try:
+            from llama_index.core import (
+                Document,
+                StorageContext,
+                VectorStoreIndex,
+                load_index_from_storage,
+            )
+            from llama_index.core.node_parser import SentenceSplitter
+        except Exception:
+            return
+
         # ── Fast path: load persisted index if file hasn't changed ────────
-        if self._storage_path.exists() and md5_file.exists() and current_md5:
+        if self._storage_path.exists() and md5_file.exists():
             if md5_file.read_text(encoding="utf-8").strip() == current_md5:
                 try:
                     storage_context = StorageContext.from_defaults(
@@ -63,27 +86,9 @@ class MemoryIndexer:
                     )
                     self._index = load_index_from_storage(storage_context)
                     self._nodes = list(self._index.docstore.docs.values())
-                    self._last_md5 = current_md5
                     return
                 except Exception:
                     pass  # Fall through to full rebuild
-
-        # ── Slow path: rebuild from file ───────────────────────────────────
-        # Reset state but do NOT set _last_md5 yet — we only update it after a
-        # successful build so that a failed embedding call (e.g. API error) causes
-        # a fresh retry on the next retrieve() call rather than silently leaving
-        # the index broken forever.
-        self._index = None
-        self._nodes = []
-
-        if not self.memory_path.exists():
-            self._last_md5 = current_md5  # empty/missing file is a valid "built" state
-            return
-
-        content = self.memory_path.read_text(encoding="utf-8").strip()
-        if not content:
-            self._last_md5 = current_md5  # empty file is also valid
-            return
 
         doc = Document(text=content, metadata={"source": "MEMORY.md"})
         splitter = SentenceSplitter(chunk_size=256, chunk_overlap=32)
@@ -95,10 +100,6 @@ class MemoryIndexer:
             self._index = VectorStoreIndex(self._nodes, storage_context=storage_context)
             self._index.storage_context.persist(persist_dir=str(self._storage_path))
             md5_file.write_text(current_md5, encoding="utf-8")
-
-        # Only record the MD5 after a successful build so failed embedding calls
-        # trigger a retry on the next access.
-        self._last_md5 = current_md5
 
     def retrieve(self, query: str, top_k: int = 3) -> list[dict]:
         """
