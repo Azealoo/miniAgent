@@ -51,6 +51,7 @@ _SCHEMA_ARTIFACT_TYPES = {
     "protocol_run",
     "qa_report",
     "checklist_results",
+    "reproducibility_drill_report",
 }
 _STRUCTURED_ROOT_ARTIFACT_TYPES = {"content_hash_manifest", "workflow_plan", "provenance"}
 _ROOT_STABLE_FILENAMES_TO_TYPES: dict[str, str] = {
@@ -159,6 +160,13 @@ def _infer_artifact_type(
 
     if artifact_relative_path.parts[:2] == USER_INPUTS_DIR.parts:
         return "user_input"
+
+    if (
+        artifact_relative_path.parts[:3] == (*GENERATED_OUTPUTS_DIR.parts, "reproducibility-drills")
+        and not is_dir
+        and artifact_relative_path.suffix.lower() == ".json"
+    ):
+        return "reproducibility_drill_report"
 
     if artifact_relative_path.parts[:2] == GENERATED_OUTPUTS_DIR.parts:
         if is_dir:

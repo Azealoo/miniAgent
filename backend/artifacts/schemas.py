@@ -41,6 +41,7 @@ ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
     "protocol_run": "yaml",
     "qa_report": "json",
     "checklist_results": "json",
+    "reproducibility_drill_report": "json",
 }
 
 _NORMALIZED_IDENTIFIER_RE = re.compile(r"^[a-z0-9]+(?:[._:-][a-z0-9]+)*$")
@@ -98,6 +99,10 @@ QACheckSeverity = Literal["warning", "error", "critical"]
 ChecklistItemSeverity = Literal["required", "best_practice"]
 ChecklistItemStatus = Literal["pass", "fail", "not_applicable"]
 ChecklistOverallStatus = Literal["passed", "warning", "blocked", "not_applicable"]
+ReproducibilityDrillTier = Literal["ci", "scheduled", "manual"]
+ReproducibilityDrillStatus = Literal["passed", "failed"]
+ReproducibilityComparisonTarget = Literal["summary_metric", "artifact_field"]
+ReproducibilityComparisonMode = Literal["exact", "absolute_tolerance"]
 ChecklistSubjectType = Literal[
     "workflow_run",
     "report_bundle",
@@ -3494,6 +3499,163 @@ class QAReport(ArtifactDocument):
         return self
 
 
+class ReproducibilityDrillComparison(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    comparison_id: str
+    description: str
+    target_type: ReproducibilityComparisonTarget
+    comparison_mode: ReproducibilityComparisonMode
+    passed: bool
+    expected_value: Any = None
+    actual_value: Any = None
+    stage: str | None = None
+    metric_name: str | None = None
+    artifact_type: str | None = None
+    artifact_path: str | None = None
+    field_path: str | None = None
+    absolute_tolerance: float | None = Field(default=None, ge=0)
+    observed_difference: float | None = Field(default=None, ge=0)
+
+    @field_validator("comparison_id")
+    @classmethod
+    def _validate_comparison_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="comparison_id")
+
+    @field_validator("description")
+    @classmethod
+    def _validate_description(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="description")
+
+    @field_validator("stage")
+    @classmethod
+    def _validate_stage(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_normalized_identifier(value, field_name="stage")
+
+    @field_validator("metric_name", "field_path")
+    @classmethod
+    def _validate_optional_text_fields(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        return _require_non_empty(value, field_name=info.field_name)
+
+    @field_validator("artifact_type")
+    @classmethod
+    def _validate_artifact_type(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_normalized_identifier(value, field_name="artifact_type")
+
+    @field_validator("artifact_path")
+    @classmethod
+    def _validate_artifact_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_relative_path(value)
+
+    @model_validator(mode="after")
+    def _validate_target_shape(self) -> "ReproducibilityDrillComparison":
+        if self.target_type == "summary_metric":
+            if self.stage is None or self.metric_name is None:
+                raise ValueError("summary_metric comparisons must include stage and metric_name.")
+        if self.target_type == "artifact_field":
+            if self.artifact_type is None or self.field_path is None:
+                raise ValueError("artifact_field comparisons must include artifact_type and field_path.")
+        if self.comparison_mode == "absolute_tolerance":
+            if self.absolute_tolerance is None:
+                raise ValueError(
+                    "absolute_tolerance comparisons must include absolute_tolerance."
+                )
+        elif self.absolute_tolerance is not None or self.observed_difference is not None:
+            raise ValueError(
+                "Only absolute_tolerance comparisons may include tolerance or observed_difference."
+            )
+        return self
+
+
+class ReproducibilityDrillCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    check_id: str
+    description: str
+    passed: bool
+    severity: QACheckSeverity = "error"
+    issues: list[WorkflowIssueDetail] = Field(default_factory=list)
+
+    @field_validator("check_id")
+    @classmethod
+    def _validate_check_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="check_id")
+
+    @field_validator("description")
+    @classmethod
+    def _validate_description(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="description")
+
+    @model_validator(mode="after")
+    def _validate_issue_context(self) -> "ReproducibilityDrillCheck":
+        if not self.passed and not self.issues:
+            raise ValueError("Failed drill checks must include at least one issue.")
+        return self
+
+
+class ReproducibilityDrillReport(ArtifactDocument):
+    artifact_type: Literal["reproducibility_drill_report"] = "reproducibility_drill_report"
+    drill_id: str
+    label: str
+    execution_tier: ReproducibilityDrillTier
+    status: ReproducibilityDrillStatus
+    workflow_spec_path: str
+    workflow_parameters: dict[str, Any] = Field(default_factory=dict)
+    environment_references: list[str] = Field(default_factory=list)
+    reproduced_run: ArtifactReference
+    source_inputs: list[ArtifactReference] = Field(default_factory=list)
+    checked_artifacts: list[ArtifactReference] = Field(default_factory=list)
+    comparisons: list[ReproducibilityDrillComparison] = Field(default_factory=list)
+    checks: list[ReproducibilityDrillCheck] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+    @field_validator("drill_id")
+    @classmethod
+    def _validate_drill_id(cls, value: str) -> str:
+        return _require_normalized_identifier(value, field_name="drill_id")
+
+    @field_validator("label")
+    @classmethod
+    def _validate_label(cls, value: str) -> str:
+        return _require_non_empty(value, field_name="label")
+
+    @field_validator("workflow_spec_path")
+    @classmethod
+    def _validate_workflow_spec_path(cls, value: str) -> str:
+        return _normalize_relative_path(value)
+
+    @field_validator("environment_references")
+    @classmethod
+    def _validate_environment_references(cls, value: list[str]) -> list[str]:
+        return _clean_unique_text_list(value, field_name="environment_reference")
+
+    @field_validator("notes")
+    @classmethod
+    def _validate_notes(cls, value: list[str]) -> list[str]:
+        return _clean_unique_text_list(value, field_name="note")
+
+    @model_validator(mode="after")
+    def _validate_status(self) -> "ReproducibilityDrillReport":
+        expected_status: ReproducibilityDrillStatus = (
+            "passed"
+            if all(item.passed for item in self.comparisons) and all(item.passed for item in self.checks)
+            else "failed"
+        )
+        if self.status != expected_status:
+            raise ValueError(
+                f"Reproducibility drill status must be {expected_status!r} for the observed checks and comparisons."
+            )
+        return self
+
+
 ArtifactModel = (
     DatasetManifest
     | FastQCRun
@@ -3516,6 +3678,7 @@ ArtifactModel = (
     | ProtocolRun
     | QAReport
     | ChecklistResultsArtifact
+    | ReproducibilityDrillReport
 )
 
 _ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
@@ -3540,6 +3703,7 @@ _ARTIFACT_MODELS: dict[str, type[ArtifactDocument]] = {
     "protocol_run": ProtocolRun,
     "qa_report": QAReport,
     "checklist_results": ChecklistResultsArtifact,
+    "reproducibility_drill_report": ReproducibilityDrillReport,
 }
 
 

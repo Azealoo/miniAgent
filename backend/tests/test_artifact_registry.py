@@ -182,6 +182,58 @@ def _write_slurm_job(base_dir: Path) -> None:
     )
 
 
+def _write_reproducibility_drill_report(base_dir: Path) -> None:
+    _write_json(
+        _run_dir(base_dir) / "outputs" / "generated" / "reproducibility-drills" / "demo-replay.json",
+        {
+            "schema_version": SCHEMA_PACK_VERSION,
+            "artifact_type": "reproducibility_drill_report",
+            "id": "reproducibility-drill-demo-replay-run-20260318t190203z-deadbeef",
+            "run_id": RUN_ID,
+            "created_at": "2026-03-18T19:12:00Z",
+            "source_workflow": WORKFLOW,
+            "related_artifacts": [
+                {
+                    "artifact_type": "workflow_run",
+                    "path": _run_dir_relpath("run.json"),
+                    "run_id": RUN_ID,
+                }
+            ],
+            "drill_id": "demo-replay",
+            "label": "Demo Replay",
+            "execution_tier": "ci",
+            "status": "passed",
+            "workflow_spec_path": "workflows/demo.yaml",
+            "workflow_parameters": {"seed": 7},
+            "environment_references": ["platform:linux"],
+            "reproduced_run": {
+                "artifact_type": "workflow_run",
+                "path": _run_dir_relpath("run.json"),
+                "run_id": RUN_ID,
+            },
+            "source_inputs": [],
+            "checked_artifacts": [
+                {
+                    "artifact_type": "workflow_run",
+                    "path": _run_dir_relpath("run.json"),
+                    "run_id": RUN_ID,
+                }
+            ],
+            "comparisons": [],
+            "checks": [
+                {
+                    "check_id": "environment_references_present",
+                    "description": "Stored environment references are present.",
+                    "passed": True,
+                    "severity": "error",
+                    "issues": [],
+                }
+            ],
+            "notes": ["Demo reproducibility drill artifact for registry coverage."],
+        },
+    )
+
+
 def _write_evidence_card(base_dir: Path) -> None:
     _write_yaml(
         _run_dir(base_dir) / "evidence_card.yaml",
@@ -746,6 +798,27 @@ class TestArtifactRegistryService:
         )
         assert refreshed.matched_count == 1
         assert refreshed.records[0].path == _run_dir_relpath("claim_graph.json")
+
+    def test_refresh_path_indexes_reproducibility_drill_report_artifact(self, isolated_registry_root):
+        rebuild_artifact_registry(isolated_registry_root)
+        _write_reproducibility_drill_report(isolated_registry_root)
+
+        record = refresh_artifact_registry_path(
+            isolated_registry_root,
+            _run_dir_relpath("outputs/generated/reproducibility-drills/demo-replay.json"),
+        )
+        assert record is not None
+        assert record.status == "valid"
+        assert record.artifact_type == "reproducibility_drill_report"
+
+        refreshed = lookup_artifact_registry(
+            isolated_registry_root,
+            artifact_type="reproducibility_drill_report",
+        )
+        assert refreshed.matched_count == 1
+        assert refreshed.records[0].path == _run_dir_relpath(
+            "outputs/generated/reproducibility-drills/demo-replay.json"
+        )
 
     def test_prepare_run_directory_registers_root_artifacts_immediately(self, tmp_path):
         prepare_run_directory(

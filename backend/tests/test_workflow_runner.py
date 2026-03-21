@@ -1262,6 +1262,11 @@ def summarize(inputs, context):
         assert result.run.steps[0].external_execution.engine_version == "test-engine 1.0.0"
         assert result.run.steps[0].external_execution.normalized_status == "completed"
         assert result.run.steps[0].external_execution.input_bindings["sample_id"] == "sample-001"
+        provenance_payload = json.loads((result.run_dir / "prov.json").read_text(encoding="utf-8"))
+        assert any(
+            activity.get("environment_references") == ["profile:local"]
+            for activity in provenance_payload["activity"].values()
+        )
 
     def test_runner_routes_slurm_profiled_nextflow_through_structured_job_manager(
         self,

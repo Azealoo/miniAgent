@@ -147,7 +147,7 @@ def materialize_provenance_bundle(
             for ref in record.outputs_produced
             if ref.path in entity_ids_by_path
         ]
-        activities[activity_id] = {
+        activity_payload: dict[str, Any] = {
             "type": "workflow_step",
             "step_id": record.id,
             "name": record.name,
@@ -159,6 +159,17 @@ def materialize_provenance_bundle(
             "warnings": list(record.warnings),
             "errors": list(record.errors),
         }
+        if record.external_execution is not None:
+            activity_payload["engine_name"] = record.external_execution.engine_name
+            if record.external_execution.engine_version is not None:
+                activity_payload["engine_version"] = record.external_execution.engine_version
+            if record.external_execution.execution_profile is not None:
+                activity_payload["execution_profile"] = record.external_execution.execution_profile
+            if record.external_execution.environment_references:
+                activity_payload["environment_references"] = list(
+                    record.external_execution.environment_references
+                )
+        activities[activity_id] = activity_payload
         used_relations.extend({"activity": activity_id, "entity": entity_id} for entity_id in step_used_ids)
         generated_relations.extend(
             {"entity": entity_id, "activity": activity_id}

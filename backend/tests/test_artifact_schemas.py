@@ -32,6 +32,7 @@ from artifacts.schemas import (  # noqa: E402
     ProtocolRun,
     ProvenanceArtifact,
     QAReport,
+    ReproducibilityDrillReport,
     SlurmJobArtifact,
     WorkflowRun,
     artifact_model_for_type,
@@ -99,6 +100,10 @@ class TestArtifactSchemas:
     def test_biocompute_artifact_type_uses_json_schema_format(self):
         assert artifact_model_for_type("biocompute") is BioComputeArtifact
         assert schema_format_for_artifact("biocompute") == "json"
+
+    def test_reproducibility_drill_report_uses_json_schema_format(self):
+        assert artifact_model_for_type("reproducibility_drill_report") is ReproducibilityDrillReport
+        assert schema_format_for_artifact("reproducibility_drill_report") == "json"
 
     def test_dataset_manifest_rejects_absolute_source_paths(self):
         payload = {
@@ -1464,6 +1469,7 @@ class TestArtifactSchemas:
             "protocol_run.yaml": ProtocolRun,
             "qa_report.json": QAReport,
             "checklist_results.json": ChecklistResultsArtifact,
+            "reproducibility_drill_report.json": ReproducibilityDrillReport,
         }
 
         for filename, expected_model in expected_types.items():
@@ -1505,3 +1511,4 @@ class TestArtifactSchemas:
         assert artifact_model_for_type("workflow_run") is WorkflowRun
         assert artifact_model_for_type("slurm_job") is SlurmJobArtifact
         assert artifact_model_for_type("checklist_results") is ChecklistResultsArtifact
+        assert artifact_model_for_type("reproducibility_drill_report") is ReproducibilityDrillReport
