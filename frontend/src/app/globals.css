@@ -3,7 +3,70 @@
 @tailwind utilities;
 
 :root {
-  --klein: #002FA7;
+  --apex-accent: #238253;
+  --apex-accent-strong: #17613d;
+  --apex-accent-soft: rgba(35, 130, 83, 0.12);
+  --apex-accent-glow: rgba(35, 130, 83, 0.18);
+  --shell-canvas: #f4f6f2;
+  --shell-border: #dfe5dd;
+  --shell-border-strong: #d3dbd2;
+  --panel-strong: #ffffff;
+  --panel-soft: #fbfcf8;
+  --panel-muted: #f7f9f5;
+  --panel-shadow: 0 10px 24px rgba(32, 43, 35, 0.04);
+  --panel-shadow-soft: 0 1px 2px rgba(32, 43, 35, 0.05);
+  --navbar-height: 60px;
+  --klein: var(--apex-accent);
+}
+
+html {
+  height: 100%;
+}
+
+body {
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top left, rgba(119, 178, 143, 0.08), transparent 24%),
+    linear-gradient(180deg, #f8faf6 0%, var(--shell-canvas) 100%);
+  color: #17211c;
+  font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+}
+
+::selection {
+  background: rgba(47, 122, 95, 0.18);
+  color: #173a2c;
+}
+
+.app-shell-frame {
+  border: 1px solid transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.apex-panel {
+  border: 1px solid var(--shell-border);
+  background: var(--panel-strong);
+  box-shadow: var(--panel-shadow-soft);
+}
+
+.apex-panel-muted {
+  background: var(--panel-soft);
+}
+
+.apex-surface {
+  border: 1px solid var(--shell-border);
+  background: var(--panel-strong);
+  box-shadow: none;
+}
+
+.apex-badge {
+  border: 1px solid var(--shell-border);
+  background: var(--panel-soft);
+  box-shadow: none;
+}
+
+.apex-divider {
+  background: var(--shell-border);
 }
 
 /* ── Scrollbar ─────────────────────────────────────── */
@@ -15,11 +78,11 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #d1d5db;
+  background: #c3cfc7;
   border-radius: 9px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #9ca3af;
+  background: #9eafa5;
 }
 
 /* ── Prose overrides for chat messages ─────────────── */
@@ -43,13 +106,17 @@
   content: "▍";
   display: inline-block;
   animation: blink 1s step-end infinite;
-  color: #002FA7;
+  color: var(--apex-accent);
   margin-left: 1px;
 }
 
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
+}
+
+.animate-blink {
+  animation: blink 1s step-end infinite;
 }
 
 /* ── Highlight.js theme (GitHub light) ────────────── */

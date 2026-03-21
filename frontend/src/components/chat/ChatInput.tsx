@@ -42,11 +42,11 @@ export default function ChatInput({
   };
 
   return (
-    <div className="border-t border-gray-200 bg-white/90 backdrop-blur px-4 py-3">
+    <div className="w-full">
       <div
         className={cn(
-          "flex items-end gap-3 border rounded-2xl px-4 py-2.5 transition-shadow",
-          "border-gray-300 focus-within:border-[#002FA7] focus-within:shadow-[0_0_0_3px_rgba(0,47,167,0.1)]",
+          "flex items-end gap-3 rounded-[16px] border bg-white px-4 py-3 transition-all",
+          "border-[var(--shell-border)] focus-within:border-[var(--apex-accent)] focus-within:shadow-[0_0_0_3px_rgba(35,130,83,0.1)]",
           disabled && "opacity-50"
         )}
       >
@@ -59,20 +59,20 @@ export default function ChatInput({
           placeholder={
             disabled
               ? "Select or create a session first…"
-              : "Message Claw… (Enter to send, Shift+Enter for newline)"
+              : "Message BioAPEX… (Enter to send, Shift+Enter for newline)"
           }
           disabled={disabled || isStreaming}
-          className="flex-1 resize-none bg-transparent text-sm text-gray-800 placeholder:text-gray-400 outline-none max-h-40 overflow-y-auto leading-relaxed disabled:cursor-not-allowed"
+          className="max-h-40 flex-1 resize-none overflow-y-auto bg-transparent text-sm leading-relaxed text-slate-800 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed"
         />
 
         <button
           onClick={handleSend}
           disabled={!text.trim() || isStreaming || disabled}
           className={cn(
-            "w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 transition-colors",
+            "flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full transition-colors",
             text.trim() && !isStreaming && !disabled
-              ? "bg-[#002FA7] text-white hover:bg-[#001F7A]"
-              : "bg-gray-200 text-gray-400 cursor-not-allowed"
+              ? "bg-[var(--apex-accent)] text-white hover:bg-[var(--apex-accent-strong)]"
+              : "bg-slate-200 text-slate-400 cursor-not-allowed"
           )}
         >
           {isStreaming ? (
@@ -82,8 +82,8 @@ export default function ChatInput({
           )}
         </button>
       </div>
-      <p className="text-[10px] text-gray-400 text-center mt-1.5">
-        Claw can make mistakes. Verify important information.
+      <p className="mt-2 px-1 text-[11px] text-slate-400">
+        BioAPEX can make mistakes. Verify important scientific and operational details.
       </p>
     </div>
   );

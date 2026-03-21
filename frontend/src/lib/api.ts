@@ -26,6 +26,12 @@ async function req<T>(
   return res.json() as Promise<T>;
 }
 
+export const getHealth = (signal?: AbortSignal) =>
+  req<{ status: string; service: string }>("/", {
+    cache: "no-store",
+    signal,
+  });
+
 // ────────────────────────────────────────────────────────────────
 // Sessions
 // ────────────────────────────────────────────────────────────────

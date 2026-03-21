@@ -760,7 +760,7 @@ function WorkflowRunCard({ run }: { run: WorkflowRunTrace }) {
                   {[0, 1, 2].map((index) => (
                     <span
                       key={index}
-                      className="inline-block w-1 h-1 bg-[#002FA7] rounded-full animate-bounce"
+                      className="inline-block w-1 h-1 rounded-full bg-[var(--apex-accent)] animate-bounce"
                       style={{ animationDelay: `${index * 150}ms` }}
                     />
                   ))}
@@ -905,9 +905,9 @@ export default function ThoughtChain({
               ))}
 
               {pendingTool && (
-                <div className="border border-dashed border-[#002FA7]/40 rounded-lg px-3 py-2 flex items-center gap-2">
+                <div className="flex items-center gap-2 rounded-lg border border-dashed border-[rgba(47,122,95,0.4)] px-3 py-2">
                   <ToolIcon name={pendingTool.tool} />
-                  <span className="text-xs font-mono text-[#002FA7]">
+                  <span className="text-xs font-mono text-[var(--apex-accent)]">
                     {pendingTool.tool}
                   </span>
                   <span className="text-xs text-gray-400 truncate">
@@ -917,7 +917,7 @@ export default function ThoughtChain({
                     {[0, 1, 2].map((index) => (
                       <span
                         key={index}
-                        className="inline-block w-1 h-1 bg-[#002FA7] rounded-full animate-bounce"
+                        className="inline-block w-1 h-1 rounded-full bg-[var(--apex-accent)] animate-bounce"
                         style={{ animationDelay: `${index * 150}ms` }}
                       />
                     ))}

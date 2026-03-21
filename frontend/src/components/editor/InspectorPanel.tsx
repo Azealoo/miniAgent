@@ -1,251 +1,156 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useState } from "react";
-import { Brain, BookOpen, Save, RefreshCw, ChevronRight } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { readFile, saveFile, listSkills, getSessionTokens } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import { BookOpen, Brain, RefreshCw, Save } from "lucide-react";
+import { getSessionTokens, listSkills, readFile, saveFile } from "@/lib/api";
 import { useApp } from "@/lib/store";
-import type { Skill, TokenStats } from "@/lib/types";
+import { cn } from "@/lib/utils";
+import type { Message, Skill, TokenStats, WorkflowStreamEvent } from "@/lib/types";
 
-// Monaco editor — SSR disabled (it uses browser APIs)
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
   ssr: false,
   loading: () => (
-    <div className="flex items-center justify-center h-full text-sm text-gray-400">
+    <div className="flex h-full items-center justify-center text-sm text-slate-400">
       Loading editor…
     </div>
   ),
 });
 
-type Tab = "memory" | "skills";
+type Tab = "files" | "sources" | "memory" | "skills" | "usage";
+const MEMORY_PATH = "memory/MEMORY.md";
 
-export default function InspectorPanel() {
-  const { currentSessionId } = useApp();
+function getWorkflowSummary(messages: Message[]) {
+  const events = messages.flatMap((message) => message.workflow_events ?? []);
+  const latestRunId = events.at(-1)?.run_id ?? null;
+  const runEvents = latestRunId
+    ? events.filter((event) => event.run_id === latestRunId)
+    : [];
+  const startedSteps = new Map<string, string>();
+  const finishedSteps = new Map<string, { label: string; status: string }>();
 
-  const [tab, setTab] = useState<Tab>("memory");
-  const [content, setContent] = useState("");
-  const [savedContent, setSavedContent] = useState("");
-  const [openPath, setOpenPath] = useState<string | null>(null);
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [tokens, setTokens] = useState<TokenStats | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [saveMsg, setSaveMsg] = useState("");
+  let workflowName: string | null = null;
+  let status: "idle" | "running" | "blocked" | "completed" = "idle";
+  let currentStep: string | null = null;
+  let totalSteps: number | null = null;
+  let completedSteps = 0;
 
-  const isDirty = content !== savedContent;
-
-  // Load memory.md when memory tab is opened
-  useEffect(() => {
-    if (tab === "memory") {
-      loadMemory();
-    } else if (tab === "skills") {
-      listSkills().then(setSkills).catch(() => {});
+  for (const event of runEvents) {
+    if (event.type === "workflow_start") {
+      workflowName = event.workflow_name;
+      status = event.lifecycle_status === "blocked" ? "blocked" : "running";
     }
-  }, [tab]);
 
-  // Load token stats for current session
-  useEffect(() => {
-    if (!currentSessionId) {
-      setTokens(null);
-      return;
+    if (event.type === "workflow_step_start") {
+      startedSteps.set(event.step_id, event.step_label);
+      currentStep = event.step_label;
+      status = "running";
     }
-    getSessionTokens(currentSessionId)
-      .then(setTokens)
-      .catch(() => setTokens(null));
-  }, [currentSessionId]);
 
-  const loadMemory = async () => {
-    setLoading(true);
-    try {
-      const res = await readFile("memory/MEMORY.md");
-      setContent(res.content);
-      setSavedContent(res.content);
-      setOpenPath("memory/MEMORY.md");
-    } catch {
-      setContent("# Could not load MEMORY.md");
-    } finally {
-      setLoading(false);
+    if (event.type === "workflow_step_end") {
+      finishedSteps.set(event.step_id, {
+        label: event.step_label,
+        status: event.status,
+      });
+
+      if (currentStep === event.step_label) {
+        currentStep = null;
+      }
+
+      if (event.status === "blocked") {
+        status = "blocked";
+      }
     }
+
+    if (event.type === "workflow_blocked") {
+      status = "blocked";
+      currentStep = event.step_label ?? currentStep;
+    }
+
+    if (event.type === "workflow_done") {
+      status = event.lifecycle_status === "blocked" ? "blocked" : "completed";
+      totalSteps = event.total_steps;
+      completedSteps = event.completed_steps;
+      currentStep = null;
+    }
+  }
+
+  const observedSteps = Math.max(startedSteps.size, finishedSteps.size);
+  const observedCompletedSteps = Array.from(finishedSteps.values()).filter(
+    (step) => step.status === "completed"
+  ).length;
+
+  return {
+    workflowName,
+    status,
+    totalSteps,
+    completedSteps: totalSteps === null ? observedCompletedSteps : completedSteps,
+    observedSteps,
+    currentStep,
+    events: runEvents,
   };
-
-  const loadSkill = async (path: string) => {
-    setLoading(true);
-    try {
-      const res = await readFile(path);
-      setContent(res.content);
-      setSavedContent(res.content);
-      setOpenPath(path);
-    } catch {
-      setContent("# Could not load skill file");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSave = async () => {
-    if (!openPath || !isDirty) return;
-    setSaving(true);
-    setSaveMsg("");
-    try {
-      await saveFile(openPath, content);
-      setSavedContent(content);
-      setSaveMsg("Saved");
-      setTimeout(() => setSaveMsg(""), 2000);
-    } catch (e) {
-      setSaveMsg("Save failed");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="flex flex-col h-full bg-white border-l border-gray-200">
-      {/* Tab bar */}
-      <div className="flex items-center border-b border-gray-200 px-2 pt-1.5 gap-1">
-        <TabBtn
-          active={tab === "memory"}
-          icon={<Brain size={13} />}
-          label="Memory"
-          onClick={() => setTab("memory")}
-        />
-        <TabBtn
-          active={tab === "skills"}
-          icon={<BookOpen size={13} />}
-          label="Skills"
-          onClick={() => setTab("skills")}
-        />
-      </div>
-
-      {/* Token stats bar */}
-      {tokens && (
-        <div className="px-3 py-1.5 bg-gray-50 border-b border-gray-100 flex items-center gap-3">
-          <span className="text-[10px] text-gray-400">
-            System: <span className="font-medium text-gray-600">{tokens.system_tokens.toLocaleString()}</span>
-          </span>
-          <span className="text-[10px] text-gray-400">
-            Msgs: <span className="font-medium text-gray-600">{tokens.message_tokens.toLocaleString()}</span>
-          </span>
-          <span className="text-[10px] text-gray-400">
-            Total: <span className="font-semibold text-[#002FA7]">{tokens.total_tokens.toLocaleString()}</span>
-          </span>
-        </div>
-      )}
-
-      {/* Skills list (visible when tab=skills and no file open) */}
-      {tab === "skills" && (
-        <div className="border-b border-gray-100 max-h-40 overflow-y-auto">
-          {skills.length === 0 ? (
-            <p className="text-xs text-gray-400 p-3">No skills found in skills/</p>
-          ) : (
-            skills.map((s) => (
-              <button
-                key={s.path}
-                onClick={() => loadSkill(s.path)}
-                className={cn(
-                  "w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-gray-50 transition-colors",
-                  openPath === s.path && "bg-[#002FA7]/5 text-[#002FA7]"
-                )}
-              >
-                <BookOpen size={12} className="text-gray-400 flex-shrink-0" />
-                <span className="text-xs font-medium text-gray-700 truncate">
-                  {s.name}
-                </span>
-                <ChevronRight size={11} className="ml-auto text-gray-300" />
-              </button>
-            ))
-          )}
-        </div>
-      )}
-
-      {/* Editor toolbar */}
-      {openPath && (
-        <div className="flex items-center justify-between px-3 py-1.5 border-b border-gray-100 bg-gray-50">
-          <span className="text-[11px] font-mono text-gray-500 truncate">
-            {openPath}
-          </span>
-          <div className="flex items-center gap-2">
-            {saveMsg && (
-              <span
-                className={cn(
-                  "text-[10px]",
-                  saveMsg === "Saved" ? "text-green-600" : "text-red-500"
-                )}
-              >
-                {saveMsg}
-              </span>
-            )}
-            <button
-              onClick={tab === "memory" ? loadMemory : () => openPath && loadSkill(openPath)}
-              className="p-1 rounded hover:bg-gray-200 text-gray-400 hover:text-gray-600 transition-colors"
-              title="Reload from disk"
-            >
-              <RefreshCw size={12} />
-            </button>
-            <button
-              onClick={handleSave}
-              disabled={!isDirty || saving}
-              className={cn(
-                "flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium transition-colors",
-                isDirty && !saving
-                  ? "bg-[#002FA7] text-white hover:bg-[#001F7A]"
-                  : "bg-gray-200 text-gray-400 cursor-not-allowed"
-              )}
-            >
-              <Save size={11} />
-              {saving ? "Saving…" : "Save"}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Monaco Editor */}
-      <div className="flex-1 overflow-hidden">
-        {loading ? (
-          <div className="flex items-center justify-center h-full text-sm text-gray-400">
-            Loading…
-          </div>
-        ) : openPath ? (
-          <MonacoEditor
-            height="100%"
-            language="markdown"
-            value={content}
-            theme="vs"
-            onChange={(val) => setContent(val ?? "")}
-            options={{
-              minimap: { enabled: false },
-              wordWrap: "on",
-              fontSize: 12,
-              lineNumbers: "on",
-              scrollBeyondLastLine: false,
-              overviewRulerLanes: 0,
-              padding: { top: 8, bottom: 8 },
-              fontFamily: '"SF Mono", "Fira Code", Consolas, monospace',
-            }}
-          />
-        ) : (
-          <div className="flex flex-col items-center justify-center h-full text-center px-6">
-            <Brain size={28} className="text-gray-200 mb-3" />
-            <p className="text-xs text-gray-400">
-              {tab === "memory"
-                ? "Loading MEMORY.md…"
-                : "Select a skill to edit"}
-            </p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
 }
 
-function TabBtn({
+function collectArtifacts(events: WorkflowStreamEvent[]) {
+  const items = new Map<
+    string,
+    { path: string; label: string; meta: string }
+  >();
+
+  events.forEach((event) => {
+    if (event.type === "workflow_artifact") {
+      items.set(event.artifact.path, {
+        path: event.artifact.path,
+        label: event.artifact.path.split("/").pop() ?? event.artifact.path,
+        meta: event.output_name ?? event.scope.replaceAll("_", " "),
+      });
+    }
+
+    if (event.type === "workflow_step_end") {
+      event.artifact_refs.forEach((artifact) => {
+        items.set(artifact.path, {
+          path: artifact.path,
+          label: artifact.path.split("/").pop() ?? artifact.path,
+          meta: artifact.artifact_type ?? event.step_label,
+        });
+      });
+    }
+  });
+
+  return Array.from(items.values()).reverse().slice(0, 8);
+}
+
+function collectSources(messages: Message[]) {
+  const sources = new Map<
+    string,
+    { source: string; score: number; count: number }
+  >();
+
+  messages.forEach((message) => {
+    (message.retrievals ?? []).forEach((result) => {
+      const existing = sources.get(result.source);
+      if (existing) {
+        existing.score = Math.max(existing.score, result.score);
+        existing.count += 1;
+      } else {
+        sources.set(result.source, {
+          source: result.source,
+          score: result.score,
+          count: 1,
+        });
+      }
+    });
+  });
+
+  return Array.from(sources.values()).sort((a, b) => b.score - a.score);
+}
+
+function TabButton({
   active,
-  icon,
   label,
   onClick,
 }: {
   active: boolean;
-  icon: React.ReactNode;
   label: string;
   onClick: () => void;
 }) {
@@ -253,14 +158,584 @@ function TabBtn({
     <button
       onClick={onClick}
       className={cn(
-        "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-t-md transition-colors border-b-2",
+        "rounded-full px-3 py-1.5 text-[11px] font-medium transition-colors",
         active
-          ? "text-[#002FA7] border-[#002FA7] bg-[#002FA7]/5"
-          : "text-gray-500 border-transparent hover:text-gray-700 hover:bg-gray-100"
+          ? "bg-[var(--apex-accent-soft)] text-[var(--apex-accent-strong)]"
+          : "text-slate-500 hover:bg-[var(--panel-soft)] hover:text-slate-700"
       )}
     >
-      {icon}
       {label}
     </button>
+  );
+}
+
+function InspectorCard({
+  title,
+  meta,
+  children,
+}: {
+  title: string;
+  meta?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-[14px] border border-[var(--shell-border)] bg-white px-3 py-3">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <h3 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+          {title}
+        </h3>
+        {meta && <span className="text-[11px] text-slate-400">{meta}</span>}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function PreviewPane({ content }: { content: string }) {
+  return (
+    <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-[12px] bg-[var(--panel-soft)] px-3 py-3 text-xs leading-6 text-slate-600">
+      {content}
+    </pre>
+  );
+}
+
+export default function InspectorPanel() {
+  const { currentSessionId, sessions, messages, ragMode } = useApp();
+
+  const [tab, setTab] = useState<Tab>("files");
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [tokens, setTokens] = useState<TokenStats | null>(null);
+  const [memoryContent, setMemoryContent] = useState("");
+  const [savedMemoryContent, setSavedMemoryContent] = useState("");
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [memorySaving, setMemorySaving] = useState(false);
+  const [memorySaveMsg, setMemorySaveMsg] = useState("");
+  const [skillContent, setSkillContent] = useState("");
+  const [savedSkillContent, setSavedSkillContent] = useState("");
+  const [selectedSkillPath, setSelectedSkillPath] = useState<string | null>(null);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillSaving, setSkillSaving] = useState(false);
+  const [skillSaveMsg, setSkillSaveMsg] = useState("");
+  const [editorOpen, setEditorOpen] = useState(false);
+  const memoryRequestIdRef = useRef(0);
+  const skillsRequestIdRef = useRef(0);
+
+  const isMemoryDirty = memoryContent !== savedMemoryContent;
+  const isSkillDirty = skillContent !== savedSkillContent;
+  const activeSession =
+    sessions.find((session) => session.id === currentSessionId) ?? null;
+  const workflowSummary = getWorkflowSummary(messages);
+  const artifactItems = collectArtifacts(workflowSummary.events);
+  const sourceItems = collectSources(messages);
+  const workflowMeta = !workflowSummary.workflowName
+    ? "No workflow"
+    : workflowSummary.totalSteps !== null
+      ? `${workflowSummary.completedSteps}/${workflowSummary.totalSteps} steps`
+      : workflowSummary.observedSteps > 0
+        ? `${workflowSummary.completedSteps} completed · ${workflowSummary.observedSteps} observed`
+        : workflowSummary.status === "blocked"
+          ? "Blocked before step execution"
+          : "Waiting for step events";
+
+  useEffect(() => {
+    if (!currentSessionId) {
+      setTokens(null);
+      return;
+    }
+
+    getSessionTokens(currentSessionId)
+      .then(setTokens)
+      .catch(() => setTokens(null));
+  }, [currentSessionId]);
+
+  useEffect(() => {
+    setEditorOpen(false);
+
+    if (tab === "memory") {
+      setMemorySaveMsg("");
+      void loadMemory();
+    }
+
+    if (tab === "skills") {
+      setSkillSaveMsg("");
+      void refreshSkills();
+    }
+  }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const loadMemory = async () => {
+    const requestId = memoryRequestIdRef.current + 1;
+    memoryRequestIdRef.current = requestId;
+    setMemoryLoading(true);
+
+    try {
+      const res = await readFile(MEMORY_PATH);
+      if (memoryRequestIdRef.current !== requestId) return;
+
+      setMemoryContent(res.content);
+      setSavedMemoryContent(res.content);
+    } catch {
+      if (memoryRequestIdRef.current !== requestId) return;
+
+      setMemoryContent("# Could not load MEMORY.md");
+      setSavedMemoryContent("# Could not load MEMORY.md");
+    } finally {
+      if (memoryRequestIdRef.current === requestId) {
+        setMemoryLoading(false);
+      }
+    }
+  };
+
+  const refreshSkills = async (preferredPath?: string) => {
+    const requestId = skillsRequestIdRef.current + 1;
+    skillsRequestIdRef.current = requestId;
+    setSkillsLoading(true);
+
+    let nextPath: string | null = preferredPath ?? selectedSkillPath;
+
+    try {
+      const nextSkills = await listSkills();
+      if (skillsRequestIdRef.current !== requestId) return;
+
+      setSkills(nextSkills);
+
+      if (nextSkills.length === 0) {
+        setSelectedSkillPath(null);
+        setSkillContent("# No skills found");
+        setSavedSkillContent("# No skills found");
+        return;
+      }
+
+      nextPath =
+        preferredPath ??
+        (selectedSkillPath &&
+        nextSkills.some((skill) => skill.path === selectedSkillPath)
+          ? selectedSkillPath
+          : nextSkills[0].path);
+
+      setSelectedSkillPath(nextPath);
+
+      const res = await readFile(nextPath);
+      if (skillsRequestIdRef.current !== requestId) return;
+
+      setSkillContent(res.content);
+      setSavedSkillContent(res.content);
+    } catch {
+      if (skillsRequestIdRef.current !== requestId) return;
+
+      setSelectedSkillPath(nextPath);
+      setSkillContent("# Could not load skill file");
+      setSavedSkillContent("# Could not load skill file");
+    } finally {
+      if (skillsRequestIdRef.current === requestId) {
+        setSkillsLoading(false);
+      }
+    }
+  };
+
+  const handleMemorySave = async () => {
+    if (!isMemoryDirty) return;
+
+    setMemorySaving(true);
+    setMemorySaveMsg("");
+
+    try {
+      await saveFile(MEMORY_PATH, memoryContent);
+      setSavedMemoryContent(memoryContent);
+      setMemorySaveMsg("Saved");
+      setTimeout(() => setMemorySaveMsg(""), 2000);
+    } catch {
+      setMemorySaveMsg("Save failed");
+    } finally {
+      setMemorySaving(false);
+    }
+  };
+
+  const handleSkillSave = async () => {
+    if (!selectedSkillPath || !isSkillDirty) return;
+
+    setSkillSaving(true);
+    setSkillSaveMsg("");
+
+    try {
+      await saveFile(selectedSkillPath, skillContent);
+      setSavedSkillContent(skillContent);
+      setSkillSaveMsg("Saved");
+      setTimeout(() => setSkillSaveMsg(""), 2000);
+    } catch {
+      setSkillSaveMsg("Save failed");
+    } finally {
+      setSkillSaving(false);
+    }
+  };
+
+  const renderFilesTab = () => (
+    <div className="space-y-3">
+      <InspectorCard
+        title="Active Run"
+        meta={workflowMeta}
+      >
+        {workflowSummary.workflowName ? (
+          <div className="space-y-2 text-sm text-slate-600">
+            <p className="font-medium text-slate-800">
+              {workflowSummary.workflowName}
+            </p>
+            <p>
+              Status:{" "}
+              <span
+                className={cn(
+                  "font-medium",
+                  workflowSummary.status === "blocked"
+                    ? "text-[rgb(142,98,29)]"
+                    : workflowSummary.status === "running"
+                      ? "text-[var(--apex-accent-strong)]"
+                      : "text-slate-700"
+                )}
+              >
+                {workflowSummary.status}
+              </span>
+            </p>
+            <p>
+              {workflowSummary.currentStep
+                ? `Current step: ${workflowSummary.currentStep}`
+                : "No step is actively running."}
+            </p>
+          </div>
+        ) : (
+          <p className="text-sm leading-6 text-slate-500">
+            Send a workflow-oriented request to populate run progress and output artifacts here.
+          </p>
+        )}
+      </InspectorCard>
+
+      <InspectorCard title="Generated" meta={`${artifactItems.length} items`}>
+        {artifactItems.length > 0 ? (
+          <div className="space-y-2">
+            {artifactItems.map((artifact) => (
+              <div
+                key={artifact.path}
+                className="rounded-[12px] bg-[var(--panel-soft)] px-3 py-2"
+              >
+                <p className="truncate text-sm font-medium text-slate-700">
+                  {artifact.label}
+                </p>
+                <p className="mt-1 text-[11px] text-slate-400">{artifact.meta}</p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm leading-6 text-slate-500">
+            No generated files yet for this session.
+          </p>
+        )}
+      </InspectorCard>
+
+      <InspectorCard title="Session" meta={activeSession?.id ?? "No session"}>
+        <div className="space-y-2 text-sm text-slate-600">
+          <p>
+            {activeSession
+              ? activeSession.title
+              : "Create or select a session to keep supporting metadata attached to the shell."}
+          </p>
+          {activeSession && (
+            <p>{activeSession.message_count} message(s) recorded.</p>
+          )}
+        </div>
+      </InspectorCard>
+    </div>
+  );
+
+  const renderSourcesTab = () => (
+    <InspectorCard title="Retrieved Sources" meta={`${sourceItems.length} sources`}>
+      {sourceItems.length > 0 ? (
+        <div className="space-y-2">
+          {sourceItems.slice(0, 8).map((source) => (
+            <div
+              key={source.source}
+              className="rounded-[12px] bg-[var(--panel-soft)] px-3 py-2"
+            >
+              <p className="truncate text-sm font-medium text-slate-700">
+                {source.source}
+              </p>
+              <p className="mt-1 text-[11px] text-slate-400">
+                score {source.score.toFixed(3)} · {source.count} hit
+                {source.count === 1 ? "" : "s"}
+              </p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-sm leading-6 text-slate-500">
+          No retrieved sources yet. Retrieved evidence will appear here after a RAG-backed response.
+        </p>
+      )}
+    </InspectorCard>
+  );
+
+  const renderMemoryTab = () => (
+    <InspectorCard title="Memory" meta={MEMORY_PATH}>
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={loadMemory}
+            className="inline-flex items-center gap-1 rounded-full border border-[var(--shell-border)] px-2.5 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-[var(--panel-soft)]"
+          >
+            <RefreshCw size={12} />
+            Refresh
+          </button>
+          <button
+            onClick={() => setEditorOpen((value) => !value)}
+            className="inline-flex items-center gap-1 rounded-full border border-[var(--shell-border)] px-2.5 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-[var(--panel-soft)]"
+          >
+            <Brain size={12} />
+            {editorOpen ? "Preview" : "Edit"}
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {memorySaveMsg && (
+            <span
+              className={cn(
+                "text-[10px]",
+                memorySaveMsg === "Saved" ? "text-emerald-600" : "text-red-500"
+              )}
+            >
+              {memorySaveMsg}
+            </span>
+          )}
+
+          <button
+            onClick={handleMemorySave}
+            disabled={!isMemoryDirty || memorySaving}
+            className={cn(
+              "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors",
+              isMemoryDirty && !memorySaving
+                ? "bg-[var(--apex-accent)] text-white hover:bg-[var(--apex-accent-strong)]"
+                : "bg-slate-200 text-slate-400 cursor-not-allowed"
+            )}
+          >
+            <Save size={12} />
+            {memorySaving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+
+      {memoryLoading ? (
+        <div className="rounded-[12px] bg-[var(--panel-soft)] px-3 py-8 text-center text-sm text-slate-400">
+          Loading memory…
+        </div>
+      ) : editorOpen ? (
+        <div className="h-[280px] overflow-hidden rounded-[12px] border border-[var(--shell-border)]">
+          <MonacoEditor
+            height="100%"
+            language="markdown"
+            value={memoryContent}
+            theme="vs"
+            onChange={(value) => setMemoryContent(value ?? "")}
+            options={{
+              minimap: { enabled: false },
+              wordWrap: "on",
+              fontSize: 12,
+              lineNumbers: "on",
+              scrollBeyondLastLine: false,
+              overviewRulerLanes: 0,
+              padding: { top: 10, bottom: 10 },
+              fontFamily: '"SF Mono", "Fira Code", Consolas, monospace',
+            }}
+          />
+        </div>
+      ) : (
+        <PreviewPane content={memoryContent} />
+      )}
+    </InspectorCard>
+  );
+
+  const renderSkillsTab = () => (
+    <div className="space-y-3">
+      <InspectorCard title="Skills" meta={`${skills.length} available`}>
+        {skillsLoading && skills.length === 0 ? (
+          <p className="text-sm text-slate-400">Loading skills…</p>
+        ) : skills.length > 0 ? (
+          <div className="space-y-1">
+            {skills.map((skill) => (
+              <button
+                key={skill.path}
+                onClick={() => void refreshSkills(skill.path)}
+                className={cn(
+                  "flex w-full items-center justify-between rounded-[12px] px-3 py-2 text-left text-sm transition-colors",
+                  skill.path === selectedSkillPath
+                    ? "bg-[var(--apex-accent-soft)] text-[var(--apex-accent-strong)]"
+                    : "bg-[var(--panel-soft)] text-slate-600 hover:bg-white"
+                )}
+              >
+                <span className="truncate">{skill.name}</span>
+                <span className="text-[11px] text-slate-400">
+                  <BookOpen size={12} />
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm leading-6 text-slate-500">
+            No skills are currently available to preview.
+          </p>
+        )}
+      </InspectorCard>
+
+      {selectedSkillPath && (
+        <InspectorCard title="Skill Preview" meta={selectedSkillPath}>
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void refreshSkills(selectedSkillPath)}
+                className="inline-flex items-center gap-1 rounded-full border border-[var(--shell-border)] px-2.5 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-[var(--panel-soft)]"
+              >
+                <RefreshCw size={12} />
+                Refresh
+              </button>
+              <button
+                onClick={() => setEditorOpen((value) => !value)}
+                className="inline-flex items-center gap-1 rounded-full border border-[var(--shell-border)] px-2.5 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-[var(--panel-soft)]"
+              >
+                <BookOpen size={12} />
+                {editorOpen ? "Preview" : "Edit"}
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {skillSaveMsg && (
+                <span
+                  className={cn(
+                    "text-[10px]",
+                    skillSaveMsg === "Saved" ? "text-emerald-600" : "text-red-500"
+                  )}
+                >
+                  {skillSaveMsg}
+                </span>
+              )}
+
+              <button
+                onClick={handleSkillSave}
+                disabled={!isSkillDirty || skillSaving}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors",
+                  isSkillDirty && !skillSaving
+                    ? "bg-[var(--apex-accent)] text-white hover:bg-[var(--apex-accent-strong)]"
+                    : "bg-slate-200 text-slate-400 cursor-not-allowed"
+                )}
+              >
+                <Save size={12} />
+                {skillSaving ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+
+          {skillsLoading ? (
+            <div className="rounded-[12px] bg-[var(--panel-soft)] px-3 py-8 text-center text-sm text-slate-400">
+              Loading skill…
+            </div>
+          ) : editorOpen ? (
+            <div className="h-[280px] overflow-hidden rounded-[12px] border border-[var(--shell-border)]">
+              <MonacoEditor
+                height="100%"
+                language="markdown"
+                value={skillContent}
+                theme="vs"
+                onChange={(value) => setSkillContent(value ?? "")}
+                options={{
+                  minimap: { enabled: false },
+                  wordWrap: "on",
+                  fontSize: 12,
+                  lineNumbers: "on",
+                  scrollBeyondLastLine: false,
+                  overviewRulerLanes: 0,
+                  padding: { top: 10, bottom: 10 },
+                  fontFamily: '"SF Mono", "Fira Code", Consolas, monospace',
+                }}
+              />
+            </div>
+          ) : (
+            <PreviewPane content={skillContent} />
+          )}
+        </InspectorCard>
+      )}
+    </div>
+  );
+
+  const renderUsageTab = () => (
+    <div className="space-y-3">
+      <InspectorCard title="Usage" meta={currentSessionId ?? "No session"}>
+        {tokens ? (
+          <div className="grid grid-cols-3 gap-2">
+            <div className="rounded-[12px] bg-[var(--panel-soft)] px-3 py-2">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">
+                System
+              </p>
+              <p className="mt-1 text-sm font-semibold text-slate-700">
+                {tokens.system_tokens.toLocaleString()}
+              </p>
+            </div>
+            <div className="rounded-[12px] bg-[var(--panel-soft)] px-3 py-2">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">
+                Messages
+              </p>
+              <p className="mt-1 text-sm font-semibold text-slate-700">
+                {tokens.message_tokens.toLocaleString()}
+              </p>
+            </div>
+            <div className="rounded-[12px] bg-[var(--apex-accent-soft)] px-3 py-2">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-[var(--apex-accent-strong)]">
+                Total
+              </p>
+              <p className="mt-1 text-sm font-semibold text-[var(--apex-accent-strong)]">
+                {tokens.total_tokens.toLocaleString()}
+              </p>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm leading-6 text-slate-500">
+            Token usage will appear once a session is selected.
+          </p>
+        )}
+      </InspectorCard>
+
+      <InspectorCard title="Context" meta={ragMode ? "RAG on" : "RAG off"}>
+        <div className="space-y-2 text-sm text-slate-600">
+          <p>{sessions.length} session(s) available.</p>
+          <p>{messages.length} message(s) loaded in the current workspace.</p>
+          <p>{ragMode ? "Retrieval is enabled for this shell." : "Retrieval is currently disabled."}</p>
+        </div>
+      </InspectorCard>
+    </div>
+  );
+
+  return (
+    <aside className="apex-panel flex h-full flex-col overflow-hidden rounded-[18px]">
+      <div className="border-b border-[var(--shell-border)] px-3 py-3">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+          Inspector
+        </p>
+        <p className="mt-1 text-sm font-semibold text-slate-800">
+          {workflowSummary.workflowName ?? activeSession?.title ?? "Supporting context"}
+        </p>
+      </div>
+
+      <div className="overflow-x-auto border-b border-[var(--shell-border)] px-2 py-2">
+        <div className="flex min-w-max gap-1">
+          <TabButton active={tab === "files"} label="Files" onClick={() => setTab("files")} />
+          <TabButton active={tab === "sources"} label="Sources" onClick={() => setTab("sources")} />
+          <TabButton active={tab === "memory"} label="Memory" onClick={() => setTab("memory")} />
+          <TabButton active={tab === "skills"} label="Skills" onClick={() => setTab("skills")} />
+          <TabButton active={tab === "usage"} label="Usage" onClick={() => setTab("usage")} />
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        {tab === "files" && renderFilesTab()}
+        {tab === "sources" && renderSourcesTab()}
+        {tab === "memory" && renderMemoryTab()}
+        {tab === "skills" && renderSkillsTab()}
+        {tab === "usage" && renderUsageTab()}
+      </div>
+    </aside>
   );
 }

@@ -3,26 +3,25 @@
 import { useEffect, useRef } from "react";
 import { MessageSquarePlus } from "lucide-react";
 import { useApp } from "@/lib/store";
-import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
+import ChatMessage from "./ChatMessage";
 
 export default function ChatPanel() {
-  const { messages, isStreaming, currentSessionId, sendMessage } = useApp();
+  const { messages, isStreaming, sendMessage } = useApp();
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
 
-  // Track whether user has scrolled up
   const handleScroll = () => {
     const el = containerRef.current;
     if (!el) return;
+
     const threshold = 80;
     isNearBottomRef.current =
       el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
   };
 
-  // Auto-scroll when messages change (only if near bottom)
   useEffect(() => {
     if (isNearBottomRef.current) {
       bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -30,51 +29,46 @@ export default function ChatPanel() {
   }, [messages]);
 
   const handleSend = async (text: string) => {
-    // sendMessage auto-creates a session if none exists
     await sendMessage(text);
   };
 
   return (
-    <div className="flex flex-col h-full bg-[#fafafa]">
-      {/* Messages */}
-      <div
-        ref={containerRef}
-        onScroll={handleScroll}
-        className="flex-1 overflow-y-auto px-6 py-6"
-      >
-        {messages.length === 0 ? (
-          <EmptyState />
-        ) : (
-          <>
-            {messages.map((msg) => (
-              <ChatMessage key={msg.id} message={msg} />
-            ))}
-          </>
-        )}
-        <div ref={bottomRef} />
-      </div>
+    <section className="apex-panel flex h-full min-h-0 flex-col overflow-hidden rounded-[18px] shadow-[var(--panel-shadow-soft)]">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div
+          ref={containerRef}
+          onScroll={handleScroll}
+          className="flex-1 overflow-y-auto px-5 py-5 sm:px-6 lg:px-8 lg:py-7"
+        >
+          {messages.length === 0 ? (
+            <EmptyState />
+          ) : (
+            messages.map((message) => (
+              <ChatMessage key={message.id} message={message} />
+            ))
+          )}
+          <div ref={bottomRef} />
+        </div>
 
-      {/* Input */}
-      <ChatInput
-        onSend={handleSend}
-        isStreaming={isStreaming}
-      />
-    </div>
+        <div className="border-t border-[var(--shell-border)] bg-[var(--panel-muted)] px-4 py-4 sm:px-5 lg:px-6">
+          <ChatInput onSend={handleSend} isStreaming={isStreaming} />
+        </div>
+      </div>
+    </section>
   );
 }
 
 function EmptyState() {
   return (
-    <div className="flex flex-col items-center justify-center h-full text-center px-8">
-      <div className="w-12 h-12 rounded-2xl bg-[#002FA7]/10 flex items-center justify-center mb-4">
-        <MessageSquarePlus size={22} className="text-[#002FA7]" />
+    <div className="flex h-full flex-col items-center justify-center px-8 text-center">
+      <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-[16px] bg-[var(--apex-accent-soft)]">
+        <MessageSquarePlus size={24} className="text-[var(--apex-accent)]" />
       </div>
-      <h2 className="text-base font-semibold text-gray-700 mb-1">
-        Start a conversation
+      <h2 className="text-lg font-semibold text-slate-800">
+        Start a BioAPEX conversation
       </h2>
-      <p className="text-sm text-gray-400 max-w-xs">
-        Ask Claw anything. Use skills for complex tasks, or let it use its
-        built-in tools directly.
+      <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">
+        Ask about a workflow, a dataset, or the next step in a scientific task. The center workspace is ready for the active conversation.
       </p>
     </div>
   );

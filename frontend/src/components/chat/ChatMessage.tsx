@@ -17,8 +17,8 @@ export default function ChatMessage({ message }: ChatMessageProps) {
 
   if (isUser) {
     return (
-      <div className="flex justify-end mb-4">
-        <div className="max-w-[70%] bg-[#002FA7] text-white rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm leading-relaxed shadow-sm">
+      <div className="mb-4 flex justify-end">
+        <div className="max-w-[72%] rounded-[22px] rounded-tr-md bg-[linear-gradient(135deg,var(--apex-accent),var(--apex-accent-strong))] px-4 py-3 text-sm leading-relaxed text-white shadow-[0_14px_28px_rgba(47,122,95,0.16)]">
           {message.content}
         </div>
       </div>
@@ -27,19 +27,16 @@ export default function ChatMessage({ message }: ChatMessageProps) {
 
   // Assistant message
   return (
-    <div className="flex gap-3 mb-4">
-      {/* Avatar */}
-      <div className="w-7 h-7 rounded-full bg-gradient-to-br from-[#002FA7] to-blue-400 flex items-center justify-center text-white text-xs font-bold flex-shrink-0 mt-0.5 shadow-sm">
-        C
+    <div className="mb-5 flex gap-3">
+      <div className="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-[rgba(47,122,95,0.14)] bg-[linear-gradient(135deg,rgba(255,255,255,0.96),rgba(228,241,233,0.96))] text-xs font-bold text-[var(--apex-accent-strong)] shadow-sm">
+        B
       </div>
 
       <div className="flex-1 min-w-0">
-        {/* RAG retrieval results */}
         {message.retrievals && message.retrievals.length > 0 && (
           <RetrievalCard results={message.retrievals} />
         )}
 
-        {/* Tool calls (thought chain) */}
         {((message.tool_calls && message.tool_calls.length > 0) ||
           (message.workflow_events && message.workflow_events.length > 0) ||
           message.pendingTool) && (
@@ -50,11 +47,10 @@ export default function ChatMessage({ message }: ChatMessageProps) {
           />
         )}
 
-        {/* Text content */}
         {(message.content || message.isStreaming) && (
           <div
             className={cn(
-              "mt-2 text-sm text-gray-800",
+              "mt-2 text-sm text-slate-800",
               message.isStreaming && !message.content && "h-5"
             )}
           >
@@ -69,13 +65,12 @@ export default function ChatMessage({ message }: ChatMessageProps) {
                   remarkPlugins={[remarkGfm]}
                   rehypePlugins={[rehypeHighlight]}
                   components={{
-                    // Inline code
                     code({ className, children, ...props }) {
                       const match = /language-(\w+)/.exec(className ?? "");
                       if (!match) {
                         return (
                           <code
-                            className="bg-gray-100 text-[#c7254e] px-1 py-0.5 rounded text-[0.8em] font-mono"
+                            className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[0.8em] text-[#c7254e]"
                             {...props}
                           >
                             {children}
@@ -88,11 +83,10 @@ export default function ChatMessage({ message }: ChatMessageProps) {
                         </code>
                       );
                     },
-                    // Tables
                     table({ children }) {
                       return (
                         <div className="overflow-x-auto my-3">
-                          <table className="min-w-full border border-gray-200 rounded-lg overflow-hidden text-xs">
+                          <table className="min-w-full overflow-hidden rounded-lg border border-slate-200 text-xs">
                             {children}
                           </table>
                         </div>
@@ -100,14 +94,14 @@ export default function ChatMessage({ message }: ChatMessageProps) {
                     },
                     th({ children }) {
                       return (
-                        <th className="bg-gray-50 border-b border-gray-200 px-3 py-2 text-left font-semibold text-gray-700">
+                        <th className="border-b border-slate-200 bg-slate-50 px-3 py-2 text-left font-semibold text-slate-700">
                           {children}
                         </th>
                       );
                     },
                     td({ children }) {
                       return (
-                        <td className="border-b border-gray-100 px-3 py-2 text-gray-600">
+                        <td className="border-b border-slate-100 px-3 py-2 text-slate-600">
                           {children}
                         </td>
                       );
@@ -118,9 +112,8 @@ export default function ChatMessage({ message }: ChatMessageProps) {
                 </ReactMarkdown>
               </div>
             ) : (
-              // Empty streaming state — show blinking cursor
               message.isStreaming && (
-                <span className="inline-block w-0.5 h-4 bg-[#002FA7] animate-blink" />
+                <span className="inline-block h-4 w-0.5 animate-blink bg-[var(--apex-accent)]" />
               )
             )}
           </div>

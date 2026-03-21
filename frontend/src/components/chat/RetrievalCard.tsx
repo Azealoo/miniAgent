@@ -14,20 +14,20 @@ export default function RetrievalCard({ results }: RetrievalCardProps) {
   if (!results || results.length === 0) return null;
 
   return (
-    <div className="mb-2 border border-purple-200 rounded-xl overflow-hidden bg-purple-50/50">
+    <div className="mb-3 overflow-hidden rounded-[18px] border border-[rgba(47,122,95,0.16)] bg-[rgba(236,245,239,0.76)]">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-purple-50 transition-colors"
+        className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-[rgba(232,242,235,0.92)]"
       >
-        <Brain size={13} className="text-purple-500 flex-shrink-0" />
-        <span className="text-xs font-medium text-purple-700">
+        <Brain size={13} className="flex-shrink-0 text-[var(--apex-accent)]" />
+        <span className="text-xs font-medium text-[var(--apex-accent-strong)]">
           Retrieved memory ({results.length} fragment{results.length !== 1 ? "s" : ""})
         </span>
         <span className="ml-auto">
           {open ? (
-            <ChevronDown size={12} className="text-purple-400" />
+            <ChevronDown size={12} className="text-[var(--apex-accent)]" />
           ) : (
-            <ChevronRight size={12} className="text-purple-400" />
+            <ChevronRight size={12} className="text-[var(--apex-accent)]" />
           )}
         </span>
       </button>
@@ -35,9 +35,9 @@ export default function RetrievalCard({ results }: RetrievalCardProps) {
       {open && (
         <div className="px-3 pb-3 space-y-2">
           {results.map((r, i) => (
-            <div key={i} className="bg-white border border-purple-100 rounded-lg p-2.5">
-              <p className="text-xs text-gray-600 leading-relaxed">{r.text}</p>
-              <p className="text-[10px] text-purple-400 mt-1">
+            <div key={i} className="rounded-[14px] border border-white/80 bg-white/92 p-2.5">
+              <p className="text-xs leading-relaxed text-slate-600">{r.text}</p>
+              <p className="mt-1 text-[10px] text-[var(--apex-accent)]">
                 {r.source} · score {r.score.toFixed(3)}
               </p>
             </div>

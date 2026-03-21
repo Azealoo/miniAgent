@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "mini OpenClaw",
-  description: "Lightweight, transparent AI Agent system",
+  title: "BioAPEX",
+  description: "Transparent, file-first scientific workspace",
 };
 
 export default function RootLayout({
@@ -13,7 +13,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="antialiased bg-[#fafafa] text-gray-900 overflow-hidden">
+      <body className="overflow-hidden antialiased text-slate-900">
         {children}
       </body>
     </html>
