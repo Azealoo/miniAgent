@@ -6,6 +6,7 @@ in-process ASGI client, which currently hangs in this environment.
 """
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -306,3 +307,52 @@ class TestConfigEndpoints:
         with patch("config._CONFIG_FILE", tmp_path / "config.json"):
             resp = set_rag_mode(RagModeRequest(enabled=True))
         assert resp["rag_mode"] is True
+
+
+class TestObservabilityEndpoints:
+    def test_observability_routes_return_metrics_traces_and_overview(self, isolated_api_state):
+        from api.observability import (
+            get_observability_dashboard_definitions,
+            get_observability_overview,
+            list_observability_metrics,
+            list_observability_traces,
+        )
+        from observability import append_metric_record, append_trace_record, chat_span_id
+
+        now = datetime.now(timezone.utc)
+        append_metric_record(
+            isolated_api_state,
+            metric_name="chat_latency_seconds",
+            metric_kind="duration",
+            value=0.42,
+            unit="seconds",
+            request_id="request-api-1",
+            session_id="session-api-1",
+            trace_id="request-api-1",
+            span_id=chat_span_id("request-api-1"),
+            attributes={"latency_scope": "user_visible"},
+            recorded_at=now,
+        )
+        append_trace_record(
+            isolated_api_state,
+            trace_id="request-api-1",
+            span_id=chat_span_id("request-api-1"),
+            span_name="chat_turn",
+            started_at=now,
+            ended_at=now,
+            status="ok",
+            request_id="request-api-1",
+            session_id="session-api-1",
+        )
+
+        metrics = list_observability_metrics(request_id="request-api-1", limit=20)
+        traces = list_observability_traces(request_id="request-api-1", limit=20)
+        overview = get_observability_overview(request_id="request-api-1", days=1, limit=100)
+        dashboards = get_observability_dashboard_definitions()
+
+        assert len(metrics["metrics"]) == 1
+        assert metrics["metrics"][0]["metric_name"] == "chat_latency_seconds"
+        assert len(traces["traces"]) == 1
+        assert traces["traces"][0]["span_name"] == "chat_turn"
+        assert overview["chat_responsiveness"]["user_visible_latency_seconds"]["count"] == 1
+        assert dashboards["dashboards"]

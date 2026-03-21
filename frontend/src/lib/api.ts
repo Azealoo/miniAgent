@@ -107,18 +107,19 @@ export const setRagMode = (enabled: boolean) =>
 export interface StreamCallbacks {
   onRetrieval: (query: string, results: object[]) => void;
   onToken: (content: string) => void;
-  onToolStart: (tool: string, input: string, runId: string) => void;
+  onToolStart: (tool: string, input: string, runId: string, requestId?: string) => void;
   onToolEnd: (
     tool: string,
     output: string,
     runId: string,
-    result?: ToolResultEnvelope
+    result?: ToolResultEnvelope,
+    requestId?: string
   ) => void;
   onWorkflowEvent: (event: WorkflowStreamEvent) => void;
   onNewResponse: () => void;
-  onDone: (content: string) => void;
+  onDone: (content: string, requestId?: string) => void;
   onTitle: (title: string) => void;
-  onError: (error: string) => void;
+  onError: (error: string, requestId?: string) => void;
 }
 
 export interface ChatRequestContext {
@@ -177,14 +178,20 @@ export async function streamChat(
                 callbacks.onToken(data.content);
                 break;
               case "tool_start":
-                callbacks.onToolStart(data.tool, data.input, data.run_id ?? data.tool);
+                callbacks.onToolStart(
+                  data.tool,
+                  data.input,
+                  data.run_id ?? data.tool,
+                  data.request_id
+                );
                 break;
               case "tool_end":
                 callbacks.onToolEnd(
                   data.tool,
                   data.output,
                   data.run_id ?? data.tool,
-                  data.result
+                  data.result,
+                  data.request_id
                 );
                 break;
               case "workflow_start":
@@ -199,13 +206,13 @@ export async function streamChat(
                 callbacks.onNewResponse();
                 break;
               case "done":
-                callbacks.onDone(data.content ?? "");
+                callbacks.onDone(data.content ?? "", data.request_id);
                 break;
               case "title":
                 callbacks.onTitle(data.title);
                 break;
               case "error":
-                callbacks.onError(data.error ?? "Unknown error");
+                callbacks.onError(data.error ?? "Unknown error", data.request_id);
                 break;
             }
           } catch {

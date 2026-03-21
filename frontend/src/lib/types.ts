@@ -151,6 +151,7 @@ export interface WorkflowEventBase {
   contract_version: "workflow_event.v1";
   run_id: string;
   workflow_id: string;
+  request_id?: string;
 }
 
 export interface WorkflowStartEvent extends WorkflowEventBase {
@@ -238,6 +239,7 @@ export interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+  request_id?: string;
   tool_calls?: ToolCall[];
   workflow_events?: WorkflowStreamEvent[];
   retrievals?: RetrievalResult[];

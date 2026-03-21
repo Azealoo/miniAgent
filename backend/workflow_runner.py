@@ -12,6 +12,7 @@ import shlex
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -25,6 +26,7 @@ from artifacts import (
     ArtifactReference,
     ComplianceReport,
     DatasetManifest,
+    EvidenceReviewArtifact,
     QAReport,
     RunLayout,
     SCHEMA_PACK_VERSION,
@@ -41,6 +43,14 @@ from artifacts import (
     stable_artifact_name,
     validate_artifact_payload,
     validate_artifact_root,
+)
+from observability import (
+    append_metric_record,
+    append_trace_record,
+    chat_span_id,
+    workflow_span_id,
+    workflow_step_span_id,
+    workflow_trace_id,
 )
 from tools.slurm_tool import refresh_slurm_job_artifact, submit_slurm_job
 from artifacts.biocompute import expected_biocompute_export_paths, materialize_biocompute_bundle
@@ -92,6 +102,18 @@ def _utcnow() -> datetime:
 
 def _isoformat_z(value: datetime) -> str:
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _duration_seconds(start: datetime | None, end: datetime | None) -> float | None:
+    if start is None or end is None:
+        return None
+    return max(0.0, (end - start).total_seconds())
+
+
+def _elapsed_monotonic_seconds(started_at: float | None) -> float | None:
+    if started_at is None:
+        return None
+    return max(0.0, time.perf_counter() - started_at)
 
 
 def _dump_json(payload: Any) -> str:
@@ -308,11 +330,15 @@ class _WorkflowRunStreamEmitter:
     spec: WorkflowSpec
     layout: RunLayout
     callback: WorkflowEventCallback | None = None
+    request_id: str | None = None
 
     def _emit(self, payload: dict[str, Any]) -> None:
         if self.callback is None:
             return
-        self.callback(normalize_workflow_stream_event(payload))
+        payload_to_emit = dict(payload)
+        if self.request_id is not None:
+            payload_to_emit.setdefault("request_id", self.request_id)
+        self.callback(normalize_workflow_stream_event(payload_to_emit))
 
     def start(self, *, resumed: bool, lifecycle_status: str) -> None:
         self._emit(
@@ -445,12 +471,14 @@ class InternalDAGRunner:
         created_at: datetime | None = None,
         event_callback: WorkflowEventCallback | None = None,
         session_id: str | None = None,
+        request_id: str | None = None,
     ) -> WorkflowRunResult:
         if step_limit is not None and step_limit < 1:
             raise ValueError("step_limit must be at least 1 when provided.")
         if restart_from_step is not None and run_dir is None:
             raise ValueError("restart_from_step requires run_dir for an existing workflow run.")
 
+        workflow_started_monotonic = time.perf_counter()
         spec = self._load_workflow_spec(workflow)
         if run_dir is None:
             layout = prepare_run_directory(
@@ -469,6 +497,7 @@ class InternalDAGRunner:
             )
             run_document = self._persist_run_document(layout, run_document)
             resumed = False
+            loaded_terminal_state = False
         else:
             layout = self._load_existing_layout(spec, Path(run_dir))
             run_document = self._load_run_document(layout)
@@ -489,8 +518,14 @@ class InternalDAGRunner:
                 run_document = self._prepare_restart_document(layout, spec, run_document, restart_from_step)
             run_document = self._persist_run_document(layout, run_document)
             resumed = True
+            loaded_terminal_state = run_document.lifecycle_status in _RUN_FINAL_STATUSES
 
-        emitter = _WorkflowRunStreamEmitter(spec=spec, layout=layout, callback=event_callback)
+        emitter = _WorkflowRunStreamEmitter(
+            spec=spec,
+            layout=layout,
+            callback=event_callback,
+            request_id=request_id,
+        )
         emitter.start(resumed=resumed, lifecycle_status=run_document.lifecycle_status)
         self._record_workflow_started_event(
             spec=spec,
@@ -513,7 +548,21 @@ class InternalDAGRunner:
                 workflow_inputs_ref=workflow_inputs_ref,
                 force_provenance_materialization=False,
                 session_id=session_id,
+                workflow_duration_seconds=None if resumed else _elapsed_monotonic_seconds(workflow_started_monotonic),
             )
+            if not loaded_terminal_state:
+                self._record_terminal_observability(
+                    spec=spec,
+                    layout=layout,
+                    run_document=run_document,
+                    resumed=resumed,
+                    session_id=session_id,
+                    request_id=request_id,
+                    workflow_duration_seconds=self._observability_summary_metric_value(
+                        run_document,
+                        "workflow_duration_seconds",
+                    ),
+                )
             emitter.done(run_document)
             self._record_workflow_finished_event(
                 spec=spec,
@@ -558,6 +607,19 @@ class InternalDAGRunner:
                 workflow_inputs_ref=workflow_inputs_ref,
                 force_provenance_materialization=True,
                 session_id=session_id,
+                workflow_duration_seconds=None if resumed else _elapsed_monotonic_seconds(workflow_started_monotonic),
+            )
+            self._record_terminal_observability(
+                spec=spec,
+                layout=layout,
+                run_document=run_document,
+                resumed=resumed,
+                session_id=session_id,
+                request_id=request_id,
+                workflow_duration_seconds=self._observability_summary_metric_value(
+                    run_document,
+                    "workflow_duration_seconds",
+                ),
             )
             emitter.done(run_document)
             self._record_workflow_finished_event(
@@ -606,6 +668,7 @@ class InternalDAGRunner:
                 step_output_refs=step_output_refs,
                 emitter=emitter,
                 session_id=session_id,
+                request_id=request_id,
             )
             run_document = self._sync_workflow_outputs(
                 layout,
@@ -674,6 +737,19 @@ class InternalDAGRunner:
                 workflow_inputs_ref=workflow_inputs_ref,
                 force_provenance_materialization=True,
                 session_id=session_id,
+                workflow_duration_seconds=None if resumed else _elapsed_monotonic_seconds(workflow_started_monotonic),
+            )
+            self._record_terminal_observability(
+                spec=spec,
+                layout=layout,
+                run_document=run_document,
+                resumed=resumed,
+                session_id=session_id,
+                request_id=request_id,
+                workflow_duration_seconds=self._observability_summary_metric_value(
+                    run_document,
+                    "workflow_duration_seconds",
+                ),
             )
 
         emitter.done(run_document)
@@ -1264,11 +1340,14 @@ class InternalDAGRunner:
         step_output_refs: dict[tuple[str, str], ArtifactReference],
         emitter: _WorkflowRunStreamEmitter | None,
         session_id: str | None,
+        request_id: str | None,
     ) -> WorkflowRun:
         record = self._step_record(run_document, step.id)
         record.status = "running"
+        use_monotonic_duration = record.start_time is None
         if record.start_time is None:
             record.start_time = _utcnow()
+        step_started_monotonic = time.perf_counter() if use_monotonic_duration else None
         record.end_time = None
         if emitter is not None:
             emitter.step_start(step)
@@ -1303,6 +1382,15 @@ class InternalDAGRunner:
             )
             if run_document.lifecycle_status in _RUN_FINAL_STATUSES:
                 record.end_time = _utcnow()
+                self._record_step_observability(
+                    spec=spec,
+                    layout=layout,
+                    step=step,
+                    record=record,
+                    session_id=session_id,
+                    request_id=request_id,
+                    duration_seconds=_elapsed_monotonic_seconds(step_started_monotonic),
+                )
                 if emitter is not None:
                     emitter.step_end(step, record)
                 return run_document
@@ -1369,6 +1457,15 @@ class InternalDAGRunner:
                 stage="after_step",
                 current_step=step,
                 emitter=emitter,
+            )
+            self._record_step_observability(
+                spec=spec,
+                layout=layout,
+                step=step,
+                record=record,
+                session_id=session_id,
+                request_id=request_id,
+                duration_seconds=_elapsed_monotonic_seconds(step_started_monotonic),
             )
             if emitter is not None:
                 emitter.step_end(step, record)
@@ -1463,6 +1560,15 @@ class InternalDAGRunner:
                         blocking_source="step_failure",
                         step=step,
                     )
+            self._record_step_observability(
+                spec=spec,
+                layout=layout,
+                step=step,
+                record=record,
+                session_id=session_id,
+                request_id=request_id,
+                duration_seconds=_elapsed_monotonic_seconds(step_started_monotonic),
+            )
             if emitter is not None:
                 emitter.step_end(step, record)
         return run_document
@@ -2472,6 +2578,7 @@ class InternalDAGRunner:
         workflow_inputs_ref: ArtifactReference,
         force_provenance_materialization: bool,
         session_id: str | None,
+        workflow_duration_seconds: float | None = None,
     ) -> WorkflowRun:
         run_document, provenance_exports_changed = self._ensure_terminal_provenance_exports(layout, run_document)
         run_document = self._finalize_terminal_report_bundle_if_needed(
@@ -2498,7 +2605,366 @@ class InternalDAGRunner:
             step_output_refs=step_output_refs,
         )
         run_document = self._sync_qc_status(run_document)
+        run_document = self._sync_observability_summary_metrics(
+            run_document,
+            workflow_duration_seconds=workflow_duration_seconds,
+        )
         return self._persist_run_document(layout, run_document)
+
+    def _sync_observability_summary_metrics(
+        self,
+        run_document: WorkflowRun,
+        *,
+        workflow_duration_seconds: float | None = None,
+    ) -> WorkflowRun:
+        observability_metric_names = {
+            "workflow_duration_seconds",
+            "step_duration_seconds",
+            "failure_rate",
+            "block_rate",
+            "qc_pass_rate",
+            "evidence_coverage_rate",
+        }
+        existing_observability_metrics = [
+            metric.model_copy(deep=True)
+            for metric in run_document.summary_metrics
+            if metric.metric_name in observability_metric_names
+        ]
+        run_document.summary_metrics = [
+            metric
+            for metric in run_document.summary_metrics
+            if metric.metric_name not in observability_metric_names
+        ]
+        if (
+            run_document.lifecycle_status in _RUN_FINAL_STATUSES
+            and workflow_duration_seconds is None
+            and existing_observability_metrics
+        ):
+            run_document.summary_metrics.extend(existing_observability_metrics)
+            return run_document
+        run_document.summary_metrics.extend(
+            self._collect_observability_summary_metrics(
+                run_document,
+                workflow_duration_seconds=workflow_duration_seconds,
+            )
+        )
+        return run_document
+
+    def _collect_observability_summary_metrics(
+        self,
+        run_document: WorkflowRun,
+        *,
+        workflow_duration_seconds: float | None = None,
+    ) -> list[WorkflowSummaryMetric]:
+        metrics: list[WorkflowSummaryMetric] = []
+        workflow_duration = (
+            max(0.0, float(workflow_duration_seconds))
+            if workflow_duration_seconds is not None
+            else _duration_seconds(
+                self._workflow_started_at(run_document),
+                self._workflow_ended_at(run_document),
+            )
+        )
+        if workflow_duration is not None:
+            metrics.append(
+                WorkflowSummaryMetric(
+                    stage="observability",
+                    metric_name="workflow_duration_seconds",
+                    value=workflow_duration,
+                )
+            )
+        metrics.append(
+            WorkflowSummaryMetric(
+                stage="observability",
+                metric_name="failure_rate",
+                value=1.0 if run_document.lifecycle_status == "failed" else 0.0,
+            )
+        )
+        metrics.append(
+            WorkflowSummaryMetric(
+                stage="observability",
+                metric_name="block_rate",
+                value=1.0 if run_document.lifecycle_status == "blocked" else 0.0,
+            )
+        )
+        metrics.append(
+            WorkflowSummaryMetric(
+                stage="observability",
+                metric_name="qc_pass_rate",
+                value=1.0 if run_document.qc_status == "passed" else 0.0,
+            )
+        )
+        evidence_coverage = self._compute_evidence_coverage_rate(run_document)
+        if evidence_coverage is not None:
+            metrics.append(
+                WorkflowSummaryMetric(
+                    stage="observability",
+                    metric_name="evidence_coverage_rate",
+                    value=evidence_coverage["value"],
+                )
+            )
+        return metrics
+
+    def _workflow_started_at(self, run_document: WorkflowRun) -> datetime:
+        started_at = min(
+            (record.start_time for record in run_document.steps if record.start_time is not None),
+            default=run_document.created_at,
+        )
+        return started_at if started_at.tzinfo is not None else started_at.replace(tzinfo=timezone.utc)
+
+    def _workflow_ended_at(self, run_document: WorkflowRun) -> datetime:
+        ended_at = max(
+            (record.end_time for record in run_document.steps if record.end_time is not None),
+            default=run_document.created_at,
+        )
+        return ended_at if ended_at.tzinfo is not None else ended_at.replace(tzinfo=timezone.utc)
+
+    def _observability_summary_metric_value(
+        self,
+        run_document: WorkflowRun,
+        metric_name: str,
+    ) -> float | None:
+        for metric in run_document.summary_metrics:
+            if metric.metric_name == metric_name:
+                return float(metric.value)
+        return None
+
+    def _compute_evidence_coverage_rate(self, run_document: WorkflowRun) -> dict[str, Any] | None:
+        evidence_review_refs = self._dedupe_refs(
+            [
+                ref
+                for ref in [
+                    *run_document.related_artifacts,
+                    *run_document.outputs,
+                    *(output for record in run_document.steps for output in record.outputs_produced),
+                ]
+                if ref.artifact_type == "evidence_review"
+            ]
+        )
+        if not evidence_review_refs:
+            return None
+
+        covered_review_count = 0
+        readable_review_count = 0
+        unreadable_review_count = 0
+        for ref in evidence_review_refs:
+            try:
+                document = load_artifact_document(self.base_dir / ref.path)
+            except Exception:
+                unreadable_review_count += 1
+                continue
+            if not isinstance(document, EvidenceReviewArtifact):
+                unreadable_review_count += 1
+                continue
+            readable_review_count += 1
+            if document.review_question.strip() and document.evidence_included and document.source_facts:
+                covered_review_count += 1
+
+        total_review_count = len(evidence_review_refs)
+        return {
+            "value": covered_review_count / total_review_count,
+            "linked_review_count": total_review_count,
+            "readable_review_count": readable_review_count,
+            "covered_review_count": covered_review_count,
+            "unreadable_review_count": unreadable_review_count,
+        }
+
+    def _record_terminal_observability(
+        self,
+        *,
+        spec: WorkflowSpec,
+        layout: RunLayout,
+        run_document: WorkflowRun,
+        resumed: bool,
+        session_id: str | None,
+        request_id: str | None,
+        workflow_duration_seconds: float | None = None,
+    ) -> None:
+        workflow_started_at = self._workflow_started_at(run_document)
+        workflow_ended_at = _utcnow()
+        workflow_duration = workflow_duration_seconds
+        if workflow_duration is None:
+            workflow_duration = self._observability_summary_metric_value(
+                run_document,
+                "workflow_duration_seconds",
+            )
+        if workflow_duration is None:
+            workflow_duration = _duration_seconds(workflow_started_at, workflow_ended_at)
+        trace_id = workflow_trace_id(run_id=layout.run_id, request_id=request_id)
+        span_id = workflow_span_id(layout.run_id)
+        completed_steps = sum(1 for record in run_document.steps if record.status == "completed")
+        warning_count = len(run_document.warnings) + sum(len(record.warnings) for record in run_document.steps)
+        base_attributes = {
+            "workflow_name": spec.name,
+            "engine": spec.engine,
+            "lifecycle_status": run_document.lifecycle_status,
+            "qc_status": run_document.qc_status,
+            "resumed": resumed,
+            "completed_steps": completed_steps,
+            "total_steps": len(run_document.steps),
+            "warning_count": warning_count,
+        }
+        if workflow_duration is not None:
+            append_metric_record(
+                self.base_dir,
+                metric_name="workflow_duration_seconds",
+                metric_kind="duration",
+                value=workflow_duration,
+                unit="seconds",
+                request_id=request_id,
+                session_id=session_id,
+                run_id=layout.run_id,
+                workflow_id=spec.workflow_id,
+                trace_id=trace_id,
+                span_id=span_id,
+                attributes=base_attributes,
+                recorded_at=workflow_ended_at,
+            )
+        append_metric_record(
+            self.base_dir,
+            metric_name="failure_rate",
+            metric_kind="rate",
+            value=1.0 if run_document.lifecycle_status == "failed" else 0.0,
+            unit="ratio",
+            request_id=request_id,
+            session_id=session_id,
+            run_id=layout.run_id,
+            workflow_id=spec.workflow_id,
+            trace_id=trace_id,
+            span_id=span_id,
+            attributes=base_attributes,
+            recorded_at=workflow_ended_at,
+        )
+        append_metric_record(
+            self.base_dir,
+            metric_name="block_rate",
+            metric_kind="rate",
+            value=1.0 if run_document.lifecycle_status == "blocked" else 0.0,
+            unit="ratio",
+            request_id=request_id,
+            session_id=session_id,
+            run_id=layout.run_id,
+            workflow_id=spec.workflow_id,
+            trace_id=trace_id,
+            span_id=span_id,
+            attributes=base_attributes,
+            recorded_at=workflow_ended_at,
+        )
+        append_metric_record(
+            self.base_dir,
+            metric_name="qc_pass_rate",
+            metric_kind="rate",
+            value=1.0 if run_document.qc_status == "passed" else 0.0,
+            unit="ratio",
+            request_id=request_id,
+            session_id=session_id,
+            run_id=layout.run_id,
+            workflow_id=spec.workflow_id,
+            trace_id=trace_id,
+            span_id=span_id,
+            attributes=base_attributes,
+            recorded_at=workflow_ended_at,
+        )
+        evidence_coverage = self._compute_evidence_coverage_rate(run_document)
+        if evidence_coverage is not None:
+            append_metric_record(
+                self.base_dir,
+                metric_name="evidence_coverage_rate",
+                metric_kind="rate",
+                value=evidence_coverage["value"],
+                unit="ratio",
+                request_id=request_id,
+                session_id=session_id,
+                run_id=layout.run_id,
+                workflow_id=spec.workflow_id,
+                trace_id=trace_id,
+                span_id=span_id,
+                attributes={**base_attributes, **evidence_coverage},
+                recorded_at=workflow_ended_at,
+            )
+
+        append_trace_record(
+            self.base_dir,
+            trace_id=trace_id,
+            span_id=span_id,
+            parent_span_id=chat_span_id(request_id) if request_id else None,
+            span_name="workflow_run",
+            started_at=workflow_started_at,
+            ended_at=workflow_ended_at,
+            status=(
+                "blocked"
+                if run_document.lifecycle_status == "blocked"
+                else "error" if run_document.lifecycle_status == "failed" else "ok"
+            ),
+            request_id=request_id,
+            session_id=session_id,
+            run_id=layout.run_id,
+            workflow_id=spec.workflow_id,
+            attributes=base_attributes,
+            duration_seconds=workflow_duration,
+        )
+
+    def _record_step_observability(
+        self,
+        *,
+        spec: WorkflowSpec,
+        layout: RunLayout,
+        step: WorkflowStepDefinition,
+        record: WorkflowStepRecord,
+        session_id: str | None,
+        request_id: str | None,
+        duration_seconds: float | None = None,
+    ) -> None:
+        step_duration = duration_seconds
+        if step_duration is None:
+            step_duration = _duration_seconds(record.start_time, record.end_time)
+        if step_duration is None:
+            return
+        trace_id = workflow_trace_id(run_id=layout.run_id, request_id=request_id)
+        base_span_id = workflow_step_span_id(layout.run_id, step.id)
+        attempt_suffix = _isoformat_z(record.start_time or record.end_time or _utcnow())
+        span_id = f"{base_span_id}:{attempt_suffix}"
+        attributes = {
+            "workflow_name": spec.name,
+            "step_label": step.label,
+            "executor_type": step.executor.executor_type,
+            "step_status": record.status,
+            "warning_count": len(record.warnings),
+            "error_count": len(record.errors),
+        }
+        append_metric_record(
+            self.base_dir,
+            metric_name="step_duration_seconds",
+            metric_kind="duration",
+            value=step_duration,
+            unit="seconds",
+            request_id=request_id,
+            session_id=session_id,
+            run_id=layout.run_id,
+            step_id=step.id,
+            workflow_id=spec.workflow_id,
+            trace_id=trace_id,
+            span_id=span_id,
+            attributes=attributes,
+            recorded_at=record.end_time,
+        )
+        append_trace_record(
+            self.base_dir,
+            trace_id=trace_id,
+            span_id=span_id,
+            parent_span_id=workflow_span_id(layout.run_id),
+            span_name="workflow_step",
+            started_at=record.start_time or record.end_time or _utcnow(),
+            ended_at=record.end_time or record.start_time or _utcnow(),
+            status="blocked" if record.status == "blocked" else "error" if record.status == "failed" else "ok",
+            request_id=request_id,
+            session_id=session_id,
+            run_id=layout.run_id,
+            step_id=step.id,
+            workflow_id=spec.workflow_id,
+            attributes=attributes,
+            duration_seconds=step_duration,
+        )
 
     def _ensure_terminal_provenance_exports(
         self,

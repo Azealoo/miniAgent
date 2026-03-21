@@ -14,11 +14,15 @@ SSE event types emitted:
 """
 import asyncio
 import json
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 from audit.store import append_chat_request_event, append_tool_invocation_event
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+from observability import append_metric_record, append_trace_record, chat_span_id
 from pydantic import BaseModel, Field, field_validator
 
 from graph.session_manager import _validate_session_id
@@ -124,6 +128,14 @@ async def chat(request: ChatRequest):
             selected_workflow=request.selected_workflow,
         )
 
+        request_id = str(uuid.uuid4())
+        request_started_at = datetime.now(timezone.utc).replace(microsecond=0)
+        request_started_monotonic = time.perf_counter()
+        first_visible_at: datetime | None = None
+        first_visible_monotonic: float | None = None
+        first_visible_event_type: str | None = None
+        observability_recorded = False
+
         # Per-request accumulators
         segments: list[dict] = []          # [{content, tool_calls, workflow_events}]
         current_content: list[str] = []
@@ -150,18 +162,122 @@ async def chat(request: ChatRequest):
             current_tool_calls.clear()
             current_workflow_events.clear()
 
+        def _mark_first_visible(payload_type: str) -> None:
+            nonlocal first_visible_at, first_visible_monotonic, first_visible_event_type
+            if first_visible_at is not None:
+                return
+            if payload_type not in {
+                "retrieval",
+                "token",
+                "tool_start",
+                "tool_end",
+                "workflow_start",
+                "workflow_step_start",
+                "workflow_step_end",
+                "workflow_blocked",
+                "workflow_artifact",
+                "workflow_done",
+                "new_response",
+                "done",
+                "error",
+            }:
+                return
+            first_visible_at = datetime.now(timezone.utc).replace(microsecond=0)
+            first_visible_monotonic = time.perf_counter()
+            first_visible_event_type = payload_type
+
         def _sse(payload: dict) -> str:
-            return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            payload_to_emit = dict(payload)
+            payload_to_emit.setdefault("request_id", request_id)
+            payload_type = payload_to_emit.get("type")
+            if isinstance(payload_type, str):
+                _mark_first_visible(payload_type)
+            return f"data: {json.dumps(payload_to_emit, ensure_ascii=False)}\n\n"
 
         def _save_user_message() -> None:
             nonlocal user_msg_saved
             if not user_msg_saved:
                 session_manager.save_message(
-                    request.session_id, "user", request.message
+                    request.session_id,
+                    "user",
+                    request.message,
+                    request_id=request_id,
                 )
                 user_msg_saved = True
 
-        async def _finalize_turn() -> list[str]:
+        def _record_turn_observability(*, turn_status: str) -> None:
+            nonlocal observability_recorded
+            if observability_recorded:
+                return
+            observability_recorded = True
+
+            ended_at = datetime.now(timezone.utc).replace(microsecond=0)
+            ended_monotonic = time.perf_counter()
+            first_visible_seconds = max(
+                0.0,
+                (first_visible_monotonic or ended_monotonic) - request_started_monotonic,
+            )
+            backend_execution_seconds = max(0.0, ended_monotonic - request_started_monotonic)
+            span_id = chat_span_id(request_id)
+            tool_call_count = sum(len(segment["tool_calls"]) for segment in segments) + len(current_tool_calls)
+            workflow_event_count = (
+                sum(len(segment["workflow_events"]) for segment in segments) + len(current_workflow_events)
+            )
+            attributes = {
+                "selected_workflow": request.selected_workflow,
+                "attached_identifier_count": len(request.attached_identifiers),
+                "review_required": review_required,
+                "review_completed": review_completed,
+                "assistant_segment_count": len(segments) + (1 if current_content or current_tool_calls or current_workflow_events else 0),
+                "tool_call_count": tool_call_count,
+                "workflow_event_count": workflow_event_count,
+                "first_visible_event_type": first_visible_event_type or "done",
+                "stream": request.stream,
+            }
+            append_metric_record(
+                agent_manager.base_dir,
+                metric_name="chat_latency_seconds",
+                metric_kind="duration",
+                value=first_visible_seconds,
+                unit="seconds",
+                request_id=request_id,
+                session_id=request.session_id,
+                workflow_id=request.selected_workflow,
+                trace_id=request_id,
+                span_id=span_id,
+                attributes={**attributes, "latency_scope": "user_visible"},
+                recorded_at=first_visible_at or ended_at,
+            )
+            append_metric_record(
+                agent_manager.base_dir,
+                metric_name="chat_latency_seconds",
+                metric_kind="duration",
+                value=backend_execution_seconds,
+                unit="seconds",
+                request_id=request_id,
+                session_id=request.session_id,
+                workflow_id=request.selected_workflow,
+                trace_id=request_id,
+                span_id=span_id,
+                attributes={**attributes, "latency_scope": "backend_execution"},
+                recorded_at=ended_at,
+            )
+            append_trace_record(
+                agent_manager.base_dir,
+                trace_id=request_id,
+                span_id=span_id,
+                span_name="chat_turn",
+                started_at=request_started_at,
+                ended_at=ended_at,
+                status=turn_status,
+                request_id=request_id,
+                session_id=request.session_id,
+                workflow_id=request.selected_workflow,
+                attributes=attributes,
+                duration_seconds=backend_execution_seconds,
+            )
+
+        async def _finalize_turn(*, turn_status: str = "ok") -> list[str]:
             _flush_segment()
 
             # Persist user message + each assistant segment to session
@@ -173,6 +289,7 @@ async def chat(request: ChatRequest):
                     seg["content"],
                     seg["tool_calls"] or None,
                     seg["workflow_events"] or None,
+                    request_id=request_id,
                 )
 
             final_content = " ".join(s["content"] for s in segments if s["content"])
@@ -223,6 +340,7 @@ async def chat(request: ChatRequest):
                 except (asyncio.TimeoutError, Exception):
                     pass
 
+            _record_turn_observability(turn_status=turn_status)
             return payloads
 
         try:
@@ -292,7 +410,8 @@ async def chat(request: ChatRequest):
                 if preflight.response_text:
                     current_content.append(preflight.response_text)
                     yield _sse({"type": "token", "content": preflight.response_text})
-                for payload in await _finalize_turn():
+                blocked_turn = preflight.report.final_disposition in {"block", "require_approval"}
+                for payload in await _finalize_turn(turn_status="blocked" if blocked_turn else "ok"):
                     yield payload
                 return
 
@@ -433,10 +552,13 @@ async def chat(request: ChatRequest):
                         prepared_workflow,
                         reason=prepared_workflow.blocking_reason,
                         session_id=request.session_id,
+                        request_id=request_id,
                     )
                     for workflow_event in blocked_run.workflow_events:
-                        current_workflow_events.append(workflow_event)
-                        yield _sse(workflow_event)
+                        workflow_payload = dict(workflow_event)
+                        workflow_payload.setdefault("request_id", request_id)
+                        current_workflow_events.append(workflow_payload)
+                        yield _sse(workflow_payload)
 
                     workflow_summary = describe_blocked_workflow(
                         prepared_workflow,
@@ -444,7 +566,7 @@ async def chat(request: ChatRequest):
                     )
                     current_content.append(workflow_summary)
                     yield _sse({"type": "token", "content": workflow_summary})
-                    for payload in await _finalize_turn():
+                    for payload in await _finalize_turn(turn_status="blocked"):
                         yield payload
                     return
 
@@ -462,6 +584,7 @@ async def chat(request: ChatRequest):
                         prepared_workflow.inputs,
                         event_callback=_on_workflow_event,
                         session_id=request.session_id,
+                        request_id=request_id,
                     )
 
                     while True:
@@ -474,14 +597,21 @@ async def chat(request: ChatRequest):
                             )
                         except asyncio.TimeoutError:
                             continue
-                        current_workflow_events.append(workflow_event)
-                        yield _sse(workflow_event)
+                        workflow_payload = dict(workflow_event)
+                        workflow_payload.setdefault("request_id", request_id)
+                        current_workflow_events.append(workflow_payload)
+                        yield _sse(workflow_payload)
 
-                    workflow_result = workflow_future.result()
+                workflow_result = workflow_future.result()
                 workflow_summary = describe_workflow_result(prepared_workflow, workflow_result)
                 current_content.append(workflow_summary)
                 yield _sse({"type": "token", "content": workflow_summary})
-                for payload in await _finalize_turn():
+                workflow_status = (
+                    "blocked"
+                    if workflow_result.run.lifecycle_status == "blocked"
+                    else "error" if workflow_result.run.lifecycle_status == "failed" else "ok"
+                )
+                for payload in await _finalize_turn(turn_status=workflow_status):
                     yield payload
                 return
 
@@ -551,7 +681,9 @@ async def chat(request: ChatRequest):
                         buffered_pre_review_tokens.clear()
 
                 elif is_workflow_stream_event_type(t):
-                    workflow_event = normalize_workflow_stream_event(ev)
+                    workflow_event = normalize_workflow_stream_event(
+                        {**ev, "request_id": ev.get("request_id", request_id)}
+                    )
                     current_workflow_events.append(workflow_event)
                     yield _sse(workflow_event)
 
@@ -576,7 +708,8 @@ async def chat(request: ChatRequest):
                         )
                         current_content.append(post_review_note)
                         yield _sse({"type": "token", "content": post_review_note})
-                    for payload in await _finalize_turn():
+                    turn_status = "blocked" if review_required and not review_completed else "ok"
+                    for payload in await _finalize_turn(turn_status=turn_status):
                         yield payload
 
                 elif t == "error":
@@ -584,11 +717,15 @@ async def chat(request: ChatRequest):
                     # session history stays consistent for future turns.
                     _save_user_message()
                     yield _sse({"type": "error", "error": ev["error"]})
+                    _record_turn_observability(turn_status="error")
+                    return
 
         except Exception as exc:
             # Same: ensure user message is recorded before surfacing the error.
             _save_user_message()
             yield _sse({"type": "error", "error": str(exc)})
+            _record_turn_observability(turn_status="error")
+            return
 
     return StreamingResponse(
         event_generator(),

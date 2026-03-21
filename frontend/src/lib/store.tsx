@@ -192,19 +192,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           );
         },
 
-        onToolStart: (tool, input, runId) => {
+        onToolStart: (tool, input, runId, requestId) => {
           const id = streamingIdRef.current;
           if (!id) return;
           setMessages((prev) =>
             prev.map((m) =>
               m.id === id
-                ? { ...m, pendingTool: { tool, input, runId } }
+                ? {
+                    ...m,
+                    request_id: m.request_id ?? requestId,
+                    pendingTool: { tool, input, runId },
+                  }
                 : m
             )
           );
         },
 
-        onToolEnd: (tool, output, runId, result) => {
+        onToolEnd: (tool, output, runId, result, requestId) => {
           const id = streamingIdRef.current;
           if (!id) return;
           setMessages((prev) =>
@@ -220,6 +224,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               };
               return {
                 ...m,
+                request_id: m.request_id ?? requestId,
                 tool_calls: [...(m.tool_calls ?? []), tc],
                 pendingTool: undefined,
               };
@@ -235,6 +240,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               m.id === id
                 ? {
                     ...m,
+                    request_id: m.request_id ?? event.request_id,
                     workflow_events: [...(m.workflow_events ?? []), event],
                   }
                 : m
@@ -263,11 +269,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           ]);
         },
 
-        onDone: () => {
+        onDone: (_content, requestId) => {
           const id = streamingIdRef.current;
           setMessages((prev) =>
             prev.map((m) =>
-              m.id === id ? { ...m, isStreaming: false } : m
+              m.id === id
+                ? { ...m, request_id: m.request_id ?? requestId, isStreaming: false }
+                : m
             )
           );
           streamingIdRef.current = null;
@@ -283,13 +291,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           );
         },
 
-        onError: (error) => {
+        onError: (error, requestId) => {
           const id = streamingIdRef.current;
           setMessages((prev) =>
             prev.map((m) =>
               m.id === id
                 ? {
                     ...m,
+                    request_id: m.request_id ?? requestId,
                     content:
                       (m.content ? m.content + "\n\n" : "") +
                       `⚠️ Error: ${error}`,
@@ -336,6 +345,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 interface RawMessage {
   role: string;
   content: string;
+  request_id?: string;
   tool_calls?: ToolCall[];
   workflow_events?: WorkflowStreamEvent[];
 }
@@ -347,6 +357,7 @@ function _historyToMessages(raw: RawMessage[]): Message[] {
       id: uid(),
       role: m.role as "user" | "assistant",
       content: m.content ?? "",
+      request_id: m.request_id,
       tool_calls: m.tool_calls ?? [],
       workflow_events: m.workflow_events ?? [],
     }));

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -113,9 +114,11 @@ def materialize_blocked_workflow_run(
     reason: str,
     now: datetime | None = None,
     session_id: str | None = None,
+    request_id: str | None = None,
 ) -> MaterializedBlockedWorkflowChatRun:
     base_path = Path(base_dir).resolve()
     runner = InternalDAGRunner(base_path)
+    started_monotonic = time.perf_counter()
     timestamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
     layout = prepare_run_directory(
         base_path,
@@ -168,6 +171,10 @@ def materialize_blocked_workflow_run(
         biocompute_exports=[],
         warnings=[reason],
     )
+    run_document = runner._sync_observability_summary_metrics(
+        run_document,
+        workflow_duration_seconds=max(0.0, time.perf_counter() - started_monotonic),
+    )
     persisted_run = runner._persist_run_document(layout, run_document)
     append_workflow_started_event(
         base_path,
@@ -194,11 +201,24 @@ def materialize_blocked_workflow_run(
         biocompute_exports=list(persisted_run.biocompute_exports),
         session_id=session_id,
     )
+    runner._record_terminal_observability(
+        spec=prepared.spec,
+        layout=layout,
+        run_document=persisted_run,
+        resumed=False,
+        session_id=session_id,
+        request_id=request_id,
+        workflow_duration_seconds=runner._observability_summary_metric_value(
+            persisted_run,
+            "workflow_duration_seconds",
+        ),
+    )
     workflow_events = _build_blocked_workflow_events_for_run(
         prepared,
         reason=reason,
         run_id=layout.run_id,
         run_record_path=layout.run_record_relpath.as_posix(),
+        request_id=request_id,
     )
     return MaterializedBlockedWorkflowChatRun(
         result=runner._build_result(layout, persisted_run, resumed=False),
@@ -211,6 +231,7 @@ def build_blocked_workflow_events(
     *,
     reason: str,
     now: datetime | None = None,
+    request_id: str | None = None,
 ) -> list[dict[str, Any]]:
     timestamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
     run_id = generate_run_id(now=timestamp)
@@ -220,6 +241,7 @@ def build_blocked_workflow_events(
         reason=reason,
         run_id=run_id,
         run_record_path=(run_dir / "run.json").as_posix(),
+        request_id=request_id,
     )
 
 
@@ -229,6 +251,7 @@ def _build_blocked_workflow_events_for_run(
     reason: str,
     run_id: str,
     run_record_path: str,
+    request_id: str | None = None,
 ) -> list[dict[str, Any]]:
     return [
         normalize_workflow_stream_event(
@@ -241,6 +264,7 @@ def _build_blocked_workflow_events_for_run(
                 "lifecycle_status": "created",
                 "resumed": False,
                 "run_record_path": run_record_path,
+                "request_id": request_id,
             }
         ),
         normalize_workflow_stream_event(
@@ -255,6 +279,7 @@ def _build_blocked_workflow_events_for_run(
                 "blocking_source": "unknown",
                 "step_id": None,
                 "step_label": None,
+                "request_id": request_id,
             }
         ),
         normalize_workflow_stream_event(
@@ -268,6 +293,7 @@ def _build_blocked_workflow_events_for_run(
                 "completed_steps": 0,
                 "total_steps": len(prepared.spec.steps),
                 "warning_count": 1,
+                "request_id": request_id,
             }
         ),
     ]

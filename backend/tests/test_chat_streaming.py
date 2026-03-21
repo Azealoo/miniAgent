@@ -221,6 +221,48 @@ async def test_chat_stream_includes_structured_tool_result_and_persists_it(isola
 
 
 @pytest.mark.asyncio
+async def test_chat_stream_records_observability_request_id_metrics_and_trace(isolated_chat_state):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+    from observability import query_metric_records, query_trace_records
+
+    session_id = agent_manager.session_manager.create_session()
+
+    async def fake_astream(_message, _history):
+        yield {"type": "token", "content": "Observable response."}
+        yield {"type": "done"}
+
+    with patch.object(agent_manager, "astream", fake_astream), patch(
+        "api.chat._generate_title_only",
+        new=AsyncMock(return_value=""),
+    ):
+        response = await chat(
+            ChatRequest(message="Observe this turn", session_id=session_id, stream=True)
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    done = next(item for item in payloads if item["type"] == "done")
+    request_id = done["request_id"]
+    assert request_id
+
+    metrics = query_metric_records(isolated_chat_state, request_id=request_id, limit=10)
+    assert {record.metric_name for record in metrics} == {"chat_latency_seconds"}
+    assert {record.attributes["latency_scope"] for record in metrics} == {
+        "user_visible",
+        "backend_execution",
+    }
+    traces = query_trace_records(isolated_chat_state, request_id=request_id, limit=10)
+    assert len(traces) == 1
+    assert traces[0].span_name == "chat_turn"
+
+    history = agent_manager.session_manager.load_session(session_id)
+    assistant_messages = [msg for msg in history if msg["role"] == "assistant"]
+    user_messages = [msg for msg in history if msg["role"] == "user"]
+    assert assistant_messages[0]["request_id"] == request_id
+    assert user_messages[0]["request_id"] == request_id
+
+
+@pytest.mark.asyncio
 async def test_chat_requires_evidence_review_before_streaming_answer_tokens(isolated_chat_state):
     from api.chat import ChatRequest, chat
     from graph.agent import agent_manager
@@ -452,6 +494,8 @@ async def test_chat_stream_includes_workflow_events_and_persists_them(isolated_c
     assert workflow_payloads[0]["contract_version"] == "workflow_event.v1"
     assert workflow_payloads[-1]["lifecycle_status"] == "completed"
     assert workflow_payloads[3]["warning_details"][0]["code"] == "normalized_metadata"
+    workflow_request_ids = {item["request_id"] for item in workflow_payloads}
+    assert len(workflow_request_ids) == 1
 
     history = agent_manager.session_manager.load_session(session_id)
     assistant_messages = [msg for msg in history if msg["role"] == "assistant"]
@@ -459,6 +503,9 @@ async def test_chat_stream_includes_workflow_events_and_persists_them(isolated_c
     assert assistant_messages[0]["workflow_events"][0]["type"] == "workflow_start"
     assert assistant_messages[0]["workflow_events"][-1]["type"] == "workflow_done"
     assert assistant_messages[0]["workflow_events"][3]["warning_details"][0]["field_path"] == "design.condition_summary"
+    assert {
+        item["request_id"] for item in assistant_messages[0]["workflow_events"]
+    } == workflow_request_ids
 
 
 @pytest.mark.asyncio
@@ -491,9 +538,11 @@ async def test_chat_stream_runs_selected_workflow_without_agent_stream(isolated_
         payloads = await _collect_sse_payloads(response)
 
     workflow_payloads = [item for item in payloads if item["type"].startswith("workflow_")]
+    workflow_request_ids = {item["request_id"] for item in workflow_payloads}
     assert workflow_payloads[0]["type"] == "workflow_start"
     assert workflow_payloads[-1]["type"] == "workflow_done"
     assert workflow_payloads[-1]["lifecycle_status"] == "completed"
+    assert len(workflow_request_ids) == 1
     assert any(
         item["type"] == "workflow_step_start" and item["step_id"] == "preflight_check"
         for item in workflow_payloads
@@ -522,6 +571,9 @@ async def test_chat_stream_runs_selected_workflow_without_agent_stream(isolated_
     assert any(call["tool"] == "compliance_preflight" for call in assistant_messages[0]["tool_calls"])
     assert assistant_messages[0]["workflow_events"][0]["type"] == "workflow_start"
     assert assistant_messages[0]["workflow_events"][-1]["lifecycle_status"] == "completed"
+    assert {
+        item["request_id"] for item in assistant_messages[0]["workflow_events"]
+    } == workflow_request_ids
 
 
 @pytest.mark.asyncio
@@ -598,11 +650,13 @@ async def test_chat_stream_blocks_selected_workflow_without_required_inputs(isol
         payloads = await _collect_sse_payloads(response)
 
     workflow_payloads = [item for item in payloads if item["type"].startswith("workflow_")]
+    workflow_request_ids = {item["request_id"] for item in workflow_payloads}
     assert [item["type"] for item in workflow_payloads] == [
         "workflow_start",
         "workflow_blocked",
         "workflow_done",
     ]
+    assert len(workflow_request_ids) == 1
     assert workflow_payloads[1]["reason"].startswith(
         "Missing required workflow inputs: dataset_manifest."
     )
@@ -615,6 +669,13 @@ async def test_chat_stream_blocks_selected_workflow_without_required_inputs(isol
         and "Workflow RNA Seq QC blocked before execution:" in item["content"]
         for item in payloads
     )
+
+    history = agent_manager.session_manager.load_session(session_id)
+    assistant_messages = [msg for msg in history if msg["role"] == "assistant"]
+    assert assistant_messages
+    assert {
+        item["request_id"] for item in assistant_messages[0]["workflow_events"]
+    } == workflow_request_ids
 
 
 @pytest.mark.asyncio

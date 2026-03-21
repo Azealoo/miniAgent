@@ -38,6 +38,7 @@ class WorkflowStreamEventBase(BaseModel):
     contract_version: Literal["workflow_event.v1"] = WORKFLOW_EVENT_CONTRACT_VERSION
     run_id: str
     workflow_id: str
+    request_id: str | None = None
 
 
 class WorkflowStartEvent(WorkflowStreamEventBase):
