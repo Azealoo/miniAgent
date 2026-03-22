@@ -269,17 +269,18 @@ function workflowMeta(
 }
 
 function summarizeWorkflowMeta(summary: ReturnType<typeof getWorkflowSummary>): string {
-  if (summary.status === "running") {
+  if (summary.status === "running" || summary.status === "not_started") {
     if (summary.totalSteps !== null) {
       return `${summary.completedSteps}/${summary.totalSteps} steps`;
     }
     if (summary.observedSteps > 0) {
       return `${summary.completedSteps}/${summary.observedSteps} observed`;
     }
-    return "Running";
+    return summary.status === "not_started" ? "Not started" : "Running";
   }
 
   if (summary.status === "blocked") return "Blocked";
+  if (summary.status === "failed") return "Failed";
   if (summary.status === "completed") {
     if (summary.totalSteps !== null) {
       return `${summary.completedSteps}/${summary.totalSteps} steps`;
@@ -293,6 +294,16 @@ function summarizeWorkflowMeta(summary: ReturnType<typeof getWorkflowSummary>): 
 function describeWorkflow(summary: ReturnType<typeof getWorkflowSummary>): string {
   if (summary.status === "blocked") {
     return summary.blockedReason ?? "Workflow execution is blocked.";
+  }
+
+  if (summary.status === "failed") {
+    return summary.failureReason ?? "Latest workflow run failed.";
+  }
+
+  if (summary.status === "not_started") {
+    return summary.totalSteps !== null
+      ? `Workflow run is ready to begin with ${summary.totalSteps} step${summary.totalSteps === 1 ? "" : "s"}.`
+      : "Workflow run is ready to begin.";
   }
 
   if (summary.status === "running") {

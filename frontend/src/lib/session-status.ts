@@ -5,18 +5,29 @@ import type {
   Message,
   ToolCall,
   ToolResultEnvelope,
+  WorkflowLifecycleStatus,
   WorkflowStreamEvent,
 } from "./types";
+
+export type WorkflowSummaryStatus =
+  | "idle"
+  | "not_started"
+  | "running"
+  | "blocked"
+  | "completed"
+  | "failed";
 
 export interface WorkflowSummary {
   workflowId: string | null;
   workflowName: string | null;
-  status: "idle" | "running" | "blocked" | "completed";
+  status: WorkflowSummaryStatus;
+  lifecycleStatus: WorkflowLifecycleStatus | null;
   totalSteps: number | null;
   completedSteps: number;
   observedSteps: number;
   currentStep: string | null;
   blockedReason: string | null;
+  failureReason: string | null;
   events: WorkflowStreamEvent[];
 }
 
@@ -34,6 +45,43 @@ export interface ReadinessSummary {
   detail: string | null;
 }
 
+function firstMeaningfulText(values: Array<string | null | undefined>): string | null {
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+
+  return null;
+}
+
+function normalizeWorkflowSummaryStatus(
+  lifecycleStatus: WorkflowLifecycleStatus
+): WorkflowSummaryStatus {
+  if (lifecycleStatus === "created" || lifecycleStatus === "preflight_checked") {
+    return "not_started";
+  }
+
+  if (lifecycleStatus === "waiting" || lifecycleStatus === "running") {
+    return "running";
+  }
+
+  if (lifecycleStatus === "failed") {
+    return "failed";
+  }
+
+  if (lifecycleStatus === "blocked") {
+    return "blocked";
+  }
+
+  if (lifecycleStatus === "completed") {
+    return "completed";
+  }
+
+  return "idle";
+}
+
 export function getWorkflowSummary(messages: Message[]): WorkflowSummary {
   const events = messages.flatMap((message) => message.workflow_events ?? []);
   const latestRunId = events.at(-1)?.run_id ?? null;
@@ -46,23 +94,31 @@ export function getWorkflowSummary(messages: Message[]): WorkflowSummary {
   let workflowId: string | null = null;
   let workflowName: string | null = null;
   let status: WorkflowSummary["status"] = "idle";
+  let lifecycleStatus: WorkflowLifecycleStatus | null = null;
   let currentStep: string | null = null;
   let totalSteps: number | null = null;
   let completedSteps = 0;
   let blockedReason: string | null = null;
+  let failureReason: string | null = null;
 
   for (const event of runEvents) {
     workflowId = event.workflow_id;
 
     if (event.type === "workflow_start") {
       workflowName = event.workflow_name;
-      status = event.lifecycle_status === "blocked" ? "blocked" : "running";
+      lifecycleStatus = event.lifecycle_status;
+      status = normalizeWorkflowSummaryStatus(event.lifecycle_status);
+      totalSteps =
+        typeof event.total_steps === "number"
+          ? event.total_steps
+          : (event.steps?.length ?? totalSteps);
     }
 
     if (event.type === "workflow_step_start") {
       startedSteps.set(event.step_id, event.step_label);
       currentStep = event.step_label;
       status = "running";
+      lifecycleStatus = "running";
     }
 
     if (event.type === "workflow_step_end") {
@@ -75,22 +131,46 @@ export function getWorkflowSummary(messages: Message[]): WorkflowSummary {
         currentStep = null;
       }
 
-      if (event.status === "blocked") {
+      if (event.status === "failed") {
+        status = "failed";
+        lifecycleStatus = "failed";
+        failureReason =
+          firstMeaningfulText([
+            ...event.errors,
+            ...event.error_details.map((detail) => detail.message),
+          ]) ?? `${event.step_label} failed.`;
+      } else if (event.status === "blocked") {
         status = "blocked";
+        lifecycleStatus = "blocked";
+        blockedReason =
+          blockedReason ??
+          firstMeaningfulText([
+            ...event.errors,
+            ...event.error_details.map((detail) => detail.message),
+          ]);
+      } else if (event.status === "waiting") {
+        status = "running";
+        lifecycleStatus = "waiting";
+      } else if (event.status === "completed" && status !== "completed") {
+        status = "running";
+        lifecycleStatus = "running";
       }
     }
 
     if (event.type === "workflow_blocked") {
       status = "blocked";
+      lifecycleStatus = "blocked";
       currentStep = event.step_label ?? currentStep;
       blockedReason = event.reason;
     }
 
     if (event.type === "workflow_done") {
-      status = event.lifecycle_status === "blocked" ? "blocked" : "completed";
+      lifecycleStatus = event.lifecycle_status;
+      status = normalizeWorkflowSummaryStatus(event.lifecycle_status);
       totalSteps = event.total_steps;
       completedSteps = event.completed_steps;
       currentStep = null;
+      blockedReason = event.blocked_reason ?? blockedReason;
     }
   }
 
@@ -103,11 +183,13 @@ export function getWorkflowSummary(messages: Message[]): WorkflowSummary {
     workflowId,
     workflowName,
     status,
+    lifecycleStatus,
     totalSteps,
     completedSteps: totalSteps === null ? observedCompletedSteps : completedSteps,
     observedSteps,
     currentStep,
     blockedReason,
+    failureReason,
     events: runEvents,
   };
 }
@@ -121,7 +203,11 @@ export function getLatestSelectedWorkflow(messages: Message[]): string | null {
   }
 
   const workflowSummary = getWorkflowSummary(messages);
-  if (workflowSummary.status === "running" || workflowSummary.status === "blocked") {
+  if (
+    workflowSummary.status === "not_started" ||
+    workflowSummary.status === "running" ||
+    workflowSummary.status === "blocked"
+  ) {
     return workflowSummary.workflowId;
   }
 
@@ -157,7 +243,18 @@ export function getReadinessSummary(
     };
   }
 
-  if (workflowSummary.status === "running") {
+  if (workflowSummary.status === "failed") {
+    return {
+      state: "blocked",
+      label: "Failed",
+      detail: workflowSummary.failureReason ?? "Workflow execution failed.",
+    };
+  }
+
+  if (
+    workflowSummary.status === "not_started" ||
+    workflowSummary.status === "running"
+  ) {
     return {
       state: "reviewing",
       label: "Reviewing",

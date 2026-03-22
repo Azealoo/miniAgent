@@ -112,24 +112,102 @@ function formatFileMeta(path: string, meta: string) {
   return [meta, shortenPath(path, 3)].filter(Boolean).join(" · ");
 }
 
-function getProgressLabel(summary: ReturnType<typeof getWorkflowSummary>) {
-  if (summary.totalSteps !== null) {
-    return `${summary.completedSteps}/${summary.totalSteps} steps`;
+function getRunStatusLabel(summary: ReturnType<typeof getWorkflowSummary>) {
+  if (summary.status === "not_started") {
+    return "Not started";
   }
 
-  if (summary.observedSteps > 0) {
-    return `${summary.completedSteps} completed`;
+  if (summary.status === "running") {
+    return "In progress";
   }
 
   if (summary.status === "blocked") {
     return "Blocked";
   }
 
+  if (summary.status === "failed") {
+    return "Failed";
+  }
+
   if (summary.status === "completed") {
     return "Completed";
   }
 
-  return "No run";
+  return "Idle";
+}
+
+function getRunStatusClass(summary: ReturnType<typeof getWorkflowSummary>) {
+  if (summary.status === "completed") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  }
+
+  if (summary.status === "blocked" || summary.status === "failed") {
+    return "border-rose-200 bg-rose-50 text-rose-700";
+  }
+
+  if (summary.status === "not_started") {
+    return "border-slate-200 bg-slate-50 text-slate-600";
+  }
+
+  return "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.1)] text-[var(--apex-accent-strong)]";
+}
+
+function getRunSurfaceClass(summary: ReturnType<typeof getWorkflowSummary>) {
+  if (summary.status === "completed") {
+    return "border-emerald-100 bg-[linear-gradient(180deg,rgba(244,251,247,0.98),rgba(237,249,241,0.98))]";
+  }
+
+  if (summary.status === "blocked" || summary.status === "failed") {
+    return "border-rose-100 bg-[linear-gradient(180deg,rgba(255,247,247,0.98),rgba(254,241,241,0.98))]";
+  }
+
+  if (summary.status === "not_started") {
+    return "border-slate-200 bg-[linear-gradient(180deg,rgba(249,250,251,0.98),rgba(245,247,249,0.98))]";
+  }
+
+  return "border-[rgba(35,130,83,0.14)] bg-[linear-gradient(180deg,rgba(242,250,245,0.98),rgba(234,247,239,0.98))]";
+}
+
+function getStepCountLabel(summary: ReturnType<typeof getWorkflowSummary>) {
+  if (summary.totalSteps !== null) {
+    return `${summary.completedSteps}/${summary.totalSteps}`;
+  }
+
+  if (summary.observedSteps > 0) {
+    return `${summary.completedSteps}/${summary.observedSteps}`;
+  }
+
+  return "0";
+}
+
+function getProgressLabel(summary: ReturnType<typeof getWorkflowSummary>) {
+  if (summary.currentStep) {
+    return summary.currentStep;
+  }
+
+  if (summary.status === "not_started") {
+    return summary.lifecycleStatus === "preflight_checked"
+      ? "Preflight checked"
+      : "Waiting for first step";
+  }
+
+  if (summary.status === "running") {
+    return summary.observedSteps > 0 ? "Awaiting next step" : "Starting workflow";
+  }
+
+  if (summary.status === "blocked") {
+    return "Action required";
+  }
+
+  if (summary.status === "failed") {
+    return "Run halted";
+  }
+
+  if (summary.status === "completed") {
+    return "All steps finished";
+  }
+
+  return null;
 }
 
 function getRunDetail(summary: ReturnType<typeof getWorkflowSummary>) {
@@ -141,12 +219,26 @@ function getRunDetail(summary: ReturnType<typeof getWorkflowSummary>) {
     return summary.blockedReason;
   }
 
+  if (summary.failureReason) {
+    return summary.failureReason;
+  }
+
+  if (summary.status === "not_started") {
+    return summary.totalSteps !== null
+      ? `Run is staged with ${summary.totalSteps} step${summary.totalSteps === 1 ? "" : "s"} and waiting to begin.`
+      : "Run is staged and waiting for the first workflow step.";
+  }
+
   if (summary.status === "completed") {
     return "Run finished.";
   }
 
   if (summary.status === "running") {
     return "Waiting for the next step update.";
+  }
+
+  if (summary.status === "failed") {
+    return "The latest workflow run failed.";
   }
 
   return "No active workflow step yet.";
@@ -395,8 +487,11 @@ export default function InspectorPanel() {
   const activeSession =
     sessions.find((session) => session.id === currentSessionId) ?? null;
   const workflowSummary = getWorkflowSummary(messages);
+  const hasActiveRun = workflowSummary.events.length > 0;
   const artifactItems = collectArtifacts(workflowSummary.events);
   const sourceItems = collectSources(messages);
+  const runStatusLabel = getRunStatusLabel(workflowSummary);
+  const stepCountLabel = getStepCountLabel(workflowSummary);
   const progressLabel = getProgressLabel(workflowSummary);
   const runDetail = getRunDetail(workflowSummary);
 
@@ -567,24 +662,53 @@ export default function InspectorPanel() {
     <div className="space-y-2">
       <InspectorCard
         title="Active Run"
-        meta={workflowSummary.workflowId ?? (workflowSummary.workflowName ? "Current workflow" : undefined)}
+        meta={workflowSummary.workflowId ?? (hasActiveRun ? "Current workflow run" : undefined)}
       >
-        {workflowSummary.workflowName ? (
-          <div className="space-y-2">
+        {hasActiveRun ? (
+          <div
+            className={cn(
+              "space-y-2 rounded-[12px] border px-2.5 py-2.5",
+              getRunSurfaceClass(workflowSummary)
+            )}
+          >
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <p className="truncate text-[12px] font-semibold text-slate-800">
-                  {workflowSummary.workflowName}
+                  {workflowSummary.workflowName ?? workflowSummary.workflowId ?? "Workflow run"}
                 </p>
-                <p className="mt-0.5 text-[10px] uppercase tracking-[0.16em] text-slate-400">
-                  Progress
-                </p>
+                {progressLabel ? (
+                  <p className="mt-0.5 truncate text-[10px] leading-4 text-slate-500">
+                    {progressLabel}
+                  </p>
+                ) : null}
               </div>
-              <p className="shrink-0 text-[12px] font-semibold text-slate-700">
-                {progressLabel}
-              </p>
+              <span
+                className={cn(
+                  "inline-flex shrink-0 items-center rounded-full border px-2 py-1 text-[10px] font-semibold",
+                  getRunStatusClass(workflowSummary)
+                )}
+              >
+                {runStatusLabel}
+              </span>
             </div>
-            <p className="text-[11px] leading-5 text-slate-500">{runDetail}</p>
+
+            <div className="grid grid-cols-2 gap-1.5">
+              <MiniStat
+                label="Steps"
+                value={stepCountLabel}
+                accent={workflowSummary.status === "running"}
+              />
+              <MiniStat
+                label="State"
+                value={runStatusLabel}
+                accent={
+                  workflowSummary.status === "running" ||
+                  workflowSummary.status === "completed"
+                }
+              />
+            </div>
+
+            <p className="text-[11px] leading-5 text-slate-600">{runDetail}</p>
           </div>
         ) : (
           <EmptyState>

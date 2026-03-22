@@ -183,7 +183,7 @@ function workflowTone(
   selectedWorkflow: string | null,
   selectionPending: boolean
 ): StatusTone {
-  if (summary.status === "blocked") return "danger";
+  if (summary.status === "blocked" || summary.status === "failed") return "danger";
   if (workflowLabel(summary, selectedWorkflow, selectionPending)) return "accent";
   return "neutral";
 }
@@ -210,11 +210,15 @@ function describeWorkflow(
   const statusLabel =
     summary.status === "blocked"
       ? "blocked"
-      : summary.status === "running"
-        ? "running"
-        : summary.status === "completed"
-          ? "completed"
-          : "idle";
+      : summary.status === "failed"
+        ? "failed"
+        : summary.status === "not_started"
+          ? "not started"
+          : summary.status === "running"
+            ? "in progress"
+            : summary.status === "completed"
+              ? "completed"
+              : "idle";
   const parts = [`${label} is ${statusLabel}.`];
 
   if (summary.currentStep) {
@@ -231,6 +235,10 @@ function describeWorkflow(
 
   if (summary.blockedReason) {
     parts.push(summary.blockedReason);
+  }
+
+  if (summary.failureReason) {
+    parts.push(summary.failureReason);
   }
 
   return parts.join(" ");
