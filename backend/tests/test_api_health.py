@@ -910,6 +910,99 @@ class TestAuditEndpoints:
 
 
 class TestTokenEndpoints:
+    def test_session_tokens_includes_usage_breakdown(self, isolated_api_state):
+        from api.tokens import _count, session_tokens
+        from graph.agent import agent_manager
+
+        session_id = agent_manager.session_manager.create_session()
+        agent_manager.session_manager.save_message(session_id, "user", "Plan a CRISPR screen")
+        agent_manager.session_manager.save_message(
+            session_id,
+            "assistant",
+            "I found the latest workflow artifacts.",
+            tool_calls=[
+                {
+                    "tool": "read_file",
+                    "input": "artifacts/rnaseq-qc/run.json",
+                    "output": "{\"status\":\"completed\"}",
+                }
+            ],
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "DEEPSEEK_MODEL": "deepseek-chat",
+                "MODEL_CONTEXT_WINDOW_TOKENS": "4096",
+            },
+            clear=False,
+        ):
+            result = session_tokens(session_id)
+
+        expected_user_tokens = _count("Plan a CRISPR screen")
+        expected_assistant_tokens = _count("I found the latest workflow artifacts.")
+        expected_tool_tokens = (
+            _count("artifacts/rnaseq-qc/run.json") + _count("{\"status\":\"completed\"}")
+        )
+
+        assert result["session_id"] == session_id
+        assert result["system_tokens"] > 0
+        assert result["message_tokens"] == expected_user_tokens + expected_assistant_tokens
+        assert result["total_tokens"] == result["system_tokens"] + result["message_tokens"]
+        assert result["input_tokens"] == result["system_tokens"] + expected_user_tokens
+        assert result["output_tokens"] == expected_assistant_tokens
+        assert result["tool_tokens"] == expected_tool_tokens
+        assert result["tracked_total_tokens"] == (
+            result["input_tokens"] + result["output_tokens"] + result["tool_tokens"]
+        )
+        assert result["context_window_tokens"] == 4096
+        assert result["context_window_remaining_tokens"] == 4096 - result["total_tokens"]
+        assert result["model_name"] == "deepseek-chat"
+
+    def test_session_tokens_include_compressed_context_in_prompt_budget(
+        self, isolated_api_state
+    ):
+        from api.tokens import _count, session_tokens
+        from graph.agent import agent_manager
+
+        session_id = agent_manager.session_manager.create_session()
+        agent_manager.session_manager.save_message(session_id, "user", "First question")
+        agent_manager.session_manager.save_message(session_id, "assistant", "First answer")
+        agent_manager.session_manager.save_message(session_id, "user", "Second question")
+        agent_manager.session_manager.save_message(session_id, "assistant", "Second answer")
+
+        compressed_summary = "Earlier work summary"
+        agent_manager.session_manager.compress_history(session_id, compressed_summary, 2)
+
+        summary_wrapper = (
+            "[Summary of earlier conversation — treat as background context]\n"
+            f"{compressed_summary}"
+        )
+        expected_summary_tokens = _count(summary_wrapper)
+        expected_user_tokens = _count("Second question")
+        expected_assistant_tokens = _count("Second answer")
+
+        with patch.dict(
+            os.environ,
+            {
+                "DEEPSEEK_MODEL": "deepseek-chat",
+                "MODEL_CONTEXT_WINDOW_TOKENS": "4096",
+            },
+            clear=False,
+        ):
+            result = session_tokens(session_id)
+
+        assert result["message_tokens"] == (
+            expected_summary_tokens + expected_user_tokens + expected_assistant_tokens
+        )
+        assert result["input_tokens"] == (
+            result["system_tokens"] + expected_summary_tokens + expected_user_tokens
+        )
+        assert result["output_tokens"] == expected_assistant_tokens
+        assert result["tool_tokens"] == 0
+        assert result["total_tokens"] == result["system_tokens"] + result["message_tokens"]
+        assert result["context_window_remaining_tokens"] == 4096 - result["total_tokens"]
+
     def test_files_tokens_counts_allowed_file(self, isolated_api_state):
         from api.tokens import FilesTokenRequest, files_tokens
 

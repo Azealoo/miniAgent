@@ -1,6 +1,7 @@
 import type {
   Session,
   Skill,
+  SkillRegistryEntry,
   TokenStats,
   ToolResultEnvelope,
   WorkflowStreamEvent,
@@ -78,6 +79,9 @@ export const saveFile = (path: string, content: string) =>
   });
 
 export const listSkills = () => req<Skill[]>("/api/skills");
+
+export const listSkillsRegistry = () =>
+  req<SkillRegistryEntry[]>("/api/skills/registry");
 
 // ────────────────────────────────────────────────────────────────
 // Tokens

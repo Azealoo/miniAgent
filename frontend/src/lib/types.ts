@@ -381,9 +381,38 @@ export interface TokenStats {
   system_tokens: number;
   message_tokens: number;
   total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  tool_tokens: number;
+  tracked_total_tokens: number;
+  context_window_tokens: number | null;
+  context_window_remaining_tokens: number | null;
+  model_name: string;
 }
 
 export interface Skill {
   name: string;
   path: string;
+  category?: string;
+  stage?: string;
+}
+
+export interface SkillRegistryEntry {
+  name: string;
+  description: string;
+  location: string;
+  source_path: string;
+  category: string;
+  version: string;
+  tags: string[];
+  aliases: string[];
+  requires_tools: string[];
+  requires_network: boolean;
+  user_invocable: boolean;
+  species: string;
+  modality: string;
+  stage: string;
+  stability: string;
+  safety_level: string;
+  enabled: boolean;
 }

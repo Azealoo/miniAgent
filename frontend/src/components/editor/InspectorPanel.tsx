@@ -11,17 +11,23 @@ import {
 import {
   BookOpen,
   Brain,
+  Copy,
+  Download,
   FileText,
   Hash,
+  Package,
+  Plus,
+  Pencil,
   RefreshCw,
   Save,
   Search,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import {
   getRawFileUrl,
   getSessionTokens,
-  listSkills,
+  listSkillsRegistry,
   readFile,
   saveFile,
 } from "@/lib/api";
@@ -40,7 +46,7 @@ import { cn } from "@/lib/utils";
 import type {
   ConfidenceLevel,
   Message,
-  Skill,
+  SkillRegistryEntry,
   TokenStats,
   ToolResultEnvelope,
   WorkflowArtifactScope,
@@ -118,6 +124,30 @@ type RetrievedSourceSummary = {
   lastSeenOrder: number;
 };
 
+type MemoryInspectorItemKind = "bullet" | "numbered" | "block";
+
+type MemoryInspectorItem = {
+  id: string;
+  namespace: string;
+  key: string;
+  value: string;
+  kind: MemoryInspectorItemKind;
+  rawLines: string[];
+};
+
+type ParsedMemoryDocument = {
+  title: string;
+  items: MemoryInspectorItem[];
+};
+
+type MemoryItemDraft = {
+  mode: "create" | "edit";
+  targetId: string | null;
+  namespace: string;
+  key: string;
+  value: string;
+};
+
 function humanizeToken(value?: string | null): string | null {
   if (!value) return null;
   return value.replaceAll("_", " ").replaceAll("-", " ");
@@ -166,6 +196,481 @@ function uniqueStrings(values: Array<string | null | undefined>): string[] {
 
 function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function formatWorkflowEvent(event: WorkflowStreamEvent) {
+  switch (event.type) {
+    case "workflow_start":
+      return `${event.workflow_name} started`;
+    case "workflow_done":
+      return `${event.workflow_id} ${event.lifecycle_status}`;
+    case "workflow_blocked":
+      return `${event.workflow_id} blocked: ${event.reason}`;
+    case "workflow_step_start":
+      return `${event.step_label} running`;
+    case "workflow_step_end":
+      return `${event.step_label} ${event.status}`;
+    case "workflow_artifact":
+      return `${event.scope}: ${event.artifact.path}`;
+  }
+}
+
+function buildExportMarkdown(title: string, messages: Message[]) {
+  const lines: string[] = [
+    `# ${title}`,
+    "",
+    `Exported: ${new Date().toISOString()}`,
+    "",
+  ];
+
+  messages.forEach((message) => {
+    lines.push(`## ${message.role === "user" ? "User" : "BioAPEX"}`);
+    lines.push(message.content || "(empty response)");
+
+    if (message.retrievals?.length) {
+      lines.push("");
+      lines.push("Retrieved sources:");
+      message.retrievals.forEach((result) => {
+        lines.push(`- ${result.source} (score ${result.score.toFixed(3)})`);
+      });
+    }
+
+    if (message.workflow_events?.length) {
+      lines.push("");
+      lines.push("Workflow events:");
+      message.workflow_events.forEach((event) => {
+        lines.push(`- ${formatWorkflowEvent(event)}`);
+      });
+    }
+
+    if (message.tool_calls?.length) {
+      lines.push("");
+      lines.push("Tool calls:");
+      message.tool_calls.forEach((call) => {
+        lines.push(`- ${call.tool}`);
+      });
+    }
+
+    lines.push("");
+  });
+
+  return `${lines.join("\n").trim()}\n`;
+}
+
+function exportFilename(title: string): string {
+  return (
+    title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
+    "bioapex-session"
+  );
+}
+
+function formatCompactTokenValue(value: number): string {
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
+  }
+
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`;
+  }
+
+  return value.toString();
+}
+
+function shortIdentifier(value: string, prefixLength = 8, suffixLength = 4): string {
+  if (value.length <= prefixLength + suffixLength + 1) {
+    return value;
+  }
+
+  return `${value.slice(0, prefixLength)}…${value.slice(-suffixLength)}`;
+}
+
+function normalizeMarkdownInline(value: string): string {
+  return value
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[(.+?)\]\(.+?\)/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function deriveMemoryKeyAndValue(text: string): {
+  key: string;
+  value: string;
+} {
+  const normalized = normalizeMarkdownInline(text);
+
+  if (!normalized) {
+    return {
+      key: "Memory note",
+      value: "",
+    };
+  }
+
+  const colonMatch = normalized.match(/^([^:]{1,48}):\s*(.+)$/);
+  if (colonMatch) {
+    return {
+      key: colonMatch[1].trim(),
+      value: colonMatch[2].trim(),
+    };
+  }
+
+  if (normalized.length <= 56) {
+    return {
+      key: normalized,
+      value: "",
+    };
+  }
+
+  const sentence = normalized.split(/[.!?](?:\s|$)/)[0]?.trim();
+  if (sentence && sentence.length <= 48) {
+    return {
+      key: sentence,
+      value: normalized,
+    };
+  }
+
+  return {
+    key: compactText(normalized, 42) ?? "Memory note",
+    value: normalized,
+  };
+}
+
+function buildMemoryItemId(namespace: string, key: string, index: number): string {
+  const normalizedNamespace = namespace
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const normalizedKey = key
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return `${normalizedNamespace || "memory"}-${normalizedKey || "item"}-${index}`;
+}
+
+function extractMemoryItemText(rawLines: string[], kind: MemoryInspectorItemKind): string {
+  if (rawLines.length === 0) {
+    return "";
+  }
+
+  if (kind === "block") {
+    return rawLines.map((line) => line.trim()).join(" ").trim();
+  }
+
+  const firstLine = rawLines[0]?.trim() ?? "";
+  const firstLineWithoutMarker =
+    kind === "numbered"
+      ? firstLine.replace(/^\d+\.\s+/, "")
+      : firstLine.replace(/^-\s+/, "");
+  const continuation = rawLines
+    .slice(1)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  return [firstLineWithoutMarker, ...continuation].join(" ").trim();
+}
+
+function renderMemoryItemLines(
+  kind: MemoryInspectorItemKind,
+  key: string,
+  value: string
+): string[] {
+  const normalizedKey = key.trim() || "Memory note";
+  const normalizedValue = value.trim();
+  const baseText =
+    normalizedValue && normalizedValue.toLowerCase() !== normalizedKey.toLowerCase()
+      ? `**${normalizedKey}**: ${normalizedValue}`
+      : normalizedValue || normalizedKey;
+  const textLines = baseText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (textLines.length === 0) {
+    return kind === "block" ? ["Memory note"] : ["- Memory note"];
+  }
+
+  if (kind === "block") {
+    return textLines;
+  }
+
+  const marker = kind === "numbered" ? "1." : "-";
+  return textLines.map((line, index) =>
+    index === 0 ? `${marker} ${line}` : `  ${line}`
+  );
+}
+
+function parseMemoryDocument(content: string): ParsedMemoryDocument {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const items: MemoryInspectorItem[] = [];
+  let title = "Long-term Memory";
+  let currentNamespace = "General";
+  let itemIndex = 0;
+
+  const pushItem = (rawLines: string[], kind: MemoryInspectorItemKind) => {
+    const normalized = extractMemoryItemText(rawLines, kind);
+    if (!normalized) {
+      return;
+    }
+
+    const { key, value } = deriveMemoryKeyAndValue(normalized);
+    items.push({
+      id: buildMemoryItemId(currentNamespace, key, itemIndex),
+      namespace: currentNamespace,
+      key,
+      value,
+      kind,
+      rawLines,
+    });
+    itemIndex += 1;
+  };
+
+  let lineIndex = 0;
+
+  while (lineIndex < lines.length) {
+    const line = lines[lineIndex];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      lineIndex += 1;
+      continue;
+    }
+
+    if (trimmed.startsWith("# ")) {
+      title = trimmed.replace(/^#\s+/, "").trim() || title;
+      lineIndex += 1;
+      continue;
+    }
+
+    if (trimmed.startsWith("## ")) {
+      currentNamespace = trimmed.replace(/^##\s+/, "").trim() || "General";
+      lineIndex += 1;
+      continue;
+    }
+
+    if (trimmed.match(/^-\s+/) || trimmed.match(/^\d+\.\s+/)) {
+      const kind: MemoryInspectorItemKind = trimmed.match(/^\d+\.\s+/)
+        ? "numbered"
+        : "bullet";
+      const rawLines = [line];
+      lineIndex += 1;
+
+      while (lineIndex < lines.length) {
+        const nextLine = lines[lineIndex];
+        const nextTrimmed = nextLine.trim();
+        if (
+          !nextTrimmed ||
+          nextTrimmed.startsWith("# ") ||
+          nextTrimmed.startsWith("## ") ||
+          nextTrimmed.match(/^-\s+/) ||
+          nextTrimmed.match(/^\d+\.\s+/)
+        ) {
+          break;
+        }
+        if (nextLine.match(/^\s+/)) {
+          rawLines.push(nextLine);
+          lineIndex += 1;
+          continue;
+        }
+        break;
+      }
+
+      pushItem(rawLines, kind);
+      continue;
+    }
+
+    const rawLines = [line];
+    lineIndex += 1;
+    while (lineIndex < lines.length) {
+      const nextLine = lines[lineIndex];
+      const nextTrimmed = nextLine.trim();
+      if (
+        !nextTrimmed ||
+        nextTrimmed.startsWith("# ") ||
+        nextTrimmed.startsWith("## ") ||
+        nextTrimmed.match(/^-\s+/) ||
+        nextTrimmed.match(/^\d+\.\s+/)
+      ) {
+        break;
+      }
+      rawLines.push(nextLine);
+      lineIndex += 1;
+    }
+
+    pushItem(rawLines, "block");
+  }
+
+  return {
+    title,
+    items,
+  };
+}
+
+function serializeMemoryDocument(document: ParsedMemoryDocument): string {
+  const sections = new Map<string, MemoryInspectorItem[]>();
+
+  document.items.forEach((item) => {
+    const namespace = item.namespace.trim() || "General";
+    const existing = sections.get(namespace);
+    if (existing) {
+      existing.push(item);
+    } else {
+      sections.set(namespace, [item]);
+    }
+  });
+
+  const lines = [`# ${document.title || "Long-term Memory"}`, ""];
+
+  if (sections.size === 0) {
+    lines.push("## General", "");
+  }
+
+  sections.forEach((sectionItems, namespace) => {
+    lines.push(`## ${namespace}`);
+
+    sectionItems.forEach((item) => {
+      const key = normalizeMarkdownInline(item.key);
+      const value = normalizeMarkdownInline(item.value);
+      const rawLines =
+        item.rawLines.length > 0
+          ? item.rawLines
+          : renderMemoryItemLines(item.kind, key, value);
+
+      rawLines.forEach((line) => lines.push(line));
+    });
+
+    lines.push("");
+  });
+
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function upsertMemoryDocumentItem(
+  document: ParsedMemoryDocument,
+  draft: MemoryItemDraft
+): ParsedMemoryDocument {
+  const namespace = draft.namespace.trim() || "General";
+  const key = draft.key.trim() || "Memory note";
+  const value = draft.value.trim();
+  const sourceItem =
+    draft.mode === "edit" && draft.targetId
+      ? document.items.find((item) => item.id === draft.targetId) ?? null
+      : null;
+  const nextKind = sourceItem?.kind ?? "bullet";
+  const shouldPreserveRawLines =
+    sourceItem !== null &&
+    sourceItem.namespace === namespace &&
+    sourceItem.key === key &&
+    sourceItem.value === value;
+  const nextItem: MemoryInspectorItem = {
+    id:
+      draft.mode === "edit" && draft.targetId
+        ? draft.targetId
+        : buildMemoryItemId(namespace, key, document.items.length),
+    namespace,
+    key,
+    value,
+    kind: nextKind,
+    rawLines: shouldPreserveRawLines
+      ? [...(sourceItem?.rawLines ?? [])]
+      : renderMemoryItemLines(nextKind, key, value),
+  };
+
+  if (draft.mode === "edit" && draft.targetId) {
+    return {
+      ...document,
+      items: document.items.map((item) =>
+        item.id === draft.targetId ? nextItem : item
+      ),
+    };
+  }
+
+  return {
+    ...document,
+    items: [...document.items, nextItem],
+  };
+}
+
+function duplicateMemoryDocumentItem(
+  document: ParsedMemoryDocument,
+  itemId: string
+): ParsedMemoryDocument {
+  const index = document.items.findIndex((item) => item.id === itemId);
+  if (index === -1) {
+    return document;
+  }
+
+  const source = document.items[index];
+  const duplicate: MemoryInspectorItem = {
+    ...source,
+    id: buildMemoryItemId(source.namespace, `${source.key} copy`, document.items.length),
+    rawLines: [...source.rawLines],
+  };
+  const nextItems = [...document.items];
+  nextItems.splice(index + 1, 0, duplicate);
+
+  return {
+    ...document,
+    items: nextItems,
+  };
+}
+
+function removeMemoryDocumentItem(
+  document: ParsedMemoryDocument,
+  itemId: string
+): ParsedMemoryDocument {
+  return {
+    ...document,
+    items: document.items.filter((item) => item.id !== itemId),
+  };
+}
+
+function groupMemoryItemsByNamespace(items: MemoryInspectorItem[]) {
+  const groups = new Map<string, MemoryInspectorItem[]>();
+
+  items.forEach((item) => {
+    const namespace = item.namespace.trim() || "General";
+    const existing = groups.get(namespace);
+    if (existing) {
+      existing.push(item);
+    } else {
+      groups.set(namespace, [item]);
+    }
+  });
+
+  return Array.from(groups.entries()).map(([namespace, sectionItems]) => ({
+    namespace,
+    items: sectionItems,
+  }));
+}
+
+function getMemoryItemSummary(item: MemoryInspectorItem): string {
+  if (item.value) {
+    return compactText(item.value, 120) ?? item.value;
+  }
+
+  return compactText(item.key, 120) ?? item.key;
+}
+
+function getSkillVersionLabel(skill: SkillRegistryEntry): string {
+  return skill.version.trim() || "Local";
+}
+
+function getSkillMetadata(skill: SkillRegistryEntry): string[] {
+  return uniqueStrings([
+    skill.enabled ? "Enabled" : "Available",
+    humanizeLabel(skill.category),
+    humanizeLabel(skill.stage),
+    humanizeLabel(skill.stability),
+  ]);
+}
+
+function getUsageShare(value: number, total: number): string {
+  if (total <= 0) {
+    return "0%";
+  }
+
+  return `${Math.round((value / total) * 100)}%`;
 }
 
 function getFileExtension(path: string): string | null {
@@ -1118,14 +1623,123 @@ function ActionButton({
   );
 }
 
+function IconActionButton({
+  onClick,
+  disabled,
+  title,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={cn(
+        "inline-flex h-8 w-8 items-center justify-center rounded-[10px] border transition-colors",
+        disabled
+          ? "cursor-not-allowed border-[var(--shell-border)] bg-[rgba(247,249,245,0.92)] text-slate-400"
+          : "border-[var(--shell-border)] bg-white/85 text-slate-600 hover:bg-[var(--panel-soft)] hover:text-slate-800"
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function PrimaryActionButton({
+  onClick,
+  disabled,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-semibold transition-colors",
+        disabled
+          ? "cursor-not-allowed bg-slate-200 text-slate-400"
+          : "bg-[var(--apex-accent)] text-white hover:bg-[var(--apex-accent-strong)]"
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function WideActionButton({
+  onClick,
+  disabled,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "inline-flex w-full items-center justify-center gap-1.5 rounded-full border px-3 py-2 text-[11px] font-semibold transition-colors",
+        disabled
+          ? "cursor-not-allowed border-[var(--shell-border)] bg-[rgba(247,249,245,0.92)] text-slate-400"
+          : "border-[rgba(211,219,210,0.92)] bg-white text-slate-700 shadow-[0_1px_2px_rgba(32,43,35,0.03)] hover:border-[rgba(35,130,83,0.2)] hover:bg-[var(--panel-soft)] hover:text-[var(--apex-accent-strong)]"
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function MetaBadge({
+  children,
+  tone = "neutral",
+}: {
+  children: ReactNode;
+  tone?: "neutral" | "accent" | "success" | "warning";
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em]",
+        tone === "accent" &&
+          "border-[rgba(35,130,83,0.16)] bg-[rgba(35,130,83,0.08)] text-[var(--apex-accent-strong)]",
+        tone === "success" &&
+          "border-emerald-200 bg-emerald-50 text-emerald-700",
+        tone === "warning" &&
+          "border-amber-200 bg-amber-50 text-amber-700",
+        tone === "neutral" &&
+          "border-[rgba(211,219,210,0.8)] bg-[rgba(251,252,248,0.92)] text-slate-500"
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
 function MiniStat({
   label,
   value,
   accent = false,
+  detail,
 }: {
   label: string;
   value: string;
   accent?: boolean;
+  detail?: string;
 }) {
   return (
     <div
@@ -1152,6 +1766,9 @@ function MiniStat({
       >
         {value}
       </p>
+      {detail ? (
+        <p className="mt-1 text-[10px] leading-4 text-slate-500">{detail}</p>
+      ) : null}
     </div>
   );
 }
@@ -1452,21 +2069,27 @@ export default function InspectorPanel() {
     currentSessionId,
     sessions,
     messages,
+    isStreaming,
     ragMode,
     inspectorTab,
     inspectorPreviewPath,
     setInspectorTab,
     openInspectorPath,
     clearInspectorPath,
+    primeDraftMessage,
   } = useApp();
 
-  const [skills, setSkills] = useState<Skill[]>([]);
+  const [skills, setSkills] = useState<SkillRegistryEntry[]>([]);
   const [tokens, setTokens] = useState<TokenStats | null>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
   const [memoryContent, setMemoryContent] = useState("");
   const [savedMemoryContent, setSavedMemoryContent] = useState("");
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memorySaving, setMemorySaving] = useState(false);
   const [memorySaveMsg, setMemorySaveMsg] = useState("");
+  const [memoryActionMsg, setMemoryActionMsg] = useState("");
+  const [memoryItemDraft, setMemoryItemDraft] = useState<MemoryItemDraft | null>(null);
+  const [memoryFileOpen, setMemoryFileOpen] = useState(false);
   const [memoryEditorOpen, setMemoryEditorOpen] = useState(false);
   const [skillContent, setSkillContent] = useState("");
   const [savedSkillContent, setSavedSkillContent] = useState("");
@@ -1474,6 +2097,7 @@ export default function InspectorPanel() {
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillSaving, setSkillSaving] = useState(false);
   const [skillSaveMsg, setSkillSaveMsg] = useState("");
+  const [skillActionMsg, setSkillActionMsg] = useState("");
   const [skillEditorOpen, setSkillEditorOpen] = useState(false);
   const [previewContent, setPreviewContent] = useState("");
   const [previewError, setPreviewError] = useState("");
@@ -1483,13 +2107,22 @@ export default function InspectorPanel() {
   >({});
   const memoryRequestIdRef = useRef(0);
   const skillsRequestIdRef = useRef(0);
+  const skillFileRequestIdRef = useRef(0);
   const previewRequestIdRef = useRef(0);
   const sourceMetadataRequestIdRef = useRef(0);
+  const hasLoadedMemoryRef = useRef(false);
+  const hasLoadedSkillsRef = useRef(false);
 
   const isMemoryDirty = memoryContent !== savedMemoryContent;
   const isSkillDirty = skillContent !== savedSkillContent;
   const activeSession =
     sessions.find((session) => session.id === currentSessionId) ?? null;
+  const parsedMemoryDocument = parseMemoryDocument(memoryContent);
+  const memoryItems = parsedMemoryDocument.items;
+  const memoryNamespaces = uniqueStrings([
+    ...memoryItems.map((item) => item.namespace),
+    memoryItemDraft?.namespace ?? null,
+  ]);
   const workflowSummary = getWorkflowSummary(messages);
   const hasActiveRun = workflowSummary.events.length > 0;
   const artifactItems = collectArtifacts(workflowSummary.events);
@@ -1511,30 +2144,76 @@ export default function InspectorPanel() {
   const previewRawUrl = inspectorPreviewPath
     ? getRawFileUrl(inspectorPreviewPath)
     : null;
+  const selectedSkill =
+    skills.find((skill) => skill.location === selectedSkillPath) ?? null;
+  const activeSkills = skills.filter((skill) => skill.enabled);
+  const availableSkills = skills.filter((skill) => !skill.enabled);
+  const trackedTotalTokens = tokens?.tracked_total_tokens ?? tokens?.total_tokens ?? 0;
+  const promptContextTokens = tokens?.total_tokens ?? 0;
+  const contextWindowRatio =
+    tokens?.context_window_tokens && tokens.context_window_tokens > 0
+      ? Math.min(promptContextTokens / tokens.context_window_tokens, 1)
+      : null;
+  const contextWindowLabel = tokens?.context_window_tokens
+    ? `${formatCompactTokenValue(promptContextTokens)} / ${formatCompactTokenValue(tokens.context_window_tokens)}`
+    : "Unavailable";
 
   useEffect(() => {
     if (!currentSessionId) {
       setTokens(null);
+      setUsageLoading(false);
       return;
     }
 
+    if (isStreaming) {
+      setUsageLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setUsageLoading(true);
+
     getSessionTokens(currentSessionId)
-      .then(setTokens)
-      .catch(() => setTokens(null));
-  }, [currentSessionId]);
+      .then((nextTokens) => {
+        if (!cancelled) {
+          setTokens(nextTokens);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setTokens(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setUsageLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSessionId, isStreaming]);
 
   useEffect(() => {
+    setMemoryFileOpen(false);
     setMemoryEditorOpen(false);
     setSkillEditorOpen(false);
 
     if (inspectorTab === "memory") {
       setMemorySaveMsg("");
-      void loadMemory();
+      setMemoryActionMsg("");
+      if (!hasLoadedMemoryRef.current) {
+        void loadMemory();
+      }
     }
 
     if (inspectorTab === "skills") {
       setSkillSaveMsg("");
-      void refreshSkills();
+      setSkillActionMsg("");
+      if (!hasLoadedSkillsRef.current) {
+        void refreshSkills();
+      }
     }
   }, [inspectorTab]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1583,6 +2262,29 @@ export default function InspectorPanel() {
     });
   }, [reviewedSourceItems, sourceArtifactMetadata]);
 
+  const confirmDiscardChanges = (
+    scopeLabel: "memory" | "skill",
+    targetLabel: string
+  ) => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+
+    return window.confirm(
+      `Discard unsaved ${scopeLabel} edits and load ${targetLabel} from disk?`
+    );
+  };
+
+  const canReloadMemory = () =>
+    !isMemoryDirty || confirmDiscardChanges("memory", MEMORY_PATH);
+
+  const canReloadSkill = (targetPath?: string | null) =>
+    !isSkillDirty ||
+    confirmDiscardChanges(
+      "skill",
+      targetPath ? shortenPath(targetPath, 3) : "the selected skill file"
+    );
+
   const loadMemory = async () => {
     const requestId = memoryRequestIdRef.current + 1;
     memoryRequestIdRef.current = requestId;
@@ -1594,11 +2296,13 @@ export default function InspectorPanel() {
 
       setMemoryContent(res.content);
       setSavedMemoryContent(res.content);
+      hasLoadedMemoryRef.current = true;
     } catch {
       if (memoryRequestIdRef.current !== requestId) return;
 
       setMemoryContent("# Could not load MEMORY.md");
       setSavedMemoryContent("# Could not load MEMORY.md");
+      hasLoadedMemoryRef.current = true;
     } finally {
       if (memoryRequestIdRef.current === requestId) {
         setMemoryLoading(false);
@@ -1611,43 +2315,77 @@ export default function InspectorPanel() {
     skillsRequestIdRef.current = requestId;
     setSkillsLoading(true);
 
-    let nextPath: string | null = preferredPath ?? selectedSkillPath;
-
     try {
-      const nextSkills = await listSkills();
+      const nextSkills = await listSkillsRegistry();
       if (skillsRequestIdRef.current !== requestId) return;
 
       setSkills(nextSkills);
+      hasLoadedSkillsRef.current = true;
 
       if (nextSkills.length === 0) {
         setSelectedSkillPath(null);
-        setSkillContent("# No skills found");
-        setSavedSkillContent("# No skills found");
-        return;
+        setSkillContent("");
+        setSavedSkillContent("");
+        return nextSkills;
       }
 
-      nextPath =
+      const nextPath =
         preferredPath ??
         (selectedSkillPath &&
-        nextSkills.some((skill) => skill.path === selectedSkillPath)
+        nextSkills.some((skill) => skill.location === selectedSkillPath)
           ? selectedSkillPath
-          : nextSkills[0].path);
+          : null);
 
-      setSelectedSkillPath(nextPath);
+      if (!nextPath) {
+        setSelectedSkillPath(null);
+        setSkillContent("");
+        setSavedSkillContent("");
+        return nextSkills;
+      }
 
-      const res = await readFile(nextPath);
+      if (!nextSkills.some((skill) => skill.location === nextPath)) {
+        setSelectedSkillPath(null);
+        setSkillContent("");
+        setSavedSkillContent("");
+        setSkillEditorOpen(false);
+      }
+
+      return nextSkills;
+    } catch {
       if (skillsRequestIdRef.current !== requestId) return;
+
+      hasLoadedSkillsRef.current = true;
+      if (skills.length === 0) {
+        setSkillContent("# Could not load skill registry");
+        setSavedSkillContent("# Could not load skill registry");
+      }
+      return null;
+    } finally {
+      if (skillsRequestIdRef.current === requestId) {
+        setSkillsLoading(false);
+      }
+    }
+  };
+
+  const loadSkillFile = async (path: string) => {
+    const requestId = skillFileRequestIdRef.current + 1;
+    skillFileRequestIdRef.current = requestId;
+    setSkillsLoading(true);
+    setSelectedSkillPath(path);
+
+    try {
+      const res = await readFile(path);
+      if (skillFileRequestIdRef.current !== requestId) return;
 
       setSkillContent(res.content);
       setSavedSkillContent(res.content);
     } catch {
-      if (skillsRequestIdRef.current !== requestId) return;
+      if (skillFileRequestIdRef.current !== requestId) return;
 
-      setSelectedSkillPath(nextPath);
       setSkillContent("# Could not load skill file");
       setSavedSkillContent("# Could not load skill file");
     } finally {
-      if (skillsRequestIdRef.current === requestId) {
+      if (skillFileRequestIdRef.current === requestId) {
         setSkillsLoading(false);
       }
     }
@@ -1703,6 +2441,76 @@ export default function InspectorPanel() {
     window.open(previewRawUrl, "_blank", "noopener,noreferrer");
   };
 
+  const openRawFile = (path: string) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.open(getRawFileUrl(path), "_blank", "noopener,noreferrer");
+  };
+
+  const inspectPathInFiles = (path: string) => {
+    openInspectorPath(path);
+    setInspectorTab("files");
+  };
+
+  const flashMemoryAction = (message: string) => {
+    setMemoryActionMsg(message);
+    window.setTimeout(() => setMemoryActionMsg(""), 2000);
+  };
+
+  const flashSkillAction = (message: string) => {
+    setSkillActionMsg(message);
+    window.setTimeout(() => setSkillActionMsg(""), 2000);
+  };
+
+  const handleInspectorExport = () => {
+    if (typeof window === "undefined" || messages.length === 0) {
+      return;
+    }
+
+    const title =
+      activeSession?.title?.trim() || currentSessionId || "BioAPEX Session";
+    const content = buildExportMarkdown(title, messages);
+    const blob = new Blob([content], {
+      type: "text/markdown;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = `${exportFilename(title)}.md`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleMemoryRefresh = async () => {
+    if (!canReloadMemory()) {
+      return;
+    }
+
+    setMemoryItemDraft(null);
+    await loadMemory();
+  };
+
+  const handleSkillsRefresh = async () => {
+    if (!canReloadSkill(selectedSkillPath)) {
+      return;
+    }
+
+    const keepSelectedPath = selectedSkillPath;
+    const nextSkills = await refreshSkills(keepSelectedPath ?? undefined);
+
+    if (
+      keepSelectedPath &&
+      nextSkills?.some((skill) => skill.location === keepSelectedPath)
+    ) {
+      await loadSkillFile(keepSelectedPath);
+    }
+  };
+
   const handleMemorySave = async () => {
     if (!isMemoryDirty) return;
 
@@ -1718,6 +2526,79 @@ export default function InspectorPanel() {
       setMemorySaveMsg("Save failed");
     } finally {
       setMemorySaving(false);
+    }
+  };
+
+  const startMemoryItemDraft = (item?: MemoryInspectorItem) => {
+    setMemoryFileOpen(false);
+    setMemoryEditorOpen(false);
+    setMemoryItemDraft(
+      item
+        ? {
+            mode: "edit",
+            targetId: item.id,
+            namespace: item.namespace,
+            key: item.key,
+            value: item.value,
+          }
+        : {
+            mode: "create",
+            targetId: null,
+            namespace: memoryItems[0]?.namespace ?? "General",
+            key: "",
+            value: "",
+          }
+    );
+  };
+
+  const handleMemoryDraftSave = () => {
+    if (!memoryItemDraft) {
+      return;
+    }
+
+    if (!memoryItemDraft.key.trim() && !memoryItemDraft.value.trim()) {
+      flashMemoryAction("Add a key or value first");
+      return;
+    }
+
+    const nextDocument = upsertMemoryDocumentItem(parsedMemoryDocument, memoryItemDraft);
+    setMemoryContent(serializeMemoryDocument(nextDocument));
+    setMemoryItemDraft(null);
+    flashMemoryAction(
+      memoryItemDraft.mode === "create" ? "Memory item added" : "Memory item updated"
+    );
+  };
+
+  const handleMemoryItemDelete = (itemId: string) => {
+    const nextDocument = removeMemoryDocumentItem(parsedMemoryDocument, itemId);
+    setMemoryContent(serializeMemoryDocument(nextDocument));
+    if (memoryItemDraft?.targetId === itemId) {
+      setMemoryItemDraft(null);
+    }
+    flashMemoryAction("Memory item removed");
+  };
+
+  const handleMemoryItemDuplicate = (itemId: string) => {
+    const nextDocument = duplicateMemoryDocumentItem(parsedMemoryDocument, itemId);
+    setMemoryContent(serializeMemoryDocument(nextDocument));
+    flashMemoryAction("Memory item duplicated");
+  };
+
+  const handleMemoryItemCopy = async (item: MemoryInspectorItem) => {
+    if (typeof navigator === "undefined" || !navigator.clipboard) {
+      flashMemoryAction("Clipboard unavailable");
+      return;
+    }
+
+    const copyValue = item.value
+      ? `${item.namespace}/${item.key}\n${item.value}`
+      : `${item.namespace}/${item.key}`;
+
+    try {
+      await navigator.clipboard.writeText(copyValue);
+      flashMemoryAction("Memory item copied");
+    } catch {
+      flashMemoryAction("Copy failed");
     }
   };
 
@@ -1737,6 +2618,46 @@ export default function InspectorPanel() {
     } finally {
       setSkillSaving(false);
     }
+  };
+
+  const handleSkillInstall = () => {
+    primeDraftMessage(
+      "Use the skill-installer skill to install a new skill into this BioAPEX workspace."
+    );
+    flashSkillAction("Install request drafted in the composer");
+  };
+
+  const handleSkillSelection = async (path: string) => {
+    if (path === selectedSkillPath && skillContent) {
+      return;
+    }
+
+    if (!canReloadSkill(path)) {
+      return;
+    }
+
+    setSkillSaveMsg("");
+    setSkillEditorOpen(false);
+    await loadSkillFile(path);
+  };
+
+  const handleSelectedSkillRefresh = async () => {
+    if (!selectedSkillPath || !canReloadSkill(selectedSkillPath)) {
+      return;
+    }
+
+    await loadSkillFile(selectedSkillPath);
+  };
+
+  const clearSelectedSkill = () => {
+    if (selectedSkillPath && !canReloadSkill(selectedSkillPath)) {
+      return;
+    }
+
+    setSelectedSkillPath(null);
+    setSkillContent("");
+    setSavedSkillContent("");
+    setSkillEditorOpen(false);
   };
 
   const renderFilesTab = () => (
@@ -1939,133 +2860,376 @@ export default function InspectorPanel() {
   );
 
   const renderMemoryTab = () => (
-    <InspectorCard
-      title="Memory"
-      meta={MEMORY_PATH}
-      controls={
-        <>
-          <ActionButton onClick={() => void loadMemory()}>
-            <RefreshCw size={11} />
-            Refresh
-          </ActionButton>
-          <ActionButton onClick={() => setMemoryEditorOpen((value) => !value)}>
-            <Brain size={11} />
-            {memoryEditorOpen ? "Preview" : "Edit"}
-          </ActionButton>
-        </>
-      }
-    >
-      <div className="mb-2 flex items-center justify-end gap-2">
-        {memorySaveMsg ? (
-          <span
-            className={cn(
-              "text-[10px]",
-              memorySaveMsg === "Saved" ? "text-emerald-600" : "text-red-500"
-            )}
-          >
-            {memorySaveMsg}
-          </span>
-        ) : null}
-        <button
-          type="button"
-          onClick={() => void handleMemorySave()}
-          disabled={!isMemoryDirty || memorySaving}
-          className={cn(
-            "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors",
-            isMemoryDirty && !memorySaving
-              ? "bg-[var(--apex-accent)] text-white hover:bg-[var(--apex-accent-strong)]"
-              : "cursor-not-allowed bg-slate-200 text-slate-400"
-          )}
-        >
-          <Save size={11} />
-          {memorySaving ? "Saving…" : "Save"}
-        </button>
-      </div>
+    <div className="space-y-2">
+      <InspectorCard
+        title="Context Memory"
+        meta={MEMORY_PATH}
+        controls={
+          <>
+            <ActionButton onClick={() => void handleMemoryRefresh()}>
+              <RefreshCw size={11} />
+              Refresh
+            </ActionButton>
+            <ActionButton
+              onClick={() => {
+                setMemoryFileOpen((value) => !value);
+                setMemoryEditorOpen(false);
+              }}
+            >
+              <Brain size={11} />
+              {memoryFileOpen ? "Hide file" : "Raw file"}
+            </ActionButton>
+          </>
+        }
+      >
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <MetaBadge tone={isMemoryDirty ? "warning" : "success"}>
+                {isMemoryDirty ? "Unsaved edits" : "File synced"}
+              </MetaBadge>
+              <MetaBadge>{pluralize(memoryItems.length, "item")}</MetaBadge>
+              {memorySaveMsg ? (
+                <MetaBadge tone={memorySaveMsg === "Saved" ? "success" : "warning"}>
+                  {memorySaveMsg}
+                </MetaBadge>
+              ) : null}
+              {memoryActionMsg ? (
+                <MetaBadge tone="accent">{memoryActionMsg}</MetaBadge>
+              ) : null}
+            </div>
+            <PrimaryActionButton
+              onClick={() => void handleMemorySave()}
+              disabled={!isMemoryDirty || memorySaving}
+            >
+              <Save size={11} />
+              {memorySaving ? "Saving…" : "Save"}
+            </PrimaryActionButton>
+          </div>
 
-      {memoryLoading ? (
-        <LoadingState label="Loading memory..." />
-      ) : memoryEditorOpen ? (
-        <div className="h-[220px] overflow-hidden rounded-[12px] border border-[rgba(211,219,210,0.86)] bg-white">
-          <MonacoEditor
-            height="100%"
-            language="markdown"
-            value={memoryContent}
-            theme="vs"
-            onChange={(value) => setMemoryContent(value ?? "")}
-            options={{
-              minimap: { enabled: false },
-              wordWrap: "on",
-              fontSize: 11,
-              lineNumbers: "on",
-              scrollBeyondLastLine: false,
-              overviewRulerLanes: 0,
-              padding: { top: 10, bottom: 10 },
-              fontFamily: '"SF Mono", "Fira Code", Consolas, monospace',
-            }}
-          />
+          <p className="text-[10px] leading-4 text-slate-500">
+            Structured memory items stay synced to `memory/MEMORY.md`, and the raw
+            markdown file remains available when exact formatting matters.
+          </p>
+
+          {memoryLoading ? (
+            <LoadingState label="Loading memory..." />
+          ) : (
+            <>
+              {memoryItemDraft ? (
+                <div className="rounded-[12px] border border-[rgba(35,130,83,0.16)] bg-white px-2.5 py-2.5 shadow-[0_1px_2px_rgba(32,43,35,0.03)]">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[11px] font-semibold text-slate-700">
+                      {memoryItemDraft.mode === "create" ? "Add memory item" : "Edit memory item"}
+                    </p>
+                    <MetaBadge tone="warning">Draft</MetaBadge>
+                  </div>
+
+                  <div className="mt-2 space-y-2">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                        Namespace
+                      </label>
+                      <input
+                        list="memory-namespaces"
+                        value={memoryItemDraft.namespace}
+                        onChange={(event) =>
+                          setMemoryItemDraft((current) =>
+                            current
+                              ? { ...current, namespace: event.target.value }
+                              : current
+                          )
+                        }
+                        className="w-full rounded-[10px] border border-[var(--shell-border)] bg-[rgba(251,252,248,0.9)] px-3 py-2 text-[12px] text-slate-700 outline-none focus:border-[var(--apex-accent)]"
+                      />
+                      {memoryNamespaces.length > 0 ? (
+                        <datalist id="memory-namespaces">
+                          {memoryNamespaces.map((namespace) => (
+                            <option key={namespace} value={namespace} />
+                          ))}
+                        </datalist>
+                      ) : null}
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                        Key
+                      </label>
+                      <input
+                        value={memoryItemDraft.key}
+                        onChange={(event) =>
+                          setMemoryItemDraft((current) =>
+                            current
+                              ? { ...current, key: event.target.value }
+                              : current
+                          )
+                        }
+                        className="w-full rounded-[10px] border border-[var(--shell-border)] bg-[rgba(251,252,248,0.9)] px-3 py-2 text-[12px] text-slate-700 outline-none focus:border-[var(--apex-accent)]"
+                        placeholder="dataset"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                        Value
+                      </label>
+                      <textarea
+                        rows={4}
+                        value={memoryItemDraft.value}
+                        onChange={(event) =>
+                          setMemoryItemDraft((current) =>
+                            current
+                              ? { ...current, value: event.target.value }
+                              : current
+                          )
+                        }
+                        className="w-full rounded-[10px] border border-[var(--shell-border)] bg-[rgba(251,252,248,0.9)] px-3 py-2 text-[12px] leading-5 text-slate-700 outline-none focus:border-[var(--apex-accent)]"
+                        placeholder="BRCA1_cohort_v2"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-2 flex items-center justify-end gap-1.5">
+                    <ActionButton onClick={() => setMemoryItemDraft(null)}>
+                      Cancel
+                    </ActionButton>
+                    <PrimaryActionButton onClick={handleMemoryDraftSave}>
+                      <Save size={11} />
+                      Apply
+                    </PrimaryActionButton>
+                  </div>
+                </div>
+              ) : null}
+
+              {memoryItems.length > 0 ? (
+                <div className="space-y-2">
+                  {memoryItems.map((item) => (
+                    <div
+                      key={item.id}
+                      className="rounded-[16px] border border-[rgba(211,219,210,0.78)] bg-[rgba(255,255,255,0.96)] px-3 py-3 shadow-[0_1px_2px_rgba(32,43,35,0.03)]"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate font-mono text-[11px] font-semibold text-[var(--apex-accent-strong)]">
+                            {item.namespace}/{item.key}
+                          </p>
+                          <p className="mt-2 text-[14px] font-medium leading-6 text-slate-700">
+                            {item.value || item.key}
+                          </p>
+                        </div>
+                        <MetaBadge tone="success">Active</MetaBadge>
+                      </div>
+
+                      <div className="mt-3 flex items-center gap-2">
+                        <IconActionButton
+                          onClick={() => startMemoryItemDraft(item)}
+                          title="Edit memory item"
+                        >
+                          <Pencil size={14} />
+                        </IconActionButton>
+                        <IconActionButton
+                          onClick={() => void handleMemoryItemCopy(item)}
+                          title="Copy memory item"
+                        >
+                          <Copy size={14} />
+                        </IconActionButton>
+                        <IconActionButton
+                          onClick={() => handleMemoryItemDelete(item.id)}
+                          title="Delete memory item"
+                        >
+                          <Trash2 size={14} />
+                        </IconActionButton>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <EmptyState>
+                  No structured memory items are available yet. Add an item here or
+                  open the raw file when you want to shape `MEMORY.md` directly.
+                </EmptyState>
+              )}
+
+              <WideActionButton onClick={() => startMemoryItemDraft()}>
+                <Plus size={13} />
+                Add Item
+              </WideActionButton>
+
+              {memoryFileOpen ? (
+                <div className="rounded-[14px] border border-[rgba(211,219,210,0.82)] bg-[rgba(251,252,248,0.92)] px-2.5 py-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                        Underlying File
+                      </p>
+                      <p className="mt-0.5 truncate text-[10px] leading-4 text-slate-500">
+                        {MEMORY_PATH}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <ActionButton onClick={() => setMemoryEditorOpen((value) => !value)}>
+                        <BookOpen size={11} />
+                        {memoryEditorOpen ? "Preview" : "Edit"}
+                      </ActionButton>
+                    </div>
+                  </div>
+
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <ActionButton onClick={() => openRawFile(MEMORY_PATH)}>
+                      Open raw
+                    </ActionButton>
+                    <ActionButton onClick={() => inspectPathInFiles(MEMORY_PATH)}>
+                      Inspect
+                    </ActionButton>
+                  </div>
+
+                  <div className="mt-2">
+                    {memoryEditorOpen ? (
+                      <div className="h-[220px] overflow-hidden rounded-[12px] border border-[rgba(211,219,210,0.86)] bg-white">
+                        <MonacoEditor
+                          height="100%"
+                          language="markdown"
+                          value={memoryContent}
+                          theme="vs"
+                          onChange={(value) => setMemoryContent(value ?? "")}
+                          options={{
+                            minimap: { enabled: false },
+                            wordWrap: "on",
+                            fontSize: 11,
+                            lineNumbers: "on",
+                            scrollBeyondLastLine: false,
+                            overviewRulerLanes: 0,
+                            padding: { top: 10, bottom: 10 },
+                            fontFamily: '"SF Mono", "Fira Code", Consolas, monospace',
+                          }}
+                        />
+                      </div>
+                    ) : (
+                      <PreviewPane content={memoryContent} className="max-h-[220px]" />
+                    )}
+                  </div>
+                </div>
+              ) : null}
+            </>
+          )}
         </div>
-      ) : (
-        <PreviewPane content={memoryContent} />
-      )}
-    </InspectorCard>
+      </InspectorCard>
+    </div>
   );
 
   const renderSkillsTab = () => (
     <div className="space-y-2">
       <InspectorCard
-        title="Skills"
-        meta={`${skills.length} available`}
+        title="Active"
+        meta={`${activeSkills.length} enabled`}
         controls={
-          <ActionButton onClick={() => void refreshSkills(selectedSkillPath ?? undefined)}>
+          <ActionButton onClick={() => void handleSkillsRefresh()}>
             <RefreshCw size={11} />
             Refresh
           </ActionButton>
         }
       >
-        {skillsLoading && skills.length === 0 ? (
-          <LoadingState label="Loading skills..." />
-        ) : skills.length > 0 ? (
-          <div className="space-y-1">
-            {skills.map((skill) => (
-              <button
-                key={skill.path}
-                type="button"
-                onClick={() => void refreshSkills(skill.path)}
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-[10px] border px-2.5 py-2 text-left transition-colors",
-                  skill.path === selectedSkillPath
-                    ? "border-[rgba(35,130,83,0.16)] bg-[rgba(35,130,83,0.08)] text-[var(--apex-accent-strong)]"
-                    : "border-transparent bg-[rgba(251,252,248,0.95)] text-slate-600 hover:border-[rgba(211,219,210,0.86)] hover:bg-white"
-                )}
-              >
-                <span
+        <div className="space-y-3">
+          {skillsLoading && skills.length === 0 ? (
+            <LoadingState label="Loading skills..." />
+          ) : activeSkills.length > 0 ? (
+            <div className="space-y-1.5">
+              {activeSkills.map((skill) => (
+                <button
+                  key={skill.location}
+                  type="button"
+                  onClick={() => void handleSkillSelection(skill.location)}
                   className={cn(
-                    "mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-[8px]",
-                    skill.path === selectedSkillPath
-                      ? "bg-[rgba(35,130,83,0.12)]"
-                      : "bg-white"
+                    "flex w-full items-center gap-2 rounded-[12px] border px-2.5 py-2 text-left transition-colors",
+                    skill.location === selectedSkillPath
+                      ? "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.08)]"
+                      : "border-transparent bg-[rgba(251,252,248,0.94)] hover:border-[rgba(211,219,210,0.86)] hover:bg-white"
                   )}
                 >
-                  <Sparkles size={12} />
-                </span>
-                <span className="min-w-0 flex-1 truncate text-[12px] font-medium">
-                  {skill.name}
-                </span>
-              </button>
-            ))}
+                  <span
+                    className={cn(
+                      "flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[9px]",
+                      skill.location === selectedSkillPath
+                        ? "bg-[rgba(35,130,83,0.12)] text-[var(--apex-accent-strong)]"
+                        : "bg-white text-[var(--apex-accent-strong)]"
+                    )}
+                  >
+                    <Sparkles size={13} />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-slate-700">
+                    {skill.name}
+                  </span>
+                  <span className="flex-shrink-0 text-[11px] text-slate-500">
+                    {getSkillVersionLabel(skill)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <EmptyState>
+              No active skills are currently available. Refresh this view once the
+              backend skill scan finishes.
+            </EmptyState>
+          )}
+
+          <div className="border-t border-[rgba(211,219,210,0.72)] pt-2">
+            <p className="text-[11px] font-semibold text-slate-500">Available Skills</p>
+            <p className="mt-1 text-[11px] leading-5 text-slate-400">
+              Add more analysis tools, data processors, or custom workflows to
+              expand capabilities.
+            </p>
+
+            <div className="mt-2">
+              <WideActionButton onClick={handleSkillInstall}>
+                <Plus size={13} />
+                Install Skill
+              </WideActionButton>
+            </div>
+
+            {skillActionMsg ? (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                <MetaBadge tone="accent">{skillActionMsg}</MetaBadge>
+              </div>
+            ) : null}
+
+            {availableSkills.length > 0 ? (
+              <div className="mt-2 space-y-1.5">
+                {availableSkills.map((skill) => (
+                  <button
+                    key={skill.location}
+                    type="button"
+                    onClick={() => void handleSkillSelection(skill.location)}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-[12px] border px-2.5 py-2 text-left transition-colors",
+                      skill.location === selectedSkillPath
+                        ? "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.08)]"
+                        : "border-transparent bg-[rgba(251,252,248,0.94)] hover:border-[rgba(211,219,210,0.86)] hover:bg-white"
+                    )}
+                  >
+                    <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[9px] bg-white text-slate-500">
+                      <Package size={13} />
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-slate-700">
+                      {skill.name}
+                    </span>
+                    <span className="flex-shrink-0 text-[11px] text-slate-500">
+                      {getSkillVersionLabel(skill)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
-        ) : (
-          <EmptyState>No skills are currently available to preview.</EmptyState>
-        )}
+        </div>
       </InspectorCard>
 
       {selectedSkillPath ? (
         <InspectorCard
-          title="Skill Preview"
+          title={selectedSkill?.name ?? "Skill File"}
           meta={shortenPath(selectedSkillPath, 3)}
           controls={
             <>
-              <ActionButton onClick={() => void refreshSkills(selectedSkillPath)}>
+              <ActionButton onClick={() => void handleSelectedSkillRefresh()}>
                 <RefreshCw size={11} />
                 Refresh
               </ActionButton>
@@ -2073,20 +3237,44 @@ export default function InspectorPanel() {
                 <BookOpen size={11} />
                 {skillEditorOpen ? "Preview" : "Edit"}
               </ActionButton>
+              <ActionButton onClick={clearSelectedSkill}>Hide</ActionButton>
             </>
           }
         >
-          <div className="mb-2 flex items-center justify-end gap-2">
-            {skillSaveMsg ? (
-              <span
-                className={cn(
-                  "text-[10px]",
-                  skillSaveMsg === "Saved" ? "text-emerald-600" : "text-red-500"
-                )}
-              >
-                {skillSaveMsg}
-              </span>
-            ) : null}
+          {selectedSkill ? (
+            <div className="mb-2 rounded-[12px] border border-[rgba(211,219,210,0.82)] bg-[rgba(251,252,248,0.92)] px-2.5 py-2.5">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-[12px] font-semibold text-slate-700">
+                    {selectedSkill.name}
+                  </p>
+                  <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                    {selectedSkill.description || "Local skill definition file."}
+                  </p>
+                </div>
+                <MetaBadge tone={selectedSkill.enabled ? "success" : "neutral"}>
+                  {getSkillVersionLabel(selectedSkill)}
+                </MetaBadge>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {getSkillMetadata(selectedSkill).map((value) => (
+                  <MetaBadge key={`${selectedSkill.location}-${value}`}>{value}</MetaBadge>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {skillSaveMsg ? (
+                <MetaBadge tone={skillSaveMsg === "Saved" ? "success" : "warning"}>
+                  {skillSaveMsg}
+                </MetaBadge>
+              ) : null}
+              <MetaBadge tone={isSkillDirty ? "warning" : "neutral"}>
+                {isSkillDirty ? "Unsaved edits" : "File synced"}
+              </MetaBadge>
+            </div>
             <button
               type="button"
               onClick={() => void handleSkillSave()}
@@ -2126,8 +3314,17 @@ export default function InspectorPanel() {
               />
             </div>
           ) : (
-            <PreviewPane content={skillContent} />
+            <PreviewPane content={skillContent} className="max-h-[220px]" />
           )}
+
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <ActionButton onClick={() => openRawFile(selectedSkillPath)}>
+              Open raw
+            </ActionButton>
+            <ActionButton onClick={() => inspectPathInFiles(selectedSkillPath)}>
+              Inspect
+            </ActionButton>
+          </div>
         </InspectorCard>
       ) : null}
     </div>
@@ -2135,30 +3332,88 @@ export default function InspectorPanel() {
 
   const renderUsageTab = () => (
     <div className="space-y-2">
-      <InspectorCard title="Usage" meta={currentSessionId ?? "No session"}>
-        {tokens ? (
-          <div className="grid grid-cols-2 gap-2">
-            <MiniStat label="System" value={tokens.system_tokens.toLocaleString()} />
-            <MiniStat label="Messages" value={tokens.message_tokens.toLocaleString()} />
-            <div className="col-span-2">
-              <MiniStat
-                label="Total"
-                value={tokens.total_tokens.toLocaleString()}
-                accent
-              />
+      <InspectorCard
+        title="Usage"
+        meta={activeSession ? activeSession.title : currentSessionId ?? "No session"}
+      >
+        {usageLoading && !tokens ? (
+          <LoadingState label="Loading usage..." />
+        ) : tokens ? (
+          <div className="space-y-3">
+            <div className="text-center">
+              <p className="text-[38px] font-semibold tracking-[-0.05em] text-slate-800">
+                {trackedTotalTokens.toLocaleString()}
+              </p>
+              <p className="text-[11px] text-slate-400">Total tokens</p>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2 text-[12px] text-slate-500">
+                <span>Input</span>
+                <span className="font-medium text-slate-700">
+                  {tokens.input_tokens.toLocaleString()}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 text-[12px] text-slate-500">
+                <span>Output</span>
+                <span className="font-medium text-slate-700">
+                  {tokens.output_tokens.toLocaleString()}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 text-[12px] text-slate-500">
+                <span>Tools</span>
+                <span className="font-medium text-slate-700">
+                  {tokens.tool_tokens.toLocaleString()}
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2 text-[12px] text-slate-500">
+                <span>Context</span>
+                <span className="font-medium text-slate-700">{contextWindowLabel}</span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-[rgba(211,219,210,0.76)]">
+                <div
+                  className="h-full rounded-full bg-[linear-gradient(90deg,var(--apex-accent),rgba(35,130,83,0.55))]"
+                  style={{ width: `${(contextWindowRatio ?? 0) * 100}%` }}
+                />
+              </div>
+              <p className="text-[10px] leading-4 text-slate-500">
+                Prompt/context pressure is calculated from the actual model history in
+                play, while tool I/O stays tracked separately above.
+              </p>
+            </div>
+
+            <div className="border-t border-[rgba(211,219,210,0.72)] pt-2">
+              <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                <span>Provenance</span>
+              </div>
+              <div className="mt-2 space-y-1.5 text-[12px]">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-400">Session</span>
+                  <span className="font-mono text-[11px] text-slate-700">
+                    {shortIdentifier(tokens.session_id)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-400">Model</span>
+                  <span className="font-mono text-[11px] text-slate-700">
+                    {tokens.model_name}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-400">Mode</span>
+                  <span className="text-[11px] font-medium text-slate-700">
+                    {ragMode ? "Grounded" : "Chat"}
+                  </span>
+                </div>
+              </div>
             </div>
           </div>
         ) : (
           <EmptyState>Token usage will appear once a session is selected.</EmptyState>
         )}
-      </InspectorCard>
-
-      <InspectorCard title="Context" meta={ragMode ? "RAG on" : "RAG off"}>
-        <div className="space-y-1 text-[11px] text-slate-600">
-          <p>{sessions.length} session(s) available.</p>
-          <p>{messages.length} message(s) loaded in the current workspace.</p>
-          <p>{activeSession ? activeSession.title : "No active session selected."}</p>
-        </div>
       </InspectorCard>
     </div>
   );
@@ -2185,6 +3440,28 @@ export default function InspectorPanel() {
         {inspectorTab === "memory" && renderMemoryTab()}
         {inspectorTab === "skills" && renderSkillsTab()}
         {inspectorTab === "usage" && renderUsageTab()}
+      </div>
+
+      <div className="border-t border-[var(--shell-border)] bg-white/70 px-2 py-2">
+        <button
+          type="button"
+          onClick={handleInspectorExport}
+          disabled={messages.length === 0}
+          className={cn(
+            "inline-flex w-full items-center justify-center gap-1.5 rounded-full border px-3 py-2 text-[11px] font-semibold transition-colors",
+            messages.length === 0
+              ? "cursor-not-allowed border-[var(--shell-border)] bg-[rgba(247,249,245,0.92)] text-slate-400"
+              : "border-[rgba(211,219,210,0.92)] bg-white text-slate-700 shadow-[0_1px_2px_rgba(32,43,35,0.03)] hover:border-[rgba(35,130,83,0.2)] hover:bg-[var(--panel-soft)] hover:text-[var(--apex-accent-strong)]"
+          )}
+          title={
+            messages.length === 0
+              ? "Start a conversation to export this workspace."
+              : "Export the current session transcript."
+          }
+        >
+          <Download size={14} />
+          Export
+        </button>
       </div>
     </aside>
   );

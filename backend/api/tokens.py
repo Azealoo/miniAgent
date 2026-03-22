@@ -4,6 +4,7 @@ Token counting endpoints using tiktoken (cl100k_base, GPT-4 compatible).
 GET  /api/tokens/session/{id}   — count tokens for a session
 POST /api/tokens/files          — batch token count for file paths (whitelisted only)
 """
+import os
 from pathlib import Path
 
 import tiktoken
@@ -27,11 +28,47 @@ def _count(text: str) -> int:
     return len(_ENCODING.encode(text))
 
 
+def _count_optional_text(value: object) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return _count(value)
+    return _count(str(value))
+
+
 def _base_dir() -> Path:
     from graph.agent import agent_manager
 
     assert agent_manager.base_dir is not None
     return agent_manager.base_dir
+
+
+def _get_configured_context_window_tokens() -> int | None:
+    for env_var in ("MODEL_CONTEXT_WINDOW_TOKENS", "DEEPSEEK_CONTEXT_WINDOW_TOKENS"):
+        raw_value = os.getenv(env_var)
+        if not raw_value:
+            continue
+        try:
+            parsed = int(raw_value)
+        except ValueError:
+            continue
+        if parsed > 0:
+            return parsed
+    return None
+
+
+def _count_tool_io_tokens(messages: list[dict]) -> int:
+    token_total = 0
+    for message in messages:
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            token_total += _count_optional_text(call.get("input"))
+            token_total += _count_optional_text(call.get("output"))
+    return token_total
 
 
 def _validate_token_path(rel_path: str, base: Path) -> Path | None:
@@ -79,16 +116,48 @@ def session_tokens(session_id: str, request: Request = None):
     system_prompt = build_system_prompt(agent_manager.base_dir, get_rag_mode())  # type: ignore[arg-type]
     system_tokens = _count(system_prompt)
 
-    messages = agent_manager.session_manager.load_session(session_id)  # type: ignore[union-attr]
-    message_tokens = sum(
-        _count(m.get("content", "")) for m in messages
+    prompt_messages = agent_manager.session_manager.load_session_for_agent(session_id)  # type: ignore[union-attr]
+    raw_messages = agent_manager.session_manager.load_session(session_id)  # type: ignore[union-attr]
+    prompt_history_system_tokens = sum(
+        _count_optional_text(message.get("content"))
+        for message in prompt_messages
+        if message.get("role") == "system"
+    )
+    user_tokens = sum(
+        _count_optional_text(message.get("content"))
+        for message in prompt_messages
+        if message.get("role") == "user"
+    )
+    assistant_tokens = sum(
+        _count_optional_text(message.get("content"))
+        for message in prompt_messages
+        if message.get("role") == "assistant"
+    )
+    message_tokens = prompt_history_system_tokens + user_tokens + assistant_tokens
+    total_tokens = system_tokens + message_tokens
+    tool_tokens = _count_tool_io_tokens(raw_messages)
+    input_tokens = system_tokens + prompt_history_system_tokens + user_tokens
+    output_tokens = assistant_tokens
+    tracked_total_tokens = input_tokens + output_tokens + tool_tokens
+    context_window_tokens = _get_configured_context_window_tokens()
+    context_window_remaining_tokens = (
+        max(context_window_tokens - total_tokens, 0)
+        if context_window_tokens is not None
+        else None
     )
 
     return {
         "session_id": session_id,
         "system_tokens": system_tokens,
         "message_tokens": message_tokens,
-        "total_tokens": system_tokens + message_tokens,
+        "total_tokens": total_tokens,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "tool_tokens": tool_tokens,
+        "tracked_total_tokens": tracked_total_tokens,
+        "context_window_tokens": context_window_tokens,
+        "context_window_remaining_tokens": context_window_remaining_tokens,
+        "model_name": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
     }
 
 
