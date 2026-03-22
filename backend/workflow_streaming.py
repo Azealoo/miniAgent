@@ -18,7 +18,14 @@ WorkflowStepStreamStatus = Literal[
     "completed",
     "blocked",
 ]
-WorkflowBlockingSource = Literal["qc_gate", "compliance_hook", "step_failure", "qa_review", "unknown"]
+WorkflowBlockingSource = Literal[
+    "qc_gate",
+    "compliance_hook",
+    "step_failure",
+    "qa_review",
+    "input_validation",
+    "unknown",
+]
 WorkflowBlockStage = Literal["before_execution", "before_step", "after_step", "before_publish"]
 WorkflowArtifactScope = Literal["run_record", "step_output", "workflow_output", "related_artifact"]
 
@@ -30,6 +37,25 @@ class WorkflowArtifactRefPayload(BaseModel):
     path: str
     id: str | None = None
     run_id: str | None = None
+
+
+class WorkflowStepDescriptorPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    step_id: str
+    step_label: str
+    prerequisite_step_ids: list[str] = Field(default_factory=list)
+    executor_type: str
+    engine_name: str | None = None
+    status: WorkflowStepStreamStatus | None = None
+    artifact_refs: list[WorkflowArtifactRefPayload] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    warning_details: list[WorkflowIssueDetail] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    error_details: list[WorkflowIssueDetail] = Field(default_factory=list)
+    started_at: str | None = None
+    ended_at: str | None = None
+    duration_seconds: float | None = None
 
 
 class WorkflowStreamEventBase(BaseModel):
@@ -47,6 +73,9 @@ class WorkflowStartEvent(WorkflowStreamEventBase):
     lifecycle_status: WorkflowLifecycleStatus
     resumed: bool = False
     run_record_path: str
+    total_steps: int | None = None
+    steps: list[WorkflowStepDescriptorPayload] = Field(default_factory=list)
+    started_at: str | None = None
 
 
 class WorkflowStepStartEvent(WorkflowStreamEventBase):
@@ -57,18 +86,22 @@ class WorkflowStepStartEvent(WorkflowStreamEventBase):
     executor_type: str
     prerequisite_step_ids: list[str] = Field(default_factory=list)
     engine_name: str | None = None
+    started_at: str | None = None
 
 
 class WorkflowStepEndEvent(WorkflowStreamEventBase):
     type: Literal["workflow_step_end"] = "workflow_step_end"
     step_id: str
     step_label: str
-    status: Literal["completed", "failed", "blocked"] = "completed"
+    status: Literal["waiting", "completed", "failed", "blocked"] = "completed"
     artifact_refs: list[WorkflowArtifactRefPayload] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     warning_details: list[WorkflowIssueDetail] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     error_details: list[WorkflowIssueDetail] = Field(default_factory=list)
+    started_at: str | None = None
+    ended_at: str | None = None
+    duration_seconds: float | None = None
 
 
 class WorkflowBlockedEvent(WorkflowStreamEventBase):
@@ -98,6 +131,11 @@ class WorkflowDoneEvent(WorkflowStreamEventBase):
     completed_steps: int
     total_steps: int
     warning_count: int
+    started_at: str | None = None
+    ended_at: str | None = None
+    duration_seconds: float | None = None
+    blocked_reason: str | None = None
+    blocked_issue_details: list[WorkflowIssueDetail] = Field(default_factory=list)
 
 
 WorkflowStreamEvent = Annotated[

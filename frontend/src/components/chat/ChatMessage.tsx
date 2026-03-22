@@ -6,6 +6,7 @@ import rehypeHighlight from "rehype-highlight";
 import { cn } from "@/lib/utils";
 import ThoughtChain from "./ThoughtChain";
 import RetrievalCard from "./RetrievalCard";
+import WorkflowProgressCard from "./WorkflowProgressCard";
 import type { Message } from "@/lib/types";
 
 interface ChatMessageProps {
@@ -15,9 +16,12 @@ interface ChatMessageProps {
 export default function ChatMessage({ message }: ChatMessageProps) {
   const isUser = message.role === "user";
   const hasRetrievals = Boolean(message.retrievals && message.retrievals.length > 0);
+  const hasWorkflowProgress = Boolean(
+    message.workflow_events && message.workflow_events.length > 0
+  );
   const hasTrace =
     Boolean(message.tool_calls && message.tool_calls.length > 0) ||
-    Boolean(message.workflow_events && message.workflow_events.length > 0) ||
+    hasWorkflowProgress ||
     Boolean(message.pendingTool);
   const hasSupport = hasRetrievals || hasTrace;
   const showAssistantShell = Boolean(message.content) || message.isStreaming || hasSupport;
@@ -146,6 +150,9 @@ export default function ChatMessage({ message }: ChatMessageProps) {
         {hasSupport && (
           <div className="mt-3 space-y-2.5">
             {hasRetrievals && <RetrievalCard results={message.retrievals ?? []} />}
+            {hasWorkflowProgress && (
+              <WorkflowProgressCard events={message.workflow_events ?? []} />
+            )}
             {hasTrace && (
               <ThoughtChain
                 toolCalls={message.tool_calls ?? []}

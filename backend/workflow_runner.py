@@ -136,6 +136,47 @@ def _module_prefixes(module_name: str) -> list[str]:
     return [".".join(parts[:index]) for index in range(1, len(parts) + 1)]
 
 
+def _workflow_project_roots(base_dir: Path | str) -> tuple[Path, ...]:
+    resolved_base = Path(base_dir).resolve()
+    roots: list[Path] = [resolved_base]
+    repo_root = resolved_base.parent
+    if (
+        resolved_base.name == "backend"
+        and repo_root != resolved_base
+        and (repo_root / "backend") == resolved_base
+        and (repo_root / "workflows").exists()
+    ):
+        roots.append(repo_root)
+    return tuple(roots)
+
+
+def _relative_to_project_roots(path: Path, roots: tuple[Path, ...]) -> PurePosixPath:
+    resolved = path.resolve()
+    for root in roots:
+        try:
+            return PurePosixPath(resolved.relative_to(root).as_posix())
+        except ValueError:
+            continue
+    raise ValueError(f"Path {resolved} must stay under one of {', '.join(str(root) for root in roots)}.")
+
+
+def _resolve_path_from_project_roots(value: str | Path, roots: tuple[Path, ...]) -> Path:
+    candidate = Path(str(value))
+    if candidate.is_absolute():
+        return candidate.resolve()
+
+    for root in roots:
+        resolved = (root / candidate).resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        if resolved.exists():
+            return resolved
+
+    return (roots[0] / candidate).resolve()
+
+
 def _serialize_for_json(value: Any) -> Any:
     if isinstance(value, Path):
         return value.as_posix()
@@ -278,6 +319,7 @@ def _workflow_issue_details_from_qc_policy_evaluation(
 @dataclass(frozen=True)
 class StepExecutionContext:
     base_dir: Path
+    project_roots: tuple[Path, ...]
     run_dir: Path
     relative_run_dir: PurePosixPath
     run_id: str
@@ -287,14 +329,11 @@ class StepExecutionContext:
     session_id: str | None = None
 
     def resolve_path(self, value: str | Path) -> Path:
-        raw_path = Path(str(value))
-        if raw_path.is_absolute():
-            return raw_path.resolve()
-        return (self.base_dir / raw_path).resolve()
+        return _resolve_path_from_project_roots(value, self.project_roots)
 
     def relative_path(self, value: str | Path) -> str:
         target = self.resolve_path(value)
-        return target.relative_to(self.base_dir).as_posix()
+        return _relative_to_project_roots(target, self.project_roots).as_posix()
 
 
 @dataclass(frozen=True)
@@ -327,6 +366,76 @@ def _workflow_artifact_payload(ref: ArtifactReference) -> dict[str, Any]:
     return payload
 
 
+def _workflow_step_descriptor_payload(
+    step: WorkflowStepDefinition,
+    record: WorkflowStepRecord | None = None,
+) -> dict[str, Any]:
+    engine_name = step.executor.engine_name if isinstance(step.executor, ExternalEngineExecutor) else None
+    payload: dict[str, Any] = {
+        "step_id": step.id,
+        "step_label": step.label,
+        "prerequisite_step_ids": list(step.prerequisites),
+        "executor_type": step.executor.executor_type,
+        "engine_name": engine_name,
+    }
+    if record is None:
+        return payload
+
+    payload["status"] = record.status
+    payload["artifact_refs"] = [_workflow_artifact_payload(ref) for ref in record.outputs_produced]
+    payload["warnings"] = list(record.warnings)
+    payload["warning_details"] = [detail.model_dump(mode="json") for detail in record.warning_details]
+    payload["errors"] = list(record.errors)
+    payload["error_details"] = [detail.model_dump(mode="json") for detail in record.error_details]
+    payload["started_at"] = _isoformat_z(record.start_time) if record.start_time is not None else None
+    payload["ended_at"] = _isoformat_z(record.end_time) if record.end_time is not None else None
+    payload["duration_seconds"] = _duration_seconds(record.start_time, record.end_time)
+    return payload
+
+
+def _workflow_blocked_reason_payload(run_document: WorkflowRun) -> str | None:
+    if run_document.lifecycle_status != "blocked":
+        return None
+
+    if run_document.blocked_reason:
+        return run_document.blocked_reason
+
+    for record in run_document.steps:
+        if record.status != "blocked":
+            continue
+        for error in record.errors:
+            if not error.startswith("Blocked by prerequisite "):
+                return error
+
+    for warning in run_document.warnings:
+        normalized = warning.casefold()
+        if "blocked" in normalized or "failed" in normalized:
+            return warning
+
+    return run_document.warnings[0] if run_document.warnings else None
+
+
+def _workflow_blocked_issue_details_payload(
+    run_document: WorkflowRun,
+) -> list[WorkflowIssueDetail]:
+    if run_document.lifecycle_status != "blocked":
+        return []
+
+    if run_document.blocked_issue_details:
+        return _dedupe_workflow_issue_details(list(run_document.blocked_issue_details))
+
+    blocked_steps = [record for record in run_document.steps if record.status == "blocked"]
+    if blocked_steps:
+        step_details: list[WorkflowIssueDetail] = []
+        for record in blocked_steps:
+            step_details.extend(record.error_details)
+            step_details.extend(record.warning_details)
+        if step_details:
+            return _dedupe_workflow_issue_details(step_details)
+
+    return _dedupe_workflow_issue_details(list(run_document.warning_details))
+
+
 @dataclass(frozen=True)
 class _WorkflowRunStreamEmitter:
     spec: WorkflowSpec
@@ -342,7 +451,15 @@ class _WorkflowRunStreamEmitter:
             payload_to_emit.setdefault("request_id", self.request_id)
         self.callback(normalize_workflow_stream_event(payload_to_emit))
 
-    def start(self, *, resumed: bool, lifecycle_status: str) -> None:
+    def start(
+        self,
+        *,
+        resumed: bool,
+        lifecycle_status: str,
+        started_at: datetime | None = None,
+        run_document: WorkflowRun | None = None,
+    ) -> None:
+        step_records = {record.id: record for record in run_document.steps} if run_document is not None else {}
         self._emit(
             {
                 "contract_version": WORKFLOW_EVENT_CONTRACT_VERSION,
@@ -353,10 +470,16 @@ class _WorkflowRunStreamEmitter:
                 "lifecycle_status": lifecycle_status,
                 "resumed": resumed,
                 "run_record_path": self.layout.run_record_relpath.as_posix(),
+                "total_steps": len(self.spec.steps),
+                "steps": [
+                    _workflow_step_descriptor_payload(step, step_records.get(step.id))
+                    for step in self.spec.steps
+                ],
+                "started_at": _isoformat_z(started_at) if started_at is not None else None,
             }
         )
 
-    def step_start(self, step: WorkflowStepDefinition) -> None:
+    def step_start(self, step: WorkflowStepDefinition, *, started_at: datetime | None = None) -> None:
         engine_name = step.executor.engine_name if isinstance(step.executor, ExternalEngineExecutor) else None
         self._emit(
             {
@@ -370,6 +493,7 @@ class _WorkflowRunStreamEmitter:
                 "executor_type": step.executor.executor_type,
                 "prerequisite_step_ids": list(step.prerequisites),
                 "engine_name": engine_name,
+                "started_at": _isoformat_z(started_at) if started_at is not None else None,
             }
         )
 
@@ -388,6 +512,9 @@ class _WorkflowRunStreamEmitter:
                 "warning_details": [detail.model_dump(mode="json") for detail in record.warning_details],
                 "errors": list(record.errors),
                 "error_details": [detail.model_dump(mode="json") for detail in record.error_details],
+                "started_at": _isoformat_z(record.start_time) if record.start_time is not None else None,
+                "ended_at": _isoformat_z(record.end_time) if record.end_time is not None else None,
+                "duration_seconds": _duration_seconds(record.start_time, record.end_time),
             }
         )
 
@@ -441,19 +568,37 @@ class _WorkflowRunStreamEmitter:
     def done(self, run_document: WorkflowRun) -> None:
         completed_steps = sum(1 for record in run_document.steps if record.status == "completed")
         warning_count = len(run_document.warnings) + sum(len(record.warnings) for record in run_document.steps)
-        self._emit(
-            {
-                "contract_version": WORKFLOW_EVENT_CONTRACT_VERSION,
-                "type": "workflow_done",
-                "run_id": self.layout.run_id,
-                "workflow_id": self.spec.workflow_id,
-                "lifecycle_status": run_document.lifecycle_status,
-                "run_record_path": self.layout.run_record_relpath.as_posix(),
-                "completed_steps": completed_steps,
-                "total_steps": len(run_document.steps),
-                "warning_count": warning_count,
-            }
+        started_at = min(
+            (record.start_time for record in run_document.steps if record.start_time is not None),
+            default=self.layout.created_at,
         )
+        ended_at = max(
+            (record.end_time for record in run_document.steps if record.end_time is not None),
+            default=started_at,
+        )
+        payload: dict[str, Any] = {
+            "contract_version": WORKFLOW_EVENT_CONTRACT_VERSION,
+            "type": "workflow_done",
+            "run_id": self.layout.run_id,
+            "workflow_id": self.spec.workflow_id,
+            "lifecycle_status": run_document.lifecycle_status,
+            "run_record_path": self.layout.run_record_relpath.as_posix(),
+            "completed_steps": completed_steps,
+            "total_steps": len(run_document.steps),
+            "warning_count": warning_count,
+            "started_at": _isoformat_z(started_at),
+            "ended_at": _isoformat_z(ended_at),
+            "duration_seconds": _duration_seconds(started_at, ended_at),
+        }
+        blocked_reason = _workflow_blocked_reason_payload(run_document)
+        if blocked_reason is not None:
+            payload["blocked_reason"] = blocked_reason
+        if run_document.lifecycle_status == "blocked":
+            payload["blocked_issue_details"] = [
+                detail.model_dump(mode="json")
+                for detail in _workflow_blocked_issue_details_payload(run_document)
+            ]
+        self._emit(payload)
 
 
 class InternalDAGRunner:
@@ -461,6 +606,7 @@ class InternalDAGRunner:
 
     def __init__(self, base_dir: Path | str):
         self.base_dir = Path(base_dir).resolve()
+        self.project_roots = _workflow_project_roots(self.base_dir)
 
     def run(
         self,
@@ -528,7 +674,12 @@ class InternalDAGRunner:
             callback=event_callback,
             request_id=request_id,
         )
-        emitter.start(resumed=resumed, lifecycle_status=run_document.lifecycle_status)
+        emitter.start(
+            resumed=resumed,
+            lifecycle_status=run_document.lifecycle_status,
+            started_at=self._workflow_started_at(run_document),
+            run_document=run_document,
+        )
         self._record_workflow_started_event(
             spec=spec,
             layout=layout,
@@ -812,9 +963,11 @@ class InternalDAGRunner:
         if candidate.is_absolute():
             resolved = candidate.resolve()
             try:
-                return resolved.relative_to(self.base_dir).as_posix()
+                return _relative_to_project_roots(resolved, self.project_roots).as_posix()
             except ValueError as exc:
-                raise ValueError(f"Path {resolved} must stay under {self.base_dir}.") from exc
+                raise ValueError(
+                    f"Path {resolved} must stay under one of {', '.join(str(root) for root in self.project_roots)}."
+                ) from exc
 
         normalized = PurePosixPath(str(value))
         if normalized.is_absolute():
@@ -917,6 +1070,8 @@ class InternalDAGRunner:
             eln_exports=[],
             summary_metrics=[],
             warnings=[],
+            blocked_reason=None,
+            blocked_issue_details=[],
         )
 
     def _record_workflow_started_event(
@@ -1097,6 +1252,8 @@ class InternalDAGRunner:
         run_document.qc_summary = "\n".join(retained_summaries) if retained_summaries else None
         run_document.warnings = []
         run_document.warning_details = []
+        run_document.blocked_reason = None
+        run_document.blocked_issue_details = []
         run_document.related_artifacts = [
             ref for ref in run_document.related_artifacts if self._artifact_ref_key(ref) not in stale_ref_keys
         ]
@@ -1353,10 +1510,11 @@ class InternalDAGRunner:
         step_started_monotonic = time.perf_counter() if use_monotonic_duration else None
         record.end_time = None
         if emitter is not None:
-            emitter.step_start(step)
+            emitter.step_start(step, started_at=record.start_time)
 
         context = StepExecutionContext(
             base_dir=self.base_dir,
+            project_roots=self.project_roots,
             run_dir=layout.run_dir,
             relative_run_dir=layout.relative_run_dir,
             run_id=layout.run_id,
@@ -1525,6 +1683,8 @@ class InternalDAGRunner:
                 record.status = terminal_status
                 run_document.lifecycle_status = terminal_status
                 if terminal_status == "blocked":
+                    run_document.blocked_reason = error_message
+                    run_document.blocked_issue_details = _dedupe_workflow_issue_details(issue_details)
                     if error_message not in run_document.warnings:
                         run_document.warnings.append(error_message)
                     run_document.warning_details = _dedupe_workflow_issue_details(
@@ -1631,7 +1791,7 @@ class InternalDAGRunner:
             if isinstance(source, WorkflowInputSource):
                 value = resolved_inputs[source.input_name]
                 if isinstance(value, str):
-                    candidate = (self.base_dir / value).resolve()
+                    candidate = self._project_path(value)
                     if not candidate.exists():
                         continue
                     refs.append(
@@ -1675,15 +1835,22 @@ class InternalDAGRunner:
         )
 
     def _load_python_callable(self, search_root: Path, module_name: str, function_name: str):
-        if str(search_root) not in sys.path:
-            sys.path.insert(0, str(search_root))
+        search_roots = _workflow_project_roots(search_root)
+        for root in reversed(search_roots):
+            root_str = str(root)
+            if root_str not in sys.path:
+                sys.path.insert(0, root_str)
 
         for prefix in _module_prefixes(module_name):
             loaded = sys.modules.get(prefix)
             if loaded is None:
                 continue
             origin = getattr(loaded, "__file__", None)
-            if origin is not None and str(search_root) not in str(origin):
+            if origin is None:
+                continue
+            try:
+                _relative_to_project_roots(Path(origin), search_roots)
+            except ValueError:
                 sys.modules.pop(prefix, None)
 
         importlib.invalidate_caches()
@@ -3211,6 +3378,7 @@ class InternalDAGRunner:
         try:
             context = StepExecutionContext(
                 base_dir=self.base_dir,
+                project_roots=self.project_roots,
                 run_dir=layout.run_dir,
                 relative_run_dir=layout.relative_run_dir,
                 run_id=layout.run_id,
@@ -3751,7 +3919,9 @@ class InternalDAGRunner:
         if self._binding_is_path_like(spec, source):
             candidate = self._project_path(value)
             if not candidate.exists():
-                raise ValueError(f"{self._binding_label(source)} path {candidate.relative_to(self.base_dir)} is missing.")
+                raise ValueError(
+                    f"{self._binding_label(source)} path {self._coerce_project_relative_path(value)} is missing."
+                )
 
     def _binding_is_path_like(self, spec: WorkflowSpec, source) -> bool:
         if isinstance(source, WorkflowInputSource):
@@ -3781,15 +3951,13 @@ class InternalDAGRunner:
     def _project_path(self, value: Any) -> Path:
         if isinstance(value, Mapping) and "path" in value:
             value = value["path"]
-        candidate = Path(str(value))
-        if candidate.is_absolute():
-            resolved = candidate.resolve()
-        else:
-            resolved = (self.base_dir / candidate).resolve()
+        resolved = _resolve_path_from_project_roots(value, self.project_roots)
         try:
-            resolved.relative_to(self.base_dir)
+            _relative_to_project_roots(resolved, self.project_roots)
         except ValueError as exc:
-            raise ValueError(f"Path {resolved} must stay under {self.base_dir}.") from exc
+            raise ValueError(
+                f"Path {resolved} must stay under one of {', '.join(str(root) for root in self.project_roots)}."
+            ) from exc
         return resolved
 
     def _binding_label(self, source) -> str:
@@ -3839,12 +4007,18 @@ class InternalDAGRunner:
         emitter: _WorkflowRunStreamEmitter | None,
     ) -> WorkflowRun:
         run_document.lifecycle_status = "blocked"
+        run_document.blocked_reason = reason
         if reason not in run_document.warnings:
             run_document.warnings.append(reason)
         if issue_details:
             run_document.warning_details = _dedupe_workflow_issue_details(
                 [*run_document.warning_details, *issue_details]
             )
+            run_document.blocked_issue_details = _dedupe_workflow_issue_details(
+                [*run_document.blocked_issue_details, *issue_details]
+            )
+        else:
+            run_document.blocked_issue_details = []
 
         if current_step is not None and stage == "before_step":
             record = self._step_record(run_document, current_step.id)

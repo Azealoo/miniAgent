@@ -1347,6 +1347,8 @@ class WorkflowRun(ArtifactDocument):
     deviations: list["DeviationRecord"] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     warning_details: list[WorkflowIssueDetail] = Field(default_factory=list)
+    blocked_reason: str | None = None
+    blocked_issue_details: list[WorkflowIssueDetail] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod

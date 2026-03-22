@@ -171,6 +171,8 @@ def materialize_blocked_workflow_run(
         biocompute_exports=[],
         eln_exports=[],
         warnings=[reason],
+        blocked_reason=reason,
+        blocked_issue_details=[],
     )
     run_document = runner._sync_observability_summary_metrics(
         run_document,
@@ -225,6 +227,7 @@ def materialize_blocked_workflow_run(
         reason=reason,
         run_id=layout.run_id,
         run_record_path=layout.run_record_relpath.as_posix(),
+        started_at=layout.created_at,
         request_id=request_id,
     )
     return MaterializedBlockedWorkflowChatRun(
@@ -248,6 +251,7 @@ def build_blocked_workflow_events(
         reason=reason,
         run_id=run_id,
         run_record_path=(run_dir / "run.json").as_posix(),
+        started_at=timestamp,
         request_id=request_id,
     )
 
@@ -258,8 +262,21 @@ def _build_blocked_workflow_events_for_run(
     reason: str,
     run_id: str,
     run_record_path: str,
+    started_at: datetime,
     request_id: str | None = None,
 ) -> list[dict[str, Any]]:
+    started_at_iso = started_at.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    workflow_steps = [
+        {
+            "step_id": step.id,
+            "step_label": step.label,
+            "prerequisite_step_ids": list(step.prerequisites),
+            "executor_type": step.executor.executor_type,
+            "engine_name": getattr(step.executor, "engine_name", None),
+            "status": "created",
+        }
+        for step in prepared.spec.steps
+    ]
     return [
         normalize_workflow_stream_event(
             {
@@ -271,6 +288,9 @@ def _build_blocked_workflow_events_for_run(
                 "lifecycle_status": "created",
                 "resumed": False,
                 "run_record_path": run_record_path,
+                "total_steps": len(prepared.spec.steps),
+                "steps": workflow_steps,
+                "started_at": started_at_iso,
                 "request_id": request_id,
             }
         ),
@@ -283,7 +303,7 @@ def _build_blocked_workflow_events_for_run(
                 "lifecycle_status": "blocked",
                 "reason": reason,
                 "stage": "before_execution",
-                "blocking_source": "unknown",
+                "blocking_source": "input_validation",
                 "step_id": None,
                 "step_label": None,
                 "request_id": request_id,
@@ -300,6 +320,11 @@ def _build_blocked_workflow_events_for_run(
                 "completed_steps": 0,
                 "total_steps": len(prepared.spec.steps),
                 "warning_count": 1,
+                "started_at": started_at_iso,
+                "ended_at": started_at_iso,
+                "duration_seconds": 0.0,
+                "blocked_reason": reason,
+                "blocked_issue_details": [],
                 "request_id": request_id,
             }
         ),
@@ -395,11 +420,22 @@ def describe_workflow_result(prepared: PreparedWorkflowChatRun, result: Workflow
 
 
 def _find_workflow_spec_path(base_dir: Path, workflow_id: str) -> Path:
-    workflows_dir = base_dir / "workflows"
-    for suffix in (".yaml", ".yml", ".json"):
-        candidate = workflows_dir / f"{workflow_id}{suffix}"
-        if candidate.exists():
-            return candidate
+    search_roots: list[Path] = [base_dir]
+    repo_root = base_dir.parent
+    if (
+        base_dir.name == "backend"
+        and repo_root != base_dir
+        and (repo_root / "backend") == base_dir
+        and (repo_root / "workflows").exists()
+    ):
+        search_roots.append(repo_root)
+
+    for root in search_roots:
+        workflows_dir = root / "workflows"
+        for suffix in (".yaml", ".yml", ".json"):
+            candidate = workflows_dir / f"{workflow_id}{suffix}"
+            if candidate.exists():
+                return candidate
     raise ValueError(f"Unknown workflow spec: {workflow_id!r}")
 
 

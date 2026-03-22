@@ -15,12 +15,15 @@ import {
   Terminal,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  buildWorkflowProgressRuns,
+  type WorkflowProgressRun,
+} from "@/lib/workflow-progress";
 import type {
   ComplianceReportArtifact,
   JsonValue,
   ToolCall,
   ToolResultEnvelope,
-  WorkflowArtifactEvent,
   WorkflowArtifactRef,
   WorkflowIssueDetail,
   WorkflowStreamEvent,
@@ -58,6 +61,17 @@ function formatJsonValue(value: JsonValue | undefined): string {
 function humanizeUnderscoreValue(value?: string | null): string {
   if (!value) return "unknown";
   return value.replaceAll("_", " ");
+}
+
+function formatWorkflowBlockContext(run: WorkflowProgressRun): string | null {
+  if (!run.blockedStage) return null;
+
+  const stageLabel = humanizeUnderscoreValue(run.blockedStage);
+  if (!run.blockingSource || run.blockingSource === "unknown") {
+    return stageLabel;
+  }
+
+  return `${stageLabel} via ${humanizeUnderscoreValue(run.blockingSource)}`;
 }
 
 function complianceRuntimeState(report: ComplianceReportArtifact | null): string | null {
@@ -416,228 +430,10 @@ function SingleCall({ call }: SingleCallProps) {
   );
 }
 
-interface WorkflowArtifactTrace {
-  artifact: WorkflowArtifactRef;
-  scope: WorkflowArtifactEvent["scope"];
-  stepId?: string | null;
-  outputName?: string | null;
-}
-
-interface WorkflowStepTrace {
-  stepId: string;
-  stepLabel: string;
-  status: string;
-  executorType?: string;
-  engineName?: string | null;
-  prerequisiteStepIds: string[];
-  artifacts: WorkflowArtifactRef[];
-  warnings: string[];
-  warningDetails: WorkflowIssueDetail[];
-  errors: string[];
-  errorDetails: WorkflowIssueDetail[];
-}
-
-interface WorkflowRunTrace {
-  runId: string;
-  workflowId: string;
-  workflowName: string;
-  status: string;
-  resumed: boolean;
-  runRecordPath?: string;
-  blockedReason?: string;
-  blockedIssueDetails: WorkflowIssueDetail[];
-  blockedStage?: string;
-  blockingSource?: string;
-  completedSteps?: number;
-  totalSteps?: number;
-  warningCount?: number;
-  steps: WorkflowStepTrace[];
-  artifacts: WorkflowArtifactTrace[];
-}
-
-function pushUniqueArtifact(
-  current: WorkflowArtifactRef[],
-  artifact: WorkflowArtifactRef
-): WorkflowArtifactRef[] {
-  if (
-    current.some(
-      (existing) =>
-        existing.path === artifact.path &&
-        existing.artifact_type === artifact.artifact_type
-    )
-  ) {
-    return current;
-  }
-  return [...current, artifact];
-}
-
-function pushUniqueIssueDetail(
-  current: WorkflowIssueDetail[],
-  detail: WorkflowIssueDetail
-): WorkflowIssueDetail[] {
-  if (
-    current.some(
-      (existing) =>
-        existing.code === detail.code &&
-        existing.message === detail.message &&
-        existing.field_path === detail.field_path &&
-        existing.path === detail.path
-    )
-  ) {
-    return current;
-  }
-  return [...current, detail];
-}
-
-function pushUniqueIssueDetails(
-  current: WorkflowIssueDetail[],
-  details: WorkflowIssueDetail[]
-): WorkflowIssueDetail[] {
-  return details.reduce(pushUniqueIssueDetail, current);
-}
-
 function formatWorkflowIssueDetail(detail: WorkflowIssueDetail): string {
   const location = detail.field_path ?? "manifest";
   const pathSuffix = detail.path ? ` (${detail.path})` : "";
   return `${location}${pathSuffix}: ${detail.message}`;
-}
-
-function buildWorkflowRuns(events: WorkflowStreamEvent[]): WorkflowRunTrace[] {
-  const runs = new Map<string, WorkflowRunTrace>();
-  const steps = new Map<string, Map<string, WorkflowStepTrace>>();
-  const order: string[] = [];
-
-  function ensureRun(event: WorkflowStreamEvent): WorkflowRunTrace {
-    const existing = runs.get(event.run_id);
-    if (existing) return existing;
-    const created: WorkflowRunTrace = {
-      runId: event.run_id,
-      workflowId: event.workflow_id,
-      workflowName: event.workflow_id,
-      status: "created",
-      resumed: false,
-      blockedIssueDetails: [],
-      steps: [],
-      artifacts: [],
-    };
-    runs.set(event.run_id, created);
-    steps.set(event.run_id, new Map());
-    order.push(event.run_id);
-    return created;
-  }
-
-  function ensureStep(
-    run: WorkflowRunTrace,
-    stepId: string,
-    stepLabel: string
-  ): WorkflowStepTrace {
-    const runSteps = steps.get(run.runId) ?? new Map<string, WorkflowStepTrace>();
-    steps.set(run.runId, runSteps);
-    const existing = runSteps.get(stepId);
-    if (existing) {
-      existing.stepLabel = stepLabel;
-      return existing;
-    }
-    const created: WorkflowStepTrace = {
-      stepId,
-      stepLabel,
-      status: "created",
-      prerequisiteStepIds: [],
-      artifacts: [],
-      warnings: [],
-      warningDetails: [],
-      errors: [],
-      errorDetails: [],
-    };
-    runSteps.set(stepId, created);
-    run.steps.push(created);
-    return created;
-  }
-
-  for (const event of events) {
-    const run = ensureRun(event);
-
-    switch (event.type) {
-      case "workflow_start":
-        run.workflowName = event.workflow_name;
-        run.status = event.lifecycle_status;
-        run.resumed = event.resumed;
-        run.runRecordPath = event.run_record_path;
-        break;
-      case "workflow_step_start": {
-        const step = ensureStep(run, event.step_id, event.step_label);
-        step.status = event.status;
-        step.executorType = event.executor_type;
-        step.engineName = event.engine_name ?? null;
-        step.prerequisiteStepIds = event.prerequisite_step_ids;
-        break;
-      }
-      case "workflow_artifact": {
-        if (
-          !run.artifacts.some(
-            (existing) =>
-              existing.scope === event.scope &&
-              existing.stepId === event.step_id &&
-              existing.outputName === event.output_name &&
-              existing.artifact.path === event.artifact.path
-          )
-        ) {
-          run.artifacts.push({
-            artifact: event.artifact,
-            scope: event.scope,
-            stepId: event.step_id,
-            outputName: event.output_name,
-          });
-        }
-        if (event.step_id && event.step_label) {
-          const step = ensureStep(run, event.step_id, event.step_label);
-          step.artifacts = pushUniqueArtifact(step.artifacts, event.artifact);
-        }
-        break;
-      }
-      case "workflow_step_end": {
-        const step = ensureStep(run, event.step_id, event.step_label);
-        if (step.status !== "blocked") {
-          step.status = event.status;
-        }
-        step.warnings = Array.from(new Set([...step.warnings, ...event.warnings]));
-        step.warningDetails = pushUniqueIssueDetails(step.warningDetails, event.warning_details);
-        step.errors = Array.from(new Set([...step.errors, ...event.errors]));
-        step.errorDetails = pushUniqueIssueDetails(step.errorDetails, event.error_details);
-        for (const artifact of event.artifact_refs) {
-          step.artifacts = pushUniqueArtifact(step.artifacts, artifact);
-        }
-        break;
-      }
-      case "workflow_blocked":
-        run.status = event.lifecycle_status;
-        run.blockedReason = event.reason;
-        run.blockedIssueDetails = pushUniqueIssueDetails(
-          run.blockedIssueDetails,
-          event.issue_details
-        );
-        run.blockedStage = event.stage;
-        run.blockingSource = event.blocking_source;
-        if (event.step_id && event.step_label) {
-          const step = ensureStep(run, event.step_id, event.step_label);
-          step.status = "blocked";
-          step.errorDetails = pushUniqueIssueDetails(step.errorDetails, event.issue_details);
-          if (!step.errors.includes(event.reason)) {
-            step.errors = [...step.errors, event.reason];
-          }
-        }
-        break;
-      case "workflow_done":
-        run.status = event.lifecycle_status;
-        run.runRecordPath = event.run_record_path;
-        run.completedSteps = event.completed_steps;
-        run.totalSteps = event.total_steps;
-        run.warningCount = event.warning_count;
-        break;
-    }
-  }
-
-  return order.map((runId) => runs.get(runId)).filter(Boolean) as WorkflowRunTrace[];
 }
 
 function workflowStatusBadgeClass(status: string): string {
@@ -662,15 +458,16 @@ function formatWorkflowArtifact(artifact: WorkflowArtifactRef): string {
   return `${artifact.artifact_type} - ${artifact.path}`;
 }
 
-function WorkflowRunCard({ run }: { run: WorkflowRunTrace }) {
+function WorkflowRunCard({ run }: { run: WorkflowProgressRun }) {
   const runArtifacts = run.artifacts.filter((artifact) => !artifact.stepId);
+  const blockedContext = formatWorkflowBlockContext(run);
 
   return (
     <div className="border border-slate-200 rounded-lg overflow-hidden bg-white">
       <div className="px-3 py-2 bg-slate-50 border-b border-slate-200">
         <div className="flex items-start gap-2">
           <span className="mt-0.5">
-            <WorkflowStatusIcon status={run.status} />
+            <WorkflowStatusIcon status={run.lifecycleStatus} />
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 flex-wrap">
@@ -680,10 +477,10 @@ function WorkflowRunCard({ run }: { run: WorkflowRunTrace }) {
               <span
                 className={cn(
                   "rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
-                  workflowStatusBadgeClass(run.status)
+                  workflowStatusBadgeClass(run.lifecycleStatus)
                 )}
               >
-                {humanizeUnderscoreValue(run.status)}
+                {humanizeUnderscoreValue(run.lifecycleStatus)}
               </span>
               {run.resumed && (
                 <span className="rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-slate-100 text-slate-600">
@@ -711,11 +508,7 @@ function WorkflowRunCard({ run }: { run: WorkflowRunTrace }) {
             {run.blockedReason && (
               <div className="mt-1 text-xs text-red-700">
                 {run.blockedReason}
-                {run.blockedStage
-                  ? ` (${humanizeUnderscoreValue(run.blockedStage)} via ${humanizeUnderscoreValue(
-                      run.blockingSource
-                    )})`
-                  : ""}
+                {blockedContext ? ` (${blockedContext})` : ""}
               </div>
             )}
             {run.blockedIssueDetails.length > 0 && (
@@ -728,93 +521,97 @@ function WorkflowRunCard({ run }: { run: WorkflowRunTrace }) {
       </div>
 
       <div className="px-3 py-2 space-y-2">
-        {run.steps.map((step) => (
-          <div
-            key={step.stepId}
-            className="rounded-md border border-slate-200 bg-white px-2.5 py-2"
-          >
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs font-medium text-slate-700">
-                {step.stepLabel}
-              </span>
-              <span
-                className={cn(
-                  "rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
-                  workflowStatusBadgeClass(step.status)
+        {run.steps.map((step) => {
+          const stepStatusLabel = step.rawStatus === "created" ? "pending" : step.rawStatus;
+
+          return (
+            <div
+              key={step.stepId}
+              className="rounded-md border border-slate-200 bg-white px-2.5 py-2"
+            >
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-medium text-slate-700">
+                  {step.stepLabel}
+                </span>
+                <span
+                  className={cn(
+                    "rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+                    workflowStatusBadgeClass(stepStatusLabel)
+                  )}
+                >
+                  {humanizeUnderscoreValue(stepStatusLabel)}
+                </span>
+                {step.engineName && (
+                  <span className="rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-slate-100 text-slate-600">
+                    {step.engineName}
+                  </span>
                 )}
-              >
-                {humanizeUnderscoreValue(step.status)}
-              </span>
-              {step.engineName && (
-                <span className="rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-slate-100 text-slate-600">
-                  {step.engineName}
-                </span>
+                {!step.engineName && step.executorType && (
+                  <span className="rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-slate-100 text-slate-600">
+                    {step.executorType}
+                  </span>
+                )}
+                {stepStatusLabel === "running" && (
+                  <span className="ml-auto flex gap-0.5">
+                    {[0, 1, 2].map((index) => (
+                      <span
+                        key={index}
+                        className="inline-block w-1 h-1 rounded-full bg-[var(--apex-accent)] animate-bounce"
+                        style={{ animationDelay: `${index * 150}ms` }}
+                      />
+                    ))}
+                  </span>
+                )}
+              </div>
+
+              {step.prerequisiteStepIds.length > 0 && (
+                <div className="mt-1 text-[11px] text-slate-500">
+                  after: {step.prerequisiteStepIds.join(", ")}
+                </div>
               )}
-              {!step.engineName && step.executorType && (
-                <span className="rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-slate-100 text-slate-600">
-                  {step.executorType}
-                </span>
-              )}
-              {step.status === "running" && (
-                <span className="ml-auto flex gap-0.5">
-                  {[0, 1, 2].map((index) => (
-                    <span
-                      key={index}
-                      className="inline-block w-1 h-1 rounded-full bg-[var(--apex-accent)] animate-bounce"
-                      style={{ animationDelay: `${index * 150}ms` }}
-                    />
+
+              {step.artifacts.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {step.artifacts.map((artifact, index) => (
+                    <div
+                      key={`${artifact.path}-${index}`}
+                      className="flex items-start gap-2 rounded bg-slate-50 px-2 py-1.5"
+                    >
+                      <Package size={12} className="text-slate-500 mt-0.5 flex-shrink-0" />
+                      <span className="text-[11px] text-slate-600 break-all">
+                        {formatWorkflowArtifact(artifact)}
+                      </span>
+                    </div>
                   ))}
-                </span>
+                </div>
+              )}
+
+              {step.warnings.length > 0 && (
+                <pre className="mt-2 text-xs font-mono text-amber-700 whitespace-pre-wrap break-all bg-amber-50 p-2 rounded">
+                  {step.warnings.join("\n")}
+                </pre>
+              )}
+
+              {step.warningDetails.length > 0 && (
+                <pre className="mt-2 text-xs font-mono text-amber-700 whitespace-pre-wrap break-all bg-amber-50 p-2 rounded">
+                  {step.warningDetails.map(formatWorkflowIssueDetail).join("\n")}
+                </pre>
+              )}
+
+              {step.errors.length > 0 && (
+                <pre className="mt-2 text-xs font-mono text-red-700 whitespace-pre-wrap break-all bg-red-50 p-2 rounded">
+                  {step.errors.join("\n")}
+                </pre>
+              )}
+
+              {step.errorDetails.length > 0 && (
+                <pre className="mt-2 text-xs font-mono text-red-700 whitespace-pre-wrap break-all bg-red-50 p-2 rounded">
+                  {step.errorDetails.map(formatWorkflowIssueDetail).join("\n")}
+                </pre>
               )}
             </div>
-
-            {step.prerequisiteStepIds.length > 0 && (
-              <div className="mt-1 text-[11px] text-slate-500">
-                after: {step.prerequisiteStepIds.join(", ")}
-              </div>
-            )}
-
-            {step.artifacts.length > 0 && (
-              <div className="mt-2 space-y-1">
-                {step.artifacts.map((artifact, index) => (
-                  <div
-                    key={`${artifact.path}-${index}`}
-                    className="flex items-start gap-2 rounded bg-slate-50 px-2 py-1.5"
-                  >
-                    <Package size={12} className="text-slate-500 mt-0.5 flex-shrink-0" />
-                    <span className="text-[11px] text-slate-600 break-all">
-                      {formatWorkflowArtifact(artifact)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {step.warnings.length > 0 && (
-              <pre className="mt-2 text-xs font-mono text-amber-700 whitespace-pre-wrap break-all bg-amber-50 p-2 rounded">
-                {step.warnings.join("\n")}
-              </pre>
-            )}
-
-            {step.warningDetails.length > 0 && (
-              <pre className="mt-2 text-xs font-mono text-amber-700 whitespace-pre-wrap break-all bg-amber-50 p-2 rounded">
-                {step.warningDetails.map(formatWorkflowIssueDetail).join("\n")}
-              </pre>
-            )}
-
-            {step.errors.length > 0 && (
-              <pre className="mt-2 text-xs font-mono text-red-700 whitespace-pre-wrap break-all bg-red-50 p-2 rounded">
-                {step.errors.join("\n")}
-              </pre>
-            )}
-
-            {step.errorDetails.length > 0 && (
-              <pre className="mt-2 text-xs font-mono text-red-700 whitespace-pre-wrap break-all bg-red-50 p-2 rounded">
-                {step.errorDetails.map(formatWorkflowIssueDetail).join("\n")}
-              </pre>
-            )}
-          </div>
-        ))}
+          );
+        })}
 
         {runArtifacts.length > 0 && (
           <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-2">
@@ -858,7 +655,7 @@ export default function ThoughtChain({
   pendingTool,
 }: ThoughtChainProps) {
   const [collapsed, setCollapsed] = useState(false);
-  const workflowRuns = buildWorkflowRuns(workflowEvents);
+  const workflowRuns = buildWorkflowProgressRuns(workflowEvents);
   const toolCount = toolCalls.length + (pendingTool ? 1 : 0);
 
   const hasItems = workflowRuns.length > 0 || toolCalls.length > 0 || !!pendingTool;

@@ -63,7 +63,7 @@ const quickStartItems: QuickStartItem[] = [
     icon: FlaskConical,
     workflowId: "rnaseq_qc_de",
     draftMessage:
-      "Run the RNA-seq differential expression workflow on the attached dataset manifest. Use the standard QC and report outputs unless I provide different parameters.",
+      "Run the RNA-seq differential expression workflow on the attached dataset manifest with condition_field=condition baseline_condition=control comparison_condition=treated. Use the standard QC and report outputs unless I provide different parameters.",
   },
   {
     id: "evidence-review",

@@ -667,15 +667,27 @@ async def test_chat_stream_runs_selected_workflow_without_agent_stream(isolated_
     assert workflow_payloads[0]["type"] == "workflow_start"
     assert workflow_payloads[-1]["type"] == "workflow_done"
     assert workflow_payloads[-1]["lifecycle_status"] == "completed"
+    assert workflow_payloads[0]["total_steps"] == 2
+    assert [step["step_id"] for step in workflow_payloads[0]["steps"]] == [
+        "preflight_check",
+        "summarize_qc",
+    ]
+    assert workflow_payloads[0]["started_at"].endswith("Z")
+    assert workflow_payloads[-1]["started_at"].endswith("Z")
+    assert workflow_payloads[-1]["ended_at"].endswith("Z")
+    assert workflow_payloads[-1]["duration_seconds"] is not None
     assert len(workflow_request_ids) == 1
     assert any(
-        item["type"] == "workflow_step_start" and item["step_id"] == "preflight_check"
+        item["type"] == "workflow_step_start"
+        and item["step_id"] == "preflight_check"
+        and item["started_at"].endswith("Z")
         for item in workflow_payloads
     )
     assert any(
         item["type"] == "workflow_step_end"
         and item["step_id"] == "summarize_qc"
         and item["status"] == "completed"
+        and item["duration_seconds"] is not None
         for item in workflow_payloads
     )
     assert any(
@@ -785,7 +797,12 @@ async def test_chat_stream_blocks_selected_workflow_without_required_inputs(isol
     assert workflow_payloads[1]["reason"].startswith(
         "Missing required workflow inputs: dataset_manifest."
     )
+    assert workflow_payloads[1]["blocking_source"] == "input_validation"
+    assert workflow_payloads[1]["stage"] == "before_execution"
     assert workflow_payloads[-1]["lifecycle_status"] == "blocked"
+    assert workflow_payloads[-1]["blocked_reason"].startswith(
+        "Missing required workflow inputs: dataset_manifest."
+    )
     blocked_run_record = isolated_chat_state / workflow_payloads[0]["run_record_path"]
     assert blocked_run_record.exists()
     assert blocked_run_record == isolated_chat_state / workflow_payloads[-1]["run_record_path"]

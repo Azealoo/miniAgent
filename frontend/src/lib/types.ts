@@ -119,6 +119,8 @@ export type WorkflowBlockingSource =
   | "qc_gate"
   | "compliance_hook"
   | "step_failure"
+  | "qa_review"
+  | "input_validation"
   | "unknown";
 
 export type WorkflowBlockStage =
@@ -154,12 +156,32 @@ export interface WorkflowEventBase {
   request_id?: string;
 }
 
+export interface WorkflowStepDescriptor {
+  step_id: string;
+  step_label: string;
+  prerequisite_step_ids: string[];
+  executor_type: string;
+  engine_name?: string | null;
+  status?: WorkflowStepStatus | null;
+  artifact_refs?: WorkflowArtifactRef[];
+  warnings?: string[];
+  warning_details?: WorkflowIssueDetail[];
+  errors?: string[];
+  error_details?: WorkflowIssueDetail[];
+  started_at?: string | null;
+  ended_at?: string | null;
+  duration_seconds?: number | null;
+}
+
 export interface WorkflowStartEvent extends WorkflowEventBase {
   type: "workflow_start";
   workflow_name: string;
   lifecycle_status: WorkflowLifecycleStatus;
   resumed: boolean;
   run_record_path: string;
+  total_steps?: number | null;
+  steps?: WorkflowStepDescriptor[];
+  started_at?: string | null;
 }
 
 export interface WorkflowStepStartEvent extends WorkflowEventBase {
@@ -170,18 +192,22 @@ export interface WorkflowStepStartEvent extends WorkflowEventBase {
   executor_type: string;
   prerequisite_step_ids: string[];
   engine_name?: string | null;
+  started_at?: string | null;
 }
 
 export interface WorkflowStepEndEvent extends WorkflowEventBase {
   type: "workflow_step_end";
   step_id: string;
   step_label: string;
-  status: Extract<WorkflowStepStatus, "completed" | "failed" | "blocked">;
+  status: Extract<WorkflowStepStatus, "waiting" | "completed" | "failed" | "blocked">;
   artifact_refs: WorkflowArtifactRef[];
   warnings: string[];
   warning_details: WorkflowIssueDetail[];
   errors: string[];
   error_details: WorkflowIssueDetail[];
+  started_at?: string | null;
+  ended_at?: string | null;
+  duration_seconds?: number | null;
 }
 
 export interface WorkflowBlockedEvent extends WorkflowEventBase {
@@ -211,6 +237,11 @@ export interface WorkflowDoneEvent extends WorkflowEventBase {
   completed_steps: number;
   total_steps: number;
   warning_count: number;
+  started_at?: string | null;
+  ended_at?: string | null;
+  duration_seconds?: number | null;
+  blocked_reason?: string | null;
+  blocked_issue_details?: WorkflowIssueDetail[];
 }
 
 export type WorkflowStreamEvent =

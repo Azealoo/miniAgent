@@ -117,6 +117,29 @@ def test_prepare_selected_workflow_run_parses_array_metadata_inputs(tmp_path):
     ]
 
 
+def test_prepare_selected_workflow_run_finds_repo_root_specs_from_backend_base_dir():
+    from workflow_chat import prepare_selected_workflow_run
+
+    prepared = prepare_selected_workflow_run(
+        REPO_ROOT / "backend",
+        "rnaseq_qc_de",
+        message=(
+            "Run the RNA-seq differential expression workflow with "
+            "condition_field=condition baseline_condition=control comparison_condition=treated"
+        ),
+        attached_identifiers=[
+            "dataset_manifest=backend/artifacts/examples/rnaseq_dataset_manifest.yaml",
+        ],
+    )
+
+    assert prepared.blocking_reason is None
+    assert prepared.spec_path == REPO_ROOT / "workflows" / "rnaseq_qc_de.yaml"
+    assert prepared.inputs["dataset_manifest"] == "backend/artifacts/examples/rnaseq_dataset_manifest.yaml"
+    assert prepared.inputs["condition_field"] == "condition"
+    assert prepared.inputs["baseline_condition"] == "control"
+    assert prepared.inputs["comparison_condition"] == "treated"
+
+
 def test_materialize_blocked_workflow_run_persists_run_record(tmp_path):
     from artifacts import load_artifact_document
     from workflow_chat import materialize_blocked_workflow_run, prepare_selected_workflow_run
@@ -139,6 +162,8 @@ def test_materialize_blocked_workflow_run_persists_run_record(tmp_path):
     assert blocked.result.artifact_path.exists()
     assert blocked.workflow_events[0]["run_record_path"] == blocked.result.artifact_relpath
     assert (tmp_path / blocked.result.artifact_relpath).exists()
+    assert blocked.workflow_events[1]["blocking_source"] == "input_validation"
+    assert blocked.workflow_events[1]["stage"] == "before_execution"
 
     run_document = load_artifact_document(blocked.result.artifact_path)
     export_manifest_path = tmp_path / blocked.result.artifact_relpath.replace(

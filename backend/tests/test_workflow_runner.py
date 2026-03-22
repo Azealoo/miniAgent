@@ -18,7 +18,7 @@ from artifacts import ArtifactReference, load_artifact_document, resolve_artifac
 from artifacts.public_urls import public_raw_file_url  # noqa: E402
 from artifacts.registry import lookup_artifact_registry, rebuild_artifact_registry  # noqa: E402
 from artifacts.schema_validation import validate_biocompute_payload_against_reference_schemas  # noqa: E402
-from artifacts.schemas import SCHEMA_PACK_VERSION  # noqa: E402
+from artifacts.schemas import SCHEMA_PACK_VERSION, WorkflowIssueDetail  # noqa: E402
 import workflow_runner as workflow_runner_module  # noqa: E402
 from workflow_runner import InternalDAGRunner  # noqa: E402
 from workflow_specs import WORKFLOW_SPEC_VERSION, validate_workflow_spec_payload  # noqa: E402
@@ -36,6 +36,132 @@ def _write_runner_module(base_dir: Path, module_name: str, source: str) -> str:
     for loaded in (f"workflows.runners.{module_name}", "workflows.runners", "workflows"):
         sys.modules.pop(loaded, None)
     return f"workflows.runners.{module_name}"
+
+
+def _stage_repo_root_workflow_for_backend_base_dir(repo_root: Path) -> Path:
+    backend_dir = repo_root / "backend"
+    workflows_dir = repo_root / "workflows"
+    runners_dir = workflows_dir / "runners"
+    report_templates_dir = workflows_dir / "report_templates"
+    backend_dir.mkdir(parents=True, exist_ok=True)
+    runners_dir.mkdir(parents=True, exist_ok=True)
+    report_templates_dir.mkdir(parents=True, exist_ok=True)
+    (workflows_dir / "__init__.py").write_text('"""Repo-root workflow package for tests."""\n', encoding="utf-8")
+    (runners_dir / "__init__.py").write_text('"""Repo-root workflow runners for tests."""\n', encoding="utf-8")
+    (runners_dir / "repo_root_demo.py").write_text(
+        """
+def compose_summary(inputs, context):
+    template_path = context.resolve_path(inputs["message_template"])
+    template = template_path.read_text(encoding="utf-8").strip()
+    return {
+        "summary": {
+            "message": template.replace("{{ sample_name }}", inputs["sample_name"]),
+            "template_path": context.relative_path(template_path),
+        }
+    }
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (report_templates_dir / "repo_root_demo.txt").write_text(
+        "Hello {{ sample_name }} from the repo-root workflow.",
+        encoding="utf-8",
+    )
+    spec_path = workflows_dir / "repo-root-demo.yaml"
+    spec_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": WORKFLOW_SPEC_VERSION,
+                "kind": "workflow_spec",
+                "workflow_id": "repo-root-demo",
+                "version": WORKFLOW_SPEC_VERSION,
+                "name": "Repo Root Demo",
+                "purpose": "Verify backend-root runners can execute repo-root workflows.",
+                "engine": "internal_dag_runner_v1",
+                "required_inputs": [
+                    {
+                        "name": "sample_name",
+                        "kind": "metadata",
+                        "data_type": "string",
+                        "description": "Sample name used in the demo summary.",
+                    }
+                ],
+                "optional_inputs": [
+                    {
+                        "name": "message_template",
+                        "kind": "template",
+                        "template_path": "workflows/report_templates/repo_root_demo.txt",
+                        "description": "Template used to render the demo summary.",
+                    }
+                ],
+                "runtime": {
+                    "provided_inputs": ["sample_name", "message_template"],
+                    "allowed_parameter_overrides": [],
+                    "generated_state": [
+                        "run_id",
+                        "created_at",
+                        "resolved_input_paths",
+                        "step_statuses",
+                        "artifact_paths",
+                    ],
+                    "state_artifact": "workflow_run",
+                    "artifact_root_template": "artifacts/{workflow_id}/{date}/{run_id}",
+                },
+                "outputs": [
+                    {
+                        "name": "summary",
+                        "kind": "value",
+                        "description": "Rendered demo summary.",
+                        "source": {
+                            "step_id": "compose_summary",
+                            "output_name": "summary",
+                        },
+                    }
+                ],
+                "steps": [
+                    {
+                        "id": "compose_summary",
+                        "label": "Compose Summary",
+                        "executor": {
+                            "executor_type": "python",
+                            "module": "workflows.runners.repo_root_demo",
+                            "function": "compose_summary",
+                        },
+                        "inputs": [
+                            {
+                                "name": "sample_name",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "sample_name",
+                                },
+                            },
+                            {
+                                "name": "message_template",
+                                "source": {
+                                    "source_type": "workflow_input",
+                                    "input_name": "message_template",
+                                },
+                            },
+                        ],
+                        "outputs": [
+                            {
+                                "name": "summary",
+                                "kind": "value",
+                                "description": "Rendered demo summary.",
+                            }
+                        ],
+                        "prerequisites": [],
+                        "retry_policy": {"max_attempts": 1, "backoff_seconds": 0},
+                        "failure_policy": "fail_workflow",
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    for loaded in ("workflows.runners.repo_root_demo", "workflows.runners", "workflows"):
+        sys.modules.pop(loaded, None)
+    return spec_path
 
 
 def _runtime_contract(provided_inputs: list[str]) -> dict:
@@ -508,6 +634,32 @@ def _write_bulk_rnaseq_manifest(
 
 
 class TestInternalDAGRunner:
+    def test_runner_executes_repo_root_workflows_from_backend_base_dir(self, tmp_path):
+        spec_path = _stage_repo_root_workflow_for_backend_base_dir(tmp_path)
+
+        result = InternalDAGRunner(tmp_path / "backend").run(
+            spec_path,
+            {"sample_name": "Ada"},
+        )
+
+        assert result.run.lifecycle_status == "completed"
+        assert result.artifact_path.exists()
+        assert any(
+            ref.artifact_type == "template"
+            and ref.path == "workflows/report_templates/repo_root_demo.txt"
+            for ref in result.run.inputs
+        )
+
+        snapshot_paths = list(result.run_dir.rglob("resolved_outputs.json"))
+        assert snapshot_paths
+        snapshot_payload = json.loads(snapshot_paths[0].read_text(encoding="utf-8"))
+        summary_ref = snapshot_payload["outputs"]["summary"]["path"]
+        summary_payload = json.loads(
+            resolve_artifact_path(tmp_path / "backend", summary_ref).read_text(encoding="utf-8")
+        )
+        assert summary_payload["value"]["message"] == "Hello Ada from the repo-root workflow."
+        assert summary_payload["value"]["template_path"] == "workflows/report_templates/repo_root_demo.txt"
+
     def test_runner_executes_steps_in_dependency_order_and_persists_outputs(self, tmp_path):
         module_name = _write_runner_module(
             tmp_path,
@@ -773,13 +925,19 @@ def summarize(inputs, _context):
             "workflow_done",
         ]
         assert events[0]["contract_version"] == "workflow_event.v1"
+        assert events[0]["total_steps"] == 2
+        assert [step["step_id"] for step in events[0]["steps"]] == ["prepare", "summarize"]
         assert events[1]["scope"] == "run_record"
+        assert events[2]["started_at"].endswith("Z")
         assert events[3]["artifact"]["artifact_type"] == "workflow_value"
+        assert events[4]["duration_seconds"] is not None
         assert events[6]["artifact"]["artifact_type"] == "qa_report"
         assert events[8]["scope"] == "workflow_output"
         assert events[-1]["lifecycle_status"] == "completed"
         assert events[-1]["completed_steps"] == 2
         assert events[-1]["total_steps"] == 2
+        assert events[-1]["started_at"].endswith("Z")
+        assert events[-1]["ended_at"].endswith("Z")
 
     def test_runner_blocks_final_publication_when_qa_review_fails(self, tmp_path):
         module_name = _write_runner_module(
@@ -1154,6 +1312,33 @@ def summarize(inputs, context):
         assert resumed.resumed is True
         assert resumed.run.lifecycle_status == "completed"
         assert [record.status for record in resumed.run.steps] == ["completed", "completed"]
+        assert json.loads((tmp_path / "execution_log.json").read_text(encoding="utf-8")) == [
+            "prepare",
+            "summarize",
+        ]
+
+        terminal_events: list[dict] = []
+        terminal_resume = runner.run(
+            spec,
+            run_dir=resumed.run_dir,
+            event_callback=terminal_events.append,
+        )
+
+        assert terminal_resume.resumed is True
+        assert terminal_resume.run.lifecycle_status == "completed"
+        assert [event["type"] for event in terminal_events] == [
+            "workflow_start",
+            "workflow_artifact",
+            "workflow_done",
+        ]
+        assert [step["status"] for step in terminal_events[0]["steps"]] == [
+            "completed",
+            "completed",
+        ]
+        assert terminal_events[0]["steps"][0]["started_at"].endswith("Z")
+        assert terminal_events[0]["steps"][0]["ended_at"].endswith("Z")
+        assert terminal_events[0]["steps"][1]["artifact_refs"][0]["artifact_type"] == "qa_report"
+        assert terminal_events[-1]["completed_steps"] == 2
         assert json.loads((tmp_path / "execution_log.json").read_text(encoding="utf-8")) == [
             "prepare",
             "summarize",
@@ -3080,6 +3265,23 @@ def launch(inputs, _context):
         assert events[2]["stage"] == "before_execution"
         assert "dataset-manifest-required" in events[2]["reason"]
         assert events[3]["lifecycle_status"] == "blocked"
+        assert "dataset-manifest-required" in events[3]["blocked_reason"]
+
+        resumed_events: list[dict] = []
+        resumed = InternalDAGRunner(tmp_path).run(
+            spec,
+            run_dir=result.run_dir,
+            event_callback=resumed_events.append,
+        )
+
+        assert resumed.resumed is True
+        assert resumed.run.lifecycle_status == "blocked"
+        assert [event["type"] for event in resumed_events] == [
+            "workflow_start",
+            "workflow_artifact",
+            "workflow_done",
+        ]
+        assert "dataset-manifest-required" in resumed_events[-1]["blocked_reason"]
 
     def test_blocked_dataset_intake_failures_preserve_structured_issue_details(self, tmp_path):
         module_name = _write_runner_module(
@@ -3200,8 +3402,9 @@ def validate(inputs, context):
             }
         )
 
+        runner = InternalDAGRunner(tmp_path)
         events: list[dict] = []
-        result = InternalDAGRunner(tmp_path).run(
+        result = runner.run(
             spec,
             {"dataset_manifest": "manifests/dataset_manifest.yaml"},
             event_callback=events.append,
@@ -3221,9 +3424,46 @@ def validate(inputs, context):
         step_end_event = next(event for event in events if event["type"] == "workflow_step_end")
         assert step_end_event["error_details"][0]["field_path"] == "sample_sheet_path"
         assert step_end_event["error_details"][0]["code"] == "missing_field"
+        done_event = next(event for event in events if event["type"] == "workflow_done")
+        assert "sample_sheet_path" in done_event["blocked_reason"]
+        assert done_event["blocked_issue_details"][0]["field_path"] == "sample_sheet_path"
         run_document = load_artifact_document(result.artifact_path)
+        assert run_document.blocked_issue_details[0].field_path == "sample_sheet_path"
         assert run_document.warning_details[0].field_path == "sample_sheet_path"
         assert run_document.steps[0].error_details[0].field_path == "sample_sheet_path"
+
+        run_document.warning_details = [
+            *run_document.warning_details,
+            WorkflowIssueDetail(
+                code="warning_only",
+                message="Earlier non-blocking warning should not become the block explanation.",
+                field_path="non_blocking_warning",
+                path="manifests/dataset_manifest.yaml",
+            ),
+        ]
+        if not any("Earlier non-blocking warning" in warning for warning in run_document.warnings):
+            run_document.warnings.append(
+                "Earlier non-blocking warning should remain separate from the final block context."
+            )
+        layout = runner._load_existing_layout(spec, result.run_dir)
+        runner._persist_run_document(layout, run_document)
+
+        resumed_events: list[dict] = []
+        resumed = runner.run(
+            spec,
+            run_dir=result.run_dir,
+            event_callback=resumed_events.append,
+        )
+        resumed_done_event = next(event for event in resumed_events if event["type"] == "workflow_done")
+        assert resumed.resumed is True
+        assert resumed.run.lifecycle_status == "blocked"
+        assert "sample_sheet_path" in resumed_done_event["blocked_reason"]
+        assert resumed_done_event["blocked_issue_details"][0]["field_path"] == "sample_sheet_path"
+        assert resumed_done_event["blocked_issue_details"][0]["code"] == "missing_field"
+        assert not any(
+            detail["field_path"] == "non_blocking_warning"
+            for detail in resumed_done_event["blocked_issue_details"]
+        )
 
     def test_runner_uses_slugified_workflow_identity_in_workflow_run_artifact(self, tmp_path):
         module_name = _write_runner_module(
