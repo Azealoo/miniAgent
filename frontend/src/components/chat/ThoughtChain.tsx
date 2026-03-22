@@ -11,6 +11,7 @@ import {
   ShieldAlert,
   Terminal,
 } from "lucide-react";
+import { getEvidenceReviewPayload } from "@/lib/evidence";
 import { cn } from "@/lib/utils";
 import type {
   ComplianceReportArtifact,
@@ -150,23 +151,6 @@ function getAuditLogPath(result?: ToolResultEnvelope): string | null {
   }
   const auditLogPath = (payload as Record<string, JsonValue>).audit_log_path;
   return typeof auditLogPath === "string" ? auditLogPath : null;
-}
-
-function getEvidenceReviewPayload(
-  result?: ToolResultEnvelope
-): Record<string, JsonValue> | null {
-  const payload = result?.structured_payload;
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return null;
-  }
-  const record = payload as Record<string, JsonValue>;
-  if (
-    typeof record.review_status === "string" ||
-    typeof record.requires_review === "boolean"
-  ) {
-    return record;
-  }
-  return null;
 }
 
 function evidenceReviewStatus(result?: ToolResultEnvelope): string | null {

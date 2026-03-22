@@ -43,6 +43,96 @@ export interface ToolResultEnvelope {
   source_payload?: JsonValue;
 }
 
+export type ConfidenceLevel = "low" | "medium" | "high";
+
+export type EvidenceReviewStatus =
+  | "supported"
+  | "mixed"
+  | "insufficient_evidence";
+
+export interface EvidenceArtifactReference {
+  artifact_type: string;
+  path: string;
+  id?: string | null;
+  run_id?: string | null;
+}
+
+export interface EvidenceRetrievalCardSummary {
+  pmid: string;
+  title: string;
+  stable_identifier: string;
+  study_type?: string | null;
+  artifact_path: string;
+  cached_raw_payload_path?: string | null;
+  retrieval_context_path?: string | null;
+  esearch_payload_path?: string | null;
+  esummary_payload_path?: string | null;
+  run_id?: string | null;
+  claim_count: number;
+  limitation_count: number;
+  entity_tags?: JsonValue;
+  grounded_entities?: JsonValue;
+  grounding_results?: JsonValue;
+  grounding_requires_clarification: boolean;
+  entity_grounding_path?: string | null;
+}
+
+export interface EvidenceRetrievalFailure {
+  pmid: string;
+  error: string;
+}
+
+export interface EvidenceRetrievalPayload {
+  query?: string | null;
+  candidate_records: JsonValue[];
+  selected_pmids: string[];
+  retrieval_context_run_id?: string | null;
+  retrieval_context_path?: string | null;
+  esearch_payload_path?: string | null;
+  esummary_payload_path?: string | null;
+  cards: EvidenceRetrievalCardSummary[];
+  failures: EvidenceRetrievalFailure[];
+}
+
+export interface EvidenceReviewExcludedEvidence {
+  evidence_id: string;
+  artifact?: EvidenceArtifactReference | null;
+  reason: string;
+}
+
+export interface EvidenceReviewSourceFact {
+  statement: string;
+  claim_id?: string | null;
+  stable_identifier?: string | null;
+  evidence?: EvidenceArtifactReference | null;
+  confidence?: ConfidenceLevel | null;
+}
+
+export interface EvidenceReviewConclusion {
+  statement: string;
+  support_status?: EvidenceReviewStatus | null;
+  confidence?: ConfidenceLevel | null;
+  supporting_evidence: EvidenceArtifactReference[];
+  limitation_notes: string[];
+  conflict_notes: string[];
+}
+
+export interface EvidenceReviewPayload {
+  question?: string | null;
+  review_status?: EvidenceReviewStatus | null;
+  confidence?: ConfidenceLevel | null;
+  unsupported_claims_present?: boolean;
+  artifact_path?: string | null;
+  evidence_included: EvidenceArtifactReference[];
+  evidence_excluded: EvidenceReviewExcludedEvidence[];
+  limitations: string[];
+  unresolved_conflicts: string[];
+  source_facts: EvidenceReviewSourceFact[];
+  synthesized_conclusions: EvidenceReviewConclusion[];
+  requires_review?: boolean;
+  reasons: string[];
+}
+
 export type ComplianceDisposition =
   | "allow"
   | "allow_with_warning"

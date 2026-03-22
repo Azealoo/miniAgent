@@ -290,7 +290,7 @@ export function getReadinessSummary(
   };
 }
 
-function getLatestRequestMessages(messages: Message[]): Message[] {
+export function getLatestRequestMessages(messages: Message[]): Message[] {
   const latestAssistantBlock = getLatestAssistantBlock(messages);
 
   if (latestAssistantBlock.some((message) => !message.request_id)) {

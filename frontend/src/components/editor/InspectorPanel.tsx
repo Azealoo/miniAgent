@@ -25,13 +25,24 @@ import {
   readFile,
   saveFile,
 } from "@/lib/api";
-import { getWorkflowSummary } from "@/lib/session-status";
+import {
+  getLatestRequestMessages,
+  getWorkflowSummary,
+} from "@/lib/session-status";
+import {
+  getEvidenceRetrievalPayload,
+  parseEvidenceArtifactMetadata,
+  getEvidenceReviewPayload,
+  type EvidenceArtifactMetadata,
+} from "@/lib/evidence";
 import { useApp } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type {
+  ConfidenceLevel,
   Message,
   Skill,
   TokenStats,
+  ToolResultEnvelope,
   WorkflowArtifactScope,
   WorkflowStreamEvent,
 } from "@/lib/types";
@@ -74,9 +85,87 @@ type GeneratedArtifactKind =
 
 type InspectorPreviewMode = "text" | "image" | "pdf" | "unsupported";
 
+type SourceInspectorItemKind = "review" | "evidence" | "retrieval";
+
+type SourceInspectorTone =
+  | "supported"
+  | "mixed"
+  | "insufficient"
+  | "retrieved"
+  | "warning"
+  | "neutral";
+
+type SourceInspectorItem = {
+  id: string;
+  kind: SourceInspectorItemKind;
+  artifactType: string | null;
+  title: string;
+  sourceType: string;
+  identifier: string | null;
+  stateLabel: string | null;
+  detail: string | null;
+  metadata: string[];
+  tone: SourceInspectorTone;
+  path: string | null;
+  lastSeenOrder: number;
+};
+
+type RetrievedSourceSummary = {
+  source: string;
+  identifier: string | null;
+  score: number;
+  count: number;
+  lastSeenOrder: number;
+};
+
 function humanizeToken(value?: string | null): string | null {
   if (!value) return null;
   return value.replaceAll("_", " ").replaceAll("-", " ");
+}
+
+function humanizeLabel(value?: string | null): string | null {
+  const humanized = humanizeToken(value);
+  if (!humanized) {
+    return null;
+  }
+
+  return humanized.charAt(0).toUpperCase() + humanized.slice(1);
+}
+
+function compactText(value?: string | null, maxLength = 160): string | null {
+  if (!value) return null;
+
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxLength - 1)}…`;
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  values.forEach((value) => {
+    const trimmed = value?.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      return;
+    }
+
+    seen.add(trimmed);
+    result.push(trimmed);
+  });
+
+  return result;
+}
+
+function pluralize(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 function getFileExtension(path: string): string | null {
@@ -434,29 +523,369 @@ function getGeneratedArtifactScopeLabel(item: GeneratedArtifactItem): string | n
   return humanizeToken(item.scope);
 }
 
-function collectSources(messages: Message[]) {
-  const sources = new Map<
-    string,
-    { source: string; score: number; count: number }
-  >();
+function getConfidenceTone(
+  confidence?: ConfidenceLevel | null
+): SourceInspectorTone {
+  if (confidence === "high") {
+    return "supported";
+  }
 
+  if (confidence === "medium") {
+    return "mixed";
+  }
+
+  if (confidence === "low") {
+    return "insufficient";
+  }
+
+  return "neutral";
+}
+
+function getReviewTone(result: {
+  reviewStatus?: string | null;
+  confidence?: ConfidenceLevel | null;
+  requiresReview?: boolean;
+}): SourceInspectorTone {
+  if (result.requiresReview) {
+    return "warning";
+  }
+
+  if (result.reviewStatus === "supported") {
+    return "supported";
+  }
+
+  if (result.reviewStatus === "mixed") {
+    return "mixed";
+  }
+
+  if (result.reviewStatus === "insufficient_evidence") {
+    return "insufficient";
+  }
+
+  return getConfidenceTone(result.confidence);
+}
+
+function getToolArtifactRef(
+  result: ToolResultEnvelope | undefined,
+  artifactType: string
+) {
+  return (
+    result?.artifact_refs.find((ref) => ref.artifact_type === artifactType) ?? null
+  );
+}
+
+function extractSourceIdentifier(source: string): string | null {
+  const prefixed = source.match(/\b([a-z]+:[A-Za-z0-9._/-]+)\b/i);
+  if (prefixed?.[1]) {
+    return prefixed[1];
+  }
+
+  const pmid = source.match(/\bPMID[:\s#-]*([0-9]{4,})\b/i);
+  if (pmid?.[1]) {
+    return `pmid:${pmid[1]}`;
+  }
+
+  const accession = source.match(/\b(?:GSE|GSM|SRP|SRA|PRJNA|PRJEB)\d+\b/i);
+  if (accession?.[0]) {
+    return accession[0];
+  }
+
+  const doi = source.match(/\b10\.\d{4,9}\/[^\s)]+/i);
+  if (doi?.[0]) {
+    return `doi:${doi[0].replace(/[.,;:]+$/, "")}`;
+  }
+
+  return null;
+}
+
+function getSourceScopeMessages(
+  messages: Message[],
+  workflowSummary: ReturnType<typeof getWorkflowSummary>
+) {
+  const latestMessages = getLatestRequestMessages(messages);
+  const latestRunId = workflowSummary.events.at(-1)?.run_id ?? null;
+
+  if (!latestRunId) {
+    return latestMessages;
+  }
+
+  const scopedIds = new Set<string>(latestMessages.map((message) => message.id));
   messages.forEach((message) => {
-    (message.retrievals ?? []).forEach((result) => {
-      const existing = sources.get(result.source);
-      if (existing) {
-        existing.score = Math.max(existing.score, result.score);
-        existing.count += 1;
-      } else {
-        sources.set(result.source, {
-          source: result.source,
-          score: result.score,
-          count: 1,
+    if ((message.workflow_events ?? []).some((event) => event.run_id === latestRunId)) {
+      scopedIds.add(message.id);
+    }
+  });
+
+  return messages.filter((message) => scopedIds.has(message.id));
+}
+
+function mergeSourceItemWithMetadata(
+  item: SourceInspectorItem,
+  metadata?: EvidenceArtifactMetadata | null
+): SourceInspectorItem {
+  if (!metadata) {
+    return item;
+  }
+
+  const nextItem = { ...item };
+
+  if (metadata.artifactType) {
+    nextItem.artifactType = metadata.artifactType;
+  }
+
+  if (metadata.title) {
+    nextItem.title = metadata.title;
+  }
+
+  if (metadata.identifier) {
+    nextItem.identifier = metadata.identifier;
+  }
+
+  if (metadata.studyType) {
+    nextItem.metadata = uniqueStrings([
+      humanizeLabel(metadata.studyType),
+      ...nextItem.metadata,
+    ]);
+  }
+
+  if (
+    metadata.confidence &&
+    (nextItem.stateLabel === "Included" ||
+      nextItem.stateLabel === "Retrieved" ||
+      nextItem.stateLabel === null)
+  ) {
+    nextItem.stateLabel = humanizeLabel(metadata.confidence);
+  }
+
+  if (metadata.confidence && nextItem.tone === "neutral") {
+    nextItem.tone = getConfidenceTone(metadata.confidence);
+  }
+
+  if (
+    nextItem.sourceType === "Reviewed evidence" ||
+    nextItem.sourceType === "Evidence artifact"
+  ) {
+    nextItem.sourceType =
+      metadata.studyType != null ? "Evidence source" : "Evidence card";
+  }
+
+  return nextItem;
+}
+
+function collectSourceInspectorData(
+  messages: Message[],
+  workflowSummary: ReturnType<typeof getWorkflowSummary>
+) {
+  const scopedMessages = getSourceScopeMessages(messages, workflowSummary);
+  const reviewedItems = new Map<string, SourceInspectorItem>();
+  const retrievedSources = new Map<string, RetrievedSourceSummary>();
+  let order = 0;
+
+  scopedMessages.forEach((message, messageIndex) => {
+    (message.tool_calls ?? []).forEach((call, callIndex) => {
+      const result = call.result;
+      if (!result) {
+        return;
+      }
+
+      if (
+        call.tool === "evidence_retrieval" ||
+        result.tool_name === "evidence_retrieval"
+      ) {
+        const payload = getEvidenceRetrievalPayload(result);
+        payload?.cards.forEach((card, cardIndex) => {
+          const key =
+            card.artifact_path || card.stable_identifier || `card-${messageIndex}-${callIndex}-${cardIndex}`;
+          const existing = reviewedItems.get(key);
+          reviewedItems.set(key, {
+            id: key,
+            kind: "evidence",
+            artifactType: "evidence_card",
+            title: existing?.title ?? card.title,
+            sourceType:
+              existing?.sourceType ??
+              (card.study_type ? "Evidence source" : "Evidence card"),
+            identifier: existing?.identifier ?? card.stable_identifier,
+            stateLabel: card.grounding_requires_clarification
+              ? "Clarify grounding"
+              : existing?.stateLabel ?? "Retrieved",
+            detail:
+              existing?.detail ??
+              (card.grounding_requires_clarification
+                ? "Entity grounding for this source needs clarification before stronger synthesis."
+                : "Retrieved for the latest evidence turn."),
+            metadata: uniqueStrings([
+              ...(existing?.metadata ?? []),
+              humanizeLabel(card.study_type),
+              pluralize(card.claim_count, "claim"),
+              card.limitation_count > 0
+                ? pluralize(card.limitation_count, "limitation")
+                : null,
+            ]),
+            tone: card.grounding_requires_clarification
+              ? "warning"
+              : existing?.tone ?? "retrieved",
+            path: existing?.path ?? card.artifact_path,
+            lastSeenOrder: order,
+          });
+          order += 1;
+        });
+      }
+
+      if (call.tool === "evidence_review" || result.tool_name === "evidence_review") {
+        const payload = getEvidenceReviewPayload(result);
+        if (!payload) {
+          return;
+        }
+
+        const reviewArtifact = getToolArtifactRef(result, "evidence_review");
+        const reviewKey =
+          payload.artifact_path ??
+          reviewArtifact?.path ??
+          `review-${messageIndex}-${callIndex}`;
+
+        reviewedItems.set(reviewKey, {
+          id: reviewKey,
+          kind: "review",
+          artifactType: "evidence_review",
+          title:
+            payload.question ??
+            compactText(payload.synthesized_conclusions[0]?.statement, 120) ??
+            "Evidence review",
+          sourceType: "Evidence review",
+          identifier: reviewArtifact?.identifier ?? null,
+          stateLabel: payload.review_status
+            ? humanizeLabel(payload.review_status)
+            : null,
+          detail:
+            compactText(payload.synthesized_conclusions[0]?.statement, 180) ??
+            compactText(result.summary, 180),
+          metadata: uniqueStrings([
+            payload.confidence ? `${humanizeLabel(payload.confidence)} confidence` : null,
+            payload.evidence_included.length > 0
+              ? pluralize(payload.evidence_included.length, "included source")
+              : null,
+            payload.evidence_excluded.length > 0
+              ? pluralize(payload.evidence_excluded.length, "excluded source")
+              : null,
+            payload.synthesized_conclusions.length > 0
+              ? pluralize(payload.synthesized_conclusions.length, "conclusion")
+              : null,
+            payload.unresolved_conflicts.length > 0
+              ? pluralize(payload.unresolved_conflicts.length, "conflict")
+              : null,
+          ]),
+          tone: getReviewTone({
+            reviewStatus: payload.review_status,
+            confidence: payload.confidence,
+            requiresReview: payload.requires_review,
+          }),
+          path: payload.artifact_path ?? reviewArtifact?.path ?? null,
+          lastSeenOrder: order,
+        });
+        order += 1;
+
+        const sourceFactsByPath = new Map<string, (typeof payload.source_facts)[number]>();
+        const sourceFactsByIdentifier = new Map<
+          string,
+          (typeof payload.source_facts)[number]
+        >();
+
+        payload.source_facts.forEach((fact) => {
+          if (fact.evidence?.path) {
+            sourceFactsByPath.set(fact.evidence.path, fact);
+          }
+          if (fact.stable_identifier) {
+            sourceFactsByIdentifier.set(fact.stable_identifier, fact);
+          }
+        });
+
+        payload.evidence_included.forEach((ref, refIndex) => {
+          const key =
+            ref.path || ref.id || `reviewed-evidence-${messageIndex}-${callIndex}-${refIndex}`;
+          const existing = reviewedItems.get(key);
+          const fact =
+            sourceFactsByPath.get(ref.path) ??
+            (existing?.identifier
+              ? sourceFactsByIdentifier.get(existing.identifier)
+              : undefined);
+
+          reviewedItems.set(key, {
+            id: key,
+            kind: "evidence",
+            artifactType: ref.artifact_type ?? null,
+            title:
+              existing?.title ??
+              compactText(
+                fact?.statement ?? fact?.stable_identifier ?? ref.id ?? ref.path,
+                120
+              ) ??
+              "Reviewed evidence",
+            sourceType:
+              existing?.sourceType ??
+              (fact ? "Reviewed evidence" : "Evidence artifact"),
+            identifier:
+              existing?.identifier ?? fact?.stable_identifier ?? ref.id ?? null,
+            stateLabel:
+              humanizeLabel(fact?.confidence) ??
+              existing?.stateLabel ??
+              "Included",
+            detail:
+              existing?.detail ??
+              compactText(
+                fact?.statement ?? "Included in the latest evidence review.",
+                180
+              ),
+            metadata: uniqueStrings([
+              ...(existing?.metadata ?? []),
+              "Included in review",
+              payload.review_status ? humanizeLabel(payload.review_status) : null,
+              fact?.claim_id ? humanizeLabel(fact.claim_id) : null,
+            ]),
+            tone:
+              fact?.confidence
+                ? getConfidenceTone(fact.confidence)
+                : getReviewTone({
+                    reviewStatus: payload.review_status,
+                    confidence: payload.confidence,
+                    requiresReview: payload.requires_review,
+                  }),
+            path: existing?.path ?? ref.path,
+            lastSeenOrder: order,
+          });
+          order += 1;
         });
       }
     });
+
+    (message.retrievals ?? []).forEach((result) => {
+      const existing = retrievedSources.get(result.source);
+      if (existing) {
+        existing.score = Math.max(existing.score, result.score);
+        existing.count += 1;
+        existing.lastSeenOrder = order;
+      } else {
+        retrievedSources.set(result.source, {
+          source: result.source,
+          identifier: extractSourceIdentifier(result.source),
+          score: result.score,
+          count: 1,
+          lastSeenOrder: order,
+        });
+      }
+      order += 1;
+    });
   });
 
-  return Array.from(sources.values()).sort((a, b) => b.score - a.score);
+  return {
+    scopedMessages,
+    reviewedItems: Array.from(reviewedItems.values()).sort(
+      (left, right) => right.lastSeenOrder - left.lastSeenOrder
+    ),
+    retrievedItems: Array.from(retrievedSources.values()).sort(
+      (left, right) => right.lastSeenOrder - left.lastSeenOrder
+    ),
+  };
 }
 
 function shortenPath(path: string, maxSegments = 2) {
@@ -735,6 +1164,60 @@ function EmptyState({ children }: { children: ReactNode }) {
   );
 }
 
+function getSourceItemTone(tone: SourceInspectorTone) {
+  if (tone === "supported") {
+    return {
+      badge: "border-emerald-200 bg-emerald-50 text-emerald-700",
+      icon: "bg-emerald-50 text-emerald-700",
+      surface:
+        "border-[rgba(16,185,129,0.14)] bg-[linear-gradient(180deg,rgba(244,251,247,0.98),rgba(237,249,241,0.96))]",
+    };
+  }
+
+  if (tone === "mixed") {
+    return {
+      badge: "border-amber-200 bg-amber-50 text-amber-700",
+      icon: "bg-amber-50 text-amber-700",
+      surface:
+        "border-[rgba(245,158,11,0.14)] bg-[linear-gradient(180deg,rgba(255,251,235,0.96),rgba(254,243,199,0.74))]",
+    };
+  }
+
+  if (tone === "insufficient") {
+    return {
+      badge: "border-rose-200 bg-rose-50 text-rose-700",
+      icon: "bg-rose-50 text-rose-700",
+      surface:
+        "border-[rgba(244,63,94,0.12)] bg-[linear-gradient(180deg,rgba(255,244,246,0.96),rgba(255,228,230,0.76))]",
+    };
+  }
+
+  if (tone === "retrieved") {
+    return {
+      badge: "border-sky-200 bg-sky-50 text-sky-700",
+      icon: "bg-sky-50 text-sky-700",
+      surface:
+        "border-[rgba(14,165,233,0.12)] bg-[linear-gradient(180deg,rgba(240,249,255,0.96),rgba(224,242,254,0.74))]",
+    };
+  }
+
+  if (tone === "warning") {
+    return {
+      badge: "border-orange-200 bg-orange-50 text-orange-700",
+      icon: "bg-orange-50 text-orange-700",
+      surface:
+        "border-[rgba(249,115,22,0.12)] bg-[linear-gradient(180deg,rgba(255,247,237,0.96),rgba(255,237,213,0.78))]",
+    };
+  }
+
+  return {
+    badge: "border-slate-200 bg-slate-100 text-slate-600",
+    icon: "bg-slate-100 text-slate-600",
+    surface:
+      "border-[rgba(148,163,184,0.14)] bg-[linear-gradient(180deg,rgba(248,250,252,0.96),rgba(241,245,249,0.82))]",
+  };
+}
+
 function GeneratedFileRow({
   item,
   active,
@@ -798,6 +1281,103 @@ function GeneratedFileRow({
         </span>
       </span>
     </button>
+  );
+}
+
+function SourceRecordRow({
+  item,
+  onInspect,
+}: {
+  item: SourceInspectorItem;
+  onInspect: (path: string) => void;
+}) {
+  const tone = getSourceItemTone(item.tone);
+  const Icon =
+    item.kind === "review"
+      ? BookOpen
+      : item.kind === "retrieval"
+        ? Search
+        : FileText;
+
+  return (
+    <div
+      className={cn(
+        "rounded-[12px] border px-2.5 py-2 shadow-[0_1px_1px_rgba(32,43,35,0.02)]",
+        tone.surface
+      )}
+    >
+      <div className="flex items-start gap-2">
+        <span
+          className={cn(
+            "mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[9px]",
+            tone.icon
+          )}
+        >
+          <Icon size={12} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <p className="text-[12px] font-semibold leading-5 text-slate-700">
+                {item.title}
+              </p>
+              <p className="mt-0.5 text-[10px] font-medium uppercase tracking-[0.12em] text-slate-400">
+                {item.sourceType}
+              </p>
+            </div>
+            {item.stateLabel ? (
+              <span
+                className={cn(
+                  "inline-flex shrink-0 items-center rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em]",
+                  tone.badge
+                )}
+              >
+                {item.stateLabel}
+              </span>
+            ) : null}
+          </div>
+
+          {item.identifier || item.metadata.length > 0 ? (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {item.identifier ? (
+                <span className="rounded-full border border-white/80 bg-white/82 px-1.5 py-0.5 font-mono text-[9px] text-slate-500">
+                  {item.identifier}
+                </span>
+              ) : null}
+              {item.metadata.map((value) => (
+                <span
+                  key={`${item.id}-${value}`}
+                  className="rounded-full border border-white/70 bg-white/75 px-1.5 py-0.5 text-[9px] font-medium text-slate-500"
+                >
+                  {value}
+                </span>
+              ))}
+            </div>
+          ) : null}
+
+          {item.detail ? (
+            <p className="mt-1 text-[11px] leading-5 text-slate-600">
+              {item.detail}
+            </p>
+          ) : null}
+
+          {item.path ? (
+            <div className="mt-1.5 flex items-center justify-between gap-2">
+              <span className="truncate font-mono text-[9px] text-slate-400">
+                {shortenPath(item.path, 4)}
+              </span>
+              <button
+                type="button"
+                onClick={() => onInspect(item.path!)}
+                className="shrink-0 rounded-full border border-white/80 bg-white/82 px-2 py-0.5 text-[10px] font-medium text-slate-600 transition-colors hover:text-slate-800"
+              >
+                Open artifact
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -898,9 +1478,13 @@ export default function InspectorPanel() {
   const [previewContent, setPreviewContent] = useState("");
   const [previewError, setPreviewError] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [sourceArtifactMetadata, setSourceArtifactMetadata] = useState<
+    Record<string, EvidenceArtifactMetadata | null>
+  >({});
   const memoryRequestIdRef = useRef(0);
   const skillsRequestIdRef = useRef(0);
   const previewRequestIdRef = useRef(0);
+  const sourceMetadataRequestIdRef = useRef(0);
 
   const isMemoryDirty = memoryContent !== savedMemoryContent;
   const isSkillDirty = skillContent !== savedSkillContent;
@@ -909,7 +1493,14 @@ export default function InspectorPanel() {
   const workflowSummary = getWorkflowSummary(messages);
   const hasActiveRun = workflowSummary.events.length > 0;
   const artifactItems = collectArtifacts(workflowSummary.events);
-  const sourceItems = collectSources(messages);
+  const sourceInspectorData = collectSourceInspectorData(messages, workflowSummary);
+  const reviewedSourceItems = sourceInspectorData.reviewedItems.map((item) =>
+    item.path
+      ? mergeSourceItemWithMetadata(item, sourceArtifactMetadata[item.path])
+      : item
+  );
+  const retrievedSourceItems = sourceInspectorData.retrievedItems;
+  const scopedSourceMessageCount = sourceInspectorData.scopedMessages.length;
   const runStatusLabel = getRunStatusLabel(workflowSummary);
   const stepCountLabel = getStepCountLabel(workflowSummary);
   const progressLabel = getProgressLabel(workflowSummary);
@@ -946,6 +1537,51 @@ export default function InspectorPanel() {
       void refreshSkills();
     }
   }, [inspectorTab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const pendingPaths = reviewedSourceItems
+      .filter(
+        (item) =>
+          item.kind === "evidence" &&
+          item.artifactType === "evidence_card" &&
+          item.path &&
+          !Object.prototype.hasOwnProperty.call(sourceArtifactMetadata, item.path)
+      )
+      .map((item) => item.path as string);
+
+    if (pendingPaths.length === 0) {
+      return;
+    }
+
+    const requestId = sourceMetadataRequestIdRef.current + 1;
+    sourceMetadataRequestIdRef.current = requestId;
+
+    void Promise.all(
+      pendingPaths.map(async (path) => {
+        try {
+          const res = await readFile(path);
+          return {
+            path,
+            metadata: parseEvidenceArtifactMetadata(path, res.content),
+          };
+        } catch {
+          return { path, metadata: null };
+        }
+      })
+    ).then((entries) => {
+      if (sourceMetadataRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      setSourceArtifactMetadata((current) => {
+        const next = { ...current };
+        entries.forEach(({ path, metadata }) => {
+          next[path] = metadata;
+        });
+        return next;
+      });
+    });
+  }, [reviewedSourceItems, sourceArtifactMetadata]);
 
   const loadMemory = async () => {
     const requestId = memoryRequestIdRef.current + 1;
@@ -1228,45 +1864,75 @@ export default function InspectorPanel() {
   const renderSourcesTab = () => (
     <div className="space-y-2">
       <InspectorCard
-        title="Retrieved Sources"
-        meta={`${sourceItems.length} source${sourceItems.length === 1 ? "" : "s"}`}
+        title="Reviewed Evidence"
+        meta={`${reviewedSourceItems.length} item${reviewedSourceItems.length === 1 ? "" : "s"}`}
       >
-        {sourceItems.length > 0 ? (
+        {reviewedSourceItems.length > 0 ? (
           <div className="space-y-1">
-            {sourceItems.slice(0, 10).map((source) => (
-              <div
-                key={source.source}
-                className="rounded-[10px] border border-[rgba(211,219,210,0.72)] bg-[rgba(251,252,248,0.92)] px-2.5 py-2"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <p className="min-w-0 truncate text-[12px] font-medium text-slate-700">
-                    {source.source}
-                  </p>
-                  <span className="shrink-0 text-[10px] font-medium text-slate-400">
-                    {source.score.toFixed(3)}
-                  </span>
-                </div>
-                <p className="mt-0.5 text-[10px] leading-4 text-slate-400">
-                  {source.count} hit{source.count === 1 ? "" : "s"} in this session
-                </p>
-              </div>
+            {reviewedSourceItems.slice(0, 8).map((item) => (
+              <SourceRecordRow
+                key={item.id}
+                item={item}
+                onInspect={openInspectorPath}
+              />
             ))}
           </div>
         ) : (
           <EmptyState>
-            No retrieved sources yet. Retrieved evidence will appear here after a RAG-backed response.
+            No reviewed evidence or attached source cards are linked to the current turn or workflow run yet. Evidence retrieval, evidence review, or source-backed workflows will populate this view.
           </EmptyState>
         )}
       </InspectorCard>
 
-      <InspectorCard title="Retrieval Context" meta={ragMode ? "RAG on" : "RAG off"}>
+      <InspectorCard
+        title="Retrieved Context"
+        meta={`${retrievedSourceItems.length} source${retrievedSourceItems.length === 1 ? "" : "s"}`}
+      >
+        {retrievedSourceItems.length > 0 ? (
+          <div className="space-y-1">
+            {retrievedSourceItems.slice(0, 8).map((source) => (
+              <SourceRecordRow
+                key={source.source}
+                item={{
+                  id: source.source,
+                  kind: "retrieval",
+                  artifactType: null,
+                  title: source.source,
+                  sourceType: "Retrieved context",
+                  identifier: source.identifier,
+                  stateLabel: null,
+                  detail: `${pluralize(source.count, "hit")} attached to the latest turn.`,
+                  metadata: [`Top score ${source.score.toFixed(3)}`],
+                  tone: "retrieved",
+                  path: null,
+                  lastSeenOrder: source.lastSeenOrder,
+                }}
+                onInspect={openInspectorPath}
+              />
+            ))}
+          </div>
+        ) : (
+          <EmptyState>
+            No retrieved context is attached to the current turn or workflow run. Retrieval remains visible in the center trace when RAG-backed context is used.
+          </EmptyState>
+        )}
+      </InspectorCard>
+
+      <InspectorCard title="Sources Context" meta={ragMode ? "RAG on" : "RAG off"}>
         <div className="space-y-1 text-[11px] text-slate-600">
-          <p>{messages.length} message(s) loaded in the current workspace.</p>
+          <p>
+            {scopedSourceMessageCount > 0
+              ? `Showing evidence and sources from the current request or workflow run (${pluralize(scopedSourceMessageCount, "message")}).`
+              : "No current turn or workflow run has attached evidence or retrieval context yet."}
+          </p>
           <p>
             {ragMode
-              ? "Retrieved evidence is enabled for the active shell."
-              : "Retrieved evidence is currently disabled for this shell."}
+              ? "Retrieved context stays separate from reviewed evidence so source inspection remains concrete and reviewable."
+              : "RAG is currently disabled, so only explicit evidence artifacts or review outputs will appear here."}
           </p>
+          {workflowSummary.workflowId ? (
+            <p>Latest workflow context: {workflowSummary.workflowId}</p>
+          ) : null}
         </div>
       </InspectorCard>
     </div>
