@@ -19,11 +19,10 @@ export default function ChatMessage({ message }: ChatMessageProps) {
   const hasWorkflowProgress = Boolean(
     message.workflow_events && message.workflow_events.length > 0
   );
-  const hasTrace =
+  const hasToolTrace =
     Boolean(message.tool_calls && message.tool_calls.length > 0) ||
-    hasWorkflowProgress ||
     Boolean(message.pendingTool);
-  const hasSupport = hasRetrievals || hasTrace;
+  const hasSupport = hasRetrievals || hasWorkflowProgress || hasToolTrace;
   const showAssistantShell = Boolean(message.content) || message.isStreaming || hasSupport;
 
   if (isUser) {
@@ -153,10 +152,9 @@ export default function ChatMessage({ message }: ChatMessageProps) {
             {hasWorkflowProgress && (
               <WorkflowProgressCard events={message.workflow_events ?? []} />
             )}
-            {hasTrace && (
+            {hasToolTrace && (
               <ThoughtChain
                 toolCalls={message.tool_calls ?? []}
-                workflowEvents={message.workflow_events ?? []}
                 pendingTool={message.pendingTool}
               />
             )}

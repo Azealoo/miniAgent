@@ -4,29 +4,19 @@ import { useState, type ReactNode } from "react";
 import {
   ChevronDown,
   ChevronRight,
-  CircleCheck,
   Code2,
   FileText,
-  GitBranch,
   Globe,
-  Package,
   Search,
   ShieldAlert,
   Terminal,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import {
-  buildWorkflowProgressRuns,
-  type WorkflowProgressRun,
-} from "@/lib/workflow-progress";
 import type {
   ComplianceReportArtifact,
   JsonValue,
   ToolCall,
   ToolResultEnvelope,
-  WorkflowArtifactRef,
-  WorkflowIssueDetail,
-  WorkflowStreamEvent,
 } from "@/lib/types";
 
 const TOOL_ICONS: Record<string, ReactNode> = {
@@ -63,15 +53,12 @@ function humanizeUnderscoreValue(value?: string | null): string {
   return value.replaceAll("_", " ");
 }
 
-function formatWorkflowBlockContext(run: WorkflowProgressRun): string | null {
-  if (!run.blockedStage) return null;
-
-  const stageLabel = humanizeUnderscoreValue(run.blockedStage);
-  if (!run.blockingSource || run.blockingSource === "unknown") {
-    return stageLabel;
-  }
-
-  return `${stageLabel} via ${humanizeUnderscoreValue(run.blockingSource)}`;
+function compactText(value?: string | null, maxLength = 120): string | null {
+  if (!value) return null;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 1)}…`;
 }
 
 function complianceRuntimeState(report: ComplianceReportArtifact | null): string | null {
@@ -87,35 +74,39 @@ function compliancePreflightDisposition(
 }
 
 function complianceFinalDisposition(report: ComplianceReportArtifact | null): string | null {
-  return typeof report?.final_disposition === "string"
-    ? report.final_disposition
-    : null;
+  return typeof report?.final_disposition === "string" ? report.final_disposition : null;
 }
 
 function outcomeBadgeClass(result?: ToolResultEnvelope): string {
-  if (!result) return "bg-gray-100 text-gray-500";
+  if (!result) return "border-slate-200 bg-slate-100 text-slate-500";
   const reviewStatus = evidenceReviewStatus(result);
-  if (evidenceReviewRequired(result)) return "bg-amber-100 text-amber-700";
-  if (evidenceReviewUnsupported(result)) return "bg-red-100 text-red-700";
-  if (reviewStatus === "mixed") return "bg-amber-100 text-amber-700";
-  if (reviewStatus === "supported") return "bg-emerald-100 text-emerald-700";
+  if (evidenceReviewRequired(result)) return "border-amber-200 bg-amber-50 text-amber-700";
+  if (evidenceReviewUnsupported(result)) return "border-rose-200 bg-rose-50 text-rose-700";
+  if (reviewStatus === "mixed") return "border-amber-200 bg-amber-50 text-amber-700";
+  if (reviewStatus === "supported") return "border-emerald-200 bg-emerald-50 text-emerald-700";
   const complianceReport = getComplianceReport(result);
   const runtimeState = complianceRuntimeState(complianceReport);
-  if (runtimeState === "approved_override") return "bg-sky-100 text-sky-700";
-  if (runtimeState === "approval_required") return "bg-amber-100 text-amber-700";
-  if (runtimeState === "blocked") return "bg-red-100 text-red-700";
-  if (runtimeState === "warning_issued") return "bg-amber-100 text-amber-700";
-  if (result.warnings.includes("approval_required")) return "bg-amber-100 text-amber-700";
-  if (result.warnings.includes("blocked_by_compliance")) return "bg-red-100 text-red-700";
-  if (result.warnings.includes("compliance_warning")) return "bg-amber-100 text-amber-700";
-  if (result.status === "error") return "bg-red-100 text-red-700";
-  if (result.outcome === "success_empty") return "bg-amber-100 text-amber-700";
-  return "bg-emerald-100 text-emerald-700";
+  if (runtimeState === "approved_override") return "border-sky-200 bg-sky-50 text-sky-700";
+  if (runtimeState === "approval_required") return "border-amber-200 bg-amber-50 text-amber-700";
+  if (runtimeState === "blocked") return "border-rose-200 bg-rose-50 text-rose-700";
+  if (runtimeState === "warning_issued") return "border-amber-200 bg-amber-50 text-amber-700";
+  if (result.warnings.includes("approval_required")) {
+    return "border-amber-200 bg-amber-50 text-amber-700";
+  }
+  if (result.warnings.includes("blocked_by_compliance")) {
+    return "border-rose-200 bg-rose-50 text-rose-700";
+  }
+  if (result.warnings.includes("compliance_warning")) {
+    return "border-amber-200 bg-amber-50 text-amber-700";
+  }
+  if (result.status === "error") return "border-rose-200 bg-rose-50 text-rose-700";
+  if (result.outcome === "success_empty") return "border-amber-200 bg-amber-50 text-amber-700";
+  return "border-emerald-200 bg-emerald-50 text-emerald-700";
 }
 
 function outcomeBadgeText(call: ToolCall): string {
   const result = call.result;
-  if (!result) return "";
+  if (!result) return "completed";
   if (evidenceReviewRequired(result)) return "review required";
   if (evidenceReviewUnsupported(result)) return "unsupported claims";
   const reviewStatus = evidenceReviewStatus(result);
@@ -194,11 +185,104 @@ function evidenceReviewRequired(result?: ToolResultEnvelope): boolean {
   return payload?.requires_review === true;
 }
 
+function metadataNumber(result: ToolResultEnvelope | undefined, key: string): number | null {
+  const value = result?.metadata?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds >= 60) {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = Math.round(seconds % 60);
+    return `${minutes}m ${remainingSeconds}s`;
+  }
+  if (seconds >= 10) {
+    return `${Math.round(seconds)}s`;
+  }
+  return `${seconds.toFixed(1)}s`;
+}
+
+function formatCountMetric(value: number, noun: string): string {
+  const rounded = Number.isInteger(value) ? value : Math.round(value);
+  return `${rounded.toLocaleString()} ${noun}${rounded === 1 ? "" : "s"}`;
+}
+
+function toolMetric(call: ToolCall): string | null {
+  const result = call.result;
+  if (!result) return null;
+
+  const durationSeconds = metadataNumber(result, "duration_seconds");
+  if (durationSeconds !== null && durationSeconds >= 0) {
+    return formatDuration(durationSeconds);
+  }
+
+  const durationMs = metadataNumber(result, "duration_ms");
+  if (durationMs !== null && durationMs >= 0) {
+    return durationMs >= 1000
+      ? formatDuration(durationMs / 1000)
+      : `${Math.round(durationMs)}ms`;
+  }
+
+  const countMetrics: Array<[string, string]> = [
+    ["result_count", "result"],
+    ["artifact_count", "artifact"],
+    ["character_count", "char"],
+    ["byte_count", "byte"],
+    ["line_count", "line"],
+    ["row_count", "row"],
+    ["token_count", "token"],
+    ["total_tokens", "token"],
+  ];
+
+  for (const [key, noun] of countMetrics) {
+    const value = metadataNumber(result, key);
+    if (value !== null && value >= 0) {
+      return formatCountMetric(value, noun);
+    }
+  }
+
+  if (result.artifact_refs.length > 0) {
+    return formatCountMetric(result.artifact_refs.length, "artifact");
+  }
+
+  return null;
+}
+
+function toolSummary(call: ToolCall): string | null {
+  return compactText(call.result?.error?.message ?? call.result?.summary ?? call.input, 132);
+}
+
 function ToolIcon({ name }: { name: string }) {
   return (
-    <span className="text-gray-500">
+    <span className="text-slate-500">
       {TOOL_ICONS[name] ?? <Terminal size={12} />}
     </span>
+  );
+}
+
+function DetailSection({
+  label,
+  tone = "default",
+  children,
+}: {
+  label: string;
+  tone?: "default" | "warning" | "error";
+  children: ReactNode;
+}) {
+  const toneClass =
+    tone === "warning"
+      ? "border-amber-200 bg-amber-50/80 text-amber-800"
+      : tone === "error"
+        ? "border-rose-200 bg-rose-50/85 text-rose-800"
+        : "border-[rgba(32,43,35,0.08)] bg-white text-slate-700";
+
+  return (
+    <div className={cn("rounded-[14px] border px-3 py-2.5", toneClass)}>
+      <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+        {label}
+      </p>
+      {children}
+    </div>
   );
 }
 
@@ -215,214 +299,210 @@ function SingleCall({ call }: SingleCallProps) {
   const complianceReport = getComplianceReport(call.result);
   const auditLogPath = getAuditLogPath(call.result);
   const evidenceReview = getEvidenceReviewPayload(call.result);
+  const metric = toolMetric(call);
+  const summary = toolSummary(call);
 
   return (
-    <div className="border border-gray-200 rounded-lg overflow-hidden">
+    <div className="border-b border-[rgba(32,43,35,0.06)] last:border-b-0">
       <button
-        onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-2 px-3 py-2 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
-      >
-        <ToolIcon name={call.tool} />
-        <span className="text-xs font-medium text-gray-700 font-mono">
-          {call.tool}
-        </span>
-        <span className="flex-1 text-xs text-gray-400 truncate">{call.input}</span>
-        {call.result && (
-          <span
-            className={cn(
-              "rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
-              outcomeBadgeClass(call.result)
-            )}
-          >
-            {outcomeBadgeText(call)}
-          </span>
+        onClick={() => setOpen((value) => !value)}
+        className={cn(
+          "flex w-full items-start gap-3 px-3 py-3 text-left transition-colors sm:px-4",
+          open ? "bg-[rgba(246,249,245,0.82)]" : "hover:bg-[rgba(248,250,247,0.9)]"
         )}
+      >
+        <span className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full border border-[rgba(32,43,35,0.08)] bg-white/90">
+          <ToolIcon name={call.tool} />
+        </span>
+
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-slate-700 font-mono">
+              {call.tool}
+            </span>
+            <span
+              className={cn(
+                "rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                outcomeBadgeClass(call.result)
+              )}
+            >
+              {outcomeBadgeText(call)}
+            </span>
+            {metric && <span className="text-[11px] text-slate-400">{metric}</span>}
+          </span>
+          {summary && (
+            <span className="mt-1 block text-[11px] leading-5 text-slate-500">
+              {summary}
+            </span>
+          )}
+        </span>
+
         {open ? (
-          <ChevronDown size={12} className="text-gray-400 flex-shrink-0" />
+          <ChevronDown size={14} className="mt-1 flex-shrink-0 text-slate-400" />
         ) : (
-          <ChevronRight size={12} className="text-gray-400 flex-shrink-0" />
+          <ChevronRight size={14} className="mt-1 flex-shrink-0 text-slate-400" />
         )}
       </button>
 
       {open && (
-        <div className="divide-y divide-gray-200">
-          <div className="px-3 py-2">
-            <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
-              Input
-            </p>
-            <pre className="text-xs font-mono text-gray-700 whitespace-pre-wrap break-all bg-gray-50 p-2 rounded">
+        <div className="space-y-2.5 px-3 pb-3 pl-[3.4rem] sm:px-4 sm:pl-[4rem]">
+          <DetailSection label="Input">
+            <pre className="whitespace-pre-wrap break-all text-xs font-mono">
               {call.input}
             </pre>
-          </div>
-          <div className="px-3 py-2">
-            <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
-              Output
-            </p>
-            <pre className="text-xs font-mono text-gray-600 whitespace-pre-wrap break-all bg-gray-50 p-2 rounded max-h-48 overflow-y-auto">
+          </DetailSection>
+
+          <DetailSection label="Output">
+            <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap break-all text-xs font-mono text-slate-600">
               {call.output || "(no output)"}
             </pre>
-          </div>
+          </DetailSection>
+
           {call.result?.error && (
-            <div className="px-3 py-2">
-              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
-                Error
-              </p>
-              <pre className="text-xs font-mono text-red-700 whitespace-pre-wrap break-all bg-red-50 p-2 rounded">
+            <DetailSection label="Error" tone="error">
+              <pre className="whitespace-pre-wrap break-all text-xs font-mono">
                 {call.result.error.code}: {call.result.error.message}
               </pre>
-            </div>
+            </DetailSection>
           )}
+
           {complianceReport && (
-            <div className="px-3 py-2">
-              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
-                Compliance Decision
-              </p>
-              <div className="bg-slate-50 rounded p-2 text-xs text-gray-700 space-y-1">
+            <DetailSection label="Compliance Decision">
+              <div className="space-y-1 text-xs">
                 <div>
-                  <span className="text-gray-400">State:</span>{" "}
+                  <span className="text-slate-400">State:</span>{" "}
                   {humanizeUnderscoreValue(complianceRuntimeState(complianceReport))}
                 </div>
                 <div>
-                  <span className="text-gray-400">Preflight:</span>{" "}
+                  <span className="text-slate-400">Preflight:</span>{" "}
                   {humanizeUnderscoreValue(
                     compliancePreflightDisposition(complianceReport)
                   )}
                 </div>
                 <div>
-                  <span className="text-gray-400">Final:</span>{" "}
+                  <span className="text-slate-400">Final:</span>{" "}
                   {humanizeUnderscoreValue(
                     complianceFinalDisposition(complianceReport)
                   )}
                 </div>
                 <div>
-                  <span className="text-gray-400">Rules hit:</span>{" "}
+                  <span className="text-slate-400">Rules hit:</span>{" "}
                   {complianceReport.triggered_rules.length}
                 </div>
                 {complianceReport.approval_scope && (
                   <div>
-                    <span className="text-gray-400">Approval scope:</span>{" "}
+                    <span className="text-slate-400">Approval scope:</span>{" "}
                     {complianceReport.approval_scope}
                   </div>
                 )}
                 {complianceReport.approval && (
                   <div>
-                    <span className="text-gray-400">Approved by:</span>{" "}
+                    <span className="text-slate-400">Approved by:</span>{" "}
                     {complianceReport.approval.approved_by}
                   </div>
                 )}
                 {complianceReport.approval?.rationale && (
                   <div>
-                    <span className="text-gray-400">Rationale:</span>{" "}
+                    <span className="text-slate-400">Rationale:</span>{" "}
                     {complianceReport.approval.rationale}
                   </div>
                 )}
                 {auditLogPath && (
                   <div>
-                    <span className="text-gray-400">Audit log:</span>{" "}
-                    {auditLogPath}
+                    <span className="text-slate-400">Audit log:</span> {auditLogPath}
                   </div>
                 )}
               </div>
-            </div>
+            </DetailSection>
           )}
+
           {evidenceReview && (
-            <div className="px-3 py-2">
-              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
-                Evidence Review
-              </p>
-              <div className="bg-slate-50 rounded p-2 text-xs text-gray-700 space-y-1">
+            <DetailSection label="Evidence Review">
+              <div className="space-y-1 text-xs">
                 {typeof evidenceReview.requires_review === "boolean" && (
                   <div>
-                    <span className="text-gray-400">Required:</span>{" "}
+                    <span className="text-slate-400">Required:</span>{" "}
                     {evidenceReview.requires_review ? "yes" : "no"}
                   </div>
                 )}
                 {typeof evidenceReview.review_status === "string" && (
                   <div>
-                    <span className="text-gray-400">Status:</span>{" "}
+                    <span className="text-slate-400">Status:</span>{" "}
                     {humanizeUnderscoreValue(evidenceReview.review_status)}
                   </div>
                 )}
                 {typeof evidenceReview.confidence === "string" && (
                   <div>
-                    <span className="text-gray-400">Confidence:</span>{" "}
+                    <span className="text-slate-400">Confidence:</span>{" "}
                     {evidenceReview.confidence}
                   </div>
                 )}
                 {typeof evidenceReview.question === "string" && (
                   <div>
-                    <span className="text-gray-400">Question:</span>{" "}
+                    <span className="text-slate-400">Question:</span>{" "}
                     {evidenceReview.question}
                   </div>
                 )}
                 {typeof evidenceReview.unsupported_claims_present === "boolean" && (
                   <div>
-                    <span className="text-gray-400">Unsupported claims:</span>{" "}
+                    <span className="text-slate-400">Unsupported claims:</span>{" "}
                     {evidenceReview.unsupported_claims_present ? "yes" : "no"}
                   </div>
                 )}
                 {Array.isArray(evidenceReview.evidence_included) && (
                   <div>
-                    <span className="text-gray-400">Included evidence:</span>{" "}
+                    <span className="text-slate-400">Included evidence:</span>{" "}
                     {evidenceReview.evidence_included.length}
                   </div>
                 )}
                 {Array.isArray(evidenceReview.evidence_excluded) && (
                   <div>
-                    <span className="text-gray-400">Excluded evidence:</span>{" "}
+                    <span className="text-slate-400">Excluded evidence:</span>{" "}
                     {evidenceReview.evidence_excluded.length}
                   </div>
                 )}
                 {Array.isArray(evidenceReview.reasons) && evidenceReview.reasons.length > 0 && (
                   <div>
-                    <span className="text-gray-400">Reasons:</span>{" "}
+                    <span className="text-slate-400">Reasons:</span>{" "}
                     {evidenceReview.reasons.join(", ")}
                   </div>
                 )}
               </div>
-            </div>
+            </DetailSection>
           )}
+
           {warnings.length > 0 && (
-            <div className="px-3 py-2">
-              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
-                Warnings
-              </p>
-              <pre className="text-xs font-mono text-amber-700 whitespace-pre-wrap break-all bg-amber-50 p-2 rounded">
+            <DetailSection label="Warnings" tone="warning">
+              <pre className="whitespace-pre-wrap break-all text-xs font-mono">
                 {warnings.join("\n")}
               </pre>
-            </div>
+            </DetailSection>
           )}
+
           {artifactRefs.length > 0 && (
-            <div className="px-3 py-2">
-              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
-                Artifact Refs
-              </p>
-              <pre className="text-xs font-mono text-gray-700 whitespace-pre-wrap break-all bg-gray-50 p-2 rounded max-h-40 overflow-y-auto">
+            <DetailSection label="Artifact Refs">
+              <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap break-all text-xs font-mono">
                 {artifactRefs
                   .map((ref) => ref.path || ref.identifier || ref.label || "(unnamed ref)")
                   .join("\n")}
               </pre>
-            </div>
+            </DetailSection>
           )}
+
           {structuredPayload !== undefined && (
-            <div className="px-3 py-2">
-              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
-                Structured Payload
-              </p>
-              <pre className="text-xs font-mono text-gray-700 whitespace-pre-wrap break-all bg-gray-50 p-2 rounded max-h-56 overflow-y-auto">
+            <DetailSection label="Structured Payload">
+              <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap break-all text-xs font-mono">
                 {formatJsonValue(structuredPayload)}
               </pre>
-            </div>
+            </DetailSection>
           )}
+
           {sourcePayload !== undefined && (
-            <div className="px-3 py-2">
-              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">
-                Source Payload
-              </p>
-              <pre className="text-xs font-mono text-gray-700 whitespace-pre-wrap break-all bg-gray-50 p-2 rounded max-h-56 overflow-y-auto">
+            <DetailSection label="Source Payload">
+              <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap break-all text-xs font-mono">
                 {formatJsonValue(sourcePayload)}
               </pre>
-            </div>
+            </DetailSection>
           )}
         </div>
       )}
@@ -430,305 +510,117 @@ function SingleCall({ call }: SingleCallProps) {
   );
 }
 
-function formatWorkflowIssueDetail(detail: WorkflowIssueDetail): string {
-  const location = detail.field_path ?? "manifest";
-  const pathSuffix = detail.path ? ` (${detail.path})` : "";
-  return `${location}${pathSuffix}: ${detail.message}`;
-}
-
-function workflowStatusBadgeClass(status: string): string {
-  if (status === "completed") return "bg-emerald-100 text-emerald-700";
-  if (status === "blocked" || status === "failed") return "bg-red-100 text-red-700";
-  if (status === "running" || status === "preflight_checked") return "bg-sky-100 text-sky-700";
-  if (status === "waiting") return "bg-amber-100 text-amber-700";
-  return "bg-slate-100 text-slate-600";
-}
-
-function WorkflowStatusIcon({ status }: { status: string }) {
-  if (status === "completed") {
-    return <CircleCheck size={14} className="text-emerald-600" />;
-  }
-  if (status === "blocked" || status === "failed") {
-    return <ShieldAlert size={14} className="text-red-600" />;
-  }
-  return <GitBranch size={14} className="text-sky-700" />;
-}
-
-function formatWorkflowArtifact(artifact: WorkflowArtifactRef): string {
-  return `${artifact.artifact_type} - ${artifact.path}`;
-}
-
-function WorkflowRunCard({ run }: { run: WorkflowProgressRun }) {
-  const runArtifacts = run.artifacts.filter((artifact) => !artifact.stepId);
-  const blockedContext = formatWorkflowBlockContext(run);
+function PendingToolRow({
+  pendingTool,
+}: {
+  pendingTool: { tool: string; input: string; runId: string };
+}) {
+  const [open, setOpen] = useState(false);
 
   return (
-    <div className="border border-slate-200 rounded-lg overflow-hidden bg-white">
-      <div className="px-3 py-2 bg-slate-50 border-b border-slate-200">
-        <div className="flex items-start gap-2">
-          <span className="mt-0.5">
-            <WorkflowStatusIcon status={run.lifecycleStatus} />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs font-medium text-slate-700">
-                {run.workflowName}
-              </span>
-              <span
-                className={cn(
-                  "rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
-                  workflowStatusBadgeClass(run.lifecycleStatus)
-                )}
-              >
-                {humanizeUnderscoreValue(run.lifecycleStatus)}
-              </span>
-              {run.resumed && (
-                <span className="rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-slate-100 text-slate-600">
-                  resumed
-                </span>
-              )}
-            </div>
-            <div className="mt-1 text-[11px] text-slate-500 font-mono break-all">
-              {run.runId}
-            </div>
-            {run.runRecordPath && (
-              <div className="text-[11px] text-slate-500 break-all">
-                run record: {run.runRecordPath}
-              </div>
-            )}
-            {typeof run.completedSteps === "number" &&
-              typeof run.totalSteps === "number" && (
-                <div className="text-[11px] text-slate-500">
-                  steps: {run.completedSteps}/{run.totalSteps} completed
-                  {typeof run.warningCount === "number"
-                    ? ` - ${run.warningCount} warning${run.warningCount === 1 ? "" : "s"}`
-                    : ""}
-                </div>
-              )}
-            {run.blockedReason && (
-              <div className="mt-1 text-xs text-red-700">
-                {run.blockedReason}
-                {blockedContext ? ` (${blockedContext})` : ""}
-              </div>
-            )}
-            {run.blockedIssueDetails.length > 0 && (
-              <pre className="mt-2 text-xs font-mono text-red-700 whitespace-pre-wrap break-all bg-red-50 p-2 rounded">
-                {run.blockedIssueDetails.map(formatWorkflowIssueDetail).join("\n")}
-              </pre>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="px-3 py-2 space-y-2">
-        {run.steps.map((step) => {
-          const stepStatusLabel = step.rawStatus === "created" ? "pending" : step.rawStatus;
-
-          return (
-            <div
-              key={step.stepId}
-              className="rounded-md border border-slate-200 bg-white px-2.5 py-2"
-            >
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-xs font-medium text-slate-700">
-                  {step.stepLabel}
-                </span>
-                <span
-                  className={cn(
-                    "rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
-                    workflowStatusBadgeClass(stepStatusLabel)
-                  )}
-                >
-                  {humanizeUnderscoreValue(stepStatusLabel)}
-                </span>
-                {step.engineName && (
-                  <span className="rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-slate-100 text-slate-600">
-                    {step.engineName}
-                  </span>
-                )}
-                {!step.engineName && step.executorType && (
-                  <span className="rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-slate-100 text-slate-600">
-                    {step.executorType}
-                  </span>
-                )}
-                {stepStatusLabel === "running" && (
-                  <span className="ml-auto flex gap-0.5">
-                    {[0, 1, 2].map((index) => (
-                      <span
-                        key={index}
-                        className="inline-block w-1 h-1 rounded-full bg-[var(--apex-accent)] animate-bounce"
-                        style={{ animationDelay: `${index * 150}ms` }}
-                      />
-                    ))}
-                  </span>
-                )}
-              </div>
-
-              {step.prerequisiteStepIds.length > 0 && (
-                <div className="mt-1 text-[11px] text-slate-500">
-                  after: {step.prerequisiteStepIds.join(", ")}
-                </div>
-              )}
-
-              {step.artifacts.length > 0 && (
-                <div className="mt-2 space-y-1">
-                  {step.artifacts.map((artifact, index) => (
-                    <div
-                      key={`${artifact.path}-${index}`}
-                      className="flex items-start gap-2 rounded bg-slate-50 px-2 py-1.5"
-                    >
-                      <Package size={12} className="text-slate-500 mt-0.5 flex-shrink-0" />
-                      <span className="text-[11px] text-slate-600 break-all">
-                        {formatWorkflowArtifact(artifact)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {step.warnings.length > 0 && (
-                <pre className="mt-2 text-xs font-mono text-amber-700 whitespace-pre-wrap break-all bg-amber-50 p-2 rounded">
-                  {step.warnings.join("\n")}
-                </pre>
-              )}
-
-              {step.warningDetails.length > 0 && (
-                <pre className="mt-2 text-xs font-mono text-amber-700 whitespace-pre-wrap break-all bg-amber-50 p-2 rounded">
-                  {step.warningDetails.map(formatWorkflowIssueDetail).join("\n")}
-                </pre>
-              )}
-
-              {step.errors.length > 0 && (
-                <pre className="mt-2 text-xs font-mono text-red-700 whitespace-pre-wrap break-all bg-red-50 p-2 rounded">
-                  {step.errors.join("\n")}
-                </pre>
-              )}
-
-              {step.errorDetails.length > 0 && (
-                <pre className="mt-2 text-xs font-mono text-red-700 whitespace-pre-wrap break-all bg-red-50 p-2 rounded">
-                  {step.errorDetails.map(formatWorkflowIssueDetail).join("\n")}
-                </pre>
-              )}
-            </div>
-          );
-        })}
-
-        {runArtifacts.length > 0 && (
-          <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-2">
-            <p className="text-[10px] uppercase tracking-wide text-slate-400 mb-2">
-              Run Artifacts
-            </p>
-            <div className="space-y-1">
-              {runArtifacts.map((artifact, index) => (
-                <div
-                  key={`${artifact.artifact.path}-${artifact.scope}-${index}`}
-                  className="flex items-start gap-2"
-                >
-                  <Package size={12} className="text-slate-500 mt-0.5 flex-shrink-0" />
-                  <div className="min-w-0">
-                    <div className="text-[10px] uppercase tracking-wide text-slate-400">
-                      {humanizeUnderscoreValue(artifact.scope)}
-                    </div>
-                    <div className="text-[11px] text-slate-600 break-all">
-                      {formatWorkflowArtifact(artifact.artifact)}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+    <div className="border-b border-[rgba(32,43,35,0.06)] last:border-b-0">
+      <button
+        onClick={() => setOpen((value) => !value)}
+        className={cn(
+          "flex w-full items-start gap-3 px-3 py-3 text-left transition-colors sm:px-4",
+          open ? "bg-[rgba(241,248,244,0.92)]" : "hover:bg-[rgba(246,250,247,0.92)]"
         )}
-      </div>
+      >
+        <span className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full border border-[rgba(35,130,83,0.16)] bg-[rgba(35,130,83,0.08)]">
+          <ToolIcon name={pendingTool.tool} />
+        </span>
+
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-slate-700 font-mono">
+              {pendingTool.tool}
+            </span>
+            <span className="rounded-full border border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.1)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--apex-accent-strong)]">
+              running
+            </span>
+            <span className="flex items-center gap-0.5">
+              {[0, 1, 2].map((index) => (
+                <span
+                  key={index}
+                  className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--apex-accent)] animate-bounce"
+                  style={{ animationDelay: `${index * 150}ms` }}
+                />
+              ))}
+            </span>
+          </span>
+          {compactText(pendingTool.input, 132) && (
+            <span className="mt-1 block text-[11px] leading-5 text-slate-500">
+              {compactText(pendingTool.input, 132)}
+            </span>
+          )}
+        </span>
+
+        {open ? (
+          <ChevronDown size={14} className="mt-1 flex-shrink-0 text-slate-400" />
+        ) : (
+          <ChevronRight size={14} className="mt-1 flex-shrink-0 text-slate-400" />
+        )}
+      </button>
+
+      {open && (
+        <div className="space-y-2.5 px-3 pb-3 pl-[3.4rem] sm:px-4 sm:pl-[4rem]">
+          <DetailSection label="Input">
+            <pre className="whitespace-pre-wrap break-all text-xs font-mono">
+              {pendingTool.input}
+            </pre>
+          </DetailSection>
+        </div>
+      )}
     </div>
   );
 }
 
 interface ThoughtChainProps {
   toolCalls: ToolCall[];
-  workflowEvents?: WorkflowStreamEvent[];
-  pendingTool?: { tool: string; input: string } | null;
+  pendingTool?: { tool: string; input: string; runId: string } | null;
 }
 
-export default function ThoughtChain({
-  toolCalls,
-  workflowEvents = [],
-  pendingTool,
-}: ThoughtChainProps) {
+export default function ThoughtChain({ toolCalls, pendingTool }: ThoughtChainProps) {
   const [collapsed, setCollapsed] = useState(false);
-  const workflowRuns = buildWorkflowProgressRuns(workflowEvents);
   const toolCount = toolCalls.length + (pendingTool ? 1 : 0);
 
-  const hasItems = workflowRuns.length > 0 || toolCalls.length > 0 || !!pendingTool;
-  if (!hasItems) return null;
+  if (toolCount === 0) return null;
 
   return (
-    <div className="overflow-hidden rounded-[16px] border border-[rgba(32,43,35,0.1)] bg-[linear-gradient(180deg,rgba(252,253,251,0.98),rgba(245,248,244,0.98))] shadow-[0_8px_18px_rgba(32,43,35,0.03)]">
+    <section className="overflow-hidden rounded-[18px] border border-[rgba(32,43,35,0.08)] bg-[linear-gradient(180deg,rgba(252,253,251,0.98),rgba(247,249,246,0.98))] shadow-[0_8px_20px_rgba(32,43,35,0.03)]">
       <button
-        onClick={() => setCollapsed((v) => !v)}
-        className="w-full flex items-center gap-2 px-3.5 py-2.5 bg-[rgba(247,249,246,0.92)] text-left transition-colors hover:bg-[rgba(240,243,239,0.96)]"
+        onClick={() => setCollapsed((value) => !value)}
+        className="flex w-full items-center gap-3 border-b border-[rgba(32,43,35,0.06)] bg-[rgba(248,250,247,0.94)] px-3.5 py-3 text-left transition-colors hover:bg-[rgba(244,247,243,0.96)]"
       >
         {collapsed ? (
-          <ChevronRight size={13} className="text-gray-400" />
+          <ChevronRight size={14} className="text-slate-400" />
         ) : (
-          <ChevronDown size={13} className="text-gray-400" />
+          <ChevronDown size={14} className="text-slate-400" />
         )}
-        <div className="min-w-0">
+
+        <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-[rgba(32,43,35,0.08)] bg-white/88 text-slate-500">
+          <Terminal size={14} />
+        </span>
+
+        <span className="min-w-0 flex-1">
           <span className="block text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-600">
-            Execution Trace
+            Tool Trace
           </span>
           <span className="block text-[11px] text-slate-400">
-            {workflowRuns.length} workflow{workflowRuns.length === 1 ? "" : "s"} · {toolCount} tool
-            {toolCount === 1 ? "" : "s"}
+            {toolCount} tool{toolCount === 1 ? "" : "s"}
+            {pendingTool ? " · 1 running" : ""}
           </span>
-        </div>
+        </span>
       </button>
 
       {!collapsed && (
-        <div className="space-y-3 px-3.5 pb-3 pt-1.5">
-          {workflowRuns.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-[10px] uppercase tracking-wide text-gray-400">
-                Workflow Runs
-              </p>
-              {workflowRuns.map((run) => (
-                <WorkflowRunCard key={run.runId} run={run} />
-              ))}
-            </div>
-          )}
-
-          {(toolCalls.length > 0 || pendingTool) && (
-            <div className="space-y-2">
-              <p className="text-[10px] uppercase tracking-wide text-gray-400">
-                Tool Calls
-              </p>
-              {toolCalls.map((call, index) => (
-                <SingleCall key={call.run_id ?? `${call.tool}-${index}`} call={call} />
-              ))}
-
-              {pendingTool && (
-                <div className="flex items-center gap-2 rounded-lg border border-dashed border-[rgba(47,122,95,0.4)] px-3 py-2">
-                  <ToolIcon name={pendingTool.tool} />
-                  <span className="text-xs font-mono text-[var(--apex-accent)]">
-                    {pendingTool.tool}
-                  </span>
-                  <span className="text-xs text-gray-400 truncate">
-                    {pendingTool.input}
-                  </span>
-                  <span className="ml-auto flex gap-0.5">
-                    {[0, 1, 2].map((index) => (
-                      <span
-                        key={index}
-                        className="inline-block w-1 h-1 rounded-full bg-[var(--apex-accent)] animate-bounce"
-                        style={{ animationDelay: `${index * 150}ms` }}
-                      />
-                    ))}
-                  </span>
-                </div>
-              )}
-            </div>
-          )}
+        <div>
+          {toolCalls.map((call, index) => (
+            <SingleCall key={call.run_id ?? `${call.tool}-${index}`} call={call} />
+          ))}
+          {pendingTool && <PendingToolRow pendingTool={pendingTool} />}
         </div>
       )}
-    </div>
+    </section>
   );
 }
