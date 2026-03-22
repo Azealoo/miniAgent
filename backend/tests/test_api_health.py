@@ -360,8 +360,247 @@ class TestSessionsEndpoints:
             2026, 3, 22, 9, 5, tzinfo=timezone.utc
         ).timestamp()
 
+    def test_list_session_files_workspace_summary_returns_durable_file_metadata(
+        self, isolated_api_state
+    ):
+        from api.sessions import create_session, list_session_files_workspace_summary
+        from artifacts.registry import rebuild_artifact_registry
+        from graph.agent import agent_manager
+
+        session_id = create_session()["id"]
+        session_manager = agent_manager.session_manager
+        run_id = "run-20260322T090000Z-deadbeef"
+        run_dir = (
+            isolated_api_state
+            / "artifacts"
+            / "demo-flow"
+            / "2026-03-22"
+            / run_id
+            / "generated_outputs"
+        )
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        results_path = run_dir / "results.csv"
+        plot_path = run_dir / "volcano.png"
+        report_path = run_dir / "report.html"
+        results_path.write_text("gene,log2fc\nA,1.2\n", encoding="utf-8")
+        plot_path.write_bytes(b"PNGDATA")
+        report_path.write_text("<html><body>ready</body></html>\n", encoding="utf-8")
+        os.utime(results_path, (1711098000, 1711098000))
+        os.utime(plot_path, (1711098300, 1711098300))
+        os.utime(report_path, (1711098600, 1711098600))
+
+        session_manager.save_message(
+            session_id,
+            "assistant",
+            "Generated result artifacts.",
+            workflow_events=[
+                {
+                    "type": "workflow_artifact",
+                    "workflow_id": "demo-flow",
+                    "run_id": run_id,
+                    "artifact": {
+                        "artifact_type": "differential_expression_results",
+                        "path": f"artifacts/demo-flow/2026-03-22/{run_id}/generated_outputs/results.csv",
+                    },
+                    "scope": "workflow_output",
+                    "step_label": "Summarize results",
+                    "output_name": "results table",
+                },
+                {
+                    "type": "workflow_step_end",
+                    "workflow_id": "demo-flow",
+                    "run_id": run_id,
+                    "step_id": "plot-results",
+                    "step_label": "Plot results",
+                    "status": "completed",
+                    "artifact_refs": [
+                        {
+                            "artifact_type": "figure",
+                            "path": f"artifacts/demo-flow/2026-03-22/{run_id}/generated_outputs/volcano.png",
+                        }
+                    ],
+                    "warnings": [],
+                    "warning_details": [],
+                    "errors": [],
+                    "error_details": [],
+                },
+                {
+                    "type": "workflow_artifact",
+                    "workflow_id": "demo-flow",
+                    "run_id": run_id,
+                    "artifact": {
+                        "artifact_type": "workflow_run",
+                        "path": f"artifacts/demo-flow/2026-03-22/{run_id}/run.json",
+                    },
+                    "scope": "run_record",
+                },
+            ],
+            tool_calls=[
+                {
+                    "tool": "write_file",
+                    "run_id": "tool-run-1",
+                    "input": "render html report",
+                    "output": "saved",
+                    "result": {
+                        "tool_name": "write_file",
+                        "status": "success",
+                        "outcome": "success",
+                        "artifact_refs": [
+                            {
+                                "artifact_type": "qa_report",
+                                "path": f"artifacts/demo-flow/2026-03-22/{run_id}/generated_outputs/report.html",
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+
+        rebuild_artifact_registry(isolated_api_state)
+        payload = list_session_files_workspace_summary(session_id)
+
+        assert [item["path"] for item in payload["items"]] == [
+            f"artifacts/demo-flow/2026-03-22/{run_id}/generated_outputs/report.html",
+            f"artifacts/demo-flow/2026-03-22/{run_id}/generated_outputs/volcano.png",
+            f"artifacts/demo-flow/2026-03-22/{run_id}/generated_outputs/results.csv",
+        ]
+
+        report_item = payload["items"][0]
+        assert report_item["name"] == "report.html"
+        assert report_item["artifact_type"] == "qa_report"
+        assert report_item["workflow"] == "demo-flow"
+        assert report_item["run_id"] == run_id
+        assert report_item["source_tool"] == "write_file"
+        assert report_item["size_bytes"] == len("<html><body>ready</body></html>\n".encode("utf-8"))
+        assert report_item["materialized_at"] == 1711098600.0
+
+        results_item = payload["items"][-1]
+        assert results_item["artifact_type"] == "differential_expression_results"
+        assert results_item["step_label"] == "Summarize results"
+        assert results_item["output_name"] == "results table"
+
+    def test_list_session_files_workspace_summary_scopes_to_latest_workflow_run(
+        self, isolated_api_state
+    ):
+        from api.sessions import create_session, list_session_files_workspace_summary
+        from artifacts.registry import rebuild_artifact_registry
+        from graph.agent import agent_manager
+
+        session_id = create_session()["id"]
+        session_manager = agent_manager.session_manager
+        old_run_id = "run-20260321T090000Z-deadbeef"
+        latest_run_id = "run-20260322T090000Z-feedface"
+
+        old_run_dir = (
+            isolated_api_state
+            / "artifacts"
+            / "demo-flow"
+            / "2026-03-21"
+            / old_run_id
+            / "generated_outputs"
+        )
+        latest_run_dir = (
+            isolated_api_state
+            / "artifacts"
+            / "demo-flow"
+            / "2026-03-22"
+            / latest_run_id
+            / "generated_outputs"
+        )
+        unrelated_tool_dir = (
+            isolated_api_state
+            / "artifacts"
+            / "tool-only"
+            / "2026-03-22"
+            / "run-20260322T100000Z-badf00d"
+            / "generated_outputs"
+        )
+        old_run_dir.mkdir(parents=True, exist_ok=True)
+        latest_run_dir.mkdir(parents=True, exist_ok=True)
+        unrelated_tool_dir.mkdir(parents=True, exist_ok=True)
+
+        (old_run_dir / "old-results.csv").write_text("gene,log2fc\nOLD,0.4\n", encoding="utf-8")
+        (latest_run_dir / "latest-results.csv").write_text("gene,log2fc\nNEW,1.8\n", encoding="utf-8")
+        (latest_run_dir / "report.html").write_text("<html>latest</html>\n", encoding="utf-8")
+        (unrelated_tool_dir / "notes.json").write_text("{\"status\":\"tool\"}\n", encoding="utf-8")
+
+        session_manager.save_message(
+            session_id,
+            "assistant",
+            "Older workflow run finished.",
+            workflow_events=[
+                {
+                    "type": "workflow_artifact",
+                    "workflow_id": "demo-flow",
+                    "run_id": old_run_id,
+                    "artifact": {
+                        "artifact_type": "differential_expression_results",
+                        "path": f"artifacts/demo-flow/2026-03-21/{old_run_id}/generated_outputs/old-results.csv",
+                    },
+                    "scope": "workflow_output",
+                    "step_label": "Summarize results",
+                }
+            ],
+        )
+
+        session_manager.save_message(
+            session_id,
+            "assistant",
+            "Latest workflow run finished.",
+            workflow_events=[
+                {
+                    "type": "workflow_artifact",
+                    "workflow_id": "demo-flow",
+                    "run_id": latest_run_id,
+                    "artifact": {
+                        "artifact_type": "differential_expression_results",
+                        "path": f"artifacts/demo-flow/2026-03-22/{latest_run_id}/generated_outputs/latest-results.csv",
+                    },
+                    "scope": "workflow_output",
+                    "step_label": "Summarize results",
+                }
+            ],
+            tool_calls=[
+                {
+                    "tool": "write_file",
+                    "run_id": "tool-run-unrelated",
+                    "input": "write notes",
+                    "output": "saved",
+                    "result": {
+                        "tool_name": "write_file",
+                        "status": "success",
+                        "outcome": "success",
+                        "artifact_refs": [
+                            {
+                                "artifact_type": "qa_report",
+                                "path": f"artifacts/demo-flow/2026-03-22/{latest_run_id}/generated_outputs/report.html",
+                            },
+                            {
+                                "artifact_type": "tool_summary",
+                                "path": "artifacts/tool-only/2026-03-22/run-20260322T100000Z-badf00d/generated_outputs/notes.json",
+                            },
+                        ],
+                    },
+                }
+            ],
+        )
+
+        rebuild_artifact_registry(isolated_api_state)
+        payload = list_session_files_workspace_summary(session_id)
+
+        assert [item["path"] for item in payload["items"]] == [
+            f"artifacts/demo-flow/2026-03-22/{latest_run_id}/generated_outputs/report.html",
+            f"artifacts/demo-flow/2026-03-22/{latest_run_id}/generated_outputs/latest-results.csv",
+        ]
+
     def test_session_reads_block_non_local_clients_without_inspection_token(self, isolated_api_state):
-        from api.sessions import create_session, get_history, list_sessions
+        from api.sessions import (
+            create_session,
+            get_history,
+            list_session_files_workspace_summary,
+            list_sessions,
+        )
 
         sid = create_session()["id"]
 
@@ -384,10 +623,18 @@ class TestSessionsEndpoints:
             )
         assert exc_info.value.status_code == 403
 
+        with pytest.raises(HTTPException) as exc_info:
+            list_session_files_workspace_summary(
+                sid,
+                _request(f"/api/sessions/{sid}/files/summary", host="10.0.0.8"),
+            )
+        assert exc_info.value.status_code == 403
+
     def test_session_reads_allow_non_local_clients_with_inspection_token(self, isolated_api_state):
         from api.sessions import (
             create_session,
             get_history,
+            list_session_files_workspace_summary,
             list_sessions,
             list_workflow_workspace_summary,
         )
@@ -422,10 +669,15 @@ class TestSessionsEndpoints:
             workflow_summary = list_workflow_workspace_summary(
                 _request("/api/sessions/workflows/summary", host="10.0.0.8", headers=headers)
             )
+            files_summary = list_session_files_workspace_summary(
+                sid,
+                _request(f"/api/sessions/{sid}/files/summary", host="10.0.0.8", headers=headers),
+            )
 
         assert any(item["id"] == sid for item in sessions)
         assert history == []
         assert workflow_summary == {"items": []}
+        assert files_summary == {"items": []}
 
     def test_session_mutations_block_non_local_clients_without_execution_token(self, isolated_api_state):
         from api.sessions import RenameRequest, create_session, delete_session, rename_session

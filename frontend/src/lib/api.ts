@@ -1,4 +1,5 @@
 import type {
+  FilesWorkspaceSummaryResponse,
   FlowsWorkspaceSummaryResponse,
   Session,
   Skill,
@@ -57,6 +58,11 @@ export const getHistory = (id: string) =>
 
 export const getFlowsWorkspaceSummary = () =>
   req<FlowsWorkspaceSummaryResponse>("/api/sessions/workflows/summary");
+
+export const getFilesWorkspaceSummary = (sessionId: string) =>
+  req<FilesWorkspaceSummaryResponse>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/files/summary`
+  );
 
 export const generateTitle = (id: string) =>
   req<{ session_id: string; title: string }>(

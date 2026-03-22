@@ -2,6 +2,7 @@
 Session management endpoints.
 
 GET    /api/sessions
+GET    /api/sessions/{id}/files/summary
 GET    /api/sessions/workflows/summary
 POST   /api/sessions
 PUT    /api/sessions/{id}
@@ -49,6 +50,23 @@ def list_workflow_workspace_summary(request: Request = None):
     from graph.workflow_workspace import list_workflow_workspace_summaries
 
     return {"items": list_workflow_workspace_summaries(_sm())}
+
+
+@router.get("/sessions/{session_id}/files/summary")
+def list_session_files_workspace_summary(session_id: str, request: Request = None):
+    require_inspection_access(request)
+    _check_session_id(session_id)
+    from graph.agent import agent_manager
+    from graph.files_workspace import list_session_files_workspace_items
+
+    assert agent_manager.base_dir is not None
+    return {
+        "items": list_session_files_workspace_items(
+            base_dir=agent_manager.base_dir,
+            session_manager=_sm(),
+            session_id=session_id,
+        )
+    }
 
 
 @router.post("/sessions", status_code=201)

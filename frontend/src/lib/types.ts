@@ -391,6 +391,23 @@ export interface FlowsWorkspaceSummaryResponse {
   items: FlowsWorkspaceSummaryItem[];
 }
 
+export interface FilesWorkspaceItem {
+  path: string;
+  name: string;
+  artifact_type: string | null;
+  workflow: string | null;
+  run_id: string | null;
+  source_tool: string | null;
+  step_label: string | null;
+  output_name: string | null;
+  size_bytes: number | null;
+  materialized_at: number | null;
+}
+
+export interface FilesWorkspaceSummaryResponse {
+  items: FilesWorkspaceItem[];
+}
+
 export interface TokenStats {
   session_id: string;
   system_tokens: number;

@@ -13,6 +13,7 @@ import {
   FlaskConical,
   FolderOpen,
   MessageSquare,
+  Package,
   Plus,
   Sparkles,
   type LucideIcon,
@@ -23,10 +24,13 @@ import {
 } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
 import {
+  getFilesWorkspaceSummary,
   getFlowsWorkspaceSummary,
+  getRawFileUrl,
   readFile,
 } from "@/lib/api";
 import type {
+  FilesWorkspaceItem,
   FlowsWorkspaceStatus,
   FlowsWorkspaceSummaryItem,
 } from "@/lib/types";
@@ -38,15 +42,14 @@ import {
   getQuickStartItem,
   parseWorkspaceDocument,
   type ParsedWorkspaceDocument,
-  recentFiles,
   summarizeFlowsWorkspaceStatus,
   workspaceDocs,
-  type SurfaceItem,
   type WorkspaceDocument,
 } from "./workspace-data";
 
 type PreviewStatus = "idle" | "loading" | "ready" | "error";
 type DocsWorkspaceStatus = "loading" | "ready" | "error";
+type FilesWorkspaceStatus = "idle" | "loading" | "ready" | "error";
 
 interface LoadedWorkspaceDocument extends WorkspaceDocument {
   parsed: ParsedWorkspaceDocument;
@@ -111,6 +114,231 @@ function previewText(content: string): string {
   return lines.length > 80 ? `${clipped}\n…` : clipped;
 }
 
+function humanizeToken(value?: string | null): string | null {
+  if (!value) return null;
+  return value.replaceAll("_", " ").replaceAll("-", " ");
+}
+
+function getFileExtension(path: string): string {
+  const fileName = path.split("/").pop() ?? path;
+  const lastDot = fileName.lastIndexOf(".");
+  if (lastDot === -1) {
+    return "";
+  }
+  return fileName.slice(lastDot).toLowerCase();
+}
+
+function formatByteSize(value?: number | null): string {
+  if (typeof value !== "number" || Number.isNaN(value) || value < 0) {
+    return "Unknown size";
+  }
+
+  if (value < 1024) {
+    return `${value} B`;
+  }
+
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = value / 1024;
+  let unitIndex = 0;
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const precision = size >= 10 ? 0 : 1;
+  return `${size.toFixed(precision)} ${units[unitIndex]}`;
+}
+
+type FilesWorkspaceKind =
+  | "table"
+  | "plot"
+  | "structured"
+  | "report"
+  | "archive"
+  | "file";
+
+function inferFilesWorkspaceKind(item: FilesWorkspaceItem): FilesWorkspaceKind {
+  const extension = getFileExtension(item.path);
+  const artifactType = item.artifact_type?.toLowerCase() ?? "";
+  const outputName = item.output_name?.toLowerCase() ?? "";
+  const name = item.name.toLowerCase();
+
+  if (
+    extension === ".csv" ||
+    extension === ".tsv" ||
+    extension === ".xlsx" ||
+    extension === ".xls" ||
+    extension === ".parquet" ||
+    extension === ".mtx" ||
+    artifactType.includes("matrix") ||
+    artifactType.includes("results") ||
+    outputName.includes("table") ||
+    name.includes("matrix")
+  ) {
+    return "table";
+  }
+
+  if (
+    extension === ".png" ||
+    extension === ".jpg" ||
+    extension === ".jpeg" ||
+    extension === ".svg" ||
+    extension === ".tif" ||
+    extension === ".tiff" ||
+    artifactType === "figure" ||
+    outputName.includes("plot") ||
+    outputName.includes("figure")
+  ) {
+    return "plot";
+  }
+
+  if (
+    extension === ".json" ||
+    extension === ".yaml" ||
+    extension === ".yml" ||
+    artifactType.includes("manifest") ||
+    artifactType.includes("summary") ||
+    artifactType.includes("metrics")
+  ) {
+    return "structured";
+  }
+
+  if (
+    extension === ".html" ||
+    extension === ".pdf" ||
+    extension === ".md" ||
+    artifactType.includes("report")
+  ) {
+    return "report";
+  }
+
+  if (
+    extension === ".zip" ||
+    extension === ".gz" ||
+    extension === ".tgz" ||
+    extension === ".tar"
+  ) {
+    return "archive";
+  }
+
+  return "file";
+}
+
+function filesWorkspaceKindLabel(item: FilesWorkspaceItem): string {
+  const extension = getFileExtension(item.path);
+
+  if (extension === ".csv") return "CSV";
+  if (extension === ".tsv") return "TSV";
+  if (extension === ".json") return "JSON";
+  if (extension === ".yaml" || extension === ".yml") return "YAML";
+  if (extension === ".html") return "HTML";
+  if (extension === ".pdf") return "PDF";
+  if (
+    extension === ".png" ||
+    extension === ".jpg" ||
+    extension === ".jpeg" ||
+    extension === ".svg"
+  ) {
+    return "Image";
+  }
+
+  const kind = inferFilesWorkspaceKind(item);
+  if (kind === "table") return "Table";
+  if (kind === "plot") return "Plot";
+  if (kind === "structured") return "Data";
+  if (kind === "report") return "Report";
+  if (kind === "archive") return "Archive";
+  return "File";
+}
+
+function filesWorkspaceKindTone(item: FilesWorkspaceItem): string {
+  const kind = inferFilesWorkspaceKind(item);
+  if (kind === "table") {
+    return "border-[rgba(217,119,6,0.18)] bg-[rgba(255,247,237,0.95)] text-amber-700";
+  }
+  if (kind === "plot") {
+    return "border-[rgba(225,29,72,0.16)] bg-[rgba(255,241,242,0.95)] text-rose-700";
+  }
+  if (kind === "structured") {
+    return "border-[rgba(2,132,199,0.16)] bg-[rgba(240,249,255,0.95)] text-sky-700";
+  }
+  if (kind === "report") {
+    return "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.08)] text-[var(--apex-accent-strong)]";
+  }
+  if (kind === "archive") {
+    return "border-[rgba(148,163,184,0.22)] bg-[rgba(241,245,249,0.92)] text-slate-600";
+  }
+  return "border-[rgba(168,162,158,0.2)] bg-[rgba(250,250,249,0.94)] text-stone-700";
+}
+
+function describeFilesWorkspaceItem(item: FilesWorkspaceItem): string {
+  const detailParts = [
+    humanizeToken(item.output_name),
+    humanizeToken(item.artifact_type),
+    humanizeToken(item.step_label),
+    humanizeToken(item.source_tool),
+  ].filter((value): value is string => Boolean(value));
+
+  const uniqueDetailParts = detailParts.filter(
+    (value, index) => detailParts.indexOf(value) === index
+  );
+
+  return uniqueDetailParts[0] ?? "Durable generated artifact";
+}
+
+function shortRunLabel(runId?: string | null): string {
+  if (!runId) {
+    return "No run label";
+  }
+  if (runId.length <= 24) {
+    return runId;
+  }
+  return `${runId.slice(0, 18)}…${runId.slice(-5)}`;
+}
+
+type FilesWorkspacePreviewMode = "text" | "image" | "pdf" | "unsupported";
+
+function getFilesWorkspacePreviewMode(
+  item: FilesWorkspaceItem
+): FilesWorkspacePreviewMode {
+  const extension = getFileExtension(item.path);
+
+  if (
+    extension === ".png" ||
+    extension === ".jpg" ||
+    extension === ".jpeg" ||
+    extension === ".svg"
+  ) {
+    return "image";
+  }
+
+  if (extension === ".pdf") {
+    return "pdf";
+  }
+
+  if (
+    extension === ".zip" ||
+    extension === ".gz" ||
+    extension === ".tgz" ||
+    extension === ".tar" ||
+    extension === ".tif" ||
+    extension === ".tiff" ||
+    extension === ".xlsx" ||
+    extension === ".xls" ||
+    extension === ".parquet" ||
+    extension === ".mtx"
+  ) {
+    return "unsupported";
+  }
+
+  return "text";
+}
+
+function isTextPreviewable(item: FilesWorkspaceItem): boolean {
+  return getFilesWorkspacePreviewMode(item) === "text";
+}
+
 function WorkspaceBadge({
   icon: Icon,
   children,
@@ -148,6 +376,32 @@ function WorkspaceAction({
     >
       {children}
     </button>
+  );
+}
+
+function WorkspaceLinkAction({
+  children,
+  href,
+  tone = "default",
+}: {
+  children: ReactNode;
+  href: string;
+  tone?: "default" | "accent";
+}) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className={cn(
+        "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors",
+        tone === "accent"
+          ? "border-[rgba(35,130,83,0.18)] bg-[var(--apex-accent-soft)] text-[var(--apex-accent-strong)] hover:bg-[rgba(35,130,83,0.16)]"
+          : "border-[var(--shell-border)] bg-white/90 text-slate-600 hover:bg-[var(--panel-soft)] hover:text-slate-800"
+      )}
+    >
+      {children}
+    </a>
   );
 }
 
@@ -234,155 +488,6 @@ function SummaryCard({
         {value}
       </p>
       <p className="mt-1 text-[12px] leading-5 text-slate-500">{detail}</p>
-    </div>
-  );
-}
-
-function SurfaceListCard({
-  title,
-  subtitle,
-  items,
-  selectedPath,
-  onSelect,
-  emptyMessage,
-}: {
-  title: string;
-  subtitle: string;
-  items: SurfaceItem[];
-  selectedPath?: string | null;
-  onSelect: (item: SurfaceItem) => void;
-  emptyMessage: string;
-}) {
-  return (
-    <div className="rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/90 p-3 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
-      <div className="border-b border-[rgba(211,219,210,0.72)] px-1 pb-3">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-          {title}
-        </p>
-        <p className="mt-1 text-sm leading-6 text-slate-500">{subtitle}</p>
-      </div>
-
-      <div className="mt-3 space-y-2">
-        {items.length === 0 ? (
-          <div className="rounded-[16px] border border-dashed border-[rgba(211,219,210,0.9)] bg-[rgba(251,252,248,0.95)] px-3 py-4 text-sm leading-6 text-slate-500">
-            {emptyMessage}
-          </div>
-        ) : (
-          items.map((item) => {
-            const Icon = item.icon;
-            const active = Boolean(item.path) && item.path === selectedPath;
-
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => onSelect(item)}
-                className={cn(
-                  "flex w-full items-start gap-3 rounded-[16px] border px-3 py-3 text-left transition-colors",
-                  active
-                    ? "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.08)]"
-                    : "border-[rgba(211,219,210,0.85)] bg-[rgba(255,255,255,0.86)] hover:border-[rgba(35,130,83,0.16)] hover:bg-[rgba(248,251,247,0.95)]"
-                )}
-              >
-                <div
-                  className={cn(
-                    "mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-[12px]",
-                    active
-                      ? "bg-white text-[var(--apex-accent-strong)]"
-                      : "bg-[rgba(247,249,245,0.9)] text-slate-500"
-                  )}
-                >
-                  <Icon size={16} />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="truncate text-sm font-semibold text-slate-800">
-                      {item.label}
-                    </p>
-                    {item.meta ? (
-                      <span className="truncate text-[10px] text-slate-400">
-                        {item.meta}
-                      </span>
-                    ) : null}
-                  </div>
-                  <p className="mt-1 text-[12px] leading-5 text-slate-500">
-                    {item.description}
-                  </p>
-                </div>
-              </button>
-            );
-          })
-        )}
-      </div>
-    </div>
-  );
-}
-
-function PreviewCard({
-  eyebrow,
-  title,
-  path,
-  status,
-  content,
-  error,
-  emptyMessage,
-  onOpen,
-}: {
-  eyebrow: string;
-  title: string;
-  path: string | null;
-  status: PreviewStatus;
-  content: string;
-  error: string | null;
-  emptyMessage: string;
-  onOpen?: () => void;
-}) {
-  return (
-    <div className="flex min-h-[24rem] flex-col rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/92 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[rgba(211,219,210,0.72)] px-4 py-4">
-        <div className="min-w-0">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-            {eyebrow}
-          </p>
-          <h3 className="mt-1 text-base font-semibold tracking-[-0.02em] text-slate-900">
-            {title}
-          </h3>
-          <p className="mt-1 truncate text-[11px] text-slate-500">
-            {path ?? "Choose an item to inspect its inline preview."}
-          </p>
-        </div>
-
-        {path && onOpen ? (
-          <WorkspaceAction onClick={onOpen}>
-            <ExternalLink size={12} />
-            Open In Inspector
-          </WorkspaceAction>
-        ) : null}
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-        {!path ? (
-          <div className="rounded-[18px] border border-dashed border-[rgba(211,219,210,0.88)] bg-[rgba(251,252,248,0.95)] px-4 py-8 text-sm leading-6 text-slate-500">
-            {emptyMessage}
-          </div>
-        ) : status === "loading" ? (
-          <div className="rounded-[18px] border border-[rgba(211,219,210,0.88)] bg-[rgba(251,252,248,0.95)] px-4 py-8 text-sm leading-6 text-slate-500">
-            Loading preview…
-          </div>
-        ) : status === "error" ? (
-          <div className="rounded-[18px] border border-[rgba(240,195,195,0.92)] bg-[rgba(253,244,244,0.94)] px-4 py-8 text-sm leading-6 text-rose-700">
-            {error ?? "Unable to load that preview."}
-          </div>
-        ) : status === "ready" ? (
-          <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-[18px] border border-[rgba(211,219,210,0.88)] bg-[rgba(248,250,246,0.95)] px-4 py-4 font-mono text-[12px] leading-6 text-slate-700">
-            {previewText(content)}
-          </pre>
-        ) : (
-          <div className="rounded-[18px] border border-dashed border-[rgba(211,219,210,0.88)] bg-[rgba(251,252,248,0.95)] px-4 py-8 text-sm leading-6 text-slate-500">
-            {emptyMessage}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
@@ -1346,11 +1451,409 @@ function DocsWorkspace() {
   );
 }
 
+function FilesWorkspaceTypeBadge({
+  item,
+}: {
+  item: FilesWorkspaceItem;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+        filesWorkspaceKindTone(item)
+      )}
+    >
+      {filesWorkspaceKindLabel(item)}
+    </span>
+  );
+}
+
+function FilesWorkspaceRow({
+  item,
+  active,
+  onSelect,
+}: {
+  item: FilesWorkspaceItem;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  const kind = inferFilesWorkspaceKind(item);
+  const Icon = kind === "archive" ? Package : kind === "plot" ? Files : FileText;
+
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={cn(
+        "w-full rounded-[18px] border px-4 py-4 text-left transition-colors",
+        active
+          ? "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.08)] shadow-[0_10px_24px_rgba(35,130,83,0.08)]"
+          : "border-[rgba(211,219,210,0.85)] bg-[rgba(255,255,255,0.92)] hover:border-[rgba(35,130,83,0.16)] hover:bg-[rgba(248,251,247,0.95)]"
+      )}
+    >
+      <div className="flex items-start gap-3">
+        <div
+          className={cn(
+            "mt-0.5 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-[12px]",
+            active
+              ? "bg-white text-[var(--apex-accent-strong)]"
+              : "bg-[rgba(247,249,245,0.9)] text-slate-500"
+          )}
+        >
+          <Icon size={18} />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="truncate text-sm font-semibold text-slate-900">{item.name}</p>
+            <FilesWorkspaceTypeBadge item={item} />
+          </div>
+          <p className="mt-2 text-[12px] leading-5 text-slate-500">
+            {describeFilesWorkspaceItem(item)}
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+            <span>{formatByteSize(item.size_bytes)}</span>
+            <span>
+              {item.materialized_at
+                ? formatRelativeTime(item.materialized_at)
+                : "Unknown time"}
+            </span>
+            <span>{shortRunLabel(item.run_id)}</span>
+          </div>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function FilesNavigatorCard({
+  status,
+  items,
+  selectedPath,
+  onSelect,
+  error,
+}: {
+  status: FilesWorkspaceStatus;
+  items: FilesWorkspaceItem[];
+  selectedPath: string | null;
+  onSelect: (item: FilesWorkspaceItem) => void;
+  error: string | null;
+}) {
+  return (
+    <div className="rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/92 p-3 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
+      <div className="border-b border-[rgba(211,219,210,0.72)] px-1 pb-3">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+          Output Browser
+        </p>
+        <p className="mt-1 text-sm leading-6 text-slate-500">
+          Generated artifacts are grouped here as durable session outputs so you
+          can review results outside the chat transcript.
+        </p>
+      </div>
+
+      <div className="mt-3 space-y-2">
+        {status === "loading" ? (
+          <WorkspaceStateCard>Loading generated file metadata…</WorkspaceStateCard>
+        ) : status === "error" ? (
+          <WorkspaceStateCard tone="error">
+            {error ?? "Unable to load generated files right now."}
+          </WorkspaceStateCard>
+        ) : items.length === 0 ? (
+          <WorkspaceStateCard>
+            No generated files are available for this session yet.
+          </WorkspaceStateCard>
+        ) : (
+          items.map((item) => (
+            <FilesWorkspaceRow
+              key={item.path}
+              item={item}
+              active={item.path === selectedPath}
+              onSelect={() => onSelect(item)}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FilesDetailPane({
+  status,
+  item,
+  error,
+  preview,
+  onOpenInspector,
+}: {
+  status: FilesWorkspaceStatus;
+  item: FilesWorkspaceItem | null;
+  error: string | null;
+  preview: {
+    status: PreviewStatus;
+    content: string;
+    error: string | null;
+  };
+  onOpenInspector?: () => void;
+}) {
+  const rawUrl = item?.path ? getRawFileUrl(item.path) : null;
+  const previewMode = item ? getFilesWorkspacePreviewMode(item) : null;
+  const previewUnavailableMessage = item
+    ? inferFilesWorkspaceKind(item) === "plot"
+      ? "This plot is ready to open in the inspector or raw-file view."
+      : inferFilesWorkspaceKind(item) === "archive"
+        ? "This archive is tracked in the workspace and can be opened through the raw-file endpoint."
+        : "This file type is tracked here even though it is not previewed inline yet."
+    : null;
+
+  return (
+    <div className="flex min-h-[32rem] flex-col rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/94 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
+      <div className="border-b border-[rgba(211,219,210,0.72)] px-5 py-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-3xl">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              File Detail
+            </p>
+            <h3 className="mt-2 text-[1.4rem] font-semibold tracking-[-0.03em] text-slate-900">
+              {item?.name ?? "Select a generated file"}
+            </h3>
+            <p className="mt-2 text-sm leading-6 text-slate-500">
+              {item
+                ? describeFilesWorkspaceItem(item)
+                : "Choose a file from the output browser to inspect its metadata and inline preview."}
+            </p>
+            {item?.path ? (
+              <p className="mt-2 break-all text-[11px] text-slate-400">{item.path}</p>
+            ) : null}
+          </div>
+
+          {item?.path ? (
+            <div className="flex flex-wrap gap-2">
+              {onOpenInspector ? (
+                <WorkspaceAction onClick={onOpenInspector} tone="accent">
+                  <FolderOpen size={12} />
+                  Open In Inspector
+                </WorkspaceAction>
+              ) : null}
+              {rawUrl ? (
+                <WorkspaceLinkAction href={rawUrl}>
+                  <ExternalLink size={12} />
+                  Open Raw File
+                </WorkspaceLinkAction>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+
+        {item ? (
+          <div className="mt-4 flex flex-wrap gap-2">
+            <FilesWorkspaceTypeBadge item={item} />
+            <WorkspaceBadge icon={FileText}>{formatByteSize(item.size_bytes)}</WorkspaceBadge>
+            <WorkspaceBadge icon={Files}>{shortRunLabel(item.run_id)}</WorkspaceBadge>
+            <WorkspaceBadge icon={Sparkles}>
+              {item.materialized_at
+                ? formatRelativeTime(item.materialized_at)
+                : "Unknown time"}
+            </WorkspaceBadge>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+        {status === "loading" ? (
+          <WorkspaceStateCard>Loading selected file metadata…</WorkspaceStateCard>
+        ) : status === "error" ? (
+          <WorkspaceStateCard tone="error">
+            {error ?? "Unable to load this file workspace right now."}
+          </WorkspaceStateCard>
+        ) : !item ? (
+          <WorkspaceStateCard>
+            Select a generated file from the browser to load its detail view.
+          </WorkspaceStateCard>
+        ) : (
+          <div className="space-y-4">
+            <section className="rounded-[20px] border border-[rgba(211,219,210,0.88)] bg-[linear-gradient(180deg,rgba(250,251,248,0.97),rgba(255,255,255,0.98))] p-4 shadow-[0_8px_20px_rgba(29,42,33,0.03)]">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Artifact Metadata
+              </p>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Workflow
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-slate-900">
+                    {humanizeToken(item.workflow) ?? "Unknown workflow"}
+                  </p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Run
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-slate-900">
+                    {item.run_id ?? "No run identifier"}
+                  </p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Step
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-slate-900">
+                    {humanizeToken(item.step_label) ?? "Not linked to a workflow step"}
+                  </p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Source
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-slate-900">
+                    {humanizeToken(item.source_tool) ??
+                      humanizeToken(item.output_name) ??
+                      "Generated artifact"}
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            <section className="rounded-[20px] border border-[rgba(211,219,210,0.88)] bg-[linear-gradient(180deg,rgba(250,251,248,0.97),rgba(255,255,255,0.98))] p-4 shadow-[0_8px_20px_rgba(29,42,33,0.03)]">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                    Preview
+                  </p>
+                  <h4 className="mt-1 text-lg font-semibold tracking-[-0.02em] text-slate-900">
+                    {previewMode === "image"
+                      ? "Inline image"
+                      : previewMode === "pdf"
+                        ? "Inline document"
+                        : previewMode === "text"
+                          ? "Inline snippet"
+                          : "Open-backed artifact"}
+                  </h4>
+                </div>
+                {rawUrl ? (
+                  <WorkspaceLinkAction href={rawUrl}>
+                    <ExternalLink size={12} />
+                    Open Raw File
+                  </WorkspaceLinkAction>
+                ) : null}
+              </div>
+
+              <div className="mt-4 rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-4">
+                {previewMode === "unsupported" ? (
+                  <WorkspaceStateCard>{previewUnavailableMessage}</WorkspaceStateCard>
+                ) : previewMode === "image" && rawUrl ? (
+                  <div className="overflow-hidden rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-[rgba(248,250,246,0.95)]">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={rawUrl}
+                      alt={item.name}
+                      className="max-h-[30rem] w-full object-contain"
+                    />
+                  </div>
+                ) : previewMode === "pdf" && rawUrl ? (
+                  <iframe
+                    src={rawUrl}
+                    title={item.name}
+                    className="h-[30rem] w-full rounded-[16px] border border-[rgba(214,221,212,0.86)]"
+                  />
+                ) : preview.status === "loading" ? (
+                  <WorkspaceStateCard>Loading preview…</WorkspaceStateCard>
+                ) : preview.status === "error" ? (
+                  <WorkspaceStateCard tone="error">
+                    {preview.error ?? "Unable to load that preview."}
+                  </WorkspaceStateCard>
+                ) : preview.status === "ready" ? (
+                  <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-[16px] bg-[rgba(248,250,246,0.95)] px-4 py-4 font-mono text-[12px] leading-6 text-slate-700">
+                    {previewText(preview.content)}
+                  </pre>
+                ) : (
+                  <WorkspaceStateCard>
+                    Select a generated file to preview it here.
+                  </WorkspaceStateCard>
+                )}
+              </div>
+            </section>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function FilesWorkspace() {
-  const { workspaceMode, inspectorPreviewPath, openInspectorPath, setWorkspaceMode, messages } =
-    useApp();
-  const fileItems = recentFiles(messages);
+  const {
+    workspaceMode,
+    currentSessionId,
+    inspectorPreviewPath,
+    openInspectorPath,
+    setWorkspaceMode,
+    messages,
+  } = useApp();
+  const workflowSummary = getWorkflowSummary(messages);
+  const latestWorkflowEvent = workflowSummary.events.at(-1);
+  const toolArtifactRefCount = messages.reduce((count, message) => {
+    const toolCalls = message.tool_calls ?? [];
+    return (
+      count +
+      toolCalls.reduce(
+        (toolCount, toolCall) =>
+          toolCount + (toolCall.result?.artifact_refs?.length ?? 0),
+        0
+      )
+    );
+  }, 0);
+  const filesRefreshKey =
+    `${workflowSummary.workflowId ?? "none"}:` +
+    `${latestWorkflowEvent?.run_id ?? "none"}:` +
+    `${workflowSummary.events.length}:` +
+    `${latestWorkflowEvent?.type ?? "none"}:` +
+    `${toolArtifactRefCount}`;
+  const [workspaceStatus, setWorkspaceStatus] =
+    useState<FilesWorkspaceStatus>("idle");
+  const [fileItems, setFileItems] = useState<FilesWorkspaceItem[]>([]);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    if (workspaceMode !== "files") {
+      return () => {
+        active = false;
+      };
+    }
+
+    if (!currentSessionId) {
+      setWorkspaceStatus("idle");
+      setFileItems([]);
+      setWorkspaceError(null);
+      setSelectedFilePath(null);
+      return () => {
+        active = false;
+      };
+    }
+
+    setWorkspaceStatus((previous) => (previous === "ready" ? previous : "loading"));
+    setWorkspaceError(null);
+
+    void getFilesWorkspaceSummary(currentSessionId)
+      .then((response) => {
+        if (!active) return;
+        setFileItems(response.items);
+        setWorkspaceStatus("ready");
+      })
+      .catch((filesError) => {
+        if (!active) return;
+        setWorkspaceStatus("error");
+        setWorkspaceError(
+          filesError instanceof Error
+            ? filesError.message
+            : "Unable to load generated files right now."
+        );
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [currentSessionId, filesRefreshKey, workspaceMode]);
 
   useEffect(() => {
     if (workspaceMode !== "files") return;
@@ -1363,26 +1866,42 @@ function FilesWorkspace() {
       return;
     }
 
-    if (!selectedFilePath && fileItems[0]?.path) {
-      setSelectedFilePath(fileItems[0].path ?? null);
+    if (
+      selectedFilePath &&
+      fileItems.some((item) => item.path === selectedFilePath)
+    ) {
+      return;
     }
+
+    setSelectedFilePath(fileItems[0]?.path ?? null);
   }, [fileItems, inspectorPreviewPath, selectedFilePath, workspaceMode]);
 
   const selectedFile =
     fileItems.find((item) => item.path === selectedFilePath) ?? fileItems[0] ?? null;
-  const preview = usePreviewContent(selectedFile?.path ?? null);
+  const preview = usePreviewContent(
+    selectedFile && isTextPreviewable(selectedFile) ? selectedFile.path : null
+  );
+  const latestFile = fileItems[0] ?? null;
+  const hasSessionActivity = messages.length > 0;
 
   return (
     <WorkspaceShell mode="files">
       <WorkspaceHero
         icon={Files}
-        title="Files Workspace"
-        description="Browse recent durable outputs from the active session without moving the top bar, sidebar, or inspector out of place."
+        title="Output Files"
+        description="Review results, plots, and generated artifacts from the current session in a dedicated center workspace instead of hunting through chat history."
         badges={
           <>
-            <WorkspaceBadge icon={Files}>{`${fileItems.length} recent files`}</WorkspaceBadge>
+            <WorkspaceBadge icon={Files}>{`${fileItems.length} files`}</WorkspaceBadge>
+            {latestFile?.run_id ? (
+              <WorkspaceBadge icon={Sparkles}>
+                {shortRunLabel(latestFile.run_id)}
+              </WorkspaceBadge>
+            ) : null}
             {selectedFile ? (
-              <WorkspaceBadge icon={FileText}>{selectedFile.label}</WorkspaceBadge>
+              <WorkspaceBadge icon={FileText}>
+                {filesWorkspaceKindLabel(selectedFile)}
+              </WorkspaceBadge>
             ) : null}
           </>
         }
@@ -1390,16 +1909,16 @@ function FilesWorkspace() {
           <>
             {selectedFile?.path ? (
               <WorkspaceAction
-                onClick={() => openInspectorPath(selectedFile.path!)}
+                onClick={() => openInspectorPath(selectedFile.path)}
                 tone="accent"
               >
                 <FolderOpen size={12} />
                 Inspect Selected File
               </WorkspaceAction>
             ) : null}
-            <WorkspaceAction onClick={() => setWorkspaceMode("flows")}>
-              <FlaskConical size={12} />
-              Open Flows Workspace
+            <WorkspaceAction onClick={() => setWorkspaceMode("sessions")}>
+              <MessageSquare size={12} />
+              Open Session Workspace
             </WorkspaceAction>
           </>
         }
@@ -1407,66 +1926,84 @@ function FilesWorkspace() {
 
       <div className="grid gap-3 sm:grid-cols-3">
         <SummaryCard
-          label="Recent Outputs"
-          value={`${fileItems.length}`}
-          detail="Latest workflow artifacts and tool-produced files are surfaced from the active session history."
-        />
-        <SummaryCard
-          label="Focused File"
-          value={selectedFile?.label ?? "None"}
-          detail={selectedFile?.description ?? "Choose a file to inspect its inline preview."}
-        />
-        <SummaryCard
-          label="Preview State"
+          label="Output Files"
           value={
-            preview.status === "ready"
-              ? "Loaded"
-              : preview.status === "loading"
-                ? "Loading"
-                : preview.status === "error"
-                  ? "Issue"
-                  : "Waiting"
+            workspaceStatus === "loading"
+              ? "Loading"
+              : workspaceStatus === "error"
+                ? "Issue"
+                : `${fileItems.length}`
           }
-          detail="The files workspace keeps the center column focused on durable artifacts rather than the chat stream."
+          detail="The file browser is backed by durable artifact paths and file metadata for the active session."
+        />
+        <SummaryCard
+          label="Latest Run"
+          value={latestFile?.run_id ? shortRunLabel(latestFile.run_id) : "None"}
+          detail="Each row keeps its associated run identifier visible so results stay tied to execution context."
+        />
+        <SummaryCard
+          label="Selected Size"
+          value={selectedFile ? formatByteSize(selectedFile.size_bytes) : "Waiting"}
+          detail="Large and small outputs use the same browser layout so preview and open actions can expand later without redesign."
         />
       </div>
 
-      {fileItems.length === 0 ? (
+      {!currentSessionId ? (
         <EmptyWorkspaceState
-          title="No recent files yet"
-          description="Run a workflow, inspect generated artifacts, or attach a reference in the session workspace and the latest durable files will appear here."
+          title="Open or create a session first"
+          description="The Files workspace stays scoped to the active session so generated outputs can be reviewed alongside the matching inspector context."
           action={
             <WorkspaceAction onClick={() => setWorkspaceMode("sessions")} tone="accent">
               <MessageSquare size={12} />
-              Open Session Workspace
+              Go To Sessions
+            </WorkspaceAction>
+          }
+        />
+      ) : workspaceStatus === "loading" ? (
+        <WorkspaceStateCard>Loading generated files for this session…</WorkspaceStateCard>
+      ) : workspaceStatus === "error" ? (
+        <WorkspaceStateCard tone="error">
+          {workspaceError ?? "Unable to load the Files workspace right now."}
+        </WorkspaceStateCard>
+      ) : fileItems.length === 0 && !hasSessionActivity ? (
+        <EmptyWorkspaceState
+          title="No session outputs yet"
+          description="Start a workflow or create a generated artifact in the session workspace and the durable files will appear here."
+          action={
+            <WorkspaceAction onClick={() => setWorkspaceMode("sessions")} tone="accent">
+              <MessageSquare size={12} />
+              Start In Sessions
+            </WorkspaceAction>
+          }
+        />
+      ) : fileItems.length === 0 ? (
+        <EmptyWorkspaceState
+          title="No durable file results for this session"
+          description="This session has activity, but it has not materialized any generated artifact files that the workspace can browse yet."
+          action={
+            <WorkspaceAction onClick={() => setWorkspaceMode("flows")} tone="accent">
+              <FlaskConical size={12} />
+              Open Flows Workspace
             </WorkspaceAction>
           }
         />
       ) : (
         <div className="grid min-h-0 gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-          <SurfaceListCard
-            title="Recent Files"
-            subtitle="Files stay scoped to recent workflow and tool activity so this workspace feels like a product surface, not just a sidebar badge."
+          <FilesNavigatorCard
+            status={workspaceStatus}
             items={fileItems}
             selectedPath={selectedFile?.path ?? null}
-            onSelect={(item) => {
-              if (item.path) {
-                setSelectedFilePath(item.path);
-              }
-            }}
-            emptyMessage="No files are available in this workspace yet."
+            onSelect={(item) => setSelectedFilePath(item.path)}
+            error={workspaceError}
           />
 
-          <PreviewCard
-            eyebrow="Inline Preview"
-            title={selectedFile?.label ?? "Select a file"}
-            path={selectedFile?.path ?? null}
-            status={preview.status}
-            content={preview.content}
-            error={preview.error}
-            emptyMessage="Choose a recent file to preview it here and open it in the inspector for the full file experience."
-            onOpen={
-              selectedFile?.path ? () => openInspectorPath(selectedFile.path!) : undefined
+          <FilesDetailPane
+            status={workspaceStatus}
+            item={selectedFile}
+            error={workspaceError}
+            preview={preview}
+            onOpenInspector={
+              selectedFile?.path ? () => openInspectorPath(selectedFile.path) : undefined
             }
           />
         </div>
