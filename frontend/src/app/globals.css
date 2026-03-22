@@ -106,6 +106,82 @@ body {
   font-size: 0.875em;
 }
 
+.apex-chat-prose {
+  color: #203028;
+  font-size: 0.95rem;
+  line-height: 1.72;
+}
+
+.apex-chat-prose :where(p) {
+  margin-top: 0;
+  margin-bottom: 0.95rem;
+}
+
+.apex-chat-prose :where(p:last-child) {
+  margin-bottom: 0;
+}
+
+.apex-chat-prose :where(h1, h2, h3, h4) {
+  margin-top: 1.4rem;
+  margin-bottom: 0.7rem;
+  color: #17211c;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.apex-chat-prose :where(h1) {
+  font-size: 1.18rem;
+}
+
+.apex-chat-prose :where(h2) {
+  font-size: 1.08rem;
+}
+
+.apex-chat-prose :where(h3, h4) {
+  font-size: 0.98rem;
+}
+
+.apex-chat-prose :where(ul, ol) {
+  margin-top: 0.7rem;
+  margin-bottom: 0.95rem;
+  padding-left: 1.25rem;
+}
+
+.apex-chat-prose :where(li) {
+  margin-top: 0.2rem;
+  margin-bottom: 0.2rem;
+}
+
+.apex-chat-prose :where(li > p) {
+  margin-bottom: 0.35rem;
+}
+
+.apex-chat-prose :where(strong) {
+  color: #17211c;
+  font-weight: 600;
+}
+
+.apex-chat-prose :where(a) {
+  color: var(--apex-accent-strong);
+  text-decoration-color: rgba(23, 97, 61, 0.28);
+}
+
+.apex-chat-prose :where(blockquote) {
+  margin: 1rem 0;
+  border-left: 2px solid rgba(35, 130, 83, 0.22);
+  padding-left: 0.95rem;
+  color: #516159;
+}
+
+.apex-chat-prose :where(hr) {
+  margin: 1.25rem 0;
+  border-color: rgba(32, 43, 35, 0.08);
+}
+
+.apex-chat-prose :where(table) {
+  font-size: 0.78rem;
+}
+
 /* ── Streaming cursor ──────────────────────────────── */
 .streaming-cursor::after {
   content: "▍";

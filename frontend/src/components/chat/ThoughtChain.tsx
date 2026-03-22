@@ -865,25 +865,29 @@ export default function ThoughtChain({
   if (!hasItems) return null;
 
   return (
-    <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden bg-white">
+    <div className="overflow-hidden rounded-[16px] border border-[rgba(32,43,35,0.1)] bg-[linear-gradient(180deg,rgba(252,253,251,0.98),rgba(245,248,244,0.98))] shadow-[0_8px_18px_rgba(32,43,35,0.03)]">
       <button
         onClick={() => setCollapsed((v) => !v)}
-        className="w-full flex items-center gap-2 px-3 py-2 bg-gray-50/80 text-left hover:bg-gray-100 transition-colors"
+        className="w-full flex items-center gap-2 px-3.5 py-2.5 bg-[rgba(247,249,246,0.92)] text-left transition-colors hover:bg-[rgba(240,243,239,0.96)]"
       >
         {collapsed ? (
           <ChevronRight size={13} className="text-gray-400" />
         ) : (
           <ChevronDown size={13} className="text-gray-400" />
         )}
-        <span className="text-xs font-medium text-gray-500">Execution trace</span>
-        <span className="text-[11px] text-gray-400">
-          {workflowRuns.length} workflow{workflowRuns.length === 1 ? "" : "s"} · {toolCount} tool
-          {toolCount === 1 ? "" : "s"}
-        </span>
+        <div className="min-w-0">
+          <span className="block text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-600">
+            Execution Trace
+          </span>
+          <span className="block text-[11px] text-slate-400">
+            {workflowRuns.length} workflow{workflowRuns.length === 1 ? "" : "s"} · {toolCount} tool
+            {toolCount === 1 ? "" : "s"}
+          </span>
+        </div>
       </button>
 
       {!collapsed && (
-        <div className="px-3 pb-3 pt-1 space-y-3">
+        <div className="space-y-3 px-3.5 pb-3 pt-1.5">
           {workflowRuns.length > 0 && (
             <div className="space-y-2">
               <p className="text-[10px] uppercase tracking-wide text-gray-400">
