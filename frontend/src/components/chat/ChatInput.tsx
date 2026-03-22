@@ -8,12 +8,18 @@ interface ChatInputProps {
   onSend: (text: string) => void;
   isStreaming: boolean;
   disabled?: boolean;
+  prefillText?: string;
+  prefillRevision?: number;
+  clearPrefill?: () => void;
 }
 
 export default function ChatInput({
   onSend,
   isStreaming,
   disabled,
+  prefillText = "",
+  prefillRevision = 0,
+  clearPrefill,
 }: ChatInputProps) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -26,13 +32,28 @@ export default function ChatInput({
     el.style.height = Math.min(el.scrollHeight, 160) + "px";
   }, [text]);
 
+  useEffect(() => {
+    setText(prefillText);
+
+    if (!prefillText) return;
+
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      const cursor = el.value.length;
+      el.setSelectionRange(cursor, cursor);
+    });
+  }, [prefillText, prefillRevision]);
+
   const handleSend = useCallback(() => {
     const trimmed = text.trim();
     if (!trimmed || isStreaming || disabled) return;
     onSend(trimmed);
     setText("");
+    clearPrefill?.();
     if (textareaRef.current) textareaRef.current.style.height = "auto";
-  }, [text, isStreaming, disabled, onSend]);
+  }, [text, isStreaming, disabled, onSend, clearPrefill]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {

@@ -8,14 +8,14 @@ import Navbar from "@/components/layout/Navbar";
 import ResizeHandle from "@/components/layout/ResizeHandle";
 import Sidebar from "@/components/layout/Sidebar";
 
-const SIDEBAR_MIN = 236;
-const SIDEBAR_MAX = 312;
-const INSPECTOR_MIN = 264;
-const INSPECTOR_MAX = 344;
+const SIDEBAR_MIN = 232;
+const SIDEBAR_MAX = 296;
+const INSPECTOR_MIN = 256;
+const INSPECTOR_MAX = 320;
 
 export default function AppShell() {
-  const [sidebarWidth, setSidebarWidth] = useState(264);
-  const [inspectorWidth, setInspectorWidth] = useState(292);
+  const [sidebarWidth, setSidebarWidth] = useState(256);
+  const [inspectorWidth, setInspectorWidth] = useState(288);
 
   const resizeSidebar = useCallback((dx: number) => {
     setSidebarWidth((width) =>
@@ -32,11 +32,11 @@ export default function AppShell() {
 
   return (
     <AppProvider>
-      <div className="flex min-h-screen flex-col overflow-hidden bg-[var(--shell-canvas)] text-slate-900">
+      <div className="app-shell-viewport flex min-h-0 flex-col overflow-hidden bg-[var(--shell-canvas)] text-slate-900">
         <Navbar />
 
-        <main className="min-h-0 flex-1 overflow-hidden pt-[var(--navbar-height)]">
-          <div className="mx-auto flex h-full min-h-0 w-full max-w-[1460px] gap-3 px-3 pb-3 pt-3 sm:gap-4 sm:px-5 sm:pb-5 sm:pt-5">
+        <main className="min-h-0 flex-1 overflow-hidden">
+          <div className="mx-auto flex h-full min-h-0 w-full max-w-[1460px] box-border gap-3 px-3 py-3 sm:gap-4 sm:px-5 sm:py-5">
             <div className="flex min-h-0 flex-1 items-stretch gap-0">
               <div
                 style={{ width: sidebarWidth }}

@@ -13,6 +13,7 @@ import { getHealth } from "@/lib/api";
 import {
   getReadinessSummary,
   getWorkflowSummary,
+  isWorkflowSelectionPending,
   type ReadinessState,
   type WorkflowSummary,
 } from "@/lib/session-status";
@@ -155,8 +156,13 @@ function formatWorkflowLabel(value: string): string {
 
 function workflowLabel(
   summary: WorkflowSummary,
-  selectedWorkflow: string | null
+  selectedWorkflow: string | null,
+  selectionPending: boolean
 ): string | null {
+  if (selectionPending && selectedWorkflow) {
+    return formatWorkflowLabel(selectedWorkflow);
+  }
+
   if (summary.workflowName) {
     return summary.workflowName;
   }
@@ -174,21 +180,27 @@ function workflowLabel(
 
 function workflowTone(
   summary: WorkflowSummary,
-  selectedWorkflow: string | null
+  selectedWorkflow: string | null,
+  selectionPending: boolean
 ): StatusTone {
   if (summary.status === "blocked") return "danger";
-  if (workflowLabel(summary, selectedWorkflow)) return "accent";
+  if (workflowLabel(summary, selectedWorkflow, selectionPending)) return "accent";
   return "neutral";
 }
 
 function describeWorkflow(
   summary: WorkflowSummary,
-  selectedWorkflow: string | null
+  selectedWorkflow: string | null,
+  selectionPending: boolean
 ): string {
-  const label = workflowLabel(summary, selectedWorkflow);
+  const label = workflowLabel(summary, selectedWorkflow, selectionPending);
 
   if (!label) {
     return "No active workflow selected.";
+  }
+
+  if (selectionPending) {
+    return `${label} is selected and waiting to start.`;
   }
 
   if (!summary.workflowName) {
@@ -318,12 +330,20 @@ export default function Navbar() {
   const activeSession =
     sessions.find((session) => session.id === currentSessionId) ?? null;
   const workflowSummary = getWorkflowSummary(messages);
+  const pendingWorkflowSelection = isWorkflowSelectionPending(
+    messages,
+    selectedWorkflow
+  );
   const readinessSummary = getReadinessSummary(messages, {
     workflowSummary,
     isStreaming,
   });
   const title = activeSession?.title ?? "BioAPEX Workspace";
-  const activeWorkflowLabel = workflowLabel(workflowSummary, selectedWorkflow);
+  const activeWorkflowLabel = workflowLabel(
+    workflowSummary,
+    selectedWorkflow,
+    pendingWorkflowSelection
+  );
 
   const connectionLabel =
     connectionState === "connected"
@@ -362,7 +382,7 @@ export default function Navbar() {
   };
 
   return (
-    <header className="fixed inset-x-0 top-0 z-40 border-b border-[var(--shell-border)] bg-[rgba(255,255,255,0.94)] backdrop-blur">
+    <header className="sticky top-0 z-40 flex-shrink-0 border-b border-[var(--shell-border)] bg-[rgba(255,255,255,0.94)] backdrop-blur">
       <div className="mx-auto flex h-[var(--navbar-height)] w-full max-w-[1460px] items-center gap-3 px-3 sm:px-5">
         <div className="flex min-w-0 flex-1 items-center gap-3 sm:gap-4">
           <div className="flex h-9 flex-shrink-0 items-center gap-2 rounded-full border border-[var(--shell-border)] bg-[rgba(255,255,255,0.82)] px-3">
@@ -395,8 +415,16 @@ export default function Navbar() {
 
           <StatusPill
             label={activeWorkflowLabel ?? "No workflow"}
-            tone={workflowTone(workflowSummary, selectedWorkflow)}
-            title={describeWorkflow(workflowSummary, selectedWorkflow)}
+            tone={workflowTone(
+              workflowSummary,
+              selectedWorkflow,
+              pendingWorkflowSelection
+            )}
+            title={describeWorkflow(
+              workflowSummary,
+              selectedWorkflow,
+              pendingWorkflowSelection
+            )}
             className="hidden max-w-[220px] md:inline-flex"
             leading={<GitBranch size={12} className="flex-shrink-0" />}
           />

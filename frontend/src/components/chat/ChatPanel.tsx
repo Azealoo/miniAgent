@@ -7,7 +7,14 @@ import ChatInput from "./ChatInput";
 import ChatMessage from "./ChatMessage";
 
 export default function ChatPanel() {
-  const { messages, isStreaming, sendMessage } = useApp();
+  const {
+    messages,
+    isStreaming,
+    sendMessage,
+    draftMessage,
+    draftRevision,
+    clearDraftMessage,
+  } = useApp();
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -51,7 +58,13 @@ export default function ChatPanel() {
         </div>
 
         <div className="border-t border-[var(--shell-border)] bg-[var(--panel-muted)] px-4 py-4 sm:px-5 lg:px-6">
-          <ChatInput onSend={handleSend} isStreaming={isStreaming} />
+          <ChatInput
+            onSend={handleSend}
+            isStreaming={isStreaming}
+            prefillText={draftMessage}
+            prefillRevision={draftRevision}
+            clearPrefill={clearDraftMessage}
+          />
         </div>
       </div>
     </section>

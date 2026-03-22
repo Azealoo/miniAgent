@@ -18,7 +18,6 @@ const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
   ),
 });
 
-type Tab = "files" | "sources" | "memory" | "skills" | "usage";
 const MEMORY_PATH = "memory/MEMORY.md";
 
 function collectArtifacts(events: WorkflowStreamEvent[]) {
@@ -130,9 +129,18 @@ function PreviewPane({ content }: { content: string }) {
 }
 
 export default function InspectorPanel() {
-  const { currentSessionId, sessions, messages, ragMode } = useApp();
+  const {
+    currentSessionId,
+    sessions,
+    messages,
+    ragMode,
+    inspectorTab,
+    inspectorPreviewPath,
+    setInspectorTab,
+    openInspectorPath,
+    clearInspectorPath,
+  } = useApp();
 
-  const [tab, setTab] = useState<Tab>("files");
   const [skills, setSkills] = useState<Skill[]>([]);
   const [tokens, setTokens] = useState<TokenStats | null>(null);
   const [memoryContent, setMemoryContent] = useState("");
@@ -147,8 +155,11 @@ export default function InspectorPanel() {
   const [skillSaving, setSkillSaving] = useState(false);
   const [skillSaveMsg, setSkillSaveMsg] = useState("");
   const [editorOpen, setEditorOpen] = useState(false);
+  const [previewContent, setPreviewContent] = useState("");
+  const [previewLoading, setPreviewLoading] = useState(false);
   const memoryRequestIdRef = useRef(0);
   const skillsRequestIdRef = useRef(0);
+  const previewRequestIdRef = useRef(0);
 
   const isMemoryDirty = memoryContent !== savedMemoryContent;
   const isSkillDirty = skillContent !== savedSkillContent;
@@ -181,16 +192,16 @@ export default function InspectorPanel() {
   useEffect(() => {
     setEditorOpen(false);
 
-    if (tab === "memory") {
+    if (inspectorTab === "memory") {
       setMemorySaveMsg("");
       void loadMemory();
     }
 
-    if (tab === "skills") {
+    if (inspectorTab === "skills") {
       setSkillSaveMsg("");
       void refreshSkills();
     }
-  }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [inspectorTab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadMemory = async () => {
     const requestId = memoryRequestIdRef.current + 1;
@@ -262,6 +273,37 @@ export default function InspectorPanel() {
     }
   };
 
+  const loadPreview = async (path: string) => {
+    const requestId = previewRequestIdRef.current + 1;
+    previewRequestIdRef.current = requestId;
+    setPreviewLoading(true);
+
+    try {
+      const res = await readFile(path);
+      if (previewRequestIdRef.current !== requestId) return;
+
+      setPreviewContent(res.content);
+    } catch {
+      if (previewRequestIdRef.current !== requestId) return;
+
+      setPreviewContent("# Could not load file preview");
+    } finally {
+      if (previewRequestIdRef.current === requestId) {
+        setPreviewLoading(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!inspectorPreviewPath) {
+      setPreviewContent("");
+      setPreviewLoading(false);
+      return;
+    }
+
+    void loadPreview(inspectorPreviewPath);
+  }, [inspectorPreviewPath]);
+
   const handleMemorySave = async () => {
     if (!isMemoryDirty) return;
 
@@ -300,6 +342,34 @@ export default function InspectorPanel() {
 
   const renderFilesTab = () => (
     <div className="space-y-3">
+      {inspectorPreviewPath ? (
+        <InspectorCard title="Preview" meta={inspectorPreviewPath}>
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <button
+              onClick={() => void loadPreview(inspectorPreviewPath)}
+              className="inline-flex items-center gap-1 rounded-full border border-[var(--shell-border)] px-2.5 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-[var(--panel-soft)]"
+            >
+              <RefreshCw size={12} />
+              Refresh
+            </button>
+            <button
+              onClick={clearInspectorPath}
+              className="inline-flex items-center gap-1 rounded-full border border-[var(--shell-border)] px-2.5 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-[var(--panel-soft)]"
+            >
+              Clear
+            </button>
+          </div>
+
+          {previewLoading ? (
+            <div className="rounded-[12px] bg-[var(--panel-soft)] px-3 py-8 text-center text-sm text-slate-400">
+              Loading preview...
+            </div>
+          ) : (
+            <PreviewPane content={previewContent} />
+          )}
+        </InspectorCard>
+      ) : null}
+
       <InspectorCard
         title="Active Run"
         meta={workflowMeta}
@@ -341,15 +411,22 @@ export default function InspectorPanel() {
         {artifactItems.length > 0 ? (
           <div className="space-y-2">
             {artifactItems.map((artifact) => (
-              <div
+              <button
                 key={artifact.path}
-                className="rounded-[12px] bg-[var(--panel-soft)] px-3 py-2"
+                type="button"
+                onClick={() => openInspectorPath(artifact.path)}
+                className={cn(
+                  "w-full rounded-[12px] px-3 py-2 text-left transition-colors",
+                  inspectorPreviewPath === artifact.path
+                    ? "bg-[var(--apex-accent-soft)]"
+                    : "bg-[var(--panel-soft)] hover:bg-white"
+                )}
               >
                 <p className="truncate text-sm font-medium text-slate-700">
                   {artifact.label}
                 </p>
                 <p className="mt-1 text-[11px] text-slate-400">{artifact.meta}</p>
-              </div>
+              </button>
             ))}
           </div>
         ) : (
@@ -651,20 +728,20 @@ export default function InspectorPanel() {
 
       <div className="overflow-x-auto border-b border-[var(--shell-border)] px-2 py-2">
         <div className="flex min-w-max gap-1">
-          <TabButton active={tab === "files"} label="Files" onClick={() => setTab("files")} />
-          <TabButton active={tab === "sources"} label="Sources" onClick={() => setTab("sources")} />
-          <TabButton active={tab === "memory"} label="Memory" onClick={() => setTab("memory")} />
-          <TabButton active={tab === "skills"} label="Skills" onClick={() => setTab("skills")} />
-          <TabButton active={tab === "usage"} label="Usage" onClick={() => setTab("usage")} />
+          <TabButton active={inspectorTab === "files"} label="Files" onClick={() => setInspectorTab("files")} />
+          <TabButton active={inspectorTab === "sources"} label="Sources" onClick={() => setInspectorTab("sources")} />
+          <TabButton active={inspectorTab === "memory"} label="Memory" onClick={() => setInspectorTab("memory")} />
+          <TabButton active={inspectorTab === "skills"} label="Skills" onClick={() => setInspectorTab("skills")} />
+          <TabButton active={inspectorTab === "usage"} label="Usage" onClick={() => setInspectorTab("usage")} />
         </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-        {tab === "files" && renderFilesTab()}
-        {tab === "sources" && renderSourcesTab()}
-        {tab === "memory" && renderMemoryTab()}
-        {tab === "skills" && renderSkillsTab()}
-        {tab === "usage" && renderUsageTab()}
+        {inspectorTab === "files" && renderFilesTab()}
+        {inspectorTab === "sources" && renderSourcesTab()}
+        {inspectorTab === "memory" && renderMemoryTab()}
+        {inspectorTab === "skills" && renderSkillsTab()}
+        {inspectorTab === "usage" && renderUsageTab()}
       </div>
     </aside>
   );

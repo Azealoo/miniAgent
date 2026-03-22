@@ -43,6 +43,11 @@ body {
   box-shadow: none;
 }
 
+.app-shell-viewport {
+  height: 100vh;
+  height: 100dvh;
+}
+
 .apex-panel {
   border: 1px solid var(--shell-border);
   background: var(--panel-strong);

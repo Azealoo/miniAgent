@@ -128,6 +128,17 @@ export function getLatestSelectedWorkflow(messages: Message[]): string | null {
   return null;
 }
 
+export function isWorkflowSelectionPending(
+  messages: Message[],
+  selectedWorkflow: string | null
+): boolean {
+  if (!selectedWorkflow) {
+    return false;
+  }
+
+  return getLatestSelectedWorkflow(messages) !== selectedWorkflow;
+}
+
 export function getReadinessSummary(
   messages: Message[],
   options?: {

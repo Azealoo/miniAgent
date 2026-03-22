@@ -30,6 +30,10 @@ interface AppContextValue {
   isStreaming: boolean;
   ragMode: boolean;
   selectedWorkflow: string | null;
+  draftMessage: string;
+  draftRevision: number;
+  inspectorTab: "files" | "sources" | "memory" | "skills" | "usage";
+  inspectorPreviewPath: string | null;
 
   // Actions
   refreshSessions: () => Promise<void>;
@@ -38,6 +42,14 @@ interface AppContextValue {
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
   sendMessage: (content: string, context?: api.ChatRequestContext) => Promise<void>;
+  selectWorkflow: (workflowId: string | null) => void;
+  primeDraftMessage: (text: string) => void;
+  clearDraftMessage: () => void;
+  setInspectorTab: (
+    tab: "files" | "sources" | "memory" | "skills" | "usage"
+  ) => void;
+  openInspectorPath: (path: string) => void;
+  clearInspectorPath: () => void;
   setRagMode: (enabled: boolean) => Promise<void>;
   compressSession: () => Promise<void>;
 }
@@ -61,6 +73,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [ragMode, setRagModeState] = useState(false);
   const [selectedWorkflow, setSelectedWorkflow] = useState<string | null>(null);
+  const [draftMessage, setDraftMessage] = useState("");
+  const [draftRevision, setDraftRevision] = useState(0);
+  const [inspectorTab, setInspectorTabState] = useState<
+    "files" | "sources" | "memory" | "skills" | "usage"
+  >("files");
+  const [inspectorPreviewPath, setInspectorPreviewPath] = useState<string | null>(null);
 
   // Ref to current streaming message ID (avoids stale closure issues)
   const streamingIdRef = useRef<string | null>(null);
@@ -103,11 +121,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setCurrentSessionId(session.id);
     setMessages([]);
     setSelectedWorkflow(null);
+    setDraftMessage("");
+    setDraftRevision((prev) => prev + 1);
+    setInspectorPreviewPath(null);
+    setInspectorTabState("files");
   }, []);
 
   const selectSession = useCallback(async (id: string) => {
     if (id === currentSessionId) return;
     await _loadSession(id, setMessages, setCurrentSessionId, setSelectedWorkflow);
+    setDraftMessage("");
+    setDraftRevision((prev) => prev + 1);
+    setInspectorPreviewPath(null);
+    setInspectorTabState("files");
   }, [currentSessionId]);
 
   const deleteSession = useCallback(
@@ -118,6 +144,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setCurrentSessionId(null);
         setMessages([]);
         setSelectedWorkflow(null);
+        setDraftMessage("");
+        setDraftRevision((prev) => prev + 1);
+        setInspectorPreviewPath(null);
+        setInspectorTabState("files");
       }
     },
     [currentSessionId]
@@ -135,6 +165,36 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const setRagMode = useCallback(async (enabled: boolean) => {
     await api.setRagMode(enabled);
     setRagModeState(enabled);
+  }, []);
+
+  const selectWorkflow = useCallback((workflowId: string | null) => {
+    setSelectedWorkflow(workflowId);
+  }, []);
+
+  const primeDraftMessage = useCallback((text: string) => {
+    setDraftMessage(text);
+    setDraftRevision((prev) => prev + 1);
+  }, []);
+
+  const clearDraftMessage = useCallback(() => {
+    setDraftMessage("");
+    setDraftRevision((prev) => prev + 1);
+  }, []);
+
+  const setInspectorTab = useCallback(
+    (tab: "files" | "sources" | "memory" | "skills" | "usage") => {
+      setInspectorTabState(tab);
+    },
+    []
+  );
+
+  const openInspectorPath = useCallback((path: string) => {
+    setInspectorPreviewPath(path);
+    setInspectorTabState("files");
+  }, []);
+
+  const clearInspectorPath = useCallback(() => {
+    setInspectorPreviewPath(null);
   }, []);
 
   // ── Compression ──────────────────────────────────────────────
@@ -155,6 +215,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const sendMessage = useCallback(
     async (content: string, context?: api.ChatRequestContext) => {
       if (isStreaming) return;
+      const requestedWorkflow =
+        context && "selectedWorkflow" in context
+          ? context.selectedWorkflow ?? null
+          : selectedWorkflow;
 
       // Auto-create session if none is selected
       let sessionId = currentSessionId;
@@ -179,7 +243,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
       setIsStreaming(true);
-      setSelectedWorkflow(context?.selectedWorkflow ?? null);
+      setSelectedWorkflow(requestedWorkflow);
+      setDraftMessage("");
+      setDraftRevision((prev) => prev + 1);
 
       await api.streamChat(content, sessionId, {
         onRetrieval: (query, results) => {
@@ -329,9 +395,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           streamingIdRef.current = null;
           setIsStreaming(false);
         },
-      }, context);
+      }, {
+        attachedIdentifiers: context?.attachedIdentifiers,
+        selectedWorkflow: requestedWorkflow,
+      });
     },
-    [currentSessionId, isStreaming, refreshSessions]
+    [currentSessionId, isStreaming, refreshSessions, selectedWorkflow]
   );
 
   return (
@@ -343,12 +412,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         isStreaming,
         ragMode,
         selectedWorkflow,
+        draftMessage,
+        draftRevision,
+        inspectorTab,
+        inspectorPreviewPath,
         refreshSessions,
         createSession,
         selectSession,
         deleteSession,
         renameSession,
         sendMessage,
+        selectWorkflow,
+        primeDraftMessage,
+        clearDraftMessage,
+        setInspectorTab,
+        openInspectorPath,
+        clearInspectorPath,
         setRagMode,
         compressSession,
       }}
