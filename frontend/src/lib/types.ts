@@ -369,6 +369,8 @@ export interface Message {
   pendingTool?: { tool: string; input: string; runId: string };
 }
 
+export type WorkspaceMode = "sessions" | "flows" | "docs" | "files";
+
 export interface Session {
   id: string;
   title: string;

@@ -17,6 +17,7 @@ import type {
   Session,
   ToolCall,
   WorkflowStreamEvent,
+  WorkspaceMode,
 } from "./types";
 
 // ────────────────────────────────────────────────────────────────
@@ -31,6 +32,7 @@ interface AppContextValue {
   isReferenceUploading: boolean;
   isSessionLoading: boolean;
   ragMode: boolean;
+  workspaceMode: WorkspaceMode;
   selectedWorkflow: string | null;
   attachedIdentifiers: string[];
   draftMessage: string;
@@ -45,6 +47,7 @@ interface AppContextValue {
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
   sendMessage: (content: string, context?: api.ChatRequestContext) => Promise<void>;
+  setWorkspaceMode: (mode: WorkspaceMode) => void;
   selectWorkflow: (workflowId: string | null) => void;
   uploadAttachedReference: (file: File) => Promise<void>;
   addAttachedIdentifier: (identifier: string) => void;
@@ -81,6 +84,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [isReferenceUploading, setIsReferenceUploading] = useState(false);
   const [isSessionLoading, setIsSessionLoading] = useState(true);
   const [ragMode, setRagModeState] = useState(false);
+  const [workspaceMode, setWorkspaceModeState] = useState<WorkspaceMode>("sessions");
   const [selectedWorkflow, setSelectedWorkflow] = useState<string | null>(null);
   const [attachedIdentifiers, setAttachedIdentifiers] = useState<string[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
@@ -138,6 +142,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const session = await api.createSession();
     setSessions((prev) => [session, ...prev]);
     setCurrentSessionId(session.id);
+    setWorkspaceModeState("sessions");
     setMessages([]);
     setSelectedWorkflow(null);
     setAttachedIdentifiers([]);
@@ -153,6 +158,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setIsSessionLoading(true);
     try {
       await _loadSession(id, setMessages, setCurrentSessionId, setSelectedWorkflow);
+      setWorkspaceModeState("sessions");
       setAttachedIdentifiers([]);
       setDraftMessage("");
       setDraftRevision((prev) => prev + 1);
@@ -170,6 +176,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setSessions((prev) => prev.filter((s) => s.id !== id));
       if (id === currentSessionId) {
         setCurrentSessionId(null);
+        setWorkspaceModeState("sessions");
         setMessages([]);
         setSelectedWorkflow(null);
         setAttachedIdentifiers([]);
@@ -194,6 +201,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const setRagMode = useCallback(async (enabled: boolean) => {
     await api.setRagMode(enabled);
     setRagModeState(enabled);
+  }, []);
+
+  const setWorkspaceMode = useCallback((mode: WorkspaceMode) => {
+    setWorkspaceModeState(mode);
   }, []);
 
   const selectWorkflow = useCallback((workflowId: string | null) => {
@@ -311,6 +322,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const session = await api.createSession();
         setSessions((prev) => [session, ...prev]);
         setCurrentSessionId(session.id);
+        setWorkspaceModeState("sessions");
         sessionId = session.id;
       }
 
@@ -506,6 +518,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         isReferenceUploading,
         isSessionLoading,
         ragMode,
+        workspaceMode,
         selectedWorkflow,
         attachedIdentifiers,
         draftMessage,
@@ -518,6 +531,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         deleteSession,
         renameSession,
         sendMessage,
+        setWorkspaceMode,
         selectWorkflow,
         uploadAttachedReference,
         addAttachedIdentifier,

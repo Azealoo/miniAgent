@@ -2,11 +2,11 @@
 
 import { useCallback, useState } from "react";
 import { AppProvider } from "@/lib/store";
-import ChatPanel from "@/components/chat/ChatPanel";
 import InspectorPanel from "@/components/editor/InspectorPanel";
 import Navbar from "@/components/layout/Navbar";
 import ResizeHandle from "@/components/layout/ResizeHandle";
 import Sidebar from "@/components/layout/Sidebar";
+import WorkspacePanel from "@/components/layout/WorkspacePanel";
 
 const SIDEBAR_MIN = 232;
 const SIDEBAR_MAX = 296;
@@ -48,7 +48,7 @@ export default function AppShell() {
               <ResizeHandle onResize={resizeSidebar} />
 
               <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
-                <ChatPanel />
+                <WorkspacePanel />
               </div>
 
               <ResizeHandle onResize={resizeInspector} />

@@ -2,123 +2,26 @@
 
 import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import {
-  BookOpen,
   Check,
   Edit2,
-  Files,
-  FlaskConical,
-  MessageSquare,
   Plus,
   Search,
-  ShieldCheck,
   Trash2,
   X,
 } from "lucide-react";
-import {
-  getWorkflowSummary,
-  isWorkflowSelectionPending,
-} from "@/lib/session-status";
+import { isWorkflowSelectionPending } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
-import type { Message } from "@/lib/types";
 import { cn, formatRelativeTime } from "@/lib/utils";
-
-type RailView = "sessions" | "flows" | "docs" | "files";
-
-interface QuickStartItem {
-  id: string;
-  label: string;
-  description: string;
-  kind: string;
-  icon: typeof FlaskConical;
-  workflowId?: string | null;
-  draftMessage: string;
-}
-
-interface SurfaceItem {
-  id: string;
-  label: string;
-  description: string;
-  meta?: string;
-  icon: typeof FlaskConical;
-  path?: string;
-}
-
-const primaryNavItems: Array<{
-  id: RailView;
-  label: string;
-  icon: typeof FlaskConical;
-}> = [
-  { id: "sessions", label: "Sessions", icon: MessageSquare },
-  { id: "flows", label: "Flows", icon: FlaskConical },
-  { id: "docs", label: "Docs", icon: BookOpen },
-  { id: "files", label: "Files", icon: Files },
-];
-
-const quickStartItems: QuickStartItem[] = [
-  {
-    id: "rnaseq-de",
-    label: "RNA-seq DE",
-    description: "Prime the RNA-seq differential expression workflow.",
-    kind: "Workflow",
-    icon: FlaskConical,
-    workflowId: "rnaseq_qc_de",
-    draftMessage:
-      "Run the RNA-seq differential expression workflow on the attached dataset manifest with condition_field=condition baseline_condition=control comparison_condition=treated. Use the standard QC and report outputs unless I provide different parameters.",
-  },
-  {
-    id: "evidence-review",
-    label: "Evidence Review",
-    description: "Draft a source-grounded evidence review request.",
-    kind: "Review",
-    icon: BookOpen,
-    draftMessage:
-      "Review the evidence for this biology question, separate source facts from conclusions, and cite the strongest supporting artifacts.",
-  },
-  {
-    id: "compliance",
-    label: "Compliance",
-    description: "Prepare a compliance and readiness check request.",
-    kind: "Safety",
-    icon: ShieldCheck,
-    draftMessage:
-      "Run a compliance and readiness check on this request, summarize any warnings or approvals required, and note what information is missing.",
-  },
-];
-
-const workspaceDocs: SurfaceItem[] = [
-  {
-    id: "current-feature",
-    label: "Current Feature",
-    description: "Active implementation contract for this pass.",
-    meta: "context/current-feature.md",
-    icon: BookOpen,
-    path: "context/current-feature.md",
-  },
-  {
-    id: "project-overview",
-    label: "Project Overview",
-    description: "Mission, architecture, and product direction.",
-    meta: "context/project-overview.md",
-    icon: BookOpen,
-    path: "context/project-overview.md",
-  },
-  {
-    id: "coding-standards",
-    label: "Coding Standards",
-    description: "Frontend and backend implementation guardrails.",
-    meta: "context/coding-standards.md",
-    icon: BookOpen,
-    path: "context/coding-standards.md",
-  },
-  {
-    id: "ai-interaction",
-    label: "AI Interaction",
-    description: "Feature workflow and review expectations.",
-    meta: "context/ai-interaction.md",
-    icon: BookOpen,
-    path: "context/ai-interaction.md",
-  },
-];
+import {
+  getWorkflowSurfaceItems,
+  matchesQuery,
+  primaryNavItems,
+  type QuickStartItem,
+  quickStartItems,
+  recentFiles,
+  type SurfaceItem,
+  workspaceDocs,
+} from "./workspace-data";
 
 function SectionLabel({ children }: { children: ReactNode }) {
   return (
@@ -200,176 +103,6 @@ function SurfaceRow({
   );
 }
 
-function formatWorkflowLabel(value: string): string {
-  return value.replaceAll("_", " ").replaceAll("-", " ");
-}
-
-function humanizeToken(value?: string | null): string | null {
-  if (!value) return null;
-  return value.replaceAll("_", " ").replaceAll("-", " ");
-}
-
-function shortenPath(path: string): string {
-  const segments = path.split("/").filter(Boolean);
-  if (segments.length <= 2) return path;
-  return segments.slice(-2).join("/");
-}
-
-function matchesQuery(
-  query: string,
-  ...parts: Array<string | null | undefined>
-): boolean {
-  const normalizedQuery = query.trim().toLowerCase();
-  if (!normalizedQuery) return true;
-  return parts.some((part) => part?.toLowerCase().includes(normalizedQuery));
-}
-
-function workflowMeta(
-  messages: Message[],
-  selectedWorkflow: string | null,
-  selectionPending: boolean
-): SurfaceItem[] {
-  const summary = getWorkflowSummary(messages);
-  const items: SurfaceItem[] = [];
-
-  if (selectedWorkflow) {
-    items.push({
-      id: `selected-${selectedWorkflow}`,
-      label:
-        !selectionPending &&
-        summary.workflowId === selectedWorkflow &&
-        summary.workflowName
-          ? summary.workflowName
-          : formatWorkflowLabel(selectedWorkflow),
-      description:
-        !selectionPending &&
-        summary.workflowId === selectedWorkflow &&
-        summary.status !== "idle"
-          ? describeWorkflow(summary)
-          : "Selected and ready for the next request.",
-      meta:
-        !selectionPending && summary.workflowId === selectedWorkflow
-          ? summarizeWorkflowMeta(summary)
-          : "Selected",
-      icon: FlaskConical,
-    });
-  }
-
-  if (summary.workflowId && summary.workflowId !== selectedWorkflow) {
-    items.push({
-      id: `recent-${summary.workflowId}`,
-      label: summary.workflowName ?? formatWorkflowLabel(summary.workflowId),
-      description: describeWorkflow(summary),
-      meta: summarizeWorkflowMeta(summary),
-      icon: FlaskConical,
-    });
-  }
-
-  return items;
-}
-
-function summarizeWorkflowMeta(summary: ReturnType<typeof getWorkflowSummary>): string {
-  if (summary.status === "running" || summary.status === "not_started") {
-    if (summary.totalSteps !== null) {
-      return `${summary.completedSteps}/${summary.totalSteps} steps`;
-    }
-    if (summary.observedSteps > 0) {
-      return `${summary.completedSteps}/${summary.observedSteps} observed`;
-    }
-    return summary.status === "not_started" ? "Not started" : "Running";
-  }
-
-  if (summary.status === "blocked") return "Blocked";
-  if (summary.status === "failed") return "Failed";
-  if (summary.status === "completed") {
-    if (summary.totalSteps !== null) {
-      return `${summary.completedSteps}/${summary.totalSteps} steps`;
-    }
-    return "Completed";
-  }
-
-  return "Idle";
-}
-
-function describeWorkflow(summary: ReturnType<typeof getWorkflowSummary>): string {
-  if (summary.status === "blocked") {
-    return summary.blockedReason ?? "Workflow execution is blocked.";
-  }
-
-  if (summary.status === "failed") {
-    return summary.failureReason ?? "Latest workflow run failed.";
-  }
-
-  if (summary.status === "not_started") {
-    return summary.totalSteps !== null
-      ? `Workflow run is ready to begin with ${summary.totalSteps} step${summary.totalSteps === 1 ? "" : "s"}.`
-      : "Workflow run is ready to begin.";
-  }
-
-  if (summary.status === "running") {
-    if (summary.currentStep) {
-      return `${summary.currentStep} is running now.`;
-    }
-    return "Workflow execution is in progress.";
-  }
-
-  if (summary.status === "completed") {
-    return "Latest workflow run completed successfully.";
-  }
-
-  return "No workflow run has started yet.";
-}
-
-function recentFiles(messages: Message[]): SurfaceItem[] {
-  const items: SurfaceItem[] = [];
-  const seenPaths = new Set<string>();
-
-  const pushItem = (
-    path: string | null | undefined,
-    description: string,
-    meta?: string | null
-  ) => {
-    if (!path || seenPaths.has(path) || items.length >= 6) return;
-    seenPaths.add(path);
-    items.push({
-      id: path,
-      label: path.split("/").pop() ?? path,
-      description,
-      meta: meta ?? shortenPath(path),
-      icon: Files,
-      path,
-    });
-  };
-
-  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
-    const message = messages[messageIndex];
-
-    const workflowEvents = message.workflow_events ?? [];
-    for (let eventIndex = workflowEvents.length - 1; eventIndex >= 0; eventIndex -= 1) {
-      const event = workflowEvents[eventIndex];
-      if (event.type !== "workflow_artifact") continue;
-      pushItem(
-        event.artifact.path,
-        humanizeToken(event.artifact.artifact_type) ?? "Workflow artifact"
-      );
-    }
-
-    const toolCalls = message.tool_calls ?? [];
-    for (let callIndex = toolCalls.length - 1; callIndex >= 0; callIndex -= 1) {
-      const artifactRefs = toolCalls[callIndex]?.result?.artifact_refs ?? [];
-      for (let refIndex = artifactRefs.length - 1; refIndex >= 0; refIndex -= 1) {
-        const ref = artifactRefs[refIndex];
-        pushItem(
-          ref.path,
-          humanizeToken(ref.artifact_type) ?? ref.label ?? "Tool artifact"
-        );
-      }
-    }
-  }
-
-  return items;
-}
-
 export default function Sidebar() {
   const {
     sessions,
@@ -382,17 +115,18 @@ export default function Sidebar() {
     isStreaming,
     isReferenceUploading,
     ragMode,
+    workspaceMode,
     selectedWorkflow,
     draftMessage,
     inspectorTab,
     inspectorPreviewPath,
+    setWorkspaceMode,
     selectWorkflow,
     primeDraftMessage,
     clearDraftMessage,
     openInspectorPath,
   } = useApp();
 
-  const [activeView, setActiveView] = useState<RailView>("sessions");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [query, setQuery] = useState("");
@@ -415,7 +149,7 @@ export default function Sidebar() {
     messages,
     selectedWorkflow
   );
-  const filteredWorkflowItems = workflowMeta(
+  const filteredWorkflowItems = getWorkflowSurfaceItems(
     messages,
     selectedWorkflow,
     pendingWorkflowSelection
@@ -439,14 +173,14 @@ export default function Sidebar() {
 
   const handleCreate = async () => {
     if (sessionActionsLocked) return;
-    setActiveView("sessions");
+    setWorkspaceMode("sessions");
     setEditingId(null);
     await createSession();
   };
 
   const handleSelect = async (id: string) => {
     if (sessionActionsLocked) return;
-    setActiveView("sessions");
+    setWorkspaceMode("sessions");
     await selectSession(id);
     setEditingId(null);
   };
@@ -485,30 +219,30 @@ export default function Sidebar() {
     if (isQuickStartActive(item)) {
       selectWorkflow(null);
       clearDraftMessage();
-      setActiveView("sessions");
+      setWorkspaceMode("sessions");
       return;
     }
 
     selectWorkflow(item.workflowId ?? null);
     primeDraftMessage(item.draftMessage);
-    setActiveView(item.workflowId ? "flows" : "sessions");
+    setWorkspaceMode("sessions");
     setEditingId(null);
   };
 
   const focusTitle =
-    activeView === "flows"
+    workspaceMode === "flows"
       ? "Flow Focus"
-      : activeView === "docs"
+      : workspaceMode === "docs"
         ? "Working Docs"
-        : activeView === "files"
+        : workspaceMode === "files"
           ? "Generated"
           : null;
   const focusItems =
-    activeView === "flows"
+    workspaceMode === "flows"
       ? filteredWorkflowItems
-      : activeView === "docs"
+      : workspaceMode === "docs"
         ? filteredDocs
-        : activeView === "files"
+        : workspaceMode === "files"
           ? filteredFileItems
           : [];
 
@@ -542,13 +276,13 @@ export default function Sidebar() {
         <div className="grid grid-cols-4 gap-0.5">
           {primaryNavItems.map((item) => {
             const Icon = item.icon;
-            const active = activeView === item.id;
+            const active = workspaceMode === item.id;
 
             return (
               <button
                 key={item.id}
                 type="button"
-                onClick={() => setActiveView(item.id)}
+                onClick={() => setWorkspaceMode(item.id)}
                 className={cn(
                   "flex flex-col items-center gap-0 rounded-[8px] px-0.5 py-1 text-[9px] leading-tight transition-colors",
                   active
@@ -635,9 +369,9 @@ export default function Sidebar() {
             <div className="mt-2">
               {focusItems.length === 0 ? (
                 <EmptyRailState>
-                  {activeView === "flows"
+                  {workspaceMode === "flows"
                     ? "No selected or recent workflow runs yet."
-                    : activeView === "docs"
+                    : workspaceMode === "docs"
                       ? "No working docs match this search."
                       : "No generated files are visible in this session yet."}
                 </EmptyRailState>
