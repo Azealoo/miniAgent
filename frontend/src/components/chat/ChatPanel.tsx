@@ -10,7 +10,15 @@ export default function ChatPanel() {
   const {
     messages,
     isStreaming,
+    isReferenceUploading,
+    isSessionLoading,
     sendMessage,
+    selectedWorkflow,
+    attachedIdentifiers,
+    selectWorkflow,
+    uploadAttachedReference,
+    removeAttachedIdentifier,
+    clearAttachedIdentifiers,
     draftMessage,
     draftRevision,
     clearDraftMessage,
@@ -41,31 +49,41 @@ export default function ChatPanel() {
 
   return (
     <section className="apex-panel flex h-full min-h-0 flex-col overflow-hidden rounded-[18px] shadow-[var(--panel-shadow-soft)]">
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[linear-gradient(180deg,rgba(248,250,246,0.92)_0%,rgba(244,246,242,0.82)_100%)]">
         <div
           ref={containerRef}
           onScroll={handleScroll}
-          className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5 lg:px-8 lg:py-7"
+          className="flex-1 overflow-y-auto px-4 pt-4 sm:px-6 sm:pt-5 lg:px-8 lg:pt-7"
         >
           <div className="mx-auto flex min-h-full w-full max-w-[54rem] flex-col">
             {messages.length === 0 ? (
               <EmptyState />
             ) : (
-              <div className="flex flex-col gap-6 pb-2 sm:gap-7">
+              <div className="flex flex-col gap-5 pb-[11.75rem] sm:gap-6 sm:pb-[13rem]">
                 {messages.map((message) => (
                   <ChatMessage key={message.id} message={message} />
                 ))}
               </div>
             )}
-            <div ref={bottomRef} />
+            <div ref={bottomRef} className="h-px" />
           </div>
         </div>
 
-        <div className="border-t border-[var(--shell-border)] bg-[var(--panel-muted)] px-4 py-4 sm:px-5 lg:px-6">
-          <div className="mx-auto w-full max-w-[54rem]">
+        <div className="pointer-events-none h-8 bg-gradient-to-t from-[rgba(244,246,242,0.96)] via-[rgba(244,246,242,0.76)] to-transparent" />
+
+        <div className="sticky bottom-0 z-10 px-3 pb-3 sm:px-5 sm:pb-4 lg:px-6 lg:pb-5">
+          <div className="mx-auto w-full max-w-[56rem]">
             <ChatInput
               onSend={handleSend}
               isStreaming={isStreaming}
+              isReferenceUploading={isReferenceUploading}
+              disabled={isSessionLoading}
+              selectedWorkflow={selectedWorkflow}
+              onSelectWorkflow={selectWorkflow}
+              attachedIdentifiers={attachedIdentifiers}
+              onUploadReferenceFile={uploadAttachedReference}
+              onRemoveAttachedIdentifier={removeAttachedIdentifier}
+              onClearAttachedIdentifiers={clearAttachedIdentifiers}
               prefillText={draftMessage}
               prefillRevision={draftRevision}
               clearPrefill={clearDraftMessage}

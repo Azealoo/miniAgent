@@ -369,6 +369,7 @@ export default function Sidebar() {
     deleteSession,
     renameSession,
     isStreaming,
+    isReferenceUploading,
     ragMode,
     selectedWorkflow,
     draftMessage,
@@ -385,7 +386,10 @@ export default function Sidebar() {
   const [editTitle, setEditTitle] = useState("");
   const [query, setQuery] = useState("");
   const trimmedQuery = query.trim();
-  const sessionActionsLocked = isStreaming;
+  const sessionActionsLocked = isStreaming || isReferenceUploading;
+  const sessionActionLockTitle = isStreaming
+    ? "Wait for streaming to finish before editing sessions"
+    : "Wait for the current reference upload to finish before editing sessions";
 
   const filteredQuickStartItems = quickStartItems.filter((item) =>
     matchesQuery(query, item.label, item.description, item.kind)
@@ -430,7 +434,7 @@ export default function Sidebar() {
   };
 
   const handleSelect = async (id: string) => {
-    if (isStreaming) return;
+    if (sessionActionsLocked) return;
     setActiveView("sessions");
     await selectSession(id);
     setEditingId(null);
@@ -465,7 +469,7 @@ export default function Sidebar() {
       : !selectedWorkflow && draftMessage === item.draftMessage;
 
   const handleQuickStart = (item: QuickStartItem) => {
-    if (isStreaming) return;
+    if (sessionActionsLocked) return;
 
     if (isQuickStartActive(item)) {
       selectWorkflow(null);
@@ -574,7 +578,7 @@ export default function Sidebar() {
                 key={item.id}
                 type="button"
                 onClick={() => handleQuickStart(item)}
-                disabled={isStreaming}
+                disabled={sessionActionsLocked}
                 className={cn(
                   "flex w-full items-center gap-2 border-b border-[rgba(211,219,210,0.8)] border-l-2 px-1 py-1.5 text-left transition-colors last:border-b-0 disabled:cursor-not-allowed disabled:opacity-60",
                   active
@@ -660,7 +664,7 @@ export default function Sidebar() {
 
           {sessionActionsLocked ? (
             <div className="mt-2 rounded-[12px] border border-[rgba(226,232,240,0.95)] bg-white/70 px-3 py-2 text-[11px] leading-5 text-slate-500">
-              Session switching is locked while the current response is streaming.
+              Session switching is locked while the current response or reference upload is in progress.
             </div>
           ) : null}
 
@@ -715,7 +719,7 @@ export default function Sidebar() {
                       <button
                         type="button"
                         onClick={() => handleSelect(session.id)}
-                        disabled={isStreaming}
+                        disabled={sessionActionsLocked}
                         className="min-w-0 flex flex-1 items-start gap-2.5 text-left disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         <div
@@ -747,7 +751,7 @@ export default function Sidebar() {
                           className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
                           title={
                             sessionActionsLocked
-                              ? "Wait for streaming to finish before editing sessions"
+                              ? sessionActionLockTitle
                               : "Rename session"
                           }
                         >
@@ -760,7 +764,7 @@ export default function Sidebar() {
                           className="rounded-full p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-50"
                           title={
                             sessionActionsLocked
-                              ? "Wait for streaming to finish before editing sessions"
+                              ? sessionActionLockTitle
                               : "Delete session"
                           }
                         >
@@ -782,7 +786,13 @@ export default function Sidebar() {
           title="Use the top bar RAG control to change retrieval mode."
         >
           <span>{ragMode ? "RAG: On" : "RAG: Off"}</span>
-          <span>{isStreaming ? "Streaming" : "Ready"}</span>
+          <span>
+            {isStreaming
+              ? "Streaming"
+              : isReferenceUploading
+                ? "Uploading ref"
+                : "Ready"}
+          </span>
         </div>
       </div>
     </aside>

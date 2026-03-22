@@ -28,8 +28,11 @@ interface AppContextValue {
   currentSessionId: string | null;
   messages: Message[];
   isStreaming: boolean;
+  isReferenceUploading: boolean;
+  isSessionLoading: boolean;
   ragMode: boolean;
   selectedWorkflow: string | null;
+  attachedIdentifiers: string[];
   draftMessage: string;
   draftRevision: number;
   inspectorTab: "files" | "sources" | "memory" | "skills" | "usage";
@@ -43,6 +46,10 @@ interface AppContextValue {
   renameSession: (id: string, title: string) => Promise<void>;
   sendMessage: (content: string, context?: api.ChatRequestContext) => Promise<void>;
   selectWorkflow: (workflowId: string | null) => void;
+  uploadAttachedReference: (file: File) => Promise<void>;
+  addAttachedIdentifier: (identifier: string) => void;
+  removeAttachedIdentifier: (identifier: string) => void;
+  clearAttachedIdentifiers: () => void;
   primeDraftMessage: (text: string) => void;
   clearDraftMessage: () => void;
   setInspectorTab: (
@@ -71,8 +78,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isReferenceUploading, setIsReferenceUploading] = useState(false);
+  const [isSessionLoading, setIsSessionLoading] = useState(true);
   const [ragMode, setRagModeState] = useState(false);
   const [selectedWorkflow, setSelectedWorkflow] = useState<string | null>(null);
+  const [attachedIdentifiers, setAttachedIdentifiers] = useState<string[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
   const [draftRevision, setDraftRevision] = useState(0);
   const [inspectorTab, setInspectorTabState] = useState<
@@ -82,6 +92,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // Ref to current streaming message ID (avoids stale closure issues)
   const streamingIdRef = useRef<string | null>(null);
+  const currentSessionIdRef = useRef<string | null>(null);
+  const referenceUploadTokenRef = useRef(0);
 
   // ── Bootstrap ────────────────────────────────────────────────
 
@@ -104,9 +116,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
       } catch {
         // Backend not ready yet — that's fine
+      } finally {
+        setIsSessionLoading(false);
       }
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
 
   // ── Session helpers ──────────────────────────────────────────
 
@@ -116,41 +134,52 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const createSession = useCallback(async () => {
+    if (isReferenceUploading) return;
     const session = await api.createSession();
     setSessions((prev) => [session, ...prev]);
     setCurrentSessionId(session.id);
     setMessages([]);
     setSelectedWorkflow(null);
+    setAttachedIdentifiers([]);
     setDraftMessage("");
     setDraftRevision((prev) => prev + 1);
     setInspectorPreviewPath(null);
     setInspectorTabState("files");
-  }, []);
+  }, [isReferenceUploading]);
 
   const selectSession = useCallback(async (id: string) => {
+    if (isReferenceUploading) return;
     if (id === currentSessionId) return;
-    await _loadSession(id, setMessages, setCurrentSessionId, setSelectedWorkflow);
-    setDraftMessage("");
-    setDraftRevision((prev) => prev + 1);
-    setInspectorPreviewPath(null);
-    setInspectorTabState("files");
-  }, [currentSessionId]);
+    setIsSessionLoading(true);
+    try {
+      await _loadSession(id, setMessages, setCurrentSessionId, setSelectedWorkflow);
+      setAttachedIdentifiers([]);
+      setDraftMessage("");
+      setDraftRevision((prev) => prev + 1);
+      setInspectorPreviewPath(null);
+      setInspectorTabState("files");
+    } finally {
+      setIsSessionLoading(false);
+    }
+  }, [currentSessionId, isReferenceUploading]);
 
   const deleteSession = useCallback(
     async (id: string) => {
+      if (isReferenceUploading) return;
       await api.deleteSession(id);
       setSessions((prev) => prev.filter((s) => s.id !== id));
       if (id === currentSessionId) {
         setCurrentSessionId(null);
         setMessages([]);
         setSelectedWorkflow(null);
+        setAttachedIdentifiers([]);
         setDraftMessage("");
         setDraftRevision((prev) => prev + 1);
         setInspectorPreviewPath(null);
         setInspectorTabState("files");
       }
     },
-    [currentSessionId]
+    [currentSessionId, isReferenceUploading]
   );
 
   const renameSession = useCallback(async (id: string, title: string) => {
@@ -169,6 +198,58 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const selectWorkflow = useCallback((workflowId: string | null) => {
     setSelectedWorkflow(workflowId);
+  }, []);
+
+  const uploadAttachedReference = useCallback(async (file: File) => {
+    if (file.size > MAX_REFERENCE_UPLOAD_BYTES) {
+      throw new Error("Reference files must be 500 KB or smaller.");
+    }
+
+    if (isReferenceUploading) {
+      throw new Error("A reference upload is already in progress.");
+    }
+
+    const uploadToken = referenceUploadTokenRef.current + 1;
+    referenceUploadTokenRef.current = uploadToken;
+    const targetSessionId = currentSessionIdRef.current;
+    setIsReferenceUploading(true);
+
+    try {
+      const content = await readReferenceUpload(file);
+      const uploadPath = buildReferenceUploadPath(file.name);
+      await api.saveFile(uploadPath, content);
+
+      if (currentSessionIdRef.current !== targetSessionId) {
+        throw new Error(
+          "Reference upload was canceled because the active session changed. Upload it again in this session."
+        );
+      }
+
+      setAttachedIdentifiers((prev) =>
+        prev.includes(uploadPath) ? prev : [...prev, uploadPath]
+      );
+    } finally {
+      if (referenceUploadTokenRef.current === uploadToken) {
+        setIsReferenceUploading(false);
+      }
+    }
+  }, [isReferenceUploading]);
+
+  const addAttachedIdentifier = useCallback((identifier: string) => {
+    const trimmed = identifier.trim();
+    if (!trimmed) return;
+
+    setAttachedIdentifiers((prev) =>
+      prev.includes(trimmed) ? prev : [...prev, trimmed]
+    );
+  }, []);
+
+  const removeAttachedIdentifier = useCallback((identifier: string) => {
+    setAttachedIdentifiers((prev) => prev.filter((item) => item !== identifier));
+  }, []);
+
+  const clearAttachedIdentifiers = useCallback(() => {
+    setAttachedIdentifiers([]);
   }, []);
 
   const primeDraftMessage = useCallback((text: string) => {
@@ -214,11 +295,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const sendMessage = useCallback(
     async (content: string, context?: api.ChatRequestContext) => {
-      if (isStreaming) return;
+      if (isStreaming || isReferenceUploading) return;
       const requestedWorkflow =
         context && "selectedWorkflow" in context
           ? context.selectedWorkflow ?? null
           : selectedWorkflow;
+      const requestedAttachments =
+        context && "attachedIdentifiers" in context
+          ? context.attachedIdentifiers ?? []
+          : attachedIdentifiers;
 
       // Auto-create session if none is selected
       let sessionId = currentSessionId;
@@ -244,6 +329,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
       setIsStreaming(true);
       setSelectedWorkflow(requestedWorkflow);
+      setAttachedIdentifiers([]);
       setDraftMessage("");
       setDraftRevision((prev) => prev + 1);
 
@@ -396,11 +482,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           setIsStreaming(false);
         },
       }, {
-        attachedIdentifiers: context?.attachedIdentifiers,
+        attachedIdentifiers: requestedAttachments,
         selectedWorkflow: requestedWorkflow,
       });
     },
-    [currentSessionId, isStreaming, refreshSessions, selectedWorkflow]
+    [
+      attachedIdentifiers,
+      currentSessionId,
+      isReferenceUploading,
+      isStreaming,
+      refreshSessions,
+      selectedWorkflow,
+    ]
   );
 
   return (
@@ -410,8 +503,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         currentSessionId,
         messages,
         isStreaming,
+        isReferenceUploading,
+        isSessionLoading,
         ragMode,
         selectedWorkflow,
+        attachedIdentifiers,
         draftMessage,
         draftRevision,
         inspectorTab,
@@ -423,6 +519,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         renameSession,
         sendMessage,
         selectWorkflow,
+        uploadAttachedReference,
+        addAttachedIdentifier,
+        removeAttachedIdentifier,
+        clearAttachedIdentifiers,
         primeDraftMessage,
         clearDraftMessage,
         setInspectorTab,
@@ -435,6 +535,36 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       {children}
     </AppContext.Provider>
   );
+}
+
+const MAX_REFERENCE_UPLOAD_BYTES = 500_000;
+
+function sanitizeUploadFileName(value: string): string {
+  const sanitized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+
+  return sanitized || "reference.txt";
+}
+
+function buildReferenceUploadPath(fileName: string): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `workspace/uploads/${stamp}__${sanitizeUploadFileName(fileName)}`;
+}
+
+async function readReferenceUpload(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+
+  for (const byte of bytes) {
+    if (byte === 0) {
+      throw new Error("Reference uploads must be UTF-8 text files.");
+    }
+  }
+
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 }
 
 // ────────────────────────────────────────────────────────────────
