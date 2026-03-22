@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import {
   BookOpen,
   Check,
@@ -12,10 +12,7 @@ import {
   Search,
   ShieldCheck,
   Trash2,
-  Wrench,
   X,
-  Zap,
-  ZapOff,
 } from "lucide-react";
 import {
   getWorkflowSummary,
@@ -23,7 +20,7 @@ import {
 } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
 import type { Message } from "@/lib/types";
-import { cn, formatTime } from "@/lib/utils";
+import { cn, formatRelativeTime } from "@/lib/utils";
 
 type RailView = "sessions" | "flows" | "docs" | "files";
 
@@ -371,7 +368,6 @@ export default function Sidebar() {
     selectSession,
     deleteSession,
     renameSession,
-    compressSession,
     isStreaming,
     ragMode,
     selectedWorkflow,
@@ -382,14 +378,14 @@ export default function Sidebar() {
     primeDraftMessage,
     clearDraftMessage,
     openInspectorPath,
-    setRagMode,
   } = useApp();
 
   const [activeView, setActiveView] = useState<RailView>("sessions");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
-  const [compressing, setCompressing] = useState(false);
   const [query, setQuery] = useState("");
+  const trimmedQuery = query.trim();
+  const sessionActionsLocked = isStreaming;
 
   const filteredQuickStartItems = quickStartItems.filter((item) =>
     matchesQuery(query, item.label, item.description, item.kind)
@@ -412,8 +408,22 @@ export default function Sidebar() {
   const filteredFileItems = recentFiles(messages).filter((item) =>
     matchesQuery(query, item.label, item.description, item.meta)
   );
+  const sessionSectionLabel = "Recent";
+  const sessionEmptyMessage =
+    sessions.length === 0
+      ? "No sessions yet. Start a new workspace to see it here."
+      : trimmedQuery
+        ? `No sessions match "${trimmedQuery}".`
+        : "No recent sessions yet.";
+
+  useEffect(() => {
+    if (!sessionActionsLocked) return;
+    setEditingId(null);
+    setEditTitle("");
+  }, [sessionActionsLocked]);
 
   const handleCreate = async () => {
+    if (sessionActionsLocked) return;
     setActiveView("sessions");
     setEditingId(null);
     await createSession();
@@ -427,12 +437,14 @@ export default function Sidebar() {
   };
 
   const startEdit = (id: string, title: string, e: MouseEvent<HTMLButtonElement>) => {
+    if (sessionActionsLocked) return;
     e.stopPropagation();
     setEditingId(id);
     setEditTitle(title);
   };
 
   const confirmEdit = async (id: string) => {
+    if (sessionActionsLocked) return;
     if (editTitle.trim()) {
       await renameSession(id, editTitle.trim());
     }
@@ -440,29 +452,10 @@ export default function Sidebar() {
   };
 
   const handleDelete = async (id: string, e: MouseEvent<HTMLButtonElement>) => {
+    if (sessionActionsLocked) return;
     e.stopPropagation();
     if (confirm("Delete this session?")) {
       await deleteSession(id);
-    }
-  };
-
-  const handleCompress = async () => {
-    if (!currentSessionId || compressing) return;
-    if (
-      !confirm(
-        "Compress the oldest 50% of messages? This will archive them and generate a summary."
-      )
-    ) {
-      return;
-    }
-
-    setCompressing(true);
-    try {
-      await compressSession();
-    } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : "Compression failed");
-    } finally {
-      setCompressing(false);
     }
   };
 
@@ -509,28 +502,29 @@ export default function Sidebar() {
       <div className="border-b border-[var(--shell-border)] px-2.5 py-3">
         <button
           onClick={handleCreate}
-          className="flex w-full items-center justify-center gap-2 rounded-[12px] bg-[var(--apex-accent)] px-3 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[var(--apex-accent-strong)]"
+          disabled={sessionActionsLocked}
+          className="flex w-full items-center justify-center gap-2 rounded-[12px] bg-[var(--apex-accent)] px-3 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[var(--apex-accent-strong)] disabled:cursor-not-allowed disabled:opacity-60"
         >
           <Plus size={15} />
           New
         </button>
 
-        <div className="relative mt-3">
+        <div className="relative mt-2.5">
           <Search
-            size={14}
-            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+            size={13}
+            className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
           />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search sessions and work"
-            className="w-full rounded-[12px] border border-[var(--shell-border)] bg-white px-9 py-2 text-sm text-slate-700 outline-none placeholder:text-slate-400 focus:border-[var(--apex-accent)]"
+            className="w-full rounded-[11px] border border-[var(--shell-border)] bg-white px-8 py-1.5 text-[13px] text-slate-700 outline-none placeholder:text-slate-400 focus:border-[var(--apex-accent)]"
           />
         </div>
       </div>
 
-      <div className="border-b border-[var(--shell-border)] px-2 py-2.5">
-        <div className="grid grid-cols-4 gap-1">
+      <div className="border-b border-[var(--shell-border)] px-1.5 py-1.5">
+        <div className="grid grid-cols-4 gap-0.5">
           {primaryNavItems.map((item) => {
             const Icon = item.icon;
             const active = activeView === item.id;
@@ -541,7 +535,7 @@ export default function Sidebar() {
                 type="button"
                 onClick={() => setActiveView(item.id)}
                 className={cn(
-                  "flex flex-col items-center gap-1 rounded-[12px] px-1 py-2 text-[11px] transition-colors",
+                  "flex flex-col items-center gap-0 rounded-[8px] px-0.5 py-1 text-[9px] leading-tight transition-colors",
                   active
                     ? "bg-white text-[var(--apex-accent-strong)] shadow-[var(--panel-shadow-soft)]"
                     : "text-slate-500 hover:bg-white/75 hover:text-slate-700"
@@ -549,20 +543,20 @@ export default function Sidebar() {
               >
                 <span
                   className={cn(
-                    "flex h-7 w-7 items-center justify-center rounded-[10px]",
+                    "flex h-[22px] w-[22px] items-center justify-center rounded-[7px]",
                     active ? "bg-[var(--apex-accent-soft)]" : "bg-transparent"
                   )}
                 >
-                  <Icon size={14} />
+                  <Icon size={12} />
                 </span>
-                <span>{item.label}</span>
+                <span className="mt-0.5">{item.label}</span>
               </button>
             );
           })}
         </div>
       </div>
 
-      <div className="border-b border-[var(--shell-border)] px-2.5 py-3">
+      <div className="border-b border-[var(--shell-border)] px-2.5 py-2.5">
         <div className="flex items-center justify-between">
           <SectionLabel>Quick Start</SectionLabel>
           <span className="text-[10px] text-slate-400">
@@ -582,7 +576,7 @@ export default function Sidebar() {
                 onClick={() => handleQuickStart(item)}
                 disabled={isStreaming}
                 className={cn(
-                  "flex w-full items-start gap-2.5 border-b border-[rgba(211,219,210,0.8)] border-l-2 px-1 py-3 text-left transition-colors last:border-b-0 disabled:cursor-not-allowed disabled:opacity-60",
+                  "flex w-full items-center gap-2 border-b border-[rgba(211,219,210,0.8)] border-l-2 px-1 py-1.5 text-left transition-colors last:border-b-0 disabled:cursor-not-allowed disabled:opacity-60",
                   active
                     ? "border-l-[var(--apex-accent)] bg-transparent"
                     : "border-l-transparent bg-transparent hover:bg-white/35"
@@ -590,25 +584,22 @@ export default function Sidebar() {
               >
                 <div
                   className={cn(
-                    "mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-[8px]",
+                    "flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-[7px]",
                     active
                       ? "bg-[var(--apex-accent-soft)] text-[var(--apex-accent-strong)]"
                       : "bg-transparent text-slate-400"
                   )}
                 >
-                  <Icon size={14} />
+                  <Icon size={12} />
                 </div>
 
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-start justify-between gap-2">
-                    <p className="truncate text-sm font-medium text-slate-700">{item.label}</p>
-                    <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-400">
-                      {item.kind}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-[11px] leading-5 text-slate-500">
-                    {item.description}
+                <div className="min-w-0 flex flex-1 items-center justify-between gap-2">
+                  <p className="truncate text-[13px] font-medium text-slate-700">
+                    {item.label}
                   </p>
+                  <span className="text-[9px] uppercase tracking-[0.14em] text-slate-400">
+                    {item.kind}
+                  </span>
                 </div>
               </button>
             );
@@ -661,15 +652,21 @@ export default function Sidebar() {
 
         <div className={cn(focusTitle && "mt-4")}>
           <div className="flex items-center justify-between">
-            <SectionLabel>Recent</SectionLabel>
+            <SectionLabel>{sessionSectionLabel}</SectionLabel>
             <span className="text-[10px] text-slate-400">
               {filteredSessions.length === 0 ? "Empty" : `${filteredSessions.length} items`}
             </span>
           </div>
 
+          {sessionActionsLocked ? (
+            <div className="mt-2 rounded-[12px] border border-[rgba(226,232,240,0.95)] bg-white/70 px-3 py-2 text-[11px] leading-5 text-slate-500">
+              Session switching is locked while the current response is streaming.
+            </div>
+          ) : null}
+
           <div className="mt-2">
             {filteredSessions.length === 0 ? (
-              <EmptyRailState>No sessions match this view yet.</EmptyRailState>
+              <EmptyRailState>{sessionEmptyMessage}</EmptyRailState>
             ) : (
               filteredSessions.map((session) => (
                 <div
@@ -699,14 +696,16 @@ export default function Sidebar() {
                       <button
                         type="button"
                         onClick={() => confirmEdit(session.id)}
-                        className="rounded-full p-1.5 text-[var(--apex-accent)] hover:bg-emerald-50"
+                        disabled={sessionActionsLocked}
+                        className="rounded-full p-1.5 text-[var(--apex-accent)] hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <Check size={12} />
                       </button>
                       <button
                         type="button"
                         onClick={() => setEditingId(null)}
-                        className="rounded-full p-1.5 text-slate-400 hover:text-slate-600"
+                        disabled={sessionActionsLocked}
+                        className="rounded-full p-1.5 text-slate-400 hover:text-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <X size={12} />
                       </button>
@@ -729,12 +728,14 @@ export default function Sidebar() {
                         />
 
                         <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium text-slate-700">
-                            {session.title}
-                          </p>
-                          <p className="mt-1 text-[11px] text-slate-400">
-                            {formatTime(session.updated_at)}
-                          </p>
+                          <div className="flex items-start justify-between gap-2">
+                            <p className="truncate text-sm font-medium text-slate-700">
+                              {session.title}
+                            </p>
+                            <span className="mt-0.5 flex-shrink-0 text-[10px] text-slate-400">
+                              {formatRelativeTime(session.updated_at)}
+                            </span>
+                          </div>
                         </div>
                       </button>
 
@@ -742,16 +743,26 @@ export default function Sidebar() {
                         <button
                           type="button"
                           onClick={(e) => startEdit(session.id, session.title, e)}
-                          className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
-                          title="Rename session"
+                          disabled={sessionActionsLocked}
+                          className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
+                          title={
+                            sessionActionsLocked
+                              ? "Wait for streaming to finish before editing sessions"
+                              : "Rename session"
+                          }
                         >
                           <Edit2 size={11} />
                         </button>
                         <button
                           type="button"
                           onClick={(e) => handleDelete(session.id, e)}
-                          className="rounded-full p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-500"
-                          title="Delete session"
+                          disabled={sessionActionsLocked}
+                          className="rounded-full p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-50"
+                          title={
+                            sessionActionsLocked
+                              ? "Wait for streaming to finish before editing sessions"
+                              : "Delete session"
+                          }
                         >
                           <Trash2 size={11} />
                         </button>
@@ -766,30 +777,12 @@ export default function Sidebar() {
       </div>
 
       <div className="border-t border-[var(--shell-border)] px-2.5 py-3">
-        <div className="grid gap-2">
-          <button
-            onClick={() => setRagMode(!ragMode)}
-            className={cn(
-              "flex w-full items-center gap-2 rounded-[12px] border px-3 py-2 text-sm font-medium transition-colors",
-              ragMode
-                ? "border-[rgba(35,130,83,0.18)] bg-[var(--apex-accent-soft)] text-[var(--apex-accent-strong)]"
-                : "border-[var(--shell-border)] bg-white text-slate-600 hover:bg-[var(--panel-soft)]"
-            )}
-          >
-            {ragMode ? <Zap size={14} /> : <ZapOff size={14} />}
-            {ragMode ? "RAG enabled" : "RAG disabled"}
-          </button>
-
-          {currentSessionId ? (
-            <button
-              onClick={handleCompress}
-              disabled={compressing || isStreaming}
-              className="flex w-full items-center gap-2 rounded-[12px] border border-[var(--shell-border)] bg-white px-3 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-[var(--panel-soft)] disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Wrench size={14} />
-              {compressing ? "Compressing..." : "Compress history"}
-            </button>
-          ) : null}
+        <div
+          className="flex items-center justify-between text-[10px] font-medium text-slate-400"
+          title="Use the top bar RAG control to change retrieval mode."
+        >
+          <span>{ragMode ? "RAG: On" : "RAG: Off"}</span>
+          <span>{isStreaming ? "Streaming" : "Ready"}</span>
         </div>
       </div>
     </aside>
