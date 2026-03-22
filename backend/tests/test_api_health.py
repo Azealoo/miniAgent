@@ -170,6 +170,196 @@ class TestSessionsEndpoints:
         sid = create_session()["id"]
         assert get_history(sid) == []
 
+    def test_list_workflow_workspace_summary_aggregates_cross_session_activity(
+        self, isolated_api_state
+    ):
+        from api.sessions import create_session, list_workflow_workspace_summary
+        from graph.agent import agent_manager
+
+        first_session_id = create_session()["id"]
+        second_session_id = create_session()["id"]
+        session_manager = agent_manager.session_manager
+
+        session_manager.save_message(
+            first_session_id,
+            "assistant",
+            "Completed RNA-seq DE.",
+            workflow_events=[
+                {
+                    "type": "workflow_start",
+                    "workflow_id": "rnaseq_qc_de",
+                    "workflow_name": "RNA-seq QC and Differential Expression Workflow",
+                    "run_id": "run-rnaseq-complete",
+                    "lifecycle_status": "created",
+                    "resumed": False,
+                    "run_record_path": "artifacts/rnaseq_qc_de/2026-03-21/run-rnaseq-complete/run.json",
+                    "started_at": "2026-03-21T18:00:00Z",
+                },
+                {
+                    "type": "workflow_done",
+                    "workflow_id": "rnaseq_qc_de",
+                    "run_id": "run-rnaseq-complete",
+                    "lifecycle_status": "completed",
+                    "run_record_path": "artifacts/rnaseq_qc_de/2026-03-21/run-rnaseq-complete/run.json",
+                    "completed_steps": 6,
+                    "total_steps": 6,
+                    "warning_count": 0,
+                    "ended_at": "2026-03-21T18:10:00Z",
+                },
+                {
+                    "type": "workflow_start",
+                    "workflow_id": "rna-seq-qc",
+                    "workflow_name": "RNA Seq QC",
+                    "run_id": "run-rna-seq-qc-active",
+                    "lifecycle_status": "running",
+                    "resumed": False,
+                    "run_record_path": "artifacts/rna-seq-qc/2026-03-22/run-rna-seq-qc-active/run.json",
+                    "started_at": "2026-03-22T16:00:00Z",
+                },
+            ],
+            tool_calls=[
+                {
+                    "tool": "evidence_review",
+                    "run_id": "evidence-review-run-1",
+                    "input": "question=demo",
+                    "output": "Reviewed evidence.",
+                    "result": {
+                        "tool_name": "evidence_review",
+                        "status": "success",
+                        "outcome": "success",
+                        "structured_payload": {
+                            "artifact_path": "artifacts/evidence-review/2026-03-22/run-evidence-review-1/evidence_review.json",
+                        },
+                    },
+                },
+                {
+                    "tool": "compliance_preflight",
+                    "run_id": "compliance-run-1",
+                    "input": "user_message=demo",
+                    "output": "Blocked.",
+                    "result": {
+                        "tool_name": "compliance_preflight",
+                        "status": "success",
+                        "outcome": "blocked",
+                        "structured_payload": {
+                            "report": {
+                                "created_at": "2026-03-22T15:00:00Z",
+                                "runtime_state": "blocked",
+                                "final_disposition": "block",
+                            }
+                        },
+                    },
+                },
+            ],
+        )
+
+        session_manager.save_message(
+            second_session_id,
+            "assistant",
+            "Latest RNA-seq DE run failed.",
+            workflow_events=[
+                {
+                    "type": "workflow_start",
+                    "workflow_id": "rnaseq_qc_de",
+                    "workflow_name": "RNA-seq QC and Differential Expression Workflow",
+                    "run_id": "run-rnaseq-failed",
+                    "lifecycle_status": "running",
+                    "resumed": False,
+                    "run_record_path": "artifacts/rnaseq_qc_de/2026-03-22/run-rnaseq-failed/run.json",
+                    "started_at": "2026-03-22T12:00:00Z",
+                },
+                {
+                    "type": "workflow_done",
+                    "workflow_id": "rnaseq_qc_de",
+                    "run_id": "run-rnaseq-failed",
+                    "lifecycle_status": "failed",
+                    "run_record_path": "artifacts/rnaseq_qc_de/2026-03-22/run-rnaseq-failed/run.json",
+                    "completed_steps": 4,
+                    "total_steps": 6,
+                    "warning_count": 1,
+                    "ended_at": "2026-03-22T12:20:00Z",
+                },
+            ],
+        )
+
+        payload = list_workflow_workspace_summary()
+        items = {item["id"]: item for item in payload["items"]}
+
+        assert items["rnaseq_qc_de"]["run_count"] == 2
+        assert items["rnaseq_qc_de"]["status"] == "failed"
+        assert items["rnaseq_qc_de"]["last_activity_at"] == datetime(
+            2026, 3, 22, 12, 20, tzinfo=timezone.utc
+        ).timestamp()
+
+        assert items["rna-seq-qc"]["run_count"] == 1
+        assert items["rna-seq-qc"]["status"] == "active"
+
+        assert items["evidence_review"]["run_count"] == 1
+        assert items["evidence_review"]["status"] == "idle"
+
+        assert items["compliance_preflight"]["run_count"] == 1
+        assert items["compliance_preflight"]["status"] == "blocked"
+        assert items["compliance_preflight"]["last_activity_at"] == datetime(
+            2026, 3, 22, 15, 0, tzinfo=timezone.utc
+        ).timestamp()
+
+    def test_list_workflow_workspace_summary_preserves_completed_status_after_artifact_events(
+        self, isolated_api_state
+    ):
+        from api.sessions import create_session, list_workflow_workspace_summary
+        from graph.agent import agent_manager
+
+        session_id = create_session()["id"]
+        session_manager = agent_manager.session_manager
+
+        session_manager.save_message(
+            session_id,
+            "assistant",
+            "Workflow finished and materialized outputs.",
+            workflow_events=[
+                {
+                    "type": "workflow_start",
+                    "workflow_id": "demo-flow",
+                    "workflow_name": "Demo Flow",
+                    "run_id": "run-demo-complete",
+                    "lifecycle_status": "running",
+                    "resumed": False,
+                    "run_record_path": "artifacts/demo-flow/2026-03-22/run-demo-complete/run.json",
+                    "started_at": "2026-03-22T09:00:00Z",
+                },
+                {
+                    "type": "workflow_done",
+                    "workflow_id": "demo-flow",
+                    "run_id": "run-demo-complete",
+                    "lifecycle_status": "completed",
+                    "run_record_path": "artifacts/demo-flow/2026-03-22/run-demo-complete/run.json",
+                    "completed_steps": 3,
+                    "total_steps": 3,
+                    "warning_count": 0,
+                    "ended_at": "2026-03-22T09:05:00Z",
+                },
+                {
+                    "type": "workflow_artifact",
+                    "workflow_id": "demo-flow",
+                    "run_id": "run-demo-complete",
+                    "artifact": {
+                        "artifact_type": "qa_report",
+                        "path": "artifacts/demo-flow/2026-03-22/run-demo-complete/report.json",
+                    },
+                    "scope": "workflow_output",
+                },
+            ],
+        )
+
+        payload = list_workflow_workspace_summary()
+        items = {item["id"]: item for item in payload["items"]}
+
+        assert items["demo-flow"]["run_count"] == 1
+        assert items["demo-flow"]["status"] == "idle"
+        assert items["demo-flow"]["last_activity_at"] == datetime(
+            2026, 3, 22, 9, 5, tzinfo=timezone.utc
+        ).timestamp()
+
     def test_session_reads_block_non_local_clients_without_inspection_token(self, isolated_api_state):
         from api.sessions import create_session, get_history, list_sessions
 
@@ -186,8 +376,21 @@ class TestSessionsEndpoints:
             )
         assert exc_info.value.status_code == 403
 
+        with pytest.raises(HTTPException) as exc_info:
+            from api.sessions import list_workflow_workspace_summary
+
+            list_workflow_workspace_summary(
+                _request("/api/sessions/workflows/summary", host="10.0.0.8")
+            )
+        assert exc_info.value.status_code == 403
+
     def test_session_reads_allow_non_local_clients_with_inspection_token(self, isolated_api_state):
-        from api.sessions import create_session, get_history, list_sessions
+        from api.sessions import (
+            create_session,
+            get_history,
+            list_sessions,
+            list_workflow_workspace_summary,
+        )
 
         sid = create_session()["id"]
         config_path = isolated_api_state / "config.json"
@@ -216,9 +419,13 @@ class TestSessionsEndpoints:
                 sid,
                 _request(f"/api/sessions/{sid}/history", host="10.0.0.8", headers=headers),
             )
+            workflow_summary = list_workflow_workspace_summary(
+                _request("/api/sessions/workflows/summary", host="10.0.0.8", headers=headers)
+            )
 
         assert any(item["id"] == sid for item in sessions)
         assert history == []
+        assert workflow_summary == {"items": []}
 
     def test_session_mutations_block_non_local_clients_without_execution_token(self, isolated_api_state):
         from api.sessions import RenameRequest, create_session, delete_session, rename_session

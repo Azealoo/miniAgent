@@ -2,6 +2,7 @@
 Session management endpoints.
 
 GET    /api/sessions
+GET    /api/sessions/workflows/summary
 POST   /api/sessions
 PUT    /api/sessions/{id}
 DELETE /api/sessions/{id}
@@ -40,6 +41,14 @@ def _check_session_id(session_id: str) -> None:
 def list_sessions(request: Request = None):
     require_inspection_access(request)
     return _sm().list_sessions()
+
+
+@router.get("/sessions/workflows/summary")
+def list_workflow_workspace_summary(request: Request = None):
+    require_inspection_access(request)
+    from graph.workflow_workspace import list_workflow_workspace_summaries
+
+    return {"items": list_workflow_workspace_summaries(_sm())}
 
 
 @router.post("/sessions", status_code=201)

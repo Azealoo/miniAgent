@@ -1,4 +1,5 @@
 import type {
+  FlowsWorkspaceSummaryResponse,
   Session,
   Skill,
   SkillRegistryEntry,
@@ -53,6 +54,9 @@ export const deleteSession = (id: string) =>
 
 export const getHistory = (id: string) =>
   req<object[]>(`/api/sessions/${id}/history`);
+
+export const getFlowsWorkspaceSummary = () =>
+  req<FlowsWorkspaceSummaryResponse>("/api/sessions/workflows/summary");
 
 export const generateTitle = (id: string) =>
   req<{ session_id: string; title: string }>(

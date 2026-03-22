@@ -10,26 +10,31 @@ import {
   FlaskConical,
   FolderOpen,
   MessageSquare,
+  Plus,
   Sparkles,
   type LucideIcon,
 } from "lucide-react";
 import ChatPanel from "@/components/chat/ChatPanel";
-import WorkflowProgressCard from "@/components/chat/WorkflowProgressCard";
 import {
   getWorkflowSummary,
-  getReadinessSummary,
-  isWorkflowSelectionPending,
 } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
-import { readFile } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import {
+  getFlowsWorkspaceSummary,
+  readFile,
+} from "@/lib/api";
+import type {
+  FlowsWorkspaceStatus,
+  FlowsWorkspaceSummaryItem,
+} from "@/lib/types";
+import { cn, formatRelativeTime } from "@/lib/utils";
 import {
   describeWorkflow,
-  formatWorkflowLabel,
-  getWorkflowSurfaceItems,
-  quickStartItems,
+  flowsWorkspaceDefinitions,
+  flowsWorkspaceSummaryMap,
+  getQuickStartItem,
   recentFiles,
-  summarizeWorkflowMeta,
+  summarizeFlowsWorkspaceStatus,
   workspaceDocs,
   type SurfaceItem,
 } from "./workspace-data";
@@ -388,192 +393,248 @@ function EmptyWorkspaceState({
   );
 }
 
+function FlowsPrimaryAction({
+  children,
+  onClick,
+}: {
+  children: ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex items-center gap-2 rounded-[14px] bg-[var(--apex-accent)] px-4 py-2.5 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(35,130,83,0.18)] transition-colors hover:bg-[var(--apex-accent-strong)]"
+    >
+      {children}
+    </button>
+  );
+}
+
+function FlowsStatusBadge({
+  status,
+}: {
+  status: FlowsWorkspaceStatus;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold",
+        status === "active" &&
+          "bg-[rgba(35,130,83,0.12)] text-[var(--apex-accent-strong)]",
+        status === "idle" && "bg-[rgba(148,163,184,0.12)] text-slate-500",
+        status === "blocked" && "bg-[rgba(217,119,6,0.12)] text-amber-700",
+        status === "failed" && "bg-[rgba(220,38,38,0.1)] text-red-700"
+      )}
+    >
+      {summarizeFlowsWorkspaceStatus(status)}
+    </span>
+  );
+}
+
+function FlowsWorkspaceCard({
+  label,
+  status,
+  runCount,
+  lastActivityAt,
+  selected = false,
+  onClick,
+}: {
+  label: string;
+  status: FlowsWorkspaceStatus;
+  runCount: number;
+  lastActivityAt: number | null;
+  selected?: boolean;
+  onClick: () => void;
+}) {
+  const timestampLabel = lastActivityAt
+    ? formatRelativeTime(lastActivityAt)
+    : "No recent activity";
+  const runCountLabel =
+    runCount === 0 ? "No runs yet" : `${runCount} run${runCount === 1 ? "" : "s"}`;
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "flex w-full items-center gap-4 rounded-[20px] border px-5 py-5 text-left shadow-[0_10px_28px_rgba(18,24,20,0.04)] transition-colors",
+        selected && "shadow-[0_14px_34px_rgba(18,24,20,0.08)]",
+        status === "active" &&
+          (selected
+            ? "border-[rgba(101,174,135,0.96)] bg-[linear-gradient(180deg,rgba(244,251,247,0.99),rgba(238,248,242,0.99))]"
+            : "border-[rgba(131,191,157,0.92)] bg-[linear-gradient(180deg,rgba(247,252,249,0.98),rgba(241,249,244,0.98))] hover:border-[rgba(101,174,135,0.96)]"),
+        status === "idle" &&
+          (selected
+            ? "border-[rgba(194,204,194,0.98)] bg-[rgba(250,251,249,0.99)]"
+            : "border-[rgba(228,232,226,0.96)] bg-white/96 hover:border-[rgba(204,214,203,0.96)] hover:bg-[rgba(251,252,250,0.98)]"),
+        status === "blocked" &&
+          (selected
+            ? "border-[rgba(217,119,6,0.36)] bg-[linear-gradient(180deg,rgba(255,249,230,0.99),rgba(255,244,231,0.99))]"
+            : "border-[rgba(245,158,11,0.3)] bg-[linear-gradient(180deg,rgba(255,251,235,0.98),rgba(255,247,237,0.98))] hover:border-[rgba(217,119,6,0.34)]"),
+        status === "failed" &&
+          (selected
+            ? "border-[rgba(220,38,38,0.34)] bg-[linear-gradient(180deg,rgba(254,240,240,0.99),rgba(254,245,245,0.99))]"
+            : "border-[rgba(248,113,113,0.28)] bg-[linear-gradient(180deg,rgba(254,242,242,0.98),rgba(254,247,247,0.98))] hover:border-[rgba(220,38,38,0.32)]")
+      )}
+    >
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-[1.05rem] font-semibold tracking-[-0.02em] text-slate-900">
+          {label}
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-slate-500">
+          <FlowsStatusBadge status={status} />
+          <span>{runCountLabel}</span>
+          <span>{timestampLabel}</span>
+        </div>
+      </div>
+
+      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-[rgba(226,232,240,0.95)] bg-white/92 text-slate-500">
+        <ArrowRight size={16} />
+      </div>
+    </button>
+  );
+}
+
+function summarizeFlowsDetail(status: FlowsWorkspaceStatus): string {
+  if (status === "active") {
+    return "Recent activity is live or staged for the next workflow request.";
+  }
+  if (status === "blocked") {
+    return "The latest activity hit a block and needs review before it can move forward.";
+  }
+  if (status === "failed") {
+    return "The latest observed run failed and should be inspected before retrying.";
+  }
+  return "Recent activity is settled, and this workflow is ready for the next run.";
+}
+
 function FlowsWorkspace() {
   const {
     messages,
     sessions,
-    currentSessionId,
-    isStreaming,
     selectedWorkflow,
+    draftMessage,
     setWorkspaceMode,
     selectWorkflow,
     primeDraftMessage,
-    clearDraftMessage,
-    openInspectorPath,
   } = useApp();
 
   const workflowSummary = getWorkflowSummary(messages);
-  const readiness = getReadinessSummary(messages, {
-    workflowSummary,
-    isStreaming,
-  });
-  const pendingSelection = isWorkflowSelectionPending(messages, selectedWorkflow);
-  const workflowItems = getWorkflowSurfaceItems(
-    messages,
-    selectedWorkflow,
-    pendingSelection
+  const [workspaceItems, setWorkspaceItems] = useState<FlowsWorkspaceSummaryItem[]>([]);
+  const [workspaceStatus, setWorkspaceStatus] = useState<"loading" | "ready" | "error">(
+    "loading"
   );
-  const artifactItems = recentFiles(messages);
-  const workflowQuickStarts = quickStartItems.filter((item) => item.workflowId);
-  const currentSession =
-    sessions.find((session) => session.id === currentSessionId) ?? null;
-  const activeWorkflowLabel = selectedWorkflow
-    ? formatWorkflowLabel(selectedWorkflow)
-    : workflowSummary.workflowName ?? "No workflow selected";
+  const [selectedFlowId, setSelectedFlowId] = useState<string | null>(null);
+  const sessionRefreshToken = sessions
+    .map((session) => `${session.id}:${session.updated_at}:${session.message_count}`)
+    .join("|");
+
+  useEffect(() => {
+    let active = true;
+    setWorkspaceStatus("loading");
+
+    void getFlowsWorkspaceSummary()
+      .then((response) => {
+        if (!active) return;
+        setWorkspaceItems(response.items);
+        setWorkspaceStatus("ready");
+      })
+      .catch(() => {
+        if (!active) return;
+        setWorkspaceItems([]);
+        setWorkspaceStatus("error");
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [sessionRefreshToken]);
+
+  const workspaceSummary = flowsWorkspaceSummaryMap(workspaceItems);
+  const flowCards = flowsWorkspaceDefinitions.map((definition) => {
+    const summary = workspaceSummary.get(definition.id);
+    const quickStart = getQuickStartItem(definition.quickStartId);
+    const quickStartActive = quickStart
+      ? quickStart.workflowId
+        ? selectedWorkflow === quickStart.workflowId
+        : !selectedWorkflow && draftMessage === quickStart.draftMessage
+      : false;
+    const currentWorkflowState =
+      definition.workflowId && workflowSummary.workflowId === definition.workflowId
+        ? workflowSummary.status
+        : null;
+
+    let status: FlowsWorkspaceStatus = summary?.status ?? "idle";
+    if (currentWorkflowState === "blocked") {
+      status = "blocked";
+    } else if (currentWorkflowState === "failed") {
+      status = "failed";
+    } else if (
+      currentWorkflowState === "running" ||
+      currentWorkflowState === "not_started" ||
+      quickStartActive
+    ) {
+      status = "active";
+    }
+
+    return {
+      ...definition,
+      status,
+      runCount: summary?.run_count ?? 0,
+      lastActivityAt: summary?.last_activity_at ?? null,
+      quickStart,
+    };
+  });
+  const hasRecordedActivity = flowCards.some((item) => item.runCount > 0);
+  const selectedCard =
+    flowCards.find((item) => item.id === selectedFlowId) ?? flowCards[0] ?? null;
+
+  useEffect(() => {
+    if (flowCards.length === 0) {
+      if (selectedFlowId !== null) {
+        setSelectedFlowId(null);
+      }
+      return;
+    }
+
+    if (selectedFlowId && flowCards.some((item) => item.id === selectedFlowId)) {
+      return;
+    }
+
+    setSelectedFlowId(flowCards[0].id);
+  }, [flowCards, selectedFlowId]);
+
+  const selectedCardSessionDetail =
+    selectedCard?.workflowId &&
+    workflowSummary.workflowId === selectedCard.workflowId &&
+    workflowSummary.status !== "idle"
+      ? describeWorkflow(workflowSummary)
+      : null;
 
   return (
     <WorkspaceShell mode="flows">
-      <WorkspaceHero
-        icon={FlaskConical}
-        title="Flows Workspace"
-        description="Review the active workflow focus, inspect the latest run status, and move back into the session when you are ready to send the next request."
-        badges={
-          <>
-            <WorkspaceBadge icon={FlaskConical}>{activeWorkflowLabel}</WorkspaceBadge>
-            <WorkspaceBadge icon={Sparkles}>{readiness.label}</WorkspaceBadge>
-            <WorkspaceBadge icon={MessageSquare}>
-              {currentSession?.title ?? "Active session"}
-            </WorkspaceBadge>
-          </>
-        }
-        actions={
-          <>
-            <WorkspaceAction onClick={() => setWorkspaceMode("sessions")} tone="accent">
-              <MessageSquare size={12} />
-              Continue In Session
-            </WorkspaceAction>
-            {selectedWorkflow ? (
-              <WorkspaceAction
-                onClick={() => {
-                  selectWorkflow(null);
-                  clearDraftMessage();
-                }}
-              >
-                Clear Workflow
-              </WorkspaceAction>
-            ) : null}
-          </>
-        }
-      />
-
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <SummaryCard
-          label="Workflow"
-          value={activeWorkflowLabel}
-          detail={
-            pendingSelection
-              ? "Selected and waiting for the next request."
-              : describeWorkflow(workflowSummary)
-          }
-        />
-        <SummaryCard
-          label="Readiness"
-          value={readiness.label}
-          detail={readiness.detail ?? "No active warnings in this workflow workspace."}
-        />
-        <SummaryCard
-          label="Progress"
-          value={summarizeWorkflowMeta(workflowSummary)}
-          detail={
-            workflowSummary.currentStep
-              ? `${workflowSummary.currentStep} is active right now.`
-              : "Progress stays aligned with the latest workflow events."
-          }
-        />
-        <SummaryCard
-          label="Artifacts"
-          value={`${artifactItems.length}`}
-          detail="Recent workflow and tool outputs stay available in the files workspace and inspector."
-        />
-      </div>
-
-      <div className="grid min-h-0 gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
-        <div className="space-y-4">
-          <SurfaceListCard
-            title="Flow Focus"
-            subtitle="Selected workflows and the latest observed run stay visible here even when the session surface is hidden."
-            items={workflowItems}
-            selectedPath={null}
-            onSelect={() => {
-              setWorkspaceMode("sessions");
-            }}
-            emptyMessage="No workflow is selected yet. Choose a workflow quick start or ask for one in the session workspace."
-          />
-
-          <div className="rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/90 p-3 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
-            <div className="border-b border-[rgba(211,219,210,0.72)] px-1 pb-3">
-              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                Workflow Quick Starts
-              </p>
-              <p className="mt-1 text-sm leading-6 text-slate-500">
-                Prime a workflow-focused request, then return to the session workspace to run it.
-              </p>
-            </div>
-
-            <div className="mt-3 space-y-2">
-              {workflowQuickStarts.map((item) => {
-                const Icon = item.icon;
-                const active = selectedWorkflow === item.workflowId;
-
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => {
-                      selectWorkflow(item.workflowId ?? null);
-                      primeDraftMessage(item.draftMessage);
-                      setWorkspaceMode("sessions");
-                    }}
-                    className={cn(
-                      "flex w-full items-start gap-3 rounded-[16px] border px-3 py-3 text-left transition-colors",
-                      active
-                        ? "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.08)]"
-                        : "border-[rgba(211,219,210,0.85)] bg-[rgba(255,255,255,0.86)] hover:border-[rgba(35,130,83,0.16)] hover:bg-[rgba(248,251,247,0.95)]"
-                    )}
-                  >
-                    <div className="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-[12px] bg-[rgba(247,249,245,0.9)] text-slate-500">
-                      <Icon size={16} />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="truncate text-sm font-semibold text-slate-800">
-                          {item.label}
-                        </p>
-                        <span className="text-[10px] uppercase tracking-[0.16em] text-slate-400">
-                          {item.kind}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-[12px] leading-5 text-slate-500">
-                        {item.description}
-                      </p>
-                    </div>
-                    <ArrowRight size={14} className="mt-1 text-slate-400" />
-                  </button>
-                );
-              })}
-            </div>
+      <div className="mx-auto flex w-full max-w-[52rem] flex-col gap-5">
+        <div className="flex flex-col gap-4 rounded-[24px] border border-[rgba(223,229,221,0.96)] bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,246,0.96))] px-5 py-5 shadow-[0_12px_30px_rgba(24,35,27,0.04)] sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h2 className="text-[1.65rem] font-semibold tracking-[-0.03em] text-slate-900">
+              Workflows
+            </h2>
+            <p className="mt-1 text-sm leading-6 text-slate-500">
+              Manage and track your analysis workflows.
+            </p>
           </div>
 
-          <SurfaceListCard
-            title="Recent Artifacts"
-            subtitle="The latest outputs from workflow and tool execution remain one click away from the inspector."
-            items={artifactItems}
-            selectedPath={null}
-            onSelect={(item) => {
-              if (item.path) {
-                openInspectorPath(item.path);
-              }
-            }}
-            emptyMessage="Artifacts will appear here after a workflow or tool produces durable outputs."
-          />
+          <FlowsPrimaryAction onClick={() => setWorkspaceMode("sessions")}>
+            <Plus size={15} />
+            New Workflow
+          </FlowsPrimaryAction>
         </div>
 
-        {workflowSummary.events.length > 0 ? (
-          <WorkflowProgressCard events={workflowSummary.events} />
-        ) : (
+        {workspaceStatus === "error" ? (
           <EmptyWorkspaceState
-            title="No workflow run is active yet"
-            description="Once a workflow starts, this workspace will show the live step-by-step run trace without forcing you back into the chat surface."
+            title="Workflow activity could not load"
+            description="The Flows workspace could not read recent workflow activity right now. Open the session workspace to continue working, then try again."
             action={
               <WorkspaceAction onClick={() => setWorkspaceMode("sessions")} tone="accent">
                 <MessageSquare size={12} />
@@ -581,6 +642,100 @@ function FlowsWorkspace() {
               </WorkspaceAction>
             }
           />
+        ) : !hasRecordedActivity && workspaceStatus === "ready" ? (
+          <EmptyWorkspaceState
+            title="No workflow activity yet"
+            description="Start a workflow, run an evidence review, or trigger a compliance check and the latest activity will appear here for quick tracking."
+            action={
+              <FlowsPrimaryAction onClick={() => setWorkspaceMode("sessions")}>
+                <Plus size={15} />
+                New Workflow
+              </FlowsPrimaryAction>
+            }
+          />
+        ) : (
+          <div className="space-y-4">
+            {flowCards.map((item) => (
+              <FlowsWorkspaceCard
+                key={item.id}
+                label={item.label}
+                status={item.status}
+                runCount={item.runCount}
+                lastActivityAt={item.lastActivityAt}
+                selected={selectedCard?.id === item.id}
+                onClick={() => setSelectedFlowId(item.id)}
+              />
+            ))}
+
+            {selectedCard ? (
+              <div className="rounded-[22px] border border-[rgba(223,229,221,0.96)] bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,246,0.96))] p-5 shadow-[0_10px_28px_rgba(18,24,20,0.05)]">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="max-w-2xl">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                      Workflow Detail
+                    </p>
+                    <h3 className="mt-2 text-xl font-semibold tracking-[-0.02em] text-slate-900">
+                      {selectedCard.label}
+                    </h3>
+                    <p className="mt-2 text-sm leading-6 text-slate-500">
+                      {selectedCardSessionDetail ??
+                        selectedCard.description ??
+                        summarizeFlowsDetail(selectedCard.status)}
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <WorkspaceAction onClick={() => setWorkspaceMode("sessions")}>
+                      <MessageSquare size={12} />
+                      Open Session
+                    </WorkspaceAction>
+                    {selectedCard.quickStart ? (
+                      <WorkspaceAction
+                        onClick={() => {
+                          const quickStart = selectedCard.quickStart;
+                          if (!quickStart) return;
+                          selectWorkflow(quickStart.workflowId ?? null);
+                          primeDraftMessage(quickStart.draftMessage);
+                          setWorkspaceMode("sessions");
+                        }}
+                        tone="accent"
+                      >
+                        <Sparkles size={12} />
+                        Prepare In Session
+                      </WorkspaceAction>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <WorkspaceBadge icon={FlaskConical}>
+                    {summarizeFlowsWorkspaceStatus(selectedCard.status)}
+                  </WorkspaceBadge>
+                  <WorkspaceBadge icon={Sparkles}>
+                    {selectedCard.runCount === 0
+                      ? "No runs yet"
+                      : `${selectedCard.runCount} run${selectedCard.runCount === 1 ? "" : "s"}`}
+                  </WorkspaceBadge>
+                  <WorkspaceBadge icon={MessageSquare}>
+                    {selectedCard.lastActivityAt
+                      ? formatRelativeTime(selectedCard.lastActivityAt)
+                      : "No recent activity"}
+                  </WorkspaceBadge>
+                  {selectedCard.workflowId ? (
+                    <WorkspaceBadge icon={FlaskConical}>
+                      {selectedCard.workflowId}
+                    </WorkspaceBadge>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+
+            {workspaceStatus === "loading" ? (
+              <p className="px-1 text-sm text-slate-500">
+                Syncing recent workflow activity…
+              </p>
+            ) : null}
+          </div>
         )}
       </div>
     </WorkspaceShell>

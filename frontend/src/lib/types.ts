@@ -378,6 +378,19 @@ export interface Session {
   message_count: number;
 }
 
+export type FlowsWorkspaceStatus = "active" | "idle" | "blocked" | "failed";
+
+export interface FlowsWorkspaceSummaryItem {
+  id: string;
+  run_count: number;
+  last_activity_at: number | null;
+  status: FlowsWorkspaceStatus;
+}
+
+export interface FlowsWorkspaceSummaryResponse {
+  items: FlowsWorkspaceSummaryItem[];
+}
+
 export interface TokenStats {
   session_id: string;
   system_tokens: number;

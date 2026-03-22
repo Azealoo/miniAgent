@@ -12,7 +12,12 @@ import {
   getWorkflowSummary,
   type WorkflowSummary,
 } from "@/lib/session-status";
-import type { Message, WorkspaceMode } from "@/lib/types";
+import type {
+  FlowsWorkspaceStatus,
+  FlowsWorkspaceSummaryItem,
+  Message,
+  WorkspaceMode,
+} from "@/lib/types";
 
 export interface WorkspaceNavItem {
   id: WorkspaceMode;
@@ -37,6 +42,14 @@ export interface SurfaceItem {
   meta?: string;
   icon: LucideIcon;
   path?: string;
+}
+
+export interface FlowsWorkspaceDefinition {
+  id: string;
+  label: string;
+  description: string;
+  quickStartId: QuickStartItem["id"];
+  workflowId?: string | null;
 }
 
 export const primaryNavItems: WorkspaceNavItem[] = [
@@ -77,6 +90,28 @@ export const quickStartItems: QuickStartItem[] = [
   },
 ];
 
+export const flowsWorkspaceDefinitions: FlowsWorkspaceDefinition[] = [
+  {
+    id: "rnaseq_qc_de",
+    label: "RNA-seq DE Analysis",
+    description: "Track RNA-seq differential expression workflow activity.",
+    quickStartId: "rnaseq-de",
+    workflowId: "rnaseq_qc_de",
+  },
+  {
+    id: "evidence_review",
+    label: "Evidence Review",
+    description: "Review grounded evidence activity and recent synthesis runs.",
+    quickStartId: "evidence-review",
+  },
+  {
+    id: "compliance_preflight",
+    label: "Compliance Check",
+    description: "Monitor deterministic compliance and readiness preflights.",
+    quickStartId: "compliance",
+  },
+];
+
 export const workspaceDocs: SurfaceItem[] = [
   {
     id: "current-feature",
@@ -114,6 +149,25 @@ export const workspaceDocs: SurfaceItem[] = [
 
 export function formatWorkflowLabel(value: string): string {
   return value.replaceAll("_", " ").replaceAll("-", " ");
+}
+
+export function getQuickStartItem(id: QuickStartItem["id"]): QuickStartItem | null {
+  return quickStartItems.find((item) => item.id === id) ?? null;
+}
+
+export function summarizeFlowsWorkspaceStatus(
+  workflowStatus?: FlowsWorkspaceStatus | null
+): string {
+  if (workflowStatus === "active") return "Active";
+  if (workflowStatus === "blocked") return "Blocked";
+  if (workflowStatus === "failed") return "Failed";
+  return "Idle";
+}
+
+export function flowsWorkspaceSummaryMap(
+  items: FlowsWorkspaceSummaryItem[]
+): Map<string, FlowsWorkspaceSummaryItem> {
+  return new Map(items.map((item) => [item.id, item]));
 }
 
 function humanizeToken(value?: string | null): string | null {
