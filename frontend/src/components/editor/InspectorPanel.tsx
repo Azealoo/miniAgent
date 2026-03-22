@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import Image from "next/image";
 import {
   useEffect,
   useRef,
@@ -17,11 +18,23 @@ import {
   Search,
   Sparkles,
 } from "lucide-react";
-import { getSessionTokens, listSkills, readFile, saveFile } from "@/lib/api";
+import {
+  getRawFileUrl,
+  getSessionTokens,
+  listSkills,
+  readFile,
+  saveFile,
+} from "@/lib/api";
 import { getWorkflowSummary } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
 import { cn } from "@/lib/utils";
-import type { Message, Skill, TokenStats, WorkflowStreamEvent } from "@/lib/types";
+import type {
+  Message,
+  Skill,
+  TokenStats,
+  WorkflowArtifactScope,
+  WorkflowStreamEvent,
+} from "@/lib/types";
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
   ssr: false,
@@ -41,35 +54,384 @@ const INSPECTOR_TABS = [
   { id: "usage", label: "Usage", icon: Hash },
 ] as const;
 
-type InspectorTabId = (typeof INSPECTOR_TABS)[number]["id"];
+type GeneratedArtifactItem = {
+  path: string;
+  label: string;
+  artifactType: string | null;
+  scope: WorkflowArtifactScope | null;
+  outputName: string | null;
+  stepLabel: string | null;
+  lastSeenOrder: number;
+};
+
+type GeneratedArtifactKind =
+  | "table"
+  | "plot"
+  | "structured"
+  | "report"
+  | "archive"
+  | "file";
+
+type InspectorPreviewMode = "text" | "image" | "pdf" | "unsupported";
+
+function humanizeToken(value?: string | null): string | null {
+  if (!value) return null;
+  return value.replaceAll("_", " ").replaceAll("-", " ");
+}
+
+function getFileExtension(path: string): string | null {
+  const fileName = path.split("/").pop() ?? path;
+  const index = fileName.lastIndexOf(".");
+  if (index <= 0 || index === fileName.length - 1) {
+    return null;
+  }
+  return fileName.slice(index).toLowerCase();
+}
+
+function getInspectorPreviewMode(path: string): InspectorPreviewMode {
+  const extension = getFileExtension(path);
+
+  if (
+    extension === ".png" ||
+    extension === ".jpg" ||
+    extension === ".jpeg" ||
+    extension === ".svg"
+  ) {
+    return "image";
+  }
+
+  if (extension === ".pdf") {
+    return "pdf";
+  }
+
+  if (
+    extension === ".zip" ||
+    extension === ".gz" ||
+    extension === ".tgz" ||
+    extension === ".tar" ||
+    extension === ".tif" ||
+    extension === ".tiff" ||
+    extension === ".xlsx" ||
+    extension === ".xls" ||
+    extension === ".parquet" ||
+    extension === ".mtx"
+  ) {
+    return "unsupported";
+  }
+
+  return "text";
+}
+
+function getUnsupportedPreviewMessage(path: string): string {
+  const extension = getFileExtension(path);
+
+  if (
+    extension === ".zip" ||
+    extension === ".gz" ||
+    extension === ".tgz" ||
+    extension === ".tar"
+  ) {
+    return "Archive previews are not available in the inspector yet. Use Open raw to inspect or download the artifact.";
+  }
+
+  if (extension === ".tif" || extension === ".tiff") {
+    return "This image format is not previewed inline in the inspector yet. Use Open raw to inspect the artifact.";
+  }
+
+  if (
+    extension === ".xlsx" ||
+    extension === ".xls" ||
+    extension === ".parquet" ||
+    extension === ".mtx"
+  ) {
+    return "This generated table format is not previewed inline yet. Use Open raw to inspect the artifact.";
+  }
+
+  return "This file is not previewed inline in the inspector yet. Use Open raw to inspect the artifact.";
+}
+
+function shouldShowGeneratedArtifact(item: {
+  path: string;
+  artifactType: string | null;
+  scope: WorkflowArtifactScope | null;
+}): boolean {
+  if (!item.path) {
+    return false;
+  }
+
+  if (item.scope === "run_record") {
+    return false;
+  }
+
+  if (item.artifactType === "workflow_run") {
+    return false;
+  }
+
+  return true;
+}
 
 function collectArtifacts(events: WorkflowStreamEvent[]) {
-  const items = new Map<
-    string,
-    { path: string; label: string; meta: string }
-  >();
+  const items = new Map<string, GeneratedArtifactItem>();
+  let order = 0;
+
+  const upsertArtifact = ({
+    path,
+    artifactType,
+    scope,
+    outputName,
+    stepLabel,
+  }: {
+    path: string;
+    artifactType?: string | null;
+    scope?: WorkflowArtifactScope | null;
+    outputName?: string | null;
+    stepLabel?: string | null;
+  }) => {
+    const existing = items.get(path);
+    const nextItem: GeneratedArtifactItem = {
+      path,
+      label: path.split("/").pop() ?? path,
+      artifactType: artifactType ?? existing?.artifactType ?? null,
+      scope: scope ?? existing?.scope ?? null,
+      outputName: outputName ?? existing?.outputName ?? null,
+      stepLabel: stepLabel ?? existing?.stepLabel ?? null,
+      lastSeenOrder: order,
+    };
+    order += 1;
+
+    if (!shouldShowGeneratedArtifact(nextItem)) {
+      return;
+    }
+
+    items.set(path, nextItem);
+  };
 
   events.forEach((event) => {
     if (event.type === "workflow_artifact") {
-      items.set(event.artifact.path, {
+      upsertArtifact({
         path: event.artifact.path,
-        label: event.artifact.path.split("/").pop() ?? event.artifact.path,
-        meta: event.output_name ?? event.scope.replaceAll("_", " "),
+        artifactType: event.artifact.artifact_type,
+        scope: event.scope,
+        outputName: event.output_name,
+        stepLabel: event.step_label,
       });
     }
 
     if (event.type === "workflow_step_end") {
       event.artifact_refs.forEach((artifact) => {
-        items.set(artifact.path, {
+        upsertArtifact({
           path: artifact.path,
-          label: artifact.path.split("/").pop() ?? artifact.path,
-          meta: artifact.artifact_type ?? event.step_label,
+          artifactType: artifact.artifact_type,
+          outputName: null,
+          stepLabel: event.step_label,
         });
       });
     }
   });
 
-  return Array.from(items.values()).reverse().slice(0, 12);
+  return Array.from(items.values())
+    .sort((left, right) => right.lastSeenOrder - left.lastSeenOrder)
+    .slice(0, 12);
+}
+
+function inferGeneratedArtifactKind(item: GeneratedArtifactItem): GeneratedArtifactKind {
+  const extension = getFileExtension(item.path);
+  const artifactType = item.artifactType?.toLowerCase() ?? "";
+  const outputName = item.outputName?.toLowerCase() ?? "";
+  const label = item.label.toLowerCase();
+
+  if (
+    extension === ".csv" ||
+    extension === ".tsv" ||
+    extension === ".xlsx" ||
+    extension === ".xls" ||
+    extension === ".parquet" ||
+    extension === ".mtx" ||
+    artifactType.includes("matrix") ||
+    artifactType.includes("results") ||
+    outputName.includes("table") ||
+    label.includes("matrix")
+  ) {
+    return "table";
+  }
+
+  if (
+    extension === ".png" ||
+    extension === ".jpg" ||
+    extension === ".jpeg" ||
+    extension === ".svg" ||
+    extension === ".tif" ||
+    extension === ".tiff" ||
+    artifactType === "figure" ||
+    outputName.includes("plot") ||
+    outputName.includes("figure")
+  ) {
+    return "plot";
+  }
+
+  if (
+    extension === ".html" ||
+    extension === ".pdf" ||
+    extension === ".md" ||
+    artifactType.includes("report")
+  ) {
+    return "report";
+  }
+
+  if (
+    extension === ".json" ||
+    extension === ".yaml" ||
+    extension === ".yml" ||
+    artifactType.includes("manifest") ||
+    artifactType.includes("summary") ||
+    artifactType.includes("metrics")
+  ) {
+    return "structured";
+  }
+
+  if (
+    extension === ".zip" ||
+    extension === ".gz" ||
+    extension === ".tgz" ||
+    extension === ".tar"
+  ) {
+    return "archive";
+  }
+
+  return "file";
+}
+
+function getGeneratedArtifactCue(item: GeneratedArtifactItem) {
+  const extension = getFileExtension(item.path);
+  const kind = inferGeneratedArtifactKind(item);
+
+  if (extension === ".json") {
+    return { kind, label: "JSON" };
+  }
+
+  if (extension === ".yaml" || extension === ".yml") {
+    return { kind, label: "YAML" };
+  }
+
+  if (extension === ".csv") {
+    return { kind, label: "CSV" };
+  }
+
+  if (extension === ".tsv") {
+    return { kind, label: "TSV" };
+  }
+
+  if (extension === ".html") {
+    return { kind, label: "HTML" };
+  }
+
+  if (extension === ".pdf") {
+    return { kind, label: "PDF" };
+  }
+
+  if (extension === ".md") {
+    return { kind, label: "MD" };
+  }
+
+  if (kind === "table") {
+    return { kind, label: "Table" };
+  }
+
+  if (kind === "plot") {
+    return { kind, label: "Plot" };
+  }
+
+  if (kind === "report") {
+    return { kind, label: "Report" };
+  }
+
+  if (kind === "structured") {
+    return { kind, label: "Data" };
+  }
+
+  if (kind === "archive") {
+    return { kind, label: "Archive" };
+  }
+
+  return { kind, label: "File" };
+}
+
+function getGeneratedArtifactTone(kind: GeneratedArtifactKind) {
+  if (kind === "table") {
+    return {
+      badge: "border-amber-200 bg-amber-50 text-amber-700",
+      icon: "bg-amber-50 text-amber-700",
+      active:
+        "border-amber-200 bg-[linear-gradient(180deg,rgba(255,251,235,0.95),rgba(254,243,199,0.72))]",
+      idle: "border-[rgba(245,158,11,0.14)] bg-[rgba(255,251,235,0.68)]",
+    };
+  }
+
+  if (kind === "plot") {
+    return {
+      badge: "border-rose-200 bg-rose-50 text-rose-700",
+      icon: "bg-rose-50 text-rose-700",
+      active:
+        "border-rose-200 bg-[linear-gradient(180deg,rgba(255,241,242,0.96),rgba(255,228,230,0.74))]",
+      idle: "border-[rgba(244,63,94,0.12)] bg-[rgba(255,244,246,0.7)]",
+    };
+  }
+
+  if (kind === "report") {
+    return {
+      badge: "border-emerald-200 bg-emerald-50 text-emerald-700",
+      icon: "bg-emerald-50 text-emerald-700",
+      active:
+        "border-emerald-200 bg-[linear-gradient(180deg,rgba(236,253,245,0.96),rgba(209,250,229,0.72))]",
+      idle: "border-[rgba(16,185,129,0.12)] bg-[rgba(240,253,244,0.72)]",
+    };
+  }
+
+  if (kind === "structured") {
+    return {
+      badge: "border-sky-200 bg-sky-50 text-sky-700",
+      icon: "bg-sky-50 text-sky-700",
+      active:
+        "border-sky-200 bg-[linear-gradient(180deg,rgba(240,249,255,0.96),rgba(224,242,254,0.74))]",
+      idle: "border-[rgba(14,165,233,0.12)] bg-[rgba(240,249,255,0.7)]",
+    };
+  }
+
+  if (kind === "archive") {
+    return {
+      badge: "border-slate-200 bg-slate-100 text-slate-600",
+      icon: "bg-slate-100 text-slate-600",
+      active:
+        "border-slate-300 bg-[linear-gradient(180deg,rgba(248,250,252,0.96),rgba(241,245,249,0.82))]",
+      idle: "border-[rgba(148,163,184,0.14)] bg-[rgba(248,250,252,0.78)]",
+    };
+  }
+
+  return {
+    badge: "border-stone-200 bg-stone-50 text-stone-700",
+    icon: "bg-stone-50 text-stone-700",
+    active:
+      "border-stone-200 bg-[linear-gradient(180deg,rgba(250,250,249,0.96),rgba(245,245,244,0.82))]",
+    idle: "border-[rgba(168,162,158,0.14)] bg-[rgba(250,250,249,0.76)]",
+  };
+}
+
+function getGeneratedArtifactDetail(item: GeneratedArtifactItem): string {
+  const values = [
+    humanizeToken(item.outputName),
+    humanizeToken(item.artifactType),
+    humanizeToken(item.stepLabel),
+  ].filter((value): value is string => Boolean(value));
+
+  const uniqueValues = values.filter(
+    (value, index) => values.indexOf(value) === index
+  );
+
+  return uniqueValues[0] ?? "Generated artifact";
+}
+
+function getGeneratedArtifactScopeLabel(item: GeneratedArtifactItem): string | null {
+  return humanizeToken(item.scope);
 }
 
 function collectSources(messages: Message[]) {
@@ -106,10 +468,6 @@ function shortenPath(path: string, maxSegments = 2) {
   }
 
   return `.../${segments.slice(-maxSegments).join("/")}`;
-}
-
-function formatFileMeta(path: string, meta: string) {
-  return [meta, shortenPath(path, 3)].filter(Boolean).join(" · ");
 }
 
 function getRunStatusLabel(summary: ReturnType<typeof getWorkflowSummary>) {
@@ -377,44 +735,66 @@ function EmptyState({ children }: { children: ReactNode }) {
   );
 }
 
-function FileRow({
+function GeneratedFileRow({
+  item,
   active,
-  label,
-  meta,
   onClick,
 }: {
+  item: GeneratedArtifactItem;
   active: boolean;
-  label: string;
-  meta: string;
   onClick: () => void;
 }) {
+  const cue = getGeneratedArtifactCue(item);
+  const tone = getGeneratedArtifactTone(cue.kind);
+  const detail = getGeneratedArtifactDetail(item);
+  const scopeLabel = getGeneratedArtifactScopeLabel(item);
+
   return (
     <button
       type="button"
       onClick={onClick}
+      title={item.path}
       className={cn(
-        "flex w-full items-start gap-2 rounded-[10px] border px-2.5 py-2 text-left transition-colors",
+        "flex w-full items-start gap-2 rounded-[12px] border px-2.5 py-2 text-left transition-colors",
         active
-          ? "border-[rgba(35,130,83,0.16)] bg-[rgba(35,130,83,0.08)]"
-          : "border-transparent bg-[rgba(251,252,248,0.95)] hover:border-[rgba(211,219,210,0.86)] hover:bg-white"
+          ? tone.active
+          : `${tone.idle} hover:border-[rgba(211,219,210,0.9)] hover:bg-white`
       )}
     >
       <span
         className={cn(
-          "mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-[8px]",
-          active
-            ? "bg-[rgba(35,130,83,0.12)] text-[var(--apex-accent-strong)]"
-            : "bg-white text-slate-500"
+          "mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[9px]",
+          tone.icon
         )}
       >
         <FileText size={12} />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[12px] font-medium text-slate-700">
-          {label}
+        <span className="flex items-start justify-between gap-2">
+          <span className="min-w-0 truncate text-[12px] font-semibold text-slate-700">
+            {item.label}
+          </span>
+          <span
+            className={cn(
+              "inline-flex shrink-0 items-center rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em]",
+              tone.badge
+            )}
+          >
+            {cue.label}
+          </span>
         </span>
-        <span className="mt-0.5 block text-[10px] leading-4 text-slate-400">
-          {meta}
+        <span className="mt-1 flex min-w-0 items-center gap-1.5">
+          <span className="truncate text-[10px] font-medium text-slate-500">
+            {detail}
+          </span>
+          {scopeLabel ? (
+            <span className="shrink-0 rounded-full bg-white/80 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-[0.08em] text-slate-400">
+              {scopeLabel}
+            </span>
+          ) : null}
+        </span>
+        <span className="mt-1 block truncate font-mono text-[9px] text-slate-400">
+          {shortenPath(item.path, 4)}
         </span>
       </span>
     </button>
@@ -437,6 +817,45 @@ function PreviewPane({
     >
       {content}
     </pre>
+  );
+}
+
+function ImagePreview({
+  src,
+  alt,
+}: {
+  src: string;
+  alt: string;
+}) {
+  return (
+    <div className="overflow-hidden rounded-[12px] border border-[rgba(211,219,210,0.8)] bg-[rgba(248,250,246,0.96)] p-2">
+      <Image
+        src={src}
+        alt={alt}
+        width={1600}
+        height={900}
+        unoptimized
+        className="max-h-[360px] h-auto w-full rounded-[10px] object-contain"
+      />
+    </div>
+  );
+}
+
+function FramePreview({
+  src,
+  title,
+}: {
+  src: string;
+  title: string;
+}) {
+  return (
+    <div className="overflow-hidden rounded-[12px] border border-[rgba(211,219,210,0.8)] bg-[rgba(248,250,246,0.96)]">
+      <iframe
+        src={src}
+        title={title}
+        className="h-[360px] w-full bg-white"
+      />
+    </div>
   );
 }
 
@@ -477,6 +896,7 @@ export default function InspectorPanel() {
   const [skillSaveMsg, setSkillSaveMsg] = useState("");
   const [skillEditorOpen, setSkillEditorOpen] = useState(false);
   const [previewContent, setPreviewContent] = useState("");
+  const [previewError, setPreviewError] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
   const memoryRequestIdRef = useRef(0);
   const skillsRequestIdRef = useRef(0);
@@ -494,6 +914,12 @@ export default function InspectorPanel() {
   const stepCountLabel = getStepCountLabel(workflowSummary);
   const progressLabel = getProgressLabel(workflowSummary);
   const runDetail = getRunDetail(workflowSummary);
+  const previewMode = inspectorPreviewPath
+    ? getInspectorPreviewMode(inspectorPreviewPath)
+    : null;
+  const previewRawUrl = inspectorPreviewPath
+    ? getRawFileUrl(inspectorPreviewPath)
+    : null;
 
   useEffect(() => {
     if (!currentSessionId) {
@@ -594,6 +1020,14 @@ export default function InspectorPanel() {
   const loadPreview = async (path: string) => {
     const requestId = previewRequestIdRef.current + 1;
     previewRequestIdRef.current = requestId;
+    setPreviewContent("");
+    setPreviewError("");
+
+    if (getInspectorPreviewMode(path) !== "text") {
+      setPreviewLoading(false);
+      return;
+    }
+
     setPreviewLoading(true);
 
     try {
@@ -604,7 +1038,9 @@ export default function InspectorPanel() {
     } catch {
       if (previewRequestIdRef.current !== requestId) return;
 
-      setPreviewContent("# Could not load file preview");
+      setPreviewError(
+        "Could not load file preview. Use Open raw to inspect the artifact."
+      );
     } finally {
       if (previewRequestIdRef.current === requestId) {
         setPreviewLoading(false);
@@ -615,12 +1051,21 @@ export default function InspectorPanel() {
   useEffect(() => {
     if (!inspectorPreviewPath) {
       setPreviewContent("");
+      setPreviewError("");
       setPreviewLoading(false);
       return;
     }
 
     void loadPreview(inspectorPreviewPath);
   }, [inspectorPreviewPath]);
+
+  const openPreviewRawFile = () => {
+    if (!previewRawUrl || typeof window === "undefined") {
+      return;
+    }
+
+    window.open(previewRawUrl, "_blank", "noopener,noreferrer");
+  };
 
   const handleMemorySave = async () => {
     if (!isMemoryDirty) return;
@@ -724,17 +1169,18 @@ export default function InspectorPanel() {
         {artifactItems.length > 0 ? (
           <div className="space-y-1">
             {artifactItems.map((artifact) => (
-              <FileRow
+              <GeneratedFileRow
                 key={artifact.path}
+                item={artifact}
                 active={inspectorPreviewPath === artifact.path}
-                label={artifact.label}
-                meta={formatFileMeta(artifact.path, artifact.meta)}
                 onClick={() => openInspectorPath(artifact.path)}
               />
             ))}
           </div>
         ) : (
-          <EmptyState>No generated files yet for this session.</EmptyState>
+          <EmptyState>
+            Generated workflow outputs will appear here once a step materializes inspectable artifacts.
+          </EmptyState>
         )}
       </InspectorCard>
 
@@ -744,16 +1190,33 @@ export default function InspectorPanel() {
           meta={shortenPath(inspectorPreviewPath, 3)}
           controls={
             <>
-              <ActionButton onClick={() => void loadPreview(inspectorPreviewPath)}>
-                <RefreshCw size={11} />
-                Refresh
-              </ActionButton>
+              {previewMode === "text" ? (
+                <ActionButton onClick={() => void loadPreview(inspectorPreviewPath)}>
+                  <RefreshCw size={11} />
+                  Refresh
+                </ActionButton>
+              ) : null}
+              <ActionButton onClick={openPreviewRawFile}>Open raw</ActionButton>
               <ActionButton onClick={clearInspectorPath}>Clear</ActionButton>
             </>
           }
         >
           {previewLoading ? (
             <LoadingState label="Loading preview..." />
+          ) : previewMode === "image" && previewRawUrl ? (
+            <ImagePreview
+              src={previewRawUrl}
+              alt={inspectorPreviewPath.split("/").pop() ?? "Generated artifact"}
+            />
+          ) : previewMode === "pdf" && previewRawUrl ? (
+            <FramePreview
+              src={previewRawUrl}
+              title={inspectorPreviewPath.split("/").pop() ?? "Generated artifact"}
+            />
+          ) : previewMode === "unsupported" ? (
+            <EmptyState>{getUnsupportedPreviewMessage(inspectorPreviewPath)}</EmptyState>
+          ) : previewError ? (
+            <EmptyState>{previewError}</EmptyState>
           ) : (
             <PreviewPane content={previewContent} />
           )}

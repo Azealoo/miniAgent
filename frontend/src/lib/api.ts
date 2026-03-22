@@ -68,6 +68,9 @@ export const readFile = (path: string) =>
     `/api/files?path=${encodeURIComponent(path)}`
   );
 
+export const getRawFileUrl = (path: string) =>
+  `${getBase()}/api/files/raw?path=${encodeURIComponent(path)}`;
+
 export const saveFile = (path: string, content: string) =>
   req<{ path: string; saved: boolean }>("/api/files", {
     method: "POST",
