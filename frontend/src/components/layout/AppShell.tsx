@@ -10,12 +10,12 @@ import Sidebar from "@/components/layout/Sidebar";
 
 const SIDEBAR_MIN = 232;
 const SIDEBAR_MAX = 296;
-const INSPECTOR_MIN = 256;
-const INSPECTOR_MAX = 320;
+const INSPECTOR_MIN = 216;
+const INSPECTOR_MAX = 280;
 
 export default function AppShell() {
   const [sidebarWidth, setSidebarWidth] = useState(256);
-  const [inspectorWidth, setInspectorWidth] = useState(288);
+  const [inspectorWidth, setInspectorWidth] = useState(236);
 
   const resizeSidebar = useCallback((dx: number) => {
     setSidebarWidth((width) =>
@@ -36,7 +36,7 @@ export default function AppShell() {
         <Navbar />
 
         <main className="min-h-0 flex-1 overflow-hidden">
-          <div className="mx-auto flex h-full min-h-0 w-full max-w-[1460px] box-border gap-3 px-3 py-3 sm:gap-4 sm:px-5 sm:py-5">
+          <div className="mx-auto flex h-full min-h-0 w-full max-w-[1420px] box-border gap-2.5 px-3 py-3 sm:gap-3 sm:px-5 sm:py-5">
             <div className="flex min-h-0 flex-1 items-stretch gap-0">
               <div
                 style={{ width: sidebarWidth }}

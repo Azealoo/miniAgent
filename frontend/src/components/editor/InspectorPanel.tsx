@@ -1,8 +1,22 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useRef, useState } from "react";
-import { BookOpen, Brain, RefreshCw, Save } from "lucide-react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import {
+  BookOpen,
+  Brain,
+  FileText,
+  Hash,
+  RefreshCw,
+  Save,
+  Search,
+  Sparkles,
+} from "lucide-react";
 import { getSessionTokens, listSkills, readFile, saveFile } from "@/lib/api";
 import { getWorkflowSummary } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
@@ -19,6 +33,15 @@ const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
 });
 
 const MEMORY_PATH = "memory/MEMORY.md";
+const INSPECTOR_TABS = [
+  { id: "files", label: "Files", icon: FileText },
+  { id: "sources", label: "Sources", icon: Search },
+  { id: "memory", label: "Memory", icon: Brain },
+  { id: "skills", label: "Skills", icon: Sparkles },
+  { id: "usage", label: "Usage", icon: Hash },
+] as const;
+
+type InspectorTabId = (typeof INSPECTOR_TABS)[number]["id"];
 
 function collectArtifacts(events: WorkflowStreamEvent[]) {
   const items = new Map<
@@ -46,7 +69,7 @@ function collectArtifacts(events: WorkflowStreamEvent[]) {
     }
   });
 
-  return Array.from(items.values()).reverse().slice(0, 8);
+  return Array.from(items.values()).reverse().slice(0, 12);
 }
 
 function collectSources(messages: Message[]) {
@@ -74,26 +97,85 @@ function collectSources(messages: Message[]) {
   return Array.from(sources.values()).sort((a, b) => b.score - a.score);
 }
 
+function shortenPath(path: string, maxSegments = 2) {
+  const normalized = path.replaceAll("\\", "/");
+  const segments = normalized.split("/").filter(Boolean);
+
+  if (segments.length <= maxSegments) {
+    return normalized;
+  }
+
+  return `.../${segments.slice(-maxSegments).join("/")}`;
+}
+
+function formatFileMeta(path: string, meta: string) {
+  return [meta, shortenPath(path, 3)].filter(Boolean).join(" · ");
+}
+
+function getProgressLabel(summary: ReturnType<typeof getWorkflowSummary>) {
+  if (summary.totalSteps !== null) {
+    return `${summary.completedSteps}/${summary.totalSteps} steps`;
+  }
+
+  if (summary.observedSteps > 0) {
+    return `${summary.completedSteps} completed`;
+  }
+
+  if (summary.status === "blocked") {
+    return "Blocked";
+  }
+
+  if (summary.status === "completed") {
+    return "Completed";
+  }
+
+  return "No run";
+}
+
+function getRunDetail(summary: ReturnType<typeof getWorkflowSummary>) {
+  if (summary.currentStep) {
+    return `Current: ${summary.currentStep}`;
+  }
+
+  if (summary.blockedReason) {
+    return summary.blockedReason;
+  }
+
+  if (summary.status === "completed") {
+    return "Run finished.";
+  }
+
+  if (summary.status === "running") {
+    return "Waiting for the next step update.";
+  }
+
+  return "No active workflow step yet.";
+}
+
 function TabButton({
   active,
+  icon: Icon,
   label,
   onClick,
 }: {
   active: boolean;
+  icon: typeof FileText;
   label: string;
   onClick: () => void;
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       className={cn(
-        "rounded-full px-3 py-1.5 text-[11px] font-medium transition-colors",
+        "flex min-h-[42px] flex-col items-center justify-center gap-0.5 rounded-[10px] border px-1 py-1 text-center transition-colors",
         active
-          ? "bg-[var(--apex-accent-soft)] text-[var(--apex-accent-strong)]"
-          : "text-slate-500 hover:bg-[var(--panel-soft)] hover:text-slate-700"
+          ? "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.1)] text-[var(--apex-accent-strong)]"
+          : "border-transparent text-slate-500 hover:border-[var(--shell-border)] hover:bg-white/80 hover:text-slate-700"
       )}
     >
-      {label}
+      <Icon size={12} strokeWidth={1.75} />
+      <span className="text-[9px] font-medium leading-tight">{label}</span>
     </button>
   );
 }
@@ -101,30 +183,176 @@ function TabButton({
 function InspectorCard({
   title,
   meta,
+  controls,
   children,
 }: {
   title: string;
   meta?: string;
-  children: React.ReactNode;
+  controls?: ReactNode;
+  children: ReactNode;
 }) {
   return (
-    <section className="rounded-[14px] border border-[var(--shell-border)] bg-white px-3 py-3">
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <h3 className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-          {title}
-        </h3>
-        {meta && <span className="text-[11px] text-slate-400">{meta}</span>}
+    <section className="rounded-[14px] border border-[rgba(211,219,210,0.86)] bg-[rgba(255,255,255,0.88)] px-2.5 py-2.5 shadow-[0_1px_2px_rgba(32,43,35,0.03)] backdrop-blur-sm">
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h3 className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+            {title}
+          </h3>
+          {meta ? (
+            <p className="mt-0.5 truncate text-[10px] leading-4 text-slate-500">
+              {meta}
+            </p>
+          ) : null}
+        </div>
+        {controls ? (
+          <div className="flex shrink-0 items-center gap-1">{controls}</div>
+        ) : null}
       </div>
       {children}
     </section>
   );
 }
 
-function PreviewPane({ content }: { content: string }) {
+function ActionButton({
+  onClick,
+  disabled,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
   return (
-    <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-[12px] bg-[var(--panel-soft)] px-3 py-3 text-xs leading-6 text-slate-600">
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium transition-colors",
+        disabled
+          ? "cursor-not-allowed border-[var(--shell-border)] bg-[rgba(247,249,245,0.92)] text-slate-400"
+          : "border-[var(--shell-border)] bg-white/85 text-slate-500 hover:bg-[var(--panel-soft)] hover:text-slate-700"
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function MiniStat({
+  label,
+  value,
+  accent = false,
+}: {
+  label: string;
+  value: string;
+  accent?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-[10px] border px-2.5 py-2",
+        accent
+          ? "border-[rgba(35,130,83,0.14)] bg-[rgba(35,130,83,0.08)]"
+          : "border-[rgba(211,219,210,0.72)] bg-[rgba(251,252,248,0.9)]"
+      )}
+    >
+      <p
+        className={cn(
+          "text-[9px] font-semibold uppercase tracking-[0.16em]",
+          accent ? "text-[var(--apex-accent-strong)]" : "text-slate-400"
+        )}
+      >
+        {label}
+      </p>
+      <p
+        className={cn(
+          "mt-0.5 text-xs font-semibold",
+          accent ? "text-[var(--apex-accent-strong)]" : "text-slate-700"
+        )}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function EmptyState({ children }: { children: ReactNode }) {
+  return (
+    <div className="rounded-[12px] border border-dashed border-[rgba(211,219,210,0.92)] bg-[rgba(251,252,248,0.78)] px-2.5 py-3 text-[11px] leading-5 text-slate-500">
+      {children}
+    </div>
+  );
+}
+
+function FileRow({
+  active,
+  label,
+  meta,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  meta: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "flex w-full items-start gap-2 rounded-[10px] border px-2.5 py-2 text-left transition-colors",
+        active
+          ? "border-[rgba(35,130,83,0.16)] bg-[rgba(35,130,83,0.08)]"
+          : "border-transparent bg-[rgba(251,252,248,0.95)] hover:border-[rgba(211,219,210,0.86)] hover:bg-white"
+      )}
+    >
+      <span
+        className={cn(
+          "mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-[8px]",
+          active
+            ? "bg-[rgba(35,130,83,0.12)] text-[var(--apex-accent-strong)]"
+            : "bg-white text-slate-500"
+        )}
+      >
+        <FileText size={12} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[12px] font-medium text-slate-700">
+          {label}
+        </span>
+        <span className="mt-0.5 block text-[10px] leading-4 text-slate-400">
+          {meta}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+function PreviewPane({
+  content,
+  className,
+}: {
+  content: string;
+  className?: string;
+}) {
+  return (
+    <pre
+      className={cn(
+        "max-h-[360px] overflow-y-auto whitespace-pre-wrap break-words rounded-[12px] border border-[rgba(211,219,210,0.8)] bg-[rgba(248,250,246,0.96)] px-2.5 py-2.5 text-[11px] leading-5 text-slate-600",
+        className
+      )}
+    >
       {content}
     </pre>
+  );
+}
+
+function LoadingState({ label }: { label: string }) {
+  return (
+    <div className="rounded-[12px] border border-dashed border-[rgba(211,219,210,0.92)] bg-[rgba(251,252,248,0.78)] px-2.5 py-5 text-center text-[11px] text-slate-400">
+      {label}
+    </div>
   );
 }
 
@@ -148,13 +376,14 @@ export default function InspectorPanel() {
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memorySaving, setMemorySaving] = useState(false);
   const [memorySaveMsg, setMemorySaveMsg] = useState("");
+  const [memoryEditorOpen, setMemoryEditorOpen] = useState(false);
   const [skillContent, setSkillContent] = useState("");
   const [savedSkillContent, setSavedSkillContent] = useState("");
   const [selectedSkillPath, setSelectedSkillPath] = useState<string | null>(null);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillSaving, setSkillSaving] = useState(false);
   const [skillSaveMsg, setSkillSaveMsg] = useState("");
-  const [editorOpen, setEditorOpen] = useState(false);
+  const [skillEditorOpen, setSkillEditorOpen] = useState(false);
   const [previewContent, setPreviewContent] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
   const memoryRequestIdRef = useRef(0);
@@ -168,15 +397,8 @@ export default function InspectorPanel() {
   const workflowSummary = getWorkflowSummary(messages);
   const artifactItems = collectArtifacts(workflowSummary.events);
   const sourceItems = collectSources(messages);
-  const workflowMeta = !workflowSummary.workflowName
-    ? "No workflow"
-    : workflowSummary.totalSteps !== null
-      ? `${workflowSummary.completedSteps}/${workflowSummary.totalSteps} steps`
-      : workflowSummary.observedSteps > 0
-        ? `${workflowSummary.completedSteps} completed · ${workflowSummary.observedSteps} observed`
-        : workflowSummary.status === "blocked"
-          ? "Blocked before step execution"
-          : "Waiting for step events";
+  const progressLabel = getProgressLabel(workflowSummary);
+  const runDetail = getRunDetail(workflowSummary);
 
   useEffect(() => {
     if (!currentSessionId) {
@@ -190,7 +412,8 @@ export default function InspectorPanel() {
   }, [currentSessionId]);
 
   useEffect(() => {
-    setEditorOpen(false);
+    setMemoryEditorOpen(false);
+    setSkillEditorOpen(false);
 
     if (inspectorTab === "memory") {
       setMemorySaveMsg("");
@@ -341,197 +564,175 @@ export default function InspectorPanel() {
   };
 
   const renderFilesTab = () => (
-    <div className="space-y-3">
-      {inspectorPreviewPath ? (
-        <InspectorCard title="Preview" meta={inspectorPreviewPath}>
-          <div className="mb-3 flex items-center justify-between gap-2">
-            <button
-              onClick={() => void loadPreview(inspectorPreviewPath)}
-              className="inline-flex items-center gap-1 rounded-full border border-[var(--shell-border)] px-2.5 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-[var(--panel-soft)]"
-            >
-              <RefreshCw size={12} />
-              Refresh
-            </button>
-            <button
-              onClick={clearInspectorPath}
-              className="inline-flex items-center gap-1 rounded-full border border-[var(--shell-border)] px-2.5 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-[var(--panel-soft)]"
-            >
-              Clear
-            </button>
-          </div>
-
-          {previewLoading ? (
-            <div className="rounded-[12px] bg-[var(--panel-soft)] px-3 py-8 text-center text-sm text-slate-400">
-              Loading preview...
+    <div className="space-y-2">
+      <InspectorCard
+        title="Active Run"
+        meta={workflowSummary.workflowId ?? (workflowSummary.workflowName ? "Current workflow" : undefined)}
+      >
+        {workflowSummary.workflowName ? (
+          <div className="space-y-2">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="truncate text-[12px] font-semibold text-slate-800">
+                  {workflowSummary.workflowName}
+                </p>
+                <p className="mt-0.5 text-[10px] uppercase tracking-[0.16em] text-slate-400">
+                  Progress
+                </p>
+              </div>
+              <p className="shrink-0 text-[12px] font-semibold text-slate-700">
+                {progressLabel}
+              </p>
             </div>
+            <p className="text-[11px] leading-5 text-slate-500">{runDetail}</p>
+          </div>
+        ) : (
+          <EmptyState>
+            Send a workflow-oriented request to populate run progress and generated files here.
+          </EmptyState>
+        )}
+      </InspectorCard>
+
+      <InspectorCard
+        title="Generated"
+        meta={`${artifactItems.length} item${artifactItems.length === 1 ? "" : "s"}`}
+      >
+        {artifactItems.length > 0 ? (
+          <div className="space-y-1">
+            {artifactItems.map((artifact) => (
+              <FileRow
+                key={artifact.path}
+                active={inspectorPreviewPath === artifact.path}
+                label={artifact.label}
+                meta={formatFileMeta(artifact.path, artifact.meta)}
+                onClick={() => openInspectorPath(artifact.path)}
+              />
+            ))}
+          </div>
+        ) : (
+          <EmptyState>No generated files yet for this session.</EmptyState>
+        )}
+      </InspectorCard>
+
+      {inspectorPreviewPath ? (
+        <InspectorCard
+          title="Preview"
+          meta={shortenPath(inspectorPreviewPath, 3)}
+          controls={
+            <>
+              <ActionButton onClick={() => void loadPreview(inspectorPreviewPath)}>
+                <RefreshCw size={11} />
+                Refresh
+              </ActionButton>
+              <ActionButton onClick={clearInspectorPath}>Clear</ActionButton>
+            </>
+          }
+        >
+          {previewLoading ? (
+            <LoadingState label="Loading preview..." />
           ) : (
             <PreviewPane content={previewContent} />
           )}
         </InspectorCard>
       ) : null}
+    </div>
+  );
 
+  const renderSourcesTab = () => (
+    <div className="space-y-2">
       <InspectorCard
-        title="Active Run"
-        meta={workflowMeta}
+        title="Retrieved Sources"
+        meta={`${sourceItems.length} source${sourceItems.length === 1 ? "" : "s"}`}
       >
-        {workflowSummary.workflowName ? (
-          <div className="space-y-2 text-sm text-slate-600">
-            <p className="font-medium text-slate-800">
-              {workflowSummary.workflowName}
-            </p>
-            <p>
-              Status:{" "}
-              <span
-                className={cn(
-                  "font-medium",
-                  workflowSummary.status === "blocked"
-                    ? "text-[rgb(142,98,29)]"
-                    : workflowSummary.status === "running"
-                      ? "text-[var(--apex-accent-strong)]"
-                      : "text-slate-700"
-                )}
+        {sourceItems.length > 0 ? (
+          <div className="space-y-1">
+            {sourceItems.slice(0, 10).map((source) => (
+              <div
+                key={source.source}
+                className="rounded-[10px] border border-[rgba(211,219,210,0.72)] bg-[rgba(251,252,248,0.92)] px-2.5 py-2"
               >
-                {workflowSummary.status}
-              </span>
-            </p>
-            <p>
-              {workflowSummary.currentStep
-                ? `Current step: ${workflowSummary.currentStep}`
-                : "No step is actively running."}
-            </p>
-          </div>
-        ) : (
-          <p className="text-sm leading-6 text-slate-500">
-            Send a workflow-oriented request to populate run progress and output artifacts here.
-          </p>
-        )}
-      </InspectorCard>
-
-      <InspectorCard title="Generated" meta={`${artifactItems.length} items`}>
-        {artifactItems.length > 0 ? (
-          <div className="space-y-2">
-            {artifactItems.map((artifact) => (
-              <button
-                key={artifact.path}
-                type="button"
-                onClick={() => openInspectorPath(artifact.path)}
-                className={cn(
-                  "w-full rounded-[12px] px-3 py-2 text-left transition-colors",
-                  inspectorPreviewPath === artifact.path
-                    ? "bg-[var(--apex-accent-soft)]"
-                    : "bg-[var(--panel-soft)] hover:bg-white"
-                )}
-              >
-                <p className="truncate text-sm font-medium text-slate-700">
-                  {artifact.label}
+                <div className="flex items-start justify-between gap-2">
+                  <p className="min-w-0 truncate text-[12px] font-medium text-slate-700">
+                    {source.source}
+                  </p>
+                  <span className="shrink-0 text-[10px] font-medium text-slate-400">
+                    {source.score.toFixed(3)}
+                  </span>
+                </div>
+                <p className="mt-0.5 text-[10px] leading-4 text-slate-400">
+                  {source.count} hit{source.count === 1 ? "" : "s"} in this session
                 </p>
-                <p className="mt-1 text-[11px] text-slate-400">{artifact.meta}</p>
-              </button>
+              </div>
             ))}
           </div>
         ) : (
-          <p className="text-sm leading-6 text-slate-500">
-            No generated files yet for this session.
-          </p>
+          <EmptyState>
+            No retrieved sources yet. Retrieved evidence will appear here after a RAG-backed response.
+          </EmptyState>
         )}
       </InspectorCard>
 
-      <InspectorCard title="Session" meta={activeSession?.id ?? "No session"}>
-        <div className="space-y-2 text-sm text-slate-600">
+      <InspectorCard title="Retrieval Context" meta={ragMode ? "RAG on" : "RAG off"}>
+        <div className="space-y-1 text-[11px] text-slate-600">
+          <p>{messages.length} message(s) loaded in the current workspace.</p>
           <p>
-            {activeSession
-              ? activeSession.title
-              : "Create or select a session to keep supporting metadata attached to the shell."}
+            {ragMode
+              ? "Retrieved evidence is enabled for the active shell."
+              : "Retrieved evidence is currently disabled for this shell."}
           </p>
-          {activeSession && (
-            <p>{activeSession.message_count} message(s) recorded.</p>
-          )}
         </div>
       </InspectorCard>
     </div>
   );
 
-  const renderSourcesTab = () => (
-    <InspectorCard title="Retrieved Sources" meta={`${sourceItems.length} sources`}>
-      {sourceItems.length > 0 ? (
-        <div className="space-y-2">
-          {sourceItems.slice(0, 8).map((source) => (
-            <div
-              key={source.source}
-              className="rounded-[12px] bg-[var(--panel-soft)] px-3 py-2"
-            >
-              <p className="truncate text-sm font-medium text-slate-700">
-                {source.source}
-              </p>
-              <p className="mt-1 text-[11px] text-slate-400">
-                score {source.score.toFixed(3)} · {source.count} hit
-                {source.count === 1 ? "" : "s"}
-              </p>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <p className="text-sm leading-6 text-slate-500">
-          No retrieved sources yet. Retrieved evidence will appear here after a RAG-backed response.
-        </p>
-      )}
-    </InspectorCard>
-  );
-
   const renderMemoryTab = () => (
-    <InspectorCard title="Memory" meta={MEMORY_PATH}>
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <button
-            onClick={loadMemory}
-            className="inline-flex items-center gap-1 rounded-full border border-[var(--shell-border)] px-2.5 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-[var(--panel-soft)]"
-          >
-            <RefreshCw size={12} />
+    <InspectorCard
+      title="Memory"
+      meta={MEMORY_PATH}
+      controls={
+        <>
+          <ActionButton onClick={() => void loadMemory()}>
+            <RefreshCw size={11} />
             Refresh
-          </button>
-          <button
-            onClick={() => setEditorOpen((value) => !value)}
-            className="inline-flex items-center gap-1 rounded-full border border-[var(--shell-border)] px-2.5 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-[var(--panel-soft)]"
-          >
-            <Brain size={12} />
-            {editorOpen ? "Preview" : "Edit"}
-          </button>
-        </div>
-
-        <div className="flex items-center gap-2">
-          {memorySaveMsg && (
-            <span
-              className={cn(
-                "text-[10px]",
-                memorySaveMsg === "Saved" ? "text-emerald-600" : "text-red-500"
-              )}
-            >
-              {memorySaveMsg}
-            </span>
-          )}
-
-          <button
-            onClick={handleMemorySave}
-            disabled={!isMemoryDirty || memorySaving}
+          </ActionButton>
+          <ActionButton onClick={() => setMemoryEditorOpen((value) => !value)}>
+            <Brain size={11} />
+            {memoryEditorOpen ? "Preview" : "Edit"}
+          </ActionButton>
+        </>
+      }
+    >
+      <div className="mb-2 flex items-center justify-end gap-2">
+        {memorySaveMsg ? (
+          <span
             className={cn(
-              "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors",
-              isMemoryDirty && !memorySaving
-                ? "bg-[var(--apex-accent)] text-white hover:bg-[var(--apex-accent-strong)]"
-                : "bg-slate-200 text-slate-400 cursor-not-allowed"
+              "text-[10px]",
+              memorySaveMsg === "Saved" ? "text-emerald-600" : "text-red-500"
             )}
           >
-            <Save size={12} />
-            {memorySaving ? "Saving…" : "Save"}
-          </button>
-        </div>
+            {memorySaveMsg}
+          </span>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => void handleMemorySave()}
+          disabled={!isMemoryDirty || memorySaving}
+          className={cn(
+            "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors",
+            isMemoryDirty && !memorySaving
+              ? "bg-[var(--apex-accent)] text-white hover:bg-[var(--apex-accent-strong)]"
+              : "cursor-not-allowed bg-slate-200 text-slate-400"
+          )}
+        >
+          <Save size={11} />
+          {memorySaving ? "Saving…" : "Save"}
+        </button>
       </div>
 
       {memoryLoading ? (
-        <div className="rounded-[12px] bg-[var(--panel-soft)] px-3 py-8 text-center text-sm text-slate-400">
-          Loading memory…
-        </div>
-      ) : editorOpen ? (
-        <div className="h-[280px] overflow-hidden rounded-[12px] border border-[var(--shell-border)]">
+        <LoadingState label="Loading memory..." />
+      ) : memoryEditorOpen ? (
+        <div className="h-[220px] overflow-hidden rounded-[12px] border border-[rgba(211,219,210,0.86)] bg-white">
           <MonacoEditor
             height="100%"
             language="markdown"
@@ -541,7 +742,7 @@ export default function InspectorPanel() {
             options={{
               minimap: { enabled: false },
               wordWrap: "on",
-              fontSize: 12,
+              fontSize: 11,
               lineNumbers: "on",
               scrollBeyondLastLine: false,
               overviewRulerLanes: 0,
@@ -557,91 +758,102 @@ export default function InspectorPanel() {
   );
 
   const renderSkillsTab = () => (
-    <div className="space-y-3">
-      <InspectorCard title="Skills" meta={`${skills.length} available`}>
+    <div className="space-y-2">
+      <InspectorCard
+        title="Skills"
+        meta={`${skills.length} available`}
+        controls={
+          <ActionButton onClick={() => void refreshSkills(selectedSkillPath ?? undefined)}>
+            <RefreshCw size={11} />
+            Refresh
+          </ActionButton>
+        }
+      >
         {skillsLoading && skills.length === 0 ? (
-          <p className="text-sm text-slate-400">Loading skills…</p>
+          <LoadingState label="Loading skills..." />
         ) : skills.length > 0 ? (
           <div className="space-y-1">
             {skills.map((skill) => (
               <button
                 key={skill.path}
+                type="button"
                 onClick={() => void refreshSkills(skill.path)}
                 className={cn(
-                  "flex w-full items-center justify-between rounded-[12px] px-3 py-2 text-left text-sm transition-colors",
+                  "flex w-full items-center gap-2 rounded-[10px] border px-2.5 py-2 text-left transition-colors",
                   skill.path === selectedSkillPath
-                    ? "bg-[var(--apex-accent-soft)] text-[var(--apex-accent-strong)]"
-                    : "bg-[var(--panel-soft)] text-slate-600 hover:bg-white"
+                    ? "border-[rgba(35,130,83,0.16)] bg-[rgba(35,130,83,0.08)] text-[var(--apex-accent-strong)]"
+                    : "border-transparent bg-[rgba(251,252,248,0.95)] text-slate-600 hover:border-[rgba(211,219,210,0.86)] hover:bg-white"
                 )}
               >
-                <span className="truncate">{skill.name}</span>
-                <span className="text-[11px] text-slate-400">
-                  <BookOpen size={12} />
+                <span
+                  className={cn(
+                    "mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-[8px]",
+                    skill.path === selectedSkillPath
+                      ? "bg-[rgba(35,130,83,0.12)]"
+                      : "bg-white"
+                  )}
+                >
+                  <Sparkles size={12} />
+                </span>
+                <span className="min-w-0 flex-1 truncate text-[12px] font-medium">
+                  {skill.name}
                 </span>
               </button>
             ))}
           </div>
         ) : (
-          <p className="text-sm leading-6 text-slate-500">
-            No skills are currently available to preview.
-          </p>
+          <EmptyState>No skills are currently available to preview.</EmptyState>
         )}
       </InspectorCard>
 
-      {selectedSkillPath && (
-        <InspectorCard title="Skill Preview" meta={selectedSkillPath}>
-          <div className="mb-3 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => void refreshSkills(selectedSkillPath)}
-                className="inline-flex items-center gap-1 rounded-full border border-[var(--shell-border)] px-2.5 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-[var(--panel-soft)]"
-              >
-                <RefreshCw size={12} />
+      {selectedSkillPath ? (
+        <InspectorCard
+          title="Skill Preview"
+          meta={shortenPath(selectedSkillPath, 3)}
+          controls={
+            <>
+              <ActionButton onClick={() => void refreshSkills(selectedSkillPath)}>
+                <RefreshCw size={11} />
                 Refresh
-              </button>
-              <button
-                onClick={() => setEditorOpen((value) => !value)}
-                className="inline-flex items-center gap-1 rounded-full border border-[var(--shell-border)] px-2.5 py-1 text-[11px] font-medium text-slate-500 transition-colors hover:bg-[var(--panel-soft)]"
-              >
-                <BookOpen size={12} />
-                {editorOpen ? "Preview" : "Edit"}
-              </button>
-            </div>
-
-            <div className="flex items-center gap-2">
-              {skillSaveMsg && (
-                <span
-                  className={cn(
-                    "text-[10px]",
-                    skillSaveMsg === "Saved" ? "text-emerald-600" : "text-red-500"
-                  )}
-                >
-                  {skillSaveMsg}
-                </span>
-              )}
-
-              <button
-                onClick={handleSkillSave}
-                disabled={!isSkillDirty || skillSaving}
+              </ActionButton>
+              <ActionButton onClick={() => setSkillEditorOpen((value) => !value)}>
+                <BookOpen size={11} />
+                {skillEditorOpen ? "Preview" : "Edit"}
+              </ActionButton>
+            </>
+          }
+        >
+          <div className="mb-2 flex items-center justify-end gap-2">
+            {skillSaveMsg ? (
+              <span
                 className={cn(
-                  "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors",
-                  isSkillDirty && !skillSaving
-                    ? "bg-[var(--apex-accent)] text-white hover:bg-[var(--apex-accent-strong)]"
-                    : "bg-slate-200 text-slate-400 cursor-not-allowed"
+                  "text-[10px]",
+                  skillSaveMsg === "Saved" ? "text-emerald-600" : "text-red-500"
                 )}
               >
-                <Save size={12} />
-                {skillSaving ? "Saving…" : "Save"}
-              </button>
-            </div>
+                {skillSaveMsg}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => void handleSkillSave()}
+              disabled={!isSkillDirty || skillSaving}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors",
+                isSkillDirty && !skillSaving
+                  ? "bg-[var(--apex-accent)] text-white hover:bg-[var(--apex-accent-strong)]"
+                  : "cursor-not-allowed bg-slate-200 text-slate-400"
+              )}
+            >
+              <Save size={11} />
+              {skillSaving ? "Saving…" : "Save"}
+            </button>
           </div>
 
           {skillsLoading ? (
-            <div className="rounded-[12px] bg-[var(--panel-soft)] px-3 py-8 text-center text-sm text-slate-400">
-              Loading skill…
-            </div>
-          ) : editorOpen ? (
-            <div className="h-[280px] overflow-hidden rounded-[12px] border border-[var(--shell-border)]">
+            <LoadingState label="Loading skill..." />
+          ) : skillEditorOpen ? (
+            <div className="h-[220px] overflow-hidden rounded-[12px] border border-[rgba(211,219,210,0.86)] bg-white">
               <MonacoEditor
                 height="100%"
                 language="markdown"
@@ -651,7 +863,7 @@ export default function InspectorPanel() {
                 options={{
                   minimap: { enabled: false },
                   wordWrap: "on",
-                  fontSize: 12,
+                  fontSize: 11,
                   lineNumbers: "on",
                   scrollBeyondLastLine: false,
                   overviewRulerLanes: 0,
@@ -664,79 +876,57 @@ export default function InspectorPanel() {
             <PreviewPane content={skillContent} />
           )}
         </InspectorCard>
-      )}
+      ) : null}
     </div>
   );
 
   const renderUsageTab = () => (
-    <div className="space-y-3">
+    <div className="space-y-2">
       <InspectorCard title="Usage" meta={currentSessionId ?? "No session"}>
         {tokens ? (
-          <div className="grid grid-cols-3 gap-2">
-            <div className="rounded-[12px] bg-[var(--panel-soft)] px-3 py-2">
-              <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">
-                System
-              </p>
-              <p className="mt-1 text-sm font-semibold text-slate-700">
-                {tokens.system_tokens.toLocaleString()}
-              </p>
-            </div>
-            <div className="rounded-[12px] bg-[var(--panel-soft)] px-3 py-2">
-              <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">
-                Messages
-              </p>
-              <p className="mt-1 text-sm font-semibold text-slate-700">
-                {tokens.message_tokens.toLocaleString()}
-              </p>
-            </div>
-            <div className="rounded-[12px] bg-[var(--apex-accent-soft)] px-3 py-2">
-              <p className="text-[10px] uppercase tracking-[0.18em] text-[var(--apex-accent-strong)]">
-                Total
-              </p>
-              <p className="mt-1 text-sm font-semibold text-[var(--apex-accent-strong)]">
-                {tokens.total_tokens.toLocaleString()}
-              </p>
+          <div className="grid grid-cols-2 gap-2">
+            <MiniStat label="System" value={tokens.system_tokens.toLocaleString()} />
+            <MiniStat label="Messages" value={tokens.message_tokens.toLocaleString()} />
+            <div className="col-span-2">
+              <MiniStat
+                label="Total"
+                value={tokens.total_tokens.toLocaleString()}
+                accent
+              />
             </div>
           </div>
         ) : (
-          <p className="text-sm leading-6 text-slate-500">
-            Token usage will appear once a session is selected.
-          </p>
+          <EmptyState>Token usage will appear once a session is selected.</EmptyState>
         )}
       </InspectorCard>
 
       <InspectorCard title="Context" meta={ragMode ? "RAG on" : "RAG off"}>
-        <div className="space-y-2 text-sm text-slate-600">
+        <div className="space-y-1 text-[11px] text-slate-600">
           <p>{sessions.length} session(s) available.</p>
           <p>{messages.length} message(s) loaded in the current workspace.</p>
-          <p>{ragMode ? "Retrieval is enabled for this shell." : "Retrieval is currently disabled."}</p>
+          <p>{activeSession ? activeSession.title : "No active session selected."}</p>
         </div>
       </InspectorCard>
     </div>
   );
 
   return (
-    <aside className="apex-panel flex h-full flex-col overflow-hidden rounded-[18px]">
-      <div className="border-b border-[var(--shell-border)] px-3 py-3">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-          Inspector
-        </p>
-        <p className="mt-1 text-sm font-semibold text-slate-800">
-          {workflowSummary.workflowName ?? activeSession?.title ?? "Supporting context"}
-        </p>
-      </div>
-
-      <div className="overflow-x-auto border-b border-[var(--shell-border)] px-2 py-2">
-        <div className="flex min-w-max gap-1">
-          <TabButton active={inspectorTab === "files"} label="Files" onClick={() => setInspectorTab("files")} />
-          <TabButton active={inspectorTab === "sources"} label="Sources" onClick={() => setInspectorTab("sources")} />
-          <TabButton active={inspectorTab === "memory"} label="Memory" onClick={() => setInspectorTab("memory")} />
-          <TabButton active={inspectorTab === "skills"} label="Skills" onClick={() => setInspectorTab("skills")} />
-          <TabButton active={inspectorTab === "usage"} label="Usage" onClick={() => setInspectorTab("usage")} />
+    <aside className="apex-panel apex-panel-muted flex h-full flex-col overflow-hidden rounded-[18px]">
+      <div className="border-b border-[var(--shell-border)] bg-white/70 px-2 py-1.5">
+        <div className="grid grid-cols-5 gap-0.5">
+          {INSPECTOR_TABS.map((tab) => (
+            <TabButton
+              key={tab.id}
+              active={inspectorTab === tab.id}
+              icon={tab.icon}
+              label={tab.label}
+              onClick={() => setInspectorTab(tab.id)}
+            />
+          ))}
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
         {inspectorTab === "files" && renderFilesTab()}
         {inspectorTab === "sources" && renderSourcesTab()}
         {inspectorTab === "memory" && renderMemoryTab()}
