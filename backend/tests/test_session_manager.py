@@ -303,6 +303,19 @@ class TestSaveAndLoad:
         msgs = sm.load_session(sid)
         assert msgs[0]["workflow_events"] == workflow_events
 
+    def test_save_message_with_retrievals(self, sm):
+        sid = sm.create_session()
+        retrievals = [
+            {
+                "text": "Differential expression used DESeq2 defaults.",
+                "score": 0.91,
+                "source": "notes/deseq2.md",
+            }
+        ]
+        sm.save_message(sid, "assistant", "Done", retrievals=retrievals)
+        msgs = sm.load_session(sid)
+        assert msgs[0]["retrievals"] == retrievals
+
     def test_no_tool_calls_key_when_none(self, sm):
         sid = sm.create_session()
         sm.save_message(sid, "user", "text")

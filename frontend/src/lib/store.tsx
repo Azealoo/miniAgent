@@ -447,6 +447,7 @@ interface RawMessage {
   request_id?: string;
   tool_calls?: ToolCall[];
   workflow_events?: WorkflowStreamEvent[];
+  retrievals?: RetrievalResult[];
 }
 
 function _historyToMessages(raw: RawMessage[]): Message[] {
@@ -459,6 +460,7 @@ function _historyToMessages(raw: RawMessage[]): Message[] {
       request_id: m.request_id,
       tool_calls: m.tool_calls ?? [],
       workflow_events: m.workflow_events ?? [],
+      retrievals: m.retrievals ?? [],
     }));
 }
 

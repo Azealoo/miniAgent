@@ -144,20 +144,15 @@ export default function ChatMessage({ message }: ChatMessageProps) {
         )}
 
         {hasSupport && (
-          <div className="mt-3 border-l border-[rgba(35,130,83,0.14)] pl-4 sm:pl-5">
-            <p className="mb-2 text-[10px] font-medium uppercase tracking-[0.18em] text-slate-400">
-              Supporting Context
-            </p>
-            <div className="space-y-2.5">
-              {hasRetrievals && <RetrievalCard results={message.retrievals ?? []} />}
-              {hasTrace && (
-                <ThoughtChain
-                  toolCalls={message.tool_calls ?? []}
-                  workflowEvents={message.workflow_events ?? []}
-                  pendingTool={message.pendingTool}
-                />
-              )}
-            </div>
+          <div className="mt-3 space-y-2.5">
+            {hasRetrievals && <RetrievalCard results={message.retrievals ?? []} />}
+            {hasTrace && (
+              <ThoughtChain
+                toolCalls={message.tool_calls ?? []}
+                workflowEvents={message.workflow_events ?? []}
+                pendingTool={message.pendingTool}
+              />
+            )}
           </div>
         )}
       </div>

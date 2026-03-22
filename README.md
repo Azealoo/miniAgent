@@ -194,7 +194,7 @@ Manages each session as a JSON file under `sessions/`. Key methods:
 |---|---|
 | `load_session(id)` | Returns the raw message array |
 | `load_session_for_agent(id)` | LLM-optimized: merges consecutive assistant messages, prepends `compressed_context` as a synthetic assistant message |
-| `save_message(id, role, content, tool_calls)` | Appends a message to the JSON file |
+| `save_message(id, role, content, tool_calls, workflow_events, retrievals, request_id)` | Appends a message to the JSON file, including structured trace and retrieval payloads when present |
 | `compress_history(id, summary, n)` | Archives first n messages to `sessions/archive/`, stores summary in `compressed_context` |
 | `auto_compress_if_needed(id, llm, threshold=40)` | Compresses oldest 50% when message count ≥ threshold |
 

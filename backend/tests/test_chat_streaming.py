@@ -242,6 +242,51 @@ async def test_chat_stream_includes_structured_tool_result_and_persists_it(isola
 
 
 @pytest.mark.asyncio
+async def test_chat_stream_persists_retrievals_in_history(isolated_chat_state):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    async def fake_astream(_message, _history):
+        yield {
+            "type": "retrieval",
+            "query": "Find BRCA1 notes",
+            "results": [
+                {
+                    "text": "BRCA1 notes mention differential expression follow-up.",
+                    "score": 0.82,
+                    "source": "knowledge/brca1-notes.md",
+                },
+                {
+                    "text": "Protocol SOP-DEG-003 is the default analysis recipe.",
+                    "score": 0.74,
+                    "source": "protocols/SOP-DEG-003.md",
+                },
+            ],
+        }
+        yield {"type": "token", "content": "Retrieved context loaded."}
+        yield {"type": "done"}
+
+    with patch.object(agent_manager, "astream", fake_astream), patch(
+        "api.chat._generate_title_only",
+        new=AsyncMock(return_value=""),
+    ):
+        response = await chat(
+            ChatRequest(message="Find BRCA1 notes", session_id=session_id, stream=True)
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    retrieval = next(item for item in payloads if item["type"] == "retrieval")
+    assert len(retrieval["results"]) == 2
+
+    history = agent_manager.session_manager.load_session(session_id)
+    assistant_messages = [msg for msg in history if msg["role"] == "assistant"]
+    assert assistant_messages
+    assert assistant_messages[0]["retrievals"] == retrieval["results"]
+
+
+@pytest.mark.asyncio
 async def test_chat_blocks_non_local_clients_without_bearer_token(isolated_chat_state):
     from api.chat import ChatRequest, chat
     from graph.agent import agent_manager

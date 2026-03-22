@@ -139,10 +139,11 @@ async def chat(request: ChatRequest, http_request: Request = None):
         observability_recorded = False
 
         # Per-request accumulators
-        segments: list[dict] = []          # [{content, tool_calls, workflow_events}]
+        segments: list[dict] = []          # [{content, tool_calls, workflow_events, retrievals}]
         current_content: list[str] = []
         current_tool_calls: list[dict] = []
         current_workflow_events: list[dict] = []
+        current_retrievals: list[dict] = []
         pending_tools: dict[str, dict] = {}  # run_id → {tool, input}
         user_msg_saved = False              # guard: save user message exactly once
         review_required = False
@@ -152,17 +153,19 @@ async def chat(request: ChatRequest, http_request: Request = None):
 
         def _flush_segment() -> None:
             content = "".join(current_content)
-            if content or current_tool_calls or current_workflow_events:
+            if content or current_tool_calls or current_workflow_events or current_retrievals:
                 segments.append(
                     {
                         "content": content,
                         "tool_calls": list(current_tool_calls),
                         "workflow_events": list(current_workflow_events),
+                        "retrievals": list(current_retrievals),
                     }
                 )
             current_content.clear()
             current_tool_calls.clear()
             current_workflow_events.clear()
+            current_retrievals.clear()
 
         def _mark_first_visible(payload_type: str) -> None:
             nonlocal first_visible_at, first_visible_monotonic, first_visible_event_type
@@ -230,7 +233,8 @@ async def chat(request: ChatRequest, http_request: Request = None):
                 "attached_identifier_count": len(request.attached_identifiers),
                 "review_required": review_required,
                 "review_completed": review_completed,
-                "assistant_segment_count": len(segments) + (1 if current_content or current_tool_calls or current_workflow_events else 0),
+                "assistant_segment_count": len(segments)
+                + (1 if current_content or current_tool_calls or current_workflow_events or current_retrievals else 0),
                 "tool_call_count": tool_call_count,
                 "workflow_event_count": workflow_event_count,
                 "first_visible_event_type": first_visible_event_type or "done",
@@ -291,6 +295,7 @@ async def chat(request: ChatRequest, http_request: Request = None):
                     seg["content"],
                     seg["tool_calls"] or None,
                     seg["workflow_events"] or None,
+                    seg["retrievals"] or None,
                     request_id=request_id,
                 )
 
@@ -621,6 +626,7 @@ async def chat(request: ChatRequest, http_request: Request = None):
                 t = ev["type"]
 
                 if t == "retrieval":
+                    current_retrievals.extend(ev["results"])
                     yield _sse(
                         {
                             "type": "retrieval",

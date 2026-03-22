@@ -6,7 +6,7 @@ POST   /api/sessions
 PUT    /api/sessions/{id}
 DELETE /api/sessions/{id}
 GET    /api/sessions/{id}/messages   — full history including system prompt
-GET    /api/sessions/{id}/history    — raw messages with tool_calls
+GET    /api/sessions/{id}/history    — raw messages with tool_calls and retrievals
 POST   /api/sessions/{id}/generate-title
 """
 from fastapi import APIRouter, HTTPException, Request
@@ -101,7 +101,7 @@ def get_messages(session_id: str, request: Request = None):
 
 @router.get("/sessions/{session_id}/history")
 def get_history(session_id: str, request: Request = None):
-    """Returns raw stored messages (with tool_calls, without system prompt)."""
+    """Returns raw stored messages (with tool_calls/retrievals, without system prompt)."""
     require_inspection_access(request)
     _check_session_id(session_id)
     return _sm().load_session(session_id)
