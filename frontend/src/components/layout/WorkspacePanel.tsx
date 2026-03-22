@@ -1,5 +1,8 @@
 "use client";
 
+import ReactMarkdown from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
+import remarkGfm from "remark-gfm";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   ArrowRight,
@@ -33,13 +36,29 @@ import {
   flowsWorkspaceDefinitions,
   flowsWorkspaceSummaryMap,
   getQuickStartItem,
+  parseWorkspaceDocument,
+  type ParsedWorkspaceDocument,
   recentFiles,
   summarizeFlowsWorkspaceStatus,
   workspaceDocs,
   type SurfaceItem,
+  type WorkspaceDocument,
 } from "./workspace-data";
 
 type PreviewStatus = "idle" | "loading" | "ready" | "error";
+type DocsWorkspaceStatus = "loading" | "ready" | "error";
+
+interface LoadedWorkspaceDocument extends WorkspaceDocument {
+  parsed: ParsedWorkspaceDocument;
+}
+
+interface WorkspaceDocumentFailure extends WorkspaceDocument {
+  error: string;
+}
+
+type DocsNavigatorEntry =
+  | { kind: "loaded"; document: LoadedWorkspaceDocument }
+  | { kind: "failed"; document: WorkspaceDocumentFailure };
 
 function usePreviewContent(path: string | null) {
   const [status, setStatus] = useState<PreviewStatus>("idle");
@@ -389,6 +408,385 @@ function EmptyWorkspaceState({
         {description}
       </p>
       {action ? <div className="mt-4 flex justify-center">{action}</div> : null}
+    </div>
+  );
+}
+
+function DocumentTypeBadge({
+  label,
+}: {
+  label: WorkspaceDocument["typeLabel"];
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+        label === "Spec" &&
+          "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.09)] text-[var(--apex-accent-strong)]",
+        label === "Reference" &&
+          "border-[rgba(148,163,184,0.22)] bg-[rgba(241,245,249,0.9)] text-slate-600",
+        label === "SOP" &&
+          "border-[rgba(217,119,6,0.18)] bg-[rgba(255,247,237,0.95)] text-amber-700"
+      )}
+    >
+      {label}
+    </span>
+  );
+}
+
+function formatSectionCount(value: number): string {
+  return `${value} section${value === 1 ? "" : "s"}`;
+}
+
+function WorkspaceStateCard({
+  tone = "neutral",
+  children,
+}: {
+  tone?: "neutral" | "error";
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-[18px] border px-4 py-6 text-sm leading-6",
+        tone === "neutral" &&
+          "border-[rgba(211,219,210,0.88)] bg-[rgba(251,252,248,0.95)] text-slate-500",
+        tone === "error" &&
+          "border-[rgba(240,195,195,0.92)] bg-[rgba(253,244,244,0.94)] text-rose-700"
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+function DocsNavigatorCard({
+  status,
+  documents,
+  failedDocuments,
+  selectedPath,
+  onSelect,
+  error,
+}: {
+  status: DocsWorkspaceStatus;
+  documents: LoadedWorkspaceDocument[];
+  failedDocuments: WorkspaceDocumentFailure[];
+  selectedPath: string | null;
+  onSelect: (document: LoadedWorkspaceDocument) => void;
+  error: string | null;
+}) {
+  const loadedByPath = new Map(documents.map((document) => [document.path, document]));
+  const failedByPath = new Map(
+    failedDocuments.map((document) => [document.path, document])
+  );
+  const orderedEntries: DocsNavigatorEntry[] = [];
+
+  workspaceDocs.forEach((document) => {
+    const loadedDocument = loadedByPath.get(document.path);
+    if (loadedDocument) {
+      orderedEntries.push({ kind: "loaded", document: loadedDocument });
+      return;
+    }
+
+    const failedDocument = failedByPath.get(document.path);
+    if (failedDocument) {
+      orderedEntries.push({ kind: "failed", document: failedDocument });
+    }
+  });
+
+  return (
+    <div className="rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/92 p-3 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
+      <div className="border-b border-[rgba(211,219,210,0.72)] px-1 pb-3">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+          Document Navigator
+        </p>
+        <p className="mt-1 text-sm leading-6 text-slate-500">
+          Protocols, specs, and reference files stay collected here so the docs
+          workspace feels like a reading surface instead of a generic file list.
+        </p>
+      </div>
+
+      <div className="mt-3 space-y-2">
+        {status === "loading" ? (
+          <WorkspaceStateCard>Loading documentation index…</WorkspaceStateCard>
+        ) : status === "error" ? (
+          <WorkspaceStateCard tone="error">
+            {error ?? "Unable to load the documentation index right now."}
+          </WorkspaceStateCard>
+        ) : orderedEntries.length === 0 ? (
+          <WorkspaceStateCard>
+            No documents are configured for this workspace yet.
+          </WorkspaceStateCard>
+        ) : (
+          orderedEntries.map((entry) => {
+            if (entry.kind === "failed") {
+              const document = entry.document;
+              const Icon = document.icon;
+
+              return (
+                <div
+                  key={document.id}
+                  className="rounded-[18px] border border-[rgba(240,195,195,0.92)] bg-[rgba(253,244,244,0.9)] px-4 py-4"
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[12px] bg-white text-rose-500">
+                      <Icon size={17} />
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="truncate text-sm font-semibold text-rose-900">
+                          {document.label}
+                        </p>
+                        <DocumentTypeBadge label={document.typeLabel} />
+                      </div>
+                      <p className="mt-2 text-[12px] leading-5 text-rose-700">
+                        {document.error}
+                      </p>
+                      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-rose-600">
+                        <span>{document.audience}</span>
+                        <span className="truncate">{document.meta ?? document.path}</span>
+                        <span>Unavailable</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+
+            const document = entry.document;
+            const active = document.path === selectedPath;
+            const Icon = document.icon;
+
+            return (
+              <button
+                key={document.id}
+                type="button"
+                onClick={() => onSelect(document)}
+                className={cn(
+                  "w-full rounded-[18px] border px-4 py-4 text-left transition-colors",
+                  active
+                    ? "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.08)] shadow-[0_10px_24px_rgba(35,130,83,0.08)]"
+                    : "border-[rgba(211,219,210,0.85)] bg-[rgba(255,255,255,0.92)] hover:border-[rgba(35,130,83,0.16)] hover:bg-[rgba(248,251,247,0.95)]"
+                )}
+              >
+                <div className="flex items-start gap-3">
+                  <div
+                    className={cn(
+                      "mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[12px]",
+                      active
+                        ? "bg-white text-[var(--apex-accent-strong)]"
+                        : "bg-[rgba(247,249,245,0.9)] text-slate-500"
+                    )}
+                  >
+                    <Icon size={17} />
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="truncate text-sm font-semibold text-slate-900">
+                        {document.label}
+                      </p>
+                      <DocumentTypeBadge label={document.typeLabel} />
+                    </div>
+                    <p className="mt-2 text-[12px] leading-5 text-slate-500">
+                      {document.description}
+                    </p>
+                    <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+                      <span>{document.audience}</span>
+                      <span>{formatSectionCount(document.parsed.sections.length)}</span>
+                      <span className="truncate">{document.meta ?? document.path}</span>
+                    </div>
+                  </div>
+                </div>
+              </button>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DocumentSectionMarkdown({
+  content,
+}: {
+  content: string;
+}) {
+  return (
+    <div className="apex-chat-prose prose prose-sm max-w-none prose-pre:bg-[#1e1e1e] prose-pre:text-gray-100 prose-p:text-slate-600 prose-li:text-slate-600 prose-strong:text-slate-900">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeHighlight]}
+        components={{
+          h1({ children }) {
+            return (
+              <h4 className="mt-0 text-base font-semibold tracking-[-0.02em] text-slate-900">
+                {children}
+              </h4>
+            );
+          },
+          h2({ children }) {
+            return (
+              <h4 className="mt-0 text-base font-semibold tracking-[-0.02em] text-slate-900">
+                {children}
+              </h4>
+            );
+          },
+          h3({ children }) {
+            return (
+              <h5 className="mt-4 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500 first:mt-0">
+                {children}
+              </h5>
+            );
+          },
+          code({ className, children, ...props }) {
+            const match = /language-(\w+)/.exec(className ?? "");
+            if (!match) {
+              return (
+                <code
+                  className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[0.8em] text-[#c7254e]"
+                  {...props}
+                >
+                  {children}
+                </code>
+              );
+            }
+
+            return (
+              <code className={className} {...props}>
+                {children}
+              </code>
+            );
+          },
+          table({ children }) {
+            return (
+              <div className="my-4 overflow-x-auto">
+                <table className="min-w-full overflow-hidden rounded-lg border border-slate-200 text-xs">
+                  {children}
+                </table>
+              </div>
+            );
+          },
+          th({ children }) {
+            return (
+              <th className="border-b border-slate-200 bg-slate-50 px-3 py-2 text-left font-semibold text-slate-700">
+                {children}
+              </th>
+            );
+          },
+          td({ children }) {
+            return (
+              <td className="border-b border-slate-100 px-3 py-2 text-slate-600">
+                {children}
+              </td>
+            );
+          },
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function DocsReaderPane({
+  status,
+  document,
+  error,
+  warning,
+  onOpen,
+}: {
+  status: DocsWorkspaceStatus;
+  document: LoadedWorkspaceDocument | null;
+  error: string | null;
+  warning?: string | null;
+  onOpen?: () => void;
+}) {
+  return (
+    <div className="flex min-h-[32rem] flex-col rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/94 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
+      <div className="border-b border-[rgba(211,219,210,0.72)] px-5 py-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-3xl">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Reading Pane
+            </p>
+            <h3 className="mt-2 text-[1.4rem] font-semibold tracking-[-0.03em] text-slate-900">
+              {document?.parsed.title ?? "Select a document"}
+            </h3>
+            <p className="mt-2 text-sm leading-6 text-slate-500">
+              {document?.description ??
+                "Choose a protocol, spec, or reference from the navigator to read it as structured sections."}
+            </p>
+            {document?.meta ? (
+              <p className="mt-2 text-[11px] text-slate-400">{document.meta}</p>
+            ) : null}
+          </div>
+
+          {document?.path && onOpen ? (
+            <WorkspaceAction onClick={onOpen} tone="accent">
+              <FolderOpen size={12} />
+              Open In Inspector
+            </WorkspaceAction>
+          ) : null}
+        </div>
+
+        {document ? (
+          <div className="mt-4 flex flex-wrap gap-2">
+            <DocumentTypeBadge label={document.typeLabel} />
+            <WorkspaceBadge icon={BookOpen}>
+              {formatSectionCount(document.parsed.sections.length)}
+            </WorkspaceBadge>
+            <WorkspaceBadge icon={FileText}>{document.audience}</WorkspaceBadge>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+        {warning ? (
+          <div className="mb-4">
+            <WorkspaceStateCard>{warning}</WorkspaceStateCard>
+          </div>
+        ) : null}
+
+        {status === "loading" ? (
+          <WorkspaceStateCard>Loading selected document…</WorkspaceStateCard>
+        ) : status === "error" ? (
+          <WorkspaceStateCard tone="error">
+            {error ?? "Unable to load the selected document right now."}
+          </WorkspaceStateCard>
+        ) : !document ? (
+          <WorkspaceStateCard>
+            Select a document from the navigator to load its reading view.
+          </WorkspaceStateCard>
+        ) : document.parsed.sections.length === 0 ? (
+          <WorkspaceStateCard>
+            This document does not have any structured sections to render yet.
+          </WorkspaceStateCard>
+        ) : (
+          <div className="space-y-4">
+            {document.parsed.sections.map((section, index) => (
+              <section
+                key={section.id}
+                className="rounded-[20px] border border-[rgba(211,219,210,0.88)] bg-[linear-gradient(180deg,rgba(250,251,248,0.97),rgba(255,255,255,0.98))] p-4 shadow-[0_8px_20px_rgba(29,42,33,0.03)]"
+              >
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="inline-flex items-center rounded-full bg-[rgba(35,130,83,0.08)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--apex-accent-strong)]">
+                    Section {index + 1}
+                  </span>
+                  <h4 className="text-lg font-semibold tracking-[-0.02em] text-slate-900">
+                    {section.title}
+                  </h4>
+                </div>
+
+                <div className="mt-4 rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-4">
+                  <DocumentSectionMarkdown content={section.markdown} />
+                </div>
+              </section>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -748,6 +1146,14 @@ function DocsWorkspace() {
   const [selectedDocPath, setSelectedDocPath] = useState<string | null>(
     workspaceDocs[0]?.path ?? null
   );
+  const [documents, setDocuments] = useState<LoadedWorkspaceDocument[]>([]);
+  const [failedDocuments, setFailedDocuments] = useState<WorkspaceDocumentFailure[]>(
+    []
+  );
+  const [workspaceStatus, setWorkspaceStatus] =
+    useState<DocsWorkspaceStatus>("loading");
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [workspaceWarning, setWorkspaceWarning] = useState<string | null>(null);
 
   useEffect(() => {
     if (
@@ -759,22 +1165,113 @@ function DocsWorkspace() {
     }
   }, [inspectorPreviewPath, workspaceMode]);
 
+  useEffect(() => {
+    if (workspaceMode !== "docs") return;
+
+    let active = true;
+    setWorkspaceStatus("loading");
+    setWorkspaceError(null);
+    setWorkspaceWarning(null);
+    setFailedDocuments([]);
+
+    void Promise.allSettled(
+      workspaceDocs.map(async (document) => {
+        const response = await readFile(document.path);
+        const loadedDocument: LoadedWorkspaceDocument = {
+          ...document,
+          parsed: parseWorkspaceDocument(response.content, document.label),
+        };
+        return loadedDocument;
+      })
+    )
+      .then((results) => {
+        if (!active) return;
+
+        const loadedDocuments: LoadedWorkspaceDocument[] = [];
+        const unreadableDocuments: WorkspaceDocumentFailure[] = [];
+
+        results.forEach((result, index) => {
+          const configuredDocument = workspaceDocs[index];
+          if (!configuredDocument) return;
+
+          if (result.status === "fulfilled") {
+            loadedDocuments.push(result.value);
+            return;
+          }
+
+          unreadableDocuments.push({
+            ...configuredDocument,
+            error:
+              result.reason instanceof Error
+                ? result.reason.message
+                : "Unable to read this document right now.",
+          });
+        });
+
+        setDocuments(loadedDocuments);
+        setFailedDocuments(unreadableDocuments);
+
+        if (loadedDocuments.length === 0) {
+          setWorkspaceStatus("error");
+          setWorkspaceError(
+            unreadableDocuments.length === 1
+              ? `The Docs workspace could not load ${unreadableDocuments[0]?.label ?? "the configured document"}.`
+              : "The Docs workspace could not load any configured documents right now."
+          );
+          return;
+        }
+
+        setWorkspaceStatus("ready");
+        if (unreadableDocuments.length > 0) {
+          setWorkspaceWarning(
+            unreadableDocuments.length === 1
+              ? `${unreadableDocuments[0]?.label ?? "One document"} is temporarily unavailable. The remaining docs are still ready to read.`
+              : `${unreadableDocuments.length} configured docs are temporarily unavailable. The remaining docs are still ready to read.`
+          );
+        }
+      })
+      .catch((error) => {
+        if (!active) return;
+        setDocuments([]);
+        setFailedDocuments([]);
+        setWorkspaceStatus("error");
+        setWorkspaceError(
+          error instanceof Error
+            ? error.message
+            : "Unable to load documentation right now."
+        );
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [workspaceMode]);
+
+  useEffect(() => {
+    if (documents.length === 0) return;
+    if (selectedDocPath && documents.some((document) => document.path === selectedDocPath)) {
+      return;
+    }
+
+    setSelectedDocPath(documents[0].path);
+  }, [documents, selectedDocPath]);
+
   const selectedDoc =
-    workspaceDocs.find((item) => item.path === selectedDocPath) ?? workspaceDocs[0] ?? null;
-  const preview = usePreviewContent(selectedDoc?.path ?? null);
+    documents.find((item) => item.path === selectedDocPath) ?? documents[0] ?? null;
 
   return (
     <WorkspaceShell mode="docs">
       <WorkspaceHero
         icon={BookOpen}
-        title="Docs Workspace"
-        description="Keep the BioAPEX working contract, project guidance, and implementation guardrails close by without disrupting the surrounding shell."
+        title="Documentation"
+        description="Read BioAPEX specs, SOPs, and reference material in a workspace built for implementation work instead of a plain file preview."
         badges={
           <>
-            <WorkspaceBadge icon={BookOpen}>{`${workspaceDocs.length} core docs`}</WorkspaceBadge>
+            <WorkspaceBadge icon={BookOpen}>{`${workspaceDocs.length} docs`}</WorkspaceBadge>
             {selectedDoc ? (
-              <WorkspaceBadge icon={FileText}>{selectedDoc.label}</WorkspaceBadge>
+              <WorkspaceBadge icon={FileText}>{selectedDoc.parsed.title}</WorkspaceBadge>
             ) : null}
+            {selectedDoc ? <DocumentTypeBadge label={selectedDoc.typeLabel} /> : null}
           </>
         }
         actions={
@@ -800,42 +1297,46 @@ function DocsWorkspace() {
         <SummaryCard
           label="Working Set"
           value={`${workspaceDocs.length} docs`}
-          detail="Project context stays one mode switch away instead of hiding behind sidebar metadata."
+          detail="Protocols, specs, and reference material stay together in one center-workspace surface."
         />
         <SummaryCard
           label="Focused Doc"
           value={selectedDoc?.label ?? "None"}
-          detail={selectedDoc?.description ?? "Choose a document to preview it inline."}
+          detail={
+            selectedDoc?.description ??
+            "Choose a document to load its structured reading view."
+          }
         />
         <SummaryCard
-          label="Inspector Sync"
-          value={selectedDoc?.path === inspectorPreviewPath ? "Aligned" : "Independent"}
-          detail="Inline preview and inspector preview can follow the same file without forcing a reset."
+          label="Reading State"
+          value={
+            workspaceStatus === "ready"
+              ? selectedDoc
+                ? formatSectionCount(selectedDoc.parsed.sections.length)
+                : "Waiting"
+              : workspaceStatus === "loading"
+                ? "Loading"
+                : "Issue"
+          }
+          detail="The selected document is rendered as section cards so longer specs and protocols remain readable."
         />
       </div>
 
       <div className="grid min-h-0 gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-        <SurfaceListCard
-          title="Working Docs"
-          subtitle="These are the contract and guidance files most often used while implementing BioAPEX features."
-          items={workspaceDocs}
+        <DocsNavigatorCard
+          status={workspaceStatus}
+          documents={documents}
+          failedDocuments={failedDocuments}
           selectedPath={selectedDoc?.path ?? null}
-          onSelect={(item) => {
-            if (item.path) {
-              setSelectedDocPath(item.path);
-            }
-          }}
-          emptyMessage="No working docs are configured for this workspace."
+          onSelect={(document) => setSelectedDocPath(document.path)}
+          error={workspaceError}
         />
 
-        <PreviewCard
-          eyebrow="Inline Preview"
-          title={selectedDoc?.label ?? "Select a document"}
-          path={selectedDoc?.path ?? null}
-          status={preview.status}
-          content={preview.content}
-          error={preview.error}
-          emptyMessage="Pick a working document to preview it here and open it in the inspector when you need the full file view."
+        <DocsReaderPane
+          status={workspaceStatus}
+          document={selectedDoc}
+          error={workspaceError}
+          warning={workspaceWarning}
           onOpen={
             selectedDoc?.path ? () => openInspectorPath(selectedDoc.path!) : undefined
           }

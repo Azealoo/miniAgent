@@ -2,6 +2,7 @@
 
 import {
   BookOpen,
+  FileText,
   Files,
   FlaskConical,
   MessageSquare,
@@ -50,6 +51,25 @@ export interface FlowsWorkspaceDefinition {
   description: string;
   quickStartId: QuickStartItem["id"];
   workflowId?: string | null;
+}
+
+export type WorkspaceDocumentType = "Spec" | "Reference" | "SOP";
+
+export interface WorkspaceDocument extends SurfaceItem {
+  path: string;
+  typeLabel: WorkspaceDocumentType;
+  audience: string;
+}
+
+export interface WorkspaceDocumentSection {
+  id: string;
+  title: string;
+  markdown: string;
+}
+
+export interface ParsedWorkspaceDocument {
+  title: string;
+  sections: WorkspaceDocumentSection[];
 }
 
 export const primaryNavItems: WorkspaceNavItem[] = [
@@ -112,14 +132,16 @@ export const flowsWorkspaceDefinitions: FlowsWorkspaceDefinition[] = [
   },
 ];
 
-export const workspaceDocs: SurfaceItem[] = [
+export const workspaceDocs: WorkspaceDocument[] = [
   {
     id: "current-feature",
     label: "Current Feature",
     description: "Active implementation contract for this pass.",
     meta: "context/current-feature.md",
-    icon: BookOpen,
+    icon: FileText,
     path: "context/current-feature.md",
+    typeLabel: "Spec",
+    audience: "Implementation contract",
   },
   {
     id: "project-overview",
@@ -128,6 +150,8 @@ export const workspaceDocs: SurfaceItem[] = [
     meta: "context/project-overview.md",
     icon: BookOpen,
     path: "context/project-overview.md",
+    typeLabel: "Reference",
+    audience: "Product context",
   },
   {
     id: "coding-standards",
@@ -136,6 +160,8 @@ export const workspaceDocs: SurfaceItem[] = [
     meta: "context/coding-standards.md",
     icon: BookOpen,
     path: "context/coding-standards.md",
+    typeLabel: "SOP",
+    audience: "Engineering guardrails",
   },
   {
     id: "ai-interaction",
@@ -144,6 +170,8 @@ export const workspaceDocs: SurfaceItem[] = [
     meta: "context/ai-interaction.md",
     icon: BookOpen,
     path: "context/ai-interaction.md",
+    typeLabel: "SOP",
+    audience: "Execution workflow",
   },
 ];
 
@@ -334,4 +362,99 @@ export function recentFiles(messages: Message[]): SurfaceItem[] {
   }
 
   return items;
+}
+
+function slugifyHeading(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function finalizeDocumentSection(
+  sections: WorkspaceDocumentSection[],
+  title: string,
+  lines: string[],
+  index: number
+): void {
+  const markdown = lines.join("\n").trim();
+  if (!markdown) return;
+
+  sections.push({
+    id: `${slugifyHeading(title) || "section"}-${index + 1}`,
+    title,
+    markdown,
+  });
+}
+
+export function parseWorkspaceDocument(
+  content: string,
+  fallbackTitle: string
+): ParsedWorkspaceDocument {
+  const normalized = content.replaceAll("\r\n", "\n");
+  const lines = normalized.split("\n");
+  let title = fallbackTitle;
+  let startIndex = 0;
+  const titleMatch = lines[0]?.match(/^#\s+(.+)$/);
+
+  if (titleMatch) {
+    title = titleMatch[1].trim();
+    startIndex = 1;
+  }
+
+  const sections: WorkspaceDocumentSection[] = [];
+  let currentSectionTitle: string | null = null;
+  let currentSectionLines: string[] = [];
+  let leadLines: string[] = [];
+
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const line = lines[index];
+    const sectionMatch = line.match(/^##\s+(.+)$/);
+
+    if (sectionMatch) {
+      if (currentSectionTitle) {
+        finalizeDocumentSection(
+          sections,
+          currentSectionTitle,
+          currentSectionLines,
+          sections.length
+        );
+      } else {
+        finalizeDocumentSection(sections, "Overview", leadLines, sections.length);
+      }
+
+      currentSectionTitle = sectionMatch[1].trim();
+      currentSectionLines = [];
+      leadLines = [];
+      continue;
+    }
+
+    if (currentSectionTitle) {
+      currentSectionLines.push(line);
+    } else {
+      leadLines.push(line);
+    }
+  }
+
+  if (currentSectionTitle) {
+    finalizeDocumentSection(
+      sections,
+      currentSectionTitle,
+      currentSectionLines,
+      sections.length
+    );
+  } else {
+    finalizeDocumentSection(sections, "Overview", leadLines, sections.length);
+  }
+
+  if (sections.length === 0 && normalized.trim()) {
+    sections.push({
+      id: "document-body-1",
+      title: "Document Body",
+      markdown: normalized.trim(),
+    });
+  }
+
+  return { title, sections };
 }
