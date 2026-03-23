@@ -18,6 +18,7 @@ import {
   Download,
   FileText,
   Hash,
+  Info,
   Package,
   Plus,
   Pencil,
@@ -2139,6 +2140,45 @@ function MiniStat({
   );
 }
 
+function UsageMetricRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 text-[12px] leading-5">
+      <span className="text-slate-400">{label}</span>
+      <span className="font-semibold text-slate-700">{value}</span>
+    </div>
+  );
+}
+
+function UsageMetadataRow({
+  label,
+  value,
+  monospace = false,
+}: {
+  label: string;
+  value: string;
+  monospace?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 text-[12px] leading-5">
+      <span className="text-slate-400">{label}</span>
+      <span
+        className={cn(
+          "min-w-0 max-w-[60%] truncate text-right font-semibold text-slate-700",
+          monospace && "font-mono text-[11px]"
+        )}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
 function EmptyState({ children }: { children: ReactNode }) {
   return (
     <div className="rounded-[12px] border border-dashed border-[rgba(211,219,210,0.92)] bg-[rgba(251,252,248,0.78)] px-2.5 py-3 text-[11px] leading-5 text-slate-500">
@@ -2471,6 +2511,7 @@ export default function InspectorPanel() {
   const [skills, setSkills] = useState<SkillRegistryEntry[]>([]);
   const [tokens, setTokens] = useState<TokenStats | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
+  const [usageLoadError, setUsageLoadError] = useState("");
   const [memoryContent, setMemoryContent] = useState("");
   const [savedMemoryContent, setSavedMemoryContent] = useState("");
   const [memoryLoadError, setMemoryLoadError] = useState("");
@@ -2545,40 +2586,50 @@ export default function InspectorPanel() {
     skills.find((skill) => skill.location === selectedSkillPath) ?? null;
   const activeSkills = skills.filter((skill) => skill.enabled);
   const availableSkills = skills.filter((skill) => !skill.enabled);
-  const trackedTotalTokens = tokens?.tracked_total_tokens ?? tokens?.total_tokens ?? 0;
-  const promptContextTokens = tokens?.total_tokens ?? 0;
+  const sessionUsage =
+    currentSessionId && tokens?.session_id === currentSessionId ? tokens : null;
+  const trackedTotalTokens =
+    sessionUsage?.tracked_total_tokens ?? sessionUsage?.total_tokens ?? 0;
+  const promptContextTokens = sessionUsage?.total_tokens ?? 0;
   const contextWindowRatio =
-    tokens?.context_window_tokens && tokens.context_window_tokens > 0
-      ? Math.min(promptContextTokens / tokens.context_window_tokens, 1)
+    sessionUsage?.context_window_tokens && sessionUsage.context_window_tokens > 0
+      ? Math.min(promptContextTokens / sessionUsage.context_window_tokens, 1)
       : null;
-  const contextWindowLabel = tokens?.context_window_tokens
-    ? `${formatCompactTokenValue(promptContextTokens)} / ${formatCompactTokenValue(tokens.context_window_tokens)}`
-    : "Unavailable";
+  const contextWindowLabel = sessionUsage?.context_window_tokens
+    ? `${formatCompactTokenValue(promptContextTokens)} / ${formatCompactTokenValue(sessionUsage.context_window_tokens)}`
+    : null;
+  const usageModeLabel = ragMode ? "Grounded" : "Chat";
+  const showStreamingUsageNotice = Boolean(sessionUsage && isStreaming);
 
   useEffect(() => {
     if (!currentSessionId) {
       setTokens(null);
       setUsageLoading(false);
+      setUsageLoadError("");
       return;
     }
 
     if (isStreaming) {
       setUsageLoading(false);
+      setUsageLoadError("");
       return;
     }
 
     let cancelled = false;
     setUsageLoading(true);
+    setUsageLoadError("");
 
     getSessionTokens(currentSessionId)
       .then((nextTokens) => {
         if (!cancelled) {
           setTokens(nextTokens);
+          setUsageLoadError("");
         }
       })
       .catch(() => {
         if (!cancelled) {
           setTokens(null);
+          setUsageLoadError("Could not load token usage for this session.");
         }
       })
       .finally(() => {
@@ -3759,85 +3810,96 @@ export default function InspectorPanel() {
     <div className="space-y-2">
       <InspectorCard
         title="Usage"
-        meta={activeSession ? activeSession.title : currentSessionId ?? "No session"}
+        controls={
+          <MetaBadge tone={ragMode ? "accent" : "neutral"}>{usageModeLabel}</MetaBadge>
+        }
       >
-        {usageLoading && !tokens ? (
+        {!currentSessionId ? (
+          <EmptyState>Select a session to inspect token usage.</EmptyState>
+        ) : usageLoading && !sessionUsage ? (
           <LoadingState label="Loading usage..." />
-        ) : tokens ? (
-          <div className="space-y-3">
-            <div className="text-center">
-              <p className="text-[38px] font-semibold tracking-[-0.05em] text-slate-800">
+        ) : usageLoadError ? (
+          <EmptyState>{usageLoadError}</EmptyState>
+        ) : sessionUsage ? (
+          <div className="space-y-4">
+            {showStreamingUsageNotice ? (
+              <p className="rounded-[10px] bg-[rgba(251,252,248,0.86)] px-2 py-1.5 text-[10px] leading-4 text-slate-500">
+                Current response is still streaming. Usage totals refresh when it
+                finishes.
+              </p>
+            ) : null}
+
+            <div className="pt-1 text-center">
+              <p className="text-[40px] font-semibold tracking-[-0.06em] text-slate-800">
                 {trackedTotalTokens.toLocaleString()}
               </p>
-              <p className="text-[11px] text-slate-400">Total tokens</p>
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-2 text-[12px] text-slate-500">
-                <span>Input</span>
-                <span className="font-medium text-slate-700">
-                  {tokens.input_tokens.toLocaleString()}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 text-[12px] text-slate-500">
-                <span>Output</span>
-                <span className="font-medium text-slate-700">
-                  {tokens.output_tokens.toLocaleString()}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-2 text-[12px] text-slate-500">
-                <span>Tools</span>
-                <span className="font-medium text-slate-700">
-                  {tokens.tool_tokens.toLocaleString()}
-                </span>
-              </div>
+              <p className="mt-1 text-[11px] text-slate-400">Total tokens</p>
             </div>
 
             <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2 text-[12px] text-slate-500">
-                <span>Context</span>
-                <span className="font-medium text-slate-700">{contextWindowLabel}</span>
-              </div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-[rgba(211,219,210,0.76)]">
-                <div
-                  className="h-full rounded-full bg-[linear-gradient(90deg,var(--apex-accent),rgba(35,130,83,0.55))]"
-                  style={{ width: `${(contextWindowRatio ?? 0) * 100}%` }}
-                />
-              </div>
-              <p className="text-[10px] leading-4 text-slate-500">
-                Prompt/context pressure is calculated from the actual model history in
-                play, while tool I/O stays tracked separately above.
-              </p>
+              <UsageMetricRow
+                label="Input"
+                value={sessionUsage.input_tokens.toLocaleString()}
+              />
+              <UsageMetricRow
+                label="Output"
+                value={sessionUsage.output_tokens.toLocaleString()}
+              />
+              <UsageMetricRow
+                label="Tools"
+                value={sessionUsage.tool_tokens.toLocaleString()}
+              />
             </div>
 
-            <div className="border-t border-[rgba(211,219,210,0.72)] pt-2">
+            <div className="space-y-1.5 pt-0.5">
+              <div className="flex items-center justify-between gap-3 text-[12px] leading-5">
+                <span>Context</span>
+                <span className="font-semibold text-slate-700">
+                  {contextWindowLabel ?? "Unavailable"}
+                </span>
+              </div>
+              <div className="h-[2px] overflow-hidden rounded-full bg-[rgba(211,219,210,0.76)]">
+                {contextWindowRatio !== null ? (
+                  <div
+                    className="h-full rounded-full bg-[var(--apex-accent)]"
+                    style={{ width: `${contextWindowRatio * 100}%` }}
+                  />
+                ) : null}
+              </div>
+              {contextWindowLabel ? null : (
+                <p className="text-[10px] leading-4 text-slate-500">
+                  Context-window budget is not configured for this model.
+                </p>
+              )}
+            </div>
+
+            <div className="border-t border-[rgba(211,219,210,0.72)] pt-2.5">
               <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                <Info size={12} strokeWidth={1.8} />
                 <span>Provenance</span>
               </div>
-              <div className="mt-2 space-y-1.5 text-[12px]">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-slate-400">Session</span>
-                  <span className="font-mono text-[11px] text-slate-700">
-                    {shortIdentifier(tokens.session_id)}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-slate-400">Model</span>
-                  <span className="font-mono text-[11px] text-slate-700">
-                    {tokens.model_name}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-slate-400">Mode</span>
-                  <span className="text-[11px] font-medium text-slate-700">
-                    {ragMode ? "Grounded" : "Chat"}
-                  </span>
-                </div>
+              <div className="mt-2 space-y-1.5">
+                <UsageMetadataRow
+                  label="Session"
+                  value={shortIdentifier(sessionUsage.session_id)}
+                  monospace
+                />
+                <UsageMetadataRow
+                  label="Model"
+                  value={sessionUsage.model_name}
+                  monospace
+                />
               </div>
             </div>
           </div>
+        ) : isStreaming ? (
+          <EmptyState>
+            Usage will refresh after the current response finishes streaming.
+          </EmptyState>
         ) : (
-          <EmptyState>Token usage will appear once a session is selected.</EmptyState>
+          <EmptyState>
+            Token usage is unavailable for this session right now.
+          </EmptyState>
         )}
       </InspectorCard>
     </div>
