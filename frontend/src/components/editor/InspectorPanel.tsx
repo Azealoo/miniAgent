@@ -655,7 +655,17 @@ function getMemoryItemSummary(item: MemoryInspectorItem): string {
 }
 
 function getSkillVersionLabel(skill: SkillRegistryEntry): string {
-  return skill.version.trim() || "Local";
+  const version = skill.version.trim();
+
+  if (!version) {
+    return "Local";
+  }
+
+  if (/^v/i.test(version)) {
+    return version;
+  }
+
+  return /^\d/.test(version) ? `v${version}` : version;
 }
 
 function getSkillMetadata(skill: SkillRegistryEntry): string[] {
@@ -2015,6 +2025,51 @@ function WideActionButton({
   );
 }
 
+function SkillRegistryRow({
+  skill,
+  selected,
+  onClick,
+}: {
+  skill: SkillRegistryEntry;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  const Icon = skill.enabled ? Sparkles : Package;
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={selected}
+      className={cn(
+        "flex w-full items-center gap-2 rounded-[12px] px-2 py-2 text-left transition-colors",
+        selected
+          ? "bg-[rgba(35,130,83,0.08)]"
+          : "hover:bg-[rgba(255,255,255,0.82)]"
+      )}
+    >
+      <span
+        className={cn(
+          "flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full",
+          selected && "bg-[rgba(35,130,83,0.12)] text-[var(--apex-accent-strong)]",
+          !selected && skill.enabled && "bg-[rgba(35,130,83,0.08)] text-[var(--apex-accent-strong)]",
+          !selected &&
+            !skill.enabled &&
+            "bg-[rgba(211,219,210,0.42)] text-slate-500"
+        )}
+      >
+        <Icon size={12} />
+      </span>
+      <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-slate-700">
+        {skill.name}
+      </span>
+      <span className="flex-shrink-0 text-[11px] text-slate-400">
+        {getSkillVersionLabel(skill)}
+      </span>
+    </button>
+  );
+}
+
 function MetaBadge({
   children,
   tone = "neutral",
@@ -2428,8 +2483,11 @@ export default function InspectorPanel() {
   const [memoryEditorOpen, setMemoryEditorOpen] = useState(false);
   const [skillContent, setSkillContent] = useState("");
   const [savedSkillContent, setSavedSkillContent] = useState("");
+  const [skillsLoadError, setSkillsLoadError] = useState("");
+  const [skillFileLoadError, setSkillFileLoadError] = useState("");
   const [selectedSkillPath, setSelectedSkillPath] = useState<string | null>(null);
-  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillsRegistryLoading, setSkillsRegistryLoading] = useState(false);
+  const [skillFileLoading, setSkillFileLoading] = useState(false);
   const [skillSaving, setSkillSaving] = useState(false);
   const [skillSaveMsg, setSkillSaveMsg] = useState("");
   const [skillActionMsg, setSkillActionMsg] = useState("");
@@ -2660,19 +2718,23 @@ export default function InspectorPanel() {
   const refreshSkills = async (preferredPath?: string) => {
     const requestId = skillsRequestIdRef.current + 1;
     skillsRequestIdRef.current = requestId;
-    setSkillsLoading(true);
+    setSkillsRegistryLoading(true);
+    setSkillsLoadError("");
 
     try {
       const nextSkills = await listSkillsRegistry();
       if (skillsRequestIdRef.current !== requestId) return;
 
       setSkills(nextSkills);
+      setSkillsLoadError("");
       hasLoadedSkillsRef.current = true;
 
       if (nextSkills.length === 0) {
         setSelectedSkillPath(null);
         setSkillContent("");
         setSavedSkillContent("");
+        setSkillFileLoadError("");
+        setSkillEditorOpen(false);
         return nextSkills;
       }
 
@@ -2687,6 +2749,8 @@ export default function InspectorPanel() {
         setSelectedSkillPath(null);
         setSkillContent("");
         setSavedSkillContent("");
+        setSkillFileLoadError("");
+        setSkillEditorOpen(false);
         return nextSkills;
       }
 
@@ -2694,6 +2758,7 @@ export default function InspectorPanel() {
         setSelectedSkillPath(null);
         setSkillContent("");
         setSavedSkillContent("");
+        setSkillFileLoadError("");
         setSkillEditorOpen(false);
       }
 
@@ -2702,14 +2767,14 @@ export default function InspectorPanel() {
       if (skillsRequestIdRef.current !== requestId) return;
 
       hasLoadedSkillsRef.current = true;
-      if (skills.length === 0) {
-        setSkillContent("# Could not load skill registry");
-        setSavedSkillContent("# Could not load skill registry");
-      }
+      setSkills([]);
+      setSkillsLoadError(
+        "Could not load the skills registry. Refresh this tab once the backend skill scan is available."
+      );
       return null;
     } finally {
       if (skillsRequestIdRef.current === requestId) {
-        setSkillsLoading(false);
+        setSkillsRegistryLoading(false);
       }
     }
   };
@@ -2717,7 +2782,8 @@ export default function InspectorPanel() {
   const loadSkillFile = async (path: string) => {
     const requestId = skillFileRequestIdRef.current + 1;
     skillFileRequestIdRef.current = requestId;
-    setSkillsLoading(true);
+    setSkillFileLoading(true);
+    setSkillFileLoadError("");
     setSelectedSkillPath(path);
 
     try {
@@ -2726,14 +2792,17 @@ export default function InspectorPanel() {
 
       setSkillContent(res.content);
       setSavedSkillContent(res.content);
+      setSkillFileLoadError("");
     } catch {
       if (skillFileRequestIdRef.current !== requestId) return;
 
-      setSkillContent("# Could not load skill file");
-      setSavedSkillContent("# Could not load skill file");
+      setSkillContent("");
+      setSavedSkillContent("");
+      setSkillEditorOpen(false);
+      setSkillFileLoadError(`Could not load \`${path}\`.`);
     } finally {
       if (skillFileRequestIdRef.current === requestId) {
-        setSkillsLoading(false);
+        setSkillFileLoading(false);
       }
     }
   };
@@ -2986,6 +3055,8 @@ export default function InspectorPanel() {
     setSelectedSkillPath(null);
     setSkillContent("");
     setSavedSkillContent("");
+    setSkillFileLoadError("");
+    setSkillSaveMsg("");
     setSkillEditorOpen(false);
   };
 
@@ -3479,170 +3550,166 @@ export default function InspectorPanel() {
   );
 
   const renderSkillsTab = () => (
-    <div className="space-y-2">
-      <InspectorCard
-        title="Active"
-        meta={`${activeSkills.length} enabled`}
-        controls={
+    <div className="space-y-4">
+      <section>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <h3 className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+            Active
+          </h3>
           <ActionButton onClick={() => void handleSkillsRefresh()}>
             <RefreshCw size={11} />
             Refresh
           </ActionButton>
-        }
-      >
-        <div className="space-y-3">
-          {skillsLoading && skills.length === 0 ? (
-            <LoadingState label="Loading skills..." />
-          ) : activeSkills.length > 0 ? (
-            <div className="space-y-1.5">
-              {activeSkills.map((skill) => (
-                <button
-                  key={skill.location}
-                  type="button"
-                  onClick={() => void handleSkillSelection(skill.location)}
-                  className={cn(
-                    "flex w-full items-center gap-2 rounded-[12px] border px-2.5 py-2 text-left transition-colors",
-                    skill.location === selectedSkillPath
-                      ? "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.08)]"
-                      : "border-transparent bg-[rgba(251,252,248,0.94)] hover:border-[rgba(211,219,210,0.86)] hover:bg-white"
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[9px]",
-                      skill.location === selectedSkillPath
-                        ? "bg-[rgba(35,130,83,0.12)] text-[var(--apex-accent-strong)]"
-                        : "bg-white text-[var(--apex-accent-strong)]"
-                    )}
-                  >
-                    <Sparkles size={13} />
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-slate-700">
-                    {skill.name}
-                  </span>
-                  <span className="flex-shrink-0 text-[11px] text-slate-500">
-                    {getSkillVersionLabel(skill)}
-                  </span>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <EmptyState>
-              No active skills are currently available. Refresh this view once the
-              backend skill scan finishes.
-            </EmptyState>
-          )}
-
-          <div className="border-t border-[rgba(211,219,210,0.72)] pt-2">
-            <p className="text-[11px] font-semibold text-slate-500">Available Skills</p>
-            <p className="mt-1 text-[11px] leading-5 text-slate-400">
-              Add more analysis tools, data processors, or custom workflows to
-              expand capabilities.
-            </p>
-
-            <div className="mt-2">
-              <WideActionButton onClick={handleSkillInstall}>
-                <Plus size={13} />
-                Install Skill
-              </WideActionButton>
-            </div>
-
-            {skillActionMsg ? (
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                <MetaBadge tone="accent">{skillActionMsg}</MetaBadge>
-              </div>
-            ) : null}
-
-            {availableSkills.length > 0 ? (
-              <div className="mt-2 space-y-1.5">
-                {availableSkills.map((skill) => (
-                  <button
-                    key={skill.location}
-                    type="button"
-                    onClick={() => void handleSkillSelection(skill.location)}
-                    className={cn(
-                      "flex w-full items-center gap-2 rounded-[12px] border px-2.5 py-2 text-left transition-colors",
-                      skill.location === selectedSkillPath
-                        ? "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.08)]"
-                        : "border-transparent bg-[rgba(251,252,248,0.94)] hover:border-[rgba(211,219,210,0.86)] hover:bg-white"
-                    )}
-                  >
-                    <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[9px] bg-white text-slate-500">
-                      <Package size={13} />
-                    </span>
-                    <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-slate-700">
-                      {skill.name}
-                    </span>
-                    <span className="flex-shrink-0 text-[11px] text-slate-500">
-                      {getSkillVersionLabel(skill)}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
         </div>
-      </InspectorCard>
+
+        {skillsRegistryLoading && skills.length === 0 ? (
+          <LoadingState label="Loading skills..." />
+        ) : skillsLoadError && skills.length === 0 ? (
+          <EmptyState>{skillsLoadError}</EmptyState>
+        ) : activeSkills.length > 0 ? (
+          <div className="space-y-1">
+            {activeSkills.map((skill) => (
+              <SkillRegistryRow
+                key={skill.location}
+                skill={skill}
+                selected={skill.location === selectedSkillPath}
+                onClick={() => void handleSkillSelection(skill.location)}
+              />
+            ))}
+          </div>
+        ) : (
+          <EmptyState>
+            No active skills are enabled right now. Refresh after the registry scan
+            finishes or after enabling a local skill entry.
+          </EmptyState>
+        )}
+
+        {skillsLoadError && skills.length > 0 ? (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <MetaBadge tone="warning">{skillsLoadError}</MetaBadge>
+          </div>
+        ) : null}
+      </section>
+
+      <section className="border-t border-[rgba(211,219,210,0.72)] pt-3">
+        <p className="text-[12px] font-semibold text-slate-600">Available Skills</p>
+        <p className="mt-1 text-[11px] leading-5 text-slate-400">
+          Add more analysis tools, data processors, or custom workflows to expand
+          capabilities.
+        </p>
+
+        <div className="mt-3">
+          <WideActionButton onClick={handleSkillInstall}>
+            <Plus size={13} />
+            Install Skill
+          </WideActionButton>
+        </div>
+
+        {skillActionMsg ? (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <MetaBadge tone="accent">{skillActionMsg}</MetaBadge>
+          </div>
+        ) : null}
+
+        {skillsLoadError ? (
+          <div className="mt-3">
+            <EmptyState>{skillsLoadError}</EmptyState>
+          </div>
+        ) : availableSkills.length > 0 ? (
+          <div className="mt-3 space-y-1">
+            {availableSkills.map((skill) => (
+              <SkillRegistryRow
+                key={skill.location}
+                skill={skill}
+                selected={skill.location === selectedSkillPath}
+                onClick={() => void handleSkillSelection(skill.location)}
+              />
+            ))}
+          </div>
+        ) : null}
+
+        {availableSkills.length === 0 && !skillsLoadError ? (
+          <div className="mt-3">
+            <EmptyState>
+              No additional local skill entries are available yet. Install a new
+              skill or add a `SKILL.md` file to expand this registry.
+            </EmptyState>
+          </div>
+        ) : null}
+      </section>
 
       {selectedSkillPath ? (
-        <InspectorCard
-          title={selectedSkill?.name ?? "Skill File"}
-          meta={shortenPath(selectedSkillPath, 3)}
-          controls={
-            <>
-              <ActionButton onClick={() => void handleSelectedSkillRefresh()}>
-                <RefreshCw size={11} />
-                Refresh
-              </ActionButton>
-              <ActionButton onClick={() => setSkillEditorOpen((value) => !value)}>
-                <BookOpen size={11} />
-                {skillEditorOpen ? "Preview" : "Edit"}
-              </ActionButton>
-              <ActionButton onClick={clearSelectedSkill}>Hide</ActionButton>
-            </>
-          }
-        >
+        <section className="rounded-[14px] border border-[rgba(211,219,210,0.86)] bg-[rgba(255,255,255,0.88)] px-3 py-3 shadow-[0_1px_2px_rgba(32,43,35,0.03)]">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <p className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Selected Skill
+              </p>
+              <p className="mt-1 text-[13px] font-semibold text-slate-700">
+                {selectedSkill?.name ?? "Skill File"}
+              </p>
+              <p className="mt-1 truncate text-[10px] leading-4 text-slate-500">
+                {shortenPath(selectedSkillPath, 3)}
+              </p>
+              <p className="mt-2 text-[10px] leading-4 text-slate-500">
+                {selectedSkill?.description || "Local skill definition file."}
+              </p>
+            </div>
+            {selectedSkill ? (
+              <MetaBadge tone={selectedSkill.enabled ? "success" : "neutral"}>
+                {getSkillVersionLabel(selectedSkill)}
+              </MetaBadge>
+            ) : null}
+          </div>
+
           {selectedSkill ? (
-            <div className="mb-2 rounded-[12px] border border-[rgba(211,219,210,0.82)] bg-[rgba(251,252,248,0.92)] px-2.5 py-2.5">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <p className="text-[12px] font-semibold text-slate-700">
-                    {selectedSkill.name}
-                  </p>
-                  <p className="mt-1 text-[10px] leading-4 text-slate-500">
-                    {selectedSkill.description || "Local skill definition file."}
-                  </p>
-                </div>
-                <MetaBadge tone={selectedSkill.enabled ? "success" : "neutral"}>
-                  {getSkillVersionLabel(selectedSkill)}
-                </MetaBadge>
-              </div>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {getSkillMetadata(selectedSkill).map((value) => (
-                  <MetaBadge key={`${selectedSkill.location}-${value}`}>{value}</MetaBadge>
-                ))}
-              </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {getSkillMetadata(selectedSkill).map((value) => (
+                <MetaBadge key={`${selectedSkill.location}-${value}`}>{value}</MetaBadge>
+              ))}
             </div>
           ) : null}
 
-          <div className="mb-2 flex items-center justify-between gap-2">
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            <ActionButton onClick={() => void handleSelectedSkillRefresh()}>
+              <RefreshCw size={11} />
+              Refresh
+            </ActionButton>
+            <ActionButton onClick={() => setSkillEditorOpen((value) => !value)}>
+              <BookOpen size={11} />
+              {skillEditorOpen ? "Preview" : "Edit"}
+            </ActionButton>
+            <ActionButton onClick={() => openRawFile(selectedSkillPath)}>
+              Open raw
+            </ActionButton>
+            <ActionButton onClick={() => inspectPathInFiles(selectedSkillPath)}>
+              Inspect
+            </ActionButton>
+            <ActionButton onClick={clearSelectedSkill}>Hide</ActionButton>
+          </div>
+
+          <div className="mt-3 flex items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-1.5">
               {skillSaveMsg ? (
                 <MetaBadge tone={skillSaveMsg === "Saved" ? "success" : "warning"}>
                   {skillSaveMsg}
                 </MetaBadge>
               ) : null}
-              <MetaBadge tone={isSkillDirty ? "warning" : "neutral"}>
-                {isSkillDirty ? "Unsaved edits" : "File synced"}
-              </MetaBadge>
+              {skillFileLoadError ? (
+                <MetaBadge tone="warning">Load failed</MetaBadge>
+              ) : (
+                <MetaBadge tone={isSkillDirty ? "warning" : "neutral"}>
+                  {isSkillDirty ? "Unsaved edits" : "File synced"}
+                </MetaBadge>
+              )}
             </div>
             <button
               type="button"
               onClick={() => void handleSkillSave()}
-              disabled={!isSkillDirty || skillSaving}
+              disabled={!isSkillDirty || skillSaving || !!skillFileLoadError}
               className={cn(
                 "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors",
-                isSkillDirty && !skillSaving
+                isSkillDirty && !skillSaving && !skillFileLoadError
                   ? "bg-[var(--apex-accent)] text-white hover:bg-[var(--apex-accent-strong)]"
                   : "cursor-not-allowed bg-slate-200 text-slate-400"
               )}
@@ -3652,41 +3719,38 @@ export default function InspectorPanel() {
             </button>
           </div>
 
-          {skillsLoading ? (
-            <LoadingState label="Loading skill..." />
-          ) : skillEditorOpen ? (
-            <div className="h-[220px] overflow-hidden rounded-[12px] border border-[rgba(211,219,210,0.86)] bg-white">
-              <MonacoEditor
-                height="100%"
-                language="markdown"
-                value={skillContent}
-                theme="vs"
-                onChange={(value) => setSkillContent(value ?? "")}
-                options={{
-                  minimap: { enabled: false },
-                  wordWrap: "on",
-                  fontSize: 11,
-                  lineNumbers: "on",
-                  scrollBeyondLastLine: false,
-                  overviewRulerLanes: 0,
-                  padding: { top: 10, bottom: 10 },
-                  fontFamily: '"SF Mono", "Fira Code", Consolas, monospace',
-                }}
-              />
-            </div>
-          ) : (
-            <PreviewPane content={skillContent} className="max-h-[220px]" />
-          )}
-
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            <ActionButton onClick={() => openRawFile(selectedSkillPath)}>
-              Open raw
-            </ActionButton>
-            <ActionButton onClick={() => inspectPathInFiles(selectedSkillPath)}>
-              Inspect
-            </ActionButton>
+          <div className="mt-3">
+            {skillFileLoading ? (
+              <LoadingState label="Loading skill..." />
+            ) : skillFileLoadError ? (
+              <EmptyState>
+                {skillFileLoadError} Use Open raw or Inspect to verify the on-disk file.
+              </EmptyState>
+            ) : skillEditorOpen ? (
+              <div className="h-[220px] overflow-hidden rounded-[12px] border border-[rgba(211,219,210,0.86)] bg-white">
+                <MonacoEditor
+                  height="100%"
+                  language="markdown"
+                  value={skillContent}
+                  theme="vs"
+                  onChange={(value) => setSkillContent(value ?? "")}
+                  options={{
+                    minimap: { enabled: false },
+                    wordWrap: "on",
+                    fontSize: 11,
+                    lineNumbers: "on",
+                    scrollBeyondLastLine: false,
+                    overviewRulerLanes: 0,
+                    padding: { top: 10, bottom: 10 },
+                    fontFamily: '"SF Mono", "Fira Code", Consolas, monospace',
+                  }}
+                />
+              </div>
+            ) : (
+              <PreviewPane content={skillContent} className="max-h-[220px]" />
+            )}
           </div>
-        </InspectorCard>
+        </section>
       ) : null}
     </div>
   );
