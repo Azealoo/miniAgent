@@ -1,5 +1,6 @@
 "use client";
 
+import { getFilePreviewDescriptor } from "./file-preview";
 import type { ArtifactRegistryQuery, ArtifactRegistryRecord } from "./types";
 
 export interface ArtifactRegistryFilterState {
@@ -20,52 +21,14 @@ export const DEFAULT_ARTIFACT_REGISTRY_FILTERS: ArtifactRegistryFilterState = {
   include_invalid: false,
 };
 
-export type ArtifactRegistryPreviewMode = "text" | "image" | "pdf" | "unsupported";
-
-const IMAGE_EXTENSIONS = new Set([
-  ".avif",
-  ".gif",
-  ".jpeg",
-  ".jpg",
-  ".png",
-  ".svg",
-  ".webp",
-]);
-
-const UNSUPPORTED_TEXT_PREVIEW_EXTENSIONS = new Set([
-  ".bam",
-  ".bcf",
-  ".bin",
-  ".cram",
-  ".feather",
-  ".gz",
-  ".mtx",
-  ".parquet",
-  ".tar",
-  ".tgz",
-  ".tif",
-  ".tiff",
-  ".vcf.gz",
-  ".xls",
-  ".xlsx",
-  ".zip",
-]);
-
-function getPathExtension(path: string): string {
-  const fileName = path.split("/").pop() ?? path;
-  const lowerName = fileName.toLowerCase();
-
-  if (lowerName.endsWith(".tar.gz")) {
-    return ".tar.gz";
-  }
-
-  if (lowerName.endsWith(".vcf.gz")) {
-    return ".vcf.gz";
-  }
-
-  const lastDot = lowerName.lastIndexOf(".");
-  return lastDot >= 0 ? lowerName.slice(lastDot) : "";
-}
+export type ArtifactRegistryPreviewMode =
+  | "text"
+  | "markdown"
+  | "json"
+  | "html"
+  | "image"
+  | "pdf"
+  | "unsupported";
 
 function uniqueStrings(values: Array<string | null | undefined>): string[] {
   return values.filter((value, index, array): value is string => {
@@ -188,35 +151,23 @@ export function getArtifactRegistryRunRecordPath(
 export function getArtifactRegistryPreviewMode(
   record: ArtifactRegistryRecord
 ): ArtifactRegistryPreviewMode {
-  if (
-    record.artifact_type === "artifact_directory" ||
-    record.artifact_type === "generated_output_group" ||
-    record.artifact_type === "ro_crate"
-  ) {
-    return "unsupported";
-  }
-
-  const extension = getPathExtension(record.path);
-
-  if (IMAGE_EXTENSIONS.has(extension)) {
-    return "image";
-  }
-
-  if (extension === ".pdf") {
-    return "pdf";
-  }
-
-  if (UNSUPPORTED_TEXT_PREVIEW_EXTENSIONS.has(extension)) {
-    return "unsupported";
-  }
-
-  return "text";
+  return getFilePreviewDescriptor({
+    path: record.path,
+    artifactType: record.artifact_type,
+    label: getArtifactRegistryDisplayName(record),
+  }).mode;
 }
 
 export function isArtifactRegistryTextPreviewable(
   record: ArtifactRegistryRecord
 ): boolean {
-  return getArtifactRegistryPreviewMode(record) === "text";
+  const mode = getArtifactRegistryPreviewMode(record);
+  return (
+    mode === "text" ||
+    mode === "markdown" ||
+    mode === "json" ||
+    mode === "html"
+  );
 }
 
 export function matchesArtifactRegistryText(

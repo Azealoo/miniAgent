@@ -1,7 +1,6 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import Image from "next/image";
 import {
   useEffect,
   useRef,
@@ -29,6 +28,11 @@ import {
   Trash2,
 } from "lucide-react";
 import {
+  FilePreviewSurface,
+  useFilePreview,
+  type FilePreviewTarget,
+} from "@/components/preview/FilePreviewSurface";
+import {
   getArtifactRegistryDescription,
   getArtifactRegistryDisplayName,
   getArtifactRegistryMetadataSummary,
@@ -39,7 +43,6 @@ import {
   sortArtifactRegistryRecords,
 } from "@/lib/artifact-registry";
 import {
-  createRawFileObjectUrl,
   getSessionTokens,
   listArtifactRegistry,
   listSkillsRegistry,
@@ -47,6 +50,10 @@ import {
   readFile,
   saveFile,
 } from "@/lib/api";
+import {
+  getPreviewableFileLabel,
+  inferPreviewableFileKind,
+} from "@/lib/file-preview";
 import {
   getLatestRequestMessages,
   getWorkflowSummary,
@@ -110,8 +117,6 @@ type GeneratedArtifactKind =
   | "report"
   | "archive"
   | "file";
-
-type InspectorPreviewMode = "text" | "image" | "pdf" | "unsupported";
 
 type SourceInspectorItemKind = "review" | "evidence" | "retrieval";
 
@@ -699,77 +704,6 @@ function getUsageShare(value: number, total: number): string {
   return `${Math.round((value / total) * 100)}%`;
 }
 
-function getFileExtension(path: string): string | null {
-  const fileName = path.split("/").pop() ?? path;
-  const index = fileName.lastIndexOf(".");
-  if (index <= 0 || index === fileName.length - 1) {
-    return null;
-  }
-  return fileName.slice(index).toLowerCase();
-}
-
-function getInspectorPreviewMode(path: string): InspectorPreviewMode {
-  const extension = getFileExtension(path);
-
-  if (
-    extension === ".png" ||
-    extension === ".jpg" ||
-    extension === ".jpeg" ||
-    extension === ".svg"
-  ) {
-    return "image";
-  }
-
-  if (extension === ".pdf") {
-    return "pdf";
-  }
-
-  if (
-    extension === ".zip" ||
-    extension === ".gz" ||
-    extension === ".tgz" ||
-    extension === ".tar" ||
-    extension === ".tif" ||
-    extension === ".tiff" ||
-    extension === ".xlsx" ||
-    extension === ".xls" ||
-    extension === ".parquet" ||
-    extension === ".mtx"
-  ) {
-    return "unsupported";
-  }
-
-  return "text";
-}
-
-function getUnsupportedPreviewMessage(path: string): string {
-  const extension = getFileExtension(path);
-
-  if (
-    extension === ".zip" ||
-    extension === ".gz" ||
-    extension === ".tgz" ||
-    extension === ".tar"
-  ) {
-    return "Archive previews are not available in the inspector yet. Use Open raw to inspect or download the artifact.";
-  }
-
-  if (extension === ".tif" || extension === ".tiff") {
-    return "This image format is not previewed inline in the inspector yet. Use Open raw to inspect the artifact.";
-  }
-
-  if (
-    extension === ".xlsx" ||
-    extension === ".xls" ||
-    extension === ".parquet" ||
-    extension === ".mtx"
-  ) {
-    return "This generated table format is not previewed inline yet. Use Open raw to inspect the artifact.";
-  }
-
-  return "This file is not previewed inline in the inspector yet. Use Open raw to inspect the artifact.";
-}
-
 function shouldShowGeneratedArtifact(item: {
   path: string;
   artifactType: string | null;
@@ -855,125 +789,25 @@ function collectArtifacts(events: WorkflowStreamEvent[]) {
 }
 
 function inferGeneratedArtifactKind(item: GeneratedArtifactItem): GeneratedArtifactKind {
-  const extension = getFileExtension(item.path);
-  const artifactType = item.artifactType?.toLowerCase() ?? "";
-  const outputName = item.outputName?.toLowerCase() ?? "";
-  const label = item.label.toLowerCase();
-
-  if (
-    extension === ".csv" ||
-    extension === ".tsv" ||
-    extension === ".xlsx" ||
-    extension === ".xls" ||
-    extension === ".parquet" ||
-    extension === ".mtx" ||
-    artifactType.includes("matrix") ||
-    artifactType.includes("results") ||
-    outputName.includes("table") ||
-    label.includes("matrix")
-  ) {
-    return "table";
-  }
-
-  if (
-    extension === ".png" ||
-    extension === ".jpg" ||
-    extension === ".jpeg" ||
-    extension === ".svg" ||
-    extension === ".tif" ||
-    extension === ".tiff" ||
-    artifactType === "figure" ||
-    outputName.includes("plot") ||
-    outputName.includes("figure")
-  ) {
-    return "plot";
-  }
-
-  if (
-    extension === ".html" ||
-    extension === ".pdf" ||
-    extension === ".md" ||
-    artifactType.includes("report")
-  ) {
-    return "report";
-  }
-
-  if (
-    extension === ".json" ||
-    extension === ".yaml" ||
-    extension === ".yml" ||
-    artifactType.includes("manifest") ||
-    artifactType.includes("summary") ||
-    artifactType.includes("metrics")
-  ) {
-    return "structured";
-  }
-
-  if (
-    extension === ".zip" ||
-    extension === ".gz" ||
-    extension === ".tgz" ||
-    extension === ".tar"
-  ) {
-    return "archive";
-  }
-
-  return "file";
+  return inferPreviewableFileKind({
+    path: item.path,
+    artifactType: item.artifactType,
+    outputName: item.outputName,
+    label: item.label,
+  });
 }
 
 function getGeneratedArtifactCue(item: GeneratedArtifactItem) {
-  const extension = getFileExtension(item.path);
   const kind = inferGeneratedArtifactKind(item);
-
-  if (extension === ".json") {
-    return { kind, label: "JSON" };
-  }
-
-  if (extension === ".yaml" || extension === ".yml") {
-    return { kind, label: "YAML" };
-  }
-
-  if (extension === ".csv") {
-    return { kind, label: "CSV" };
-  }
-
-  if (extension === ".tsv") {
-    return { kind, label: "TSV" };
-  }
-
-  if (extension === ".html") {
-    return { kind, label: "HTML" };
-  }
-
-  if (extension === ".pdf") {
-    return { kind, label: "PDF" };
-  }
-
-  if (extension === ".md") {
-    return { kind, label: "MD" };
-  }
-
-  if (kind === "table") {
-    return { kind, label: "Table" };
-  }
-
-  if (kind === "plot") {
-    return { kind, label: "Plot" };
-  }
-
-  if (kind === "report") {
-    return { kind, label: "Report" };
-  }
-
-  if (kind === "structured") {
-    return { kind, label: "Data" };
-  }
-
-  if (kind === "archive") {
-    return { kind, label: "Archive" };
-  }
-
-  return { kind, label: "File" };
+  return {
+    kind,
+    label: getPreviewableFileLabel({
+      path: item.path,
+      artifactType: item.artifactType,
+      outputName: item.outputName,
+      label: item.label,
+    }),
+  };
 }
 
 function getGeneratedArtifactTone(kind: GeneratedArtifactKind) {
@@ -2526,45 +2360,6 @@ function PreviewPane({
   );
 }
 
-function ImagePreview({
-  src,
-  alt,
-}: {
-  src: string;
-  alt: string;
-}) {
-  return (
-    <div className="overflow-hidden rounded-[12px] border border-[rgba(211,219,210,0.8)] bg-[rgba(248,250,246,0.96)] p-2">
-      <Image
-        src={src}
-        alt={alt}
-        width={1600}
-        height={900}
-        unoptimized
-        className="max-h-[360px] h-auto w-full rounded-[10px] object-contain"
-      />
-    </div>
-  );
-}
-
-function FramePreview({
-  src,
-  title,
-}: {
-  src: string;
-  title: string;
-}) {
-  return (
-    <div className="overflow-hidden rounded-[12px] border border-[rgba(211,219,210,0.8)] bg-[rgba(248,250,246,0.96)]">
-      <iframe
-        src={src}
-        title={title}
-        className="h-[360px] w-full bg-white"
-      />
-    </div>
-  );
-}
-
 function LoadingState({ label }: { label: string }) {
   return (
     <div className="rounded-[12px] border border-dashed border-[rgba(211,219,210,0.92)] bg-[rgba(251,252,248,0.78)] px-2.5 py-5 text-center text-[11px] text-slate-400">
@@ -2614,10 +2409,7 @@ export default function InspectorPanel() {
   const [skillSaveMsg, setSkillSaveMsg] = useState("");
   const [skillActionMsg, setSkillActionMsg] = useState("");
   const [skillEditorOpen, setSkillEditorOpen] = useState(false);
-  const [previewContent, setPreviewContent] = useState("");
-  const [previewError, setPreviewError] = useState("");
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewRawUrl, setPreviewRawUrl] = useState<string | null>(null);
+  const [previewActionError, setPreviewActionError] = useState("");
   const [artifactRegistryRecords, setArtifactRegistryRecords] = useState<
     ArtifactRegistryRecord[]
   >([]);
@@ -2629,8 +2421,6 @@ export default function InspectorPanel() {
   const memoryRequestIdRef = useRef(0);
   const skillsRequestIdRef = useRef(0);
   const skillFileRequestIdRef = useRef(0);
-  const previewRequestIdRef = useRef(0);
-  const previewObjectUrlRevokeRef = useRef<(() => void) | null>(null);
   const sourceMetadataRequestIdRef = useRef(0);
   const hasLoadedMemoryRef = useRef(false);
   const hasLoadedSkillsRef = useRef(false);
@@ -2671,9 +2461,6 @@ export default function InspectorPanel() {
   const stepCountLabel = getStepCountLabel(workflowSummary);
   const progressLabel = getProgressLabel(workflowSummary);
   const runDetail = getRunDetail(workflowSummary);
-  const previewMode = inspectorPreviewPath
-    ? getInspectorPreviewMode(inspectorPreviewPath)
-    : null;
   const selectedSkill =
     skills.find((skill) => skill.location === selectedSkillPath) ?? null;
   const activeSkills = skills.filter((skill) => skill.enabled);
@@ -2694,6 +2481,8 @@ export default function InspectorPanel() {
   const showStreamingUsageNotice = Boolean(sessionUsage && isStreaming);
   const selectedRegistryRecord =
     artifactRegistryRecords.find((record) => record.path === inspectorPreviewPath) ?? null;
+  const selectedArtifactItem =
+    artifactItems.find((item) => item.path === inspectorPreviewPath) ?? null;
   const registryScopedRunId =
     selectedRegistryRecord?.run_id ?? latestWorkflowEvent?.run_id ?? null;
   const artifactRegistryListItems = (
@@ -2713,6 +2502,31 @@ export default function InspectorPanel() {
           item !== selectedRegistryRecord.workflow
       )
     : [];
+  const inspectorPreviewTarget: FilePreviewTarget | null = inspectorPreviewPath
+    ? {
+        path: inspectorPreviewPath,
+        displayName:
+          selectedRegistryRecord
+            ? getArtifactRegistryDisplayName(selectedRegistryRecord)
+            : selectedArtifactItem?.label ??
+              inspectorPreviewPath.split("/").pop() ??
+              inspectorPreviewPath,
+        artifactType:
+          selectedRegistryRecord?.artifact_type ??
+          selectedArtifactItem?.artifactType ??
+          null,
+        outputName: selectedArtifactItem?.outputName ?? null,
+        runId:
+          selectedRegistryRecord?.run_id ??
+          latestWorkflowEvent?.run_id ??
+          null,
+      }
+    : null;
+  const preview = useFilePreview(inspectorPreviewTarget);
+
+  useEffect(() => {
+    setPreviewActionError("");
+  }, [inspectorPreviewPath]);
 
   useEffect(() => {
     if (!currentSessionId) {
@@ -3009,83 +2823,13 @@ export default function InspectorPanel() {
     }
   };
 
-  const loadPreview = async (path: string) => {
-    const requestId = previewRequestIdRef.current + 1;
-    previewRequestIdRef.current = requestId;
-    previewObjectUrlRevokeRef.current?.();
-    previewObjectUrlRevokeRef.current = null;
-    setPreviewRawUrl(null);
-    setPreviewContent("");
-    setPreviewError("");
-
-    const mode = getInspectorPreviewMode(path);
-
-    if (mode === "unsupported") {
-      setPreviewLoading(false);
-      return;
-    }
-
-    setPreviewLoading(true);
-
-    try {
-      if (mode === "text") {
-        const res = await readFile(path);
-        if (previewRequestIdRef.current !== requestId) return;
-
-        setPreviewContent(res.content);
-      } else {
-        const rawPreview = await createRawFileObjectUrl(path);
-        if (previewRequestIdRef.current !== requestId) {
-          rawPreview.revoke();
-          return;
-        }
-
-        previewObjectUrlRevokeRef.current = rawPreview.revoke;
-        setPreviewRawUrl(rawPreview.url);
-      }
-    } catch {
-      if (previewRequestIdRef.current !== requestId) return;
-
-      setPreviewError(
-        mode === "text"
-          ? "Could not load file preview. Use Open raw to inspect the artifact."
-          : "Could not load the raw preview. Use Open raw to inspect the artifact."
-      );
-    } finally {
-      if (previewRequestIdRef.current === requestId) {
-        setPreviewLoading(false);
-      }
-    }
-  };
-
-  useEffect(() => {
-    if (!inspectorPreviewPath) {
-      previewObjectUrlRevokeRef.current?.();
-      previewObjectUrlRevokeRef.current = null;
-      setPreviewRawUrl(null);
-      setPreviewContent("");
-      setPreviewError("");
-      setPreviewLoading(false);
-      return;
-    }
-
-    void loadPreview(inspectorPreviewPath);
-  }, [inspectorPreviewPath]);
-
-  useEffect(() => {
-    return () => {
-      previewObjectUrlRevokeRef.current?.();
-      previewObjectUrlRevokeRef.current = null;
-    };
-  }, []);
-
   const openPreviewRawFile = () => {
     if (!inspectorPreviewPath || typeof window === "undefined") {
       return;
     }
 
     void openRawFileInNewTab(inspectorPreviewPath).catch(() => {
-      setPreviewError("Could not open the raw file right now.");
+      setPreviewActionError("Could not open the raw file right now.");
     });
   };
 
@@ -3509,36 +3253,23 @@ export default function InspectorPanel() {
           meta={shortenPath(inspectorPreviewPath, 3)}
           controls={
             <>
-              {previewMode === "text" ? (
-                <ActionButton onClick={() => void loadPreview(inspectorPreviewPath)}>
-                  <RefreshCw size={11} />
-                  Refresh
-                </ActionButton>
-              ) : null}
+              <ActionButton onClick={preview.refresh}>
+                <RefreshCw size={11} />
+                Refresh
+              </ActionButton>
               <ActionButton onClick={openPreviewRawFile}>Open raw</ActionButton>
               <ActionButton onClick={clearInspectorPath}>Clear</ActionButton>
             </>
           }
         >
-          {previewLoading ? (
-            <LoadingState label="Loading preview..." />
-          ) : previewMode === "image" && previewRawUrl ? (
-            <ImagePreview
-              src={previewRawUrl}
-              alt={inspectorPreviewPath.split("/").pop() ?? "Generated artifact"}
-            />
-          ) : previewMode === "pdf" && previewRawUrl ? (
-            <FramePreview
-              src={previewRawUrl}
-              title={inspectorPreviewPath.split("/").pop() ?? "Generated artifact"}
-            />
-          ) : previewMode === "unsupported" ? (
-            <EmptyState>{getUnsupportedPreviewMessage(inspectorPreviewPath)}</EmptyState>
-          ) : previewError ? (
-            <EmptyState>{previewError}</EmptyState>
-          ) : (
-            <PreviewPane content={previewContent} />
-          )}
+          {previewActionError ? <EmptyState>{previewActionError}</EmptyState> : null}
+          <FilePreviewSurface
+            target={inspectorPreviewTarget}
+            preview={preview}
+            emptyMessage="Select a generated file to preview it here."
+            compact
+            className={previewActionError ? "mt-2" : undefined}
+          />
         </InspectorCard>
       ) : null}
     </div>

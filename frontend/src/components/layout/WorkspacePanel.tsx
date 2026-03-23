@@ -21,27 +21,33 @@ import {
 } from "lucide-react";
 import ChatPanel from "@/components/chat/ChatPanel";
 import {
+  FilePreviewSurface,
+  useFilePreview,
+  type FilePreviewTarget,
+} from "@/components/preview/FilePreviewSurface";
+import {
   DEFAULT_ARTIFACT_REGISTRY_FILTERS,
   artifactRegistryHasActiveFilters,
   getArtifactRegistryDescription,
   getArtifactRegistryDisplayName,
   getArtifactRegistryMetadataSummary,
-  getArtifactRegistryPreviewMode,
   getArtifactRegistryRunRecordPath,
   getArtifactRegistryTimestamp,
   humanizeArtifactToken,
-  isArtifactRegistryTextPreviewable,
   normalizeArtifactRegistryQuery,
   shortenArtifactPath,
   sortArtifactRegistryRecords,
   type ArtifactRegistryFilterState,
 } from "@/lib/artifact-registry";
 import {
+  getPreviewableFileLabel,
+  inferPreviewableFileKind,
+} from "@/lib/file-preview";
+import {
   getWorkflowSummary,
 } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
 import {
-  createRawFileObjectUrl,
   getFilesWorkspaceSummary,
   getFlowsWorkspaceSummary,
   listArtifactRegistry,
@@ -68,7 +74,6 @@ import {
   type WorkspaceDocument,
 } from "./workspace-data";
 
-type PreviewStatus = "idle" | "loading" | "ready" | "error";
 type DocsWorkspaceStatus = "loading" | "ready" | "error";
 type FilesWorkspaceStatus = "idle" | "loading" | "ready" | "error";
 type ArtifactRegistryWorkspaceStatus = "loading" | "ready" | "error";
@@ -87,125 +92,9 @@ type DocsNavigatorEntry =
   | { kind: "loaded"; document: LoadedWorkspaceDocument }
   | { kind: "failed"; document: WorkspaceDocumentFailure };
 
-function usePreviewContent(path: string | null) {
-  const [status, setStatus] = useState<PreviewStatus>("idle");
-  const [content, setContent] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let active = true;
-
-    if (!path) {
-      setStatus("idle");
-      setContent("");
-      setError(null);
-      return () => {
-        active = false;
-      };
-    }
-
-    setStatus("loading");
-    setContent("");
-    setError(null);
-
-    void readFile(path)
-      .then((response) => {
-        if (!active) return;
-        setContent(response.content);
-        setStatus("ready");
-      })
-      .catch((previewError) => {
-        if (!active) return;
-        setStatus("error");
-        setError(
-          previewError instanceof Error
-            ? previewError.message
-            : "Unable to load that file preview right now."
-        );
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [path]);
-
-  return { status, content, error };
-}
-
-function useRawPreviewObjectUrl(path: string | null, enabled: boolean) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    let revoke: (() => void) | null = null;
-
-    if (!path || !enabled) {
-      setUrl(null);
-      setError(null);
-      setLoading(false);
-      return () => {
-        active = false;
-      };
-    }
-
-    const controller = new AbortController();
-    setLoading(true);
-    setError(null);
-    setUrl(null);
-
-    void createRawFileObjectUrl(path, controller.signal)
-      .then((result) => {
-        if (!active) {
-          result.revoke();
-          return;
-        }
-
-        revoke = result.revoke;
-        setUrl(result.url);
-      })
-      .catch(() => {
-        if (!active) {
-          return;
-        }
-
-        setError("Could not load the raw preview. Use Open Raw File to inspect it.");
-      })
-      .finally(() => {
-        if (active) {
-          setLoading(false);
-        }
-      });
-
-    return () => {
-      active = false;
-      controller.abort();
-      revoke?.();
-    };
-  }, [enabled, path]);
-
-  return { url, error, loading };
-}
-
-function previewText(content: string): string {
-  const lines = content.split("\n");
-  const clipped = lines.slice(0, 80).join("\n");
-  return lines.length > 80 ? `${clipped}\n…` : clipped;
-}
-
 function humanizeToken(value?: string | null): string | null {
   if (!value) return null;
   return value.replaceAll("_", " ").replaceAll("-", " ");
-}
-
-function getFileExtension(path: string): string {
-  const fileName = path.split("/").pop() ?? path;
-  const lastDot = fileName.lastIndexOf(".");
-  if (lastDot === -1) {
-    return "";
-  }
-  return fileName.slice(lastDot).toLowerCase();
 }
 
 function formatByteSize(value?: number | null): string {
@@ -239,97 +128,21 @@ type FilesWorkspaceKind =
   | "file";
 
 function inferFilesWorkspaceKind(item: FilesWorkspaceItem): FilesWorkspaceKind {
-  const extension = getFileExtension(item.path);
-  const artifactType = item.artifact_type?.toLowerCase() ?? "";
-  const outputName = item.output_name?.toLowerCase() ?? "";
-  const name = item.name.toLowerCase();
-
-  if (
-    extension === ".csv" ||
-    extension === ".tsv" ||
-    extension === ".xlsx" ||
-    extension === ".xls" ||
-    extension === ".parquet" ||
-    extension === ".mtx" ||
-    artifactType.includes("matrix") ||
-    artifactType.includes("results") ||
-    outputName.includes("table") ||
-    name.includes("matrix")
-  ) {
-    return "table";
-  }
-
-  if (
-    extension === ".png" ||
-    extension === ".jpg" ||
-    extension === ".jpeg" ||
-    extension === ".svg" ||
-    extension === ".tif" ||
-    extension === ".tiff" ||
-    artifactType === "figure" ||
-    outputName.includes("plot") ||
-    outputName.includes("figure")
-  ) {
-    return "plot";
-  }
-
-  if (
-    extension === ".json" ||
-    extension === ".yaml" ||
-    extension === ".yml" ||
-    artifactType.includes("manifest") ||
-    artifactType.includes("summary") ||
-    artifactType.includes("metrics")
-  ) {
-    return "structured";
-  }
-
-  if (
-    extension === ".html" ||
-    extension === ".pdf" ||
-    extension === ".md" ||
-    artifactType.includes("report")
-  ) {
-    return "report";
-  }
-
-  if (
-    extension === ".zip" ||
-    extension === ".gz" ||
-    extension === ".tgz" ||
-    extension === ".tar"
-  ) {
-    return "archive";
-  }
-
-  return "file";
+  return inferPreviewableFileKind({
+    path: item.path,
+    artifactType: item.artifact_type,
+    outputName: item.output_name,
+    label: item.name,
+  });
 }
 
 function filesWorkspaceKindLabel(item: FilesWorkspaceItem): string {
-  const extension = getFileExtension(item.path);
-
-  if (extension === ".csv") return "CSV";
-  if (extension === ".tsv") return "TSV";
-  if (extension === ".json") return "JSON";
-  if (extension === ".yaml" || extension === ".yml") return "YAML";
-  if (extension === ".html") return "HTML";
-  if (extension === ".pdf") return "PDF";
-  if (
-    extension === ".png" ||
-    extension === ".jpg" ||
-    extension === ".jpeg" ||
-    extension === ".svg"
-  ) {
-    return "Image";
-  }
-
-  const kind = inferFilesWorkspaceKind(item);
-  if (kind === "table") return "Table";
-  if (kind === "plot") return "Plot";
-  if (kind === "structured") return "Data";
-  if (kind === "report") return "Report";
-  if (kind === "archive") return "Archive";
-  return "File";
+  return getPreviewableFileLabel({
+    path: item.path,
+    artifactType: item.artifact_type,
+    outputName: item.output_name,
+    label: item.name,
+  });
 }
 
 function filesWorkspaceKindTone(item: FilesWorkspaceItem): string {
@@ -375,48 +188,6 @@ function shortRunLabel(runId?: string | null): string {
     return runId;
   }
   return `${runId.slice(0, 18)}…${runId.slice(-5)}`;
-}
-
-type FilesWorkspacePreviewMode = "text" | "image" | "pdf" | "unsupported";
-
-function getFilesWorkspacePreviewMode(
-  item: FilesWorkspaceItem
-): FilesWorkspacePreviewMode {
-  const extension = getFileExtension(item.path);
-
-  if (
-    extension === ".png" ||
-    extension === ".jpg" ||
-    extension === ".jpeg" ||
-    extension === ".svg"
-  ) {
-    return "image";
-  }
-
-  if (extension === ".pdf") {
-    return "pdf";
-  }
-
-  if (
-    extension === ".zip" ||
-    extension === ".gz" ||
-    extension === ".tgz" ||
-    extension === ".tar" ||
-    extension === ".tif" ||
-    extension === ".tiff" ||
-    extension === ".xlsx" ||
-    extension === ".xls" ||
-    extension === ".parquet" ||
-    extension === ".mtx"
-  ) {
-    return "unsupported";
-  }
-
-  return "text";
-}
-
-function isTextPreviewable(item: FilesWorkspaceItem): boolean {
-  return getFilesWorkspacePreviewMode(item) === "text";
 }
 
 function WorkspaceBadge({
@@ -1637,34 +1408,25 @@ function FilesDetailPane({
   status,
   item,
   error,
-  preview,
   onOpenInspector,
 }: {
   status: FilesWorkspaceStatus;
   item: FilesWorkspaceItem | null;
   error: string | null;
-  preview: {
-    status: PreviewStatus;
-    content: string;
-    error: string | null;
-  };
   onOpenInspector?: () => void;
 }) {
-  const previewMode = item ? getFilesWorkspacePreviewMode(item) : null;
-  const [openRawFileError, setOpenRawFileError] = useState<string | null>(null);
-  const previewUnavailableMessage = item
-    ? inferFilesWorkspaceKind(item) === "plot"
-      ? "This plot is ready to open in the inspector or raw-file view."
-      : inferFilesWorkspaceKind(item) === "archive"
-        ? "This archive is tracked in the workspace and can be opened through the raw-file endpoint."
-        : "This file type is tracked here even though it is not previewed inline yet."
+  const previewTarget: FilePreviewTarget | null = item
+    ? {
+        path: item.path,
+        displayName: item.name,
+        artifactType: item.artifact_type,
+        outputName: item.output_name,
+        runId: item.run_id,
+        sizeBytes: item.size_bytes,
+      }
     : null;
-  const supportsRawInlinePreview = previewMode === "image" || previewMode === "pdf";
-  const {
-    url: rawPreviewUrl,
-    error: rawPreviewError,
-    loading: rawPreviewLoading,
-  } = useRawPreviewObjectUrl(item?.path ?? null, supportsRawInlinePreview);
+  const preview = useFilePreview(previewTarget);
+  const [openRawFileError, setOpenRawFileError] = useState<string | null>(null);
 
   useEffect(() => {
     setOpenRawFileError(null);
@@ -1790,18 +1552,12 @@ function FilesDetailPane({
 
             <section className="rounded-[20px] border border-[rgba(211,219,210,0.88)] bg-[linear-gradient(180deg,rgba(250,251,248,0.97),rgba(255,255,255,0.98))] p-4 shadow-[0_8px_20px_rgba(29,42,33,0.03)]">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
+              <div>
                   <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
                     Preview
                   </p>
                   <h4 className="mt-1 text-lg font-semibold tracking-[-0.02em] text-slate-900">
-                    {previewMode === "image"
-                      ? "Inline image"
-                      : previewMode === "pdf"
-                        ? "Inline document"
-                        : previewMode === "text"
-                          ? "Inline snippet"
-                          : "Open-backed artifact"}
+                    {preview.descriptor?.title ?? "Inline preview"}
                   </h4>
                 </div>
                 {item?.path ? (
@@ -1813,44 +1569,14 @@ function FilesDetailPane({
               </div>
 
               <div className="mt-4 rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-4">
-                {previewMode === "unsupported" ? (
-                  <WorkspaceStateCard>{previewUnavailableMessage}</WorkspaceStateCard>
-                ) : supportsRawInlinePreview && rawPreviewLoading ? (
-                  <WorkspaceStateCard>Loading raw preview…</WorkspaceStateCard>
-                ) : openRawFileError || rawPreviewError ? (
-                  <WorkspaceStateCard tone="error">
-                    {openRawFileError ?? rawPreviewError}
-                  </WorkspaceStateCard>
-                ) : previewMode === "image" && rawPreviewUrl ? (
-                  <div className="overflow-hidden rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-[rgba(248,250,246,0.95)]">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={rawPreviewUrl}
-                      alt={item.name}
-                      className="max-h-[30rem] w-full object-contain"
-                    />
-                  </div>
-                ) : previewMode === "pdf" && rawPreviewUrl ? (
-                  <iframe
-                    src={rawPreviewUrl}
-                    title={item.name}
-                    className="h-[30rem] w-full rounded-[16px] border border-[rgba(214,221,212,0.86)]"
-                  />
-                ) : preview.status === "loading" ? (
-                  <WorkspaceStateCard>Loading preview…</WorkspaceStateCard>
-                ) : preview.status === "error" ? (
-                  <WorkspaceStateCard tone="error">
-                    {preview.error ?? "Unable to load that preview."}
-                  </WorkspaceStateCard>
-                ) : preview.status === "ready" ? (
-                  <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-[16px] bg-[rgba(248,250,246,0.95)] px-4 py-4 font-mono text-[12px] leading-6 text-slate-700">
-                    {previewText(preview.content)}
-                  </pre>
-                ) : (
-                  <WorkspaceStateCard>
-                    Select a generated file to preview it here.
-                  </WorkspaceStateCard>
-                )}
+                {openRawFileError ? (
+                  <WorkspaceStateCard tone="error">{openRawFileError}</WorkspaceStateCard>
+                ) : null}
+                <FilePreviewSurface
+                  target={previewTarget}
+                  preview={preview}
+                  emptyMessage="Select a generated file to preview it here."
+                />
               </div>
             </section>
           </div>
@@ -1960,9 +1686,6 @@ function FilesWorkspace() {
 
   const selectedFile =
     fileItems.find((item) => item.path === selectedFilePath) ?? fileItems[0] ?? null;
-  const preview = usePreviewContent(
-    selectedFile && isTextPreviewable(selectedFile) ? selectedFile.path : null
-  );
   const latestFile = fileItems[0] ?? null;
   const hasSessionActivity = messages.length > 0;
 
@@ -2083,7 +1806,6 @@ function FilesWorkspace() {
             status={workspaceStatus}
             item={selectedFile}
             error={workspaceError}
-            preview={preview}
             onOpenInspector={
               selectedFile?.path ? () => openInspectorPath(selectedFile.path) : undefined
             }
@@ -2412,29 +2134,25 @@ function ArtifactRegistryDetailPane({
   status,
   record,
   error,
-  preview,
   onOpenInspector,
   onOpenRunRecord,
 }: {
   status: ArtifactRegistryWorkspaceStatus;
   record: ArtifactRegistryRecord | null;
   error: string | null;
-  preview: {
-    status: PreviewStatus;
-    content: string;
-    error: string | null;
-  };
   onOpenInspector?: () => void;
   onOpenRunRecord?: () => void;
 }) {
-  const previewMode = record ? getArtifactRegistryPreviewMode(record) : null;
+  const previewTarget: FilePreviewTarget | null = record
+    ? {
+        path: record.path,
+        displayName: getArtifactRegistryDisplayName(record),
+        artifactType: record.artifact_type,
+        runId: record.run_id,
+      }
+    : null;
+  const preview = useFilePreview(previewTarget);
   const [openRawFileError, setOpenRawFileError] = useState<string | null>(null);
-  const supportsRawInlinePreview = previewMode === "image" || previewMode === "pdf";
-  const {
-    url: rawPreviewUrl,
-    error: rawPreviewError,
-    loading: rawPreviewLoading,
-  } = useRawPreviewObjectUrl(record?.path ?? null, supportsRawInlinePreview);
 
   useEffect(() => {
     setOpenRawFileError(null);
@@ -2450,12 +2168,6 @@ function ArtifactRegistryDetailPane({
       setOpenRawFileError("Could not open the raw file right now.");
     });
   };
-
-  const previewUnavailableMessage = record
-    ? record.status === "invalid"
-      ? "This registry entry is invalid. Use the structured metadata and run record to inspect what failed."
-      : "This artifact is tracked in the registry even though it is not previewed inline yet."
-    : null;
 
   return (
     <div className="flex min-h-[32rem] flex-col rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/94 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
@@ -2623,13 +2335,7 @@ function ArtifactRegistryDetailPane({
                     Preview
                   </p>
                   <h4 className="mt-1 text-lg font-semibold tracking-[-0.02em] text-slate-900">
-                    {previewMode === "image"
-                      ? "Inline image"
-                      : previewMode === "pdf"
-                        ? "Inline document"
-                        : previewMode === "text"
-                          ? "Inline snippet"
-                          : "Open-backed artifact"}
+                    {preview.descriptor?.title ?? "Inline preview"}
                   </h4>
                 </div>
                 <WorkspaceAction onClick={handleOpenRawFile}>
@@ -2639,44 +2345,14 @@ function ArtifactRegistryDetailPane({
               </div>
 
               <div className="mt-4 rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-4">
-                {previewMode === "unsupported" ? (
-                  <WorkspaceStateCard>{previewUnavailableMessage}</WorkspaceStateCard>
-                ) : supportsRawInlinePreview && rawPreviewLoading ? (
-                  <WorkspaceStateCard>Loading raw preview…</WorkspaceStateCard>
-                ) : openRawFileError || rawPreviewError ? (
-                  <WorkspaceStateCard tone="error">
-                    {openRawFileError ?? rawPreviewError}
-                  </WorkspaceStateCard>
-                ) : previewMode === "image" && rawPreviewUrl ? (
-                  <div className="overflow-hidden rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-[rgba(248,250,246,0.95)]">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={rawPreviewUrl}
-                      alt={getArtifactRegistryDisplayName(record)}
-                      className="max-h-[30rem] w-full object-contain"
-                    />
-                  </div>
-                ) : previewMode === "pdf" && rawPreviewUrl ? (
-                  <iframe
-                    src={rawPreviewUrl}
-                    title={getArtifactRegistryDisplayName(record)}
-                    className="h-[30rem] w-full rounded-[16px] border border-[rgba(214,221,212,0.86)]"
-                  />
-                ) : preview.status === "loading" ? (
-                  <WorkspaceStateCard>Loading preview…</WorkspaceStateCard>
-                ) : preview.status === "error" ? (
-                  <WorkspaceStateCard tone="error">
-                    {preview.error ?? "Unable to load that preview."}
-                  </WorkspaceStateCard>
-                ) : preview.status === "ready" ? (
-                  <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-[16px] bg-[rgba(248,250,246,0.95)] px-4 py-4 font-mono text-[12px] leading-6 text-slate-700">
-                    {previewText(preview.content)}
-                  </pre>
-                ) : (
-                  <WorkspaceStateCard>
-                    Select an artifact to preview it here.
-                  </WorkspaceStateCard>
-                )}
+                {openRawFileError ? (
+                  <WorkspaceStateCard tone="error">{openRawFileError}</WorkspaceStateCard>
+                ) : null}
+                <FilePreviewSurface
+                  target={previewTarget}
+                  preview={preview}
+                  emptyMessage="Select an artifact to preview it here."
+                />
               </div>
             </section>
           </div>
@@ -2789,11 +2465,6 @@ function ArtifactsWorkspace() {
     registryRecords.find((record) => record.path === selectedArtifactPath) ??
     registryRecords[0] ??
     null;
-  const preview = usePreviewContent(
-    selectedRecord && isArtifactRegistryTextPreviewable(selectedRecord)
-      ? selectedRecord.path
-      : null
-  );
   const hasActiveFilters = artifactRegistryHasActiveFilters(filters);
   const generatedAtLabel = formatArtifactRegistryGeneratedAt(
     lookup?.generated_at ?? null
@@ -2924,7 +2595,6 @@ function ArtifactsWorkspace() {
             status={workspaceStatus}
             record={selectedRecord}
             error={workspaceError}
-            preview={preview}
             onOpenInspector={
               selectedRecord?.path
                 ? () => openInspectorPath(selectedRecord.path)

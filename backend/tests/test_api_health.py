@@ -845,6 +845,28 @@ class TestFilesEndpoints:
         assert resp.media_type == "application/json"
         assert b'"$schema"' in resp.body
 
+    def test_read_binary_artifact_file_raw_preserves_bytes(self, isolated_api_state):
+        from api.files import read_raw_file
+
+        image_path = (
+            isolated_api_state
+            / "artifacts"
+            / "demo"
+            / "2026-03-18"
+            / "run-20260318T190203Z-deadbeef"
+            / "preview.png"
+        )
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = b"\x89PNG\r\n\x1a\nBIOAPEX"
+        image_path.write_bytes(payload)
+
+        resp = read_raw_file(
+            "artifacts/demo/2026-03-18/run-20260318T190203Z-deadbeef/preview.png"
+        )
+
+        assert resp.media_type == "image/png"
+        assert resp.body == payload
+
     def test_read_artifact_reference_schema_raw_rewrites_schema_id_to_public_url(
         self,
         isolated_api_state,

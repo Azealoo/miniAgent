@@ -134,7 +134,15 @@ def read_raw_file(path: str = Query(..., description="Relative file path"), requ
     if not target.is_file():
         raise HTTPException(400, f"Not a file: {path}")
 
-    return Response(content=_read_raw_content(target, clean), media_type=_guess_media_type(target))
+    media_type = _guess_media_type(target)
+
+    if clean.startswith(_REFERENCE_SCHEMA_PREFIX) and target.suffix.lower() == ".json":
+        return Response(
+            content=_read_raw_content(target, clean).encode("utf-8"),
+            media_type=media_type,
+        )
+
+    return Response(content=target.read_bytes(), media_type=media_type)
 
 
 # ------------------------------------------------------------------ #
