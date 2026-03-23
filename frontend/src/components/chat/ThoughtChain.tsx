@@ -11,10 +11,16 @@ import {
   ShieldAlert,
   Terminal,
 } from "lucide-react";
+import {
+  complianceWarningsState,
+  getAuditLogPath,
+  getComplianceReport,
+  labelizeComplianceValue,
+  summarizeComplianceReport,
+} from "@/lib/compliance";
 import { getEvidenceReviewPayload } from "@/lib/evidence";
 import { cn } from "@/lib/utils";
 import type {
-  ComplianceReportArtifact,
   JsonValue,
   ToolCall,
   ToolResultEnvelope,
@@ -62,22 +68,6 @@ function compactText(value?: string | null, maxLength = 120): string | null {
   return `${normalized.slice(0, maxLength - 1)}…`;
 }
 
-function complianceRuntimeState(report: ComplianceReportArtifact | null): string | null {
-  return typeof report?.runtime_state === "string" ? report.runtime_state : null;
-}
-
-function compliancePreflightDisposition(
-  report: ComplianceReportArtifact | null
-): string | null {
-  return typeof report?.preflight_disposition === "string"
-    ? report.preflight_disposition
-    : null;
-}
-
-function complianceFinalDisposition(report: ComplianceReportArtifact | null): string | null {
-  return typeof report?.final_disposition === "string" ? report.final_disposition : null;
-}
-
 function outcomeBadgeClass(result?: ToolResultEnvelope): string {
   if (!result) return "border-slate-200 bg-slate-100 text-slate-500";
   const reviewStatus = evidenceReviewStatus(result);
@@ -86,19 +76,17 @@ function outcomeBadgeClass(result?: ToolResultEnvelope): string {
   if (reviewStatus === "mixed") return "border-amber-200 bg-amber-50 text-amber-700";
   if (reviewStatus === "supported") return "border-emerald-200 bg-emerald-50 text-emerald-700";
   const complianceReport = getComplianceReport(result);
-  const runtimeState = complianceRuntimeState(complianceReport);
-  if (runtimeState === "approved_override") return "border-sky-200 bg-sky-50 text-sky-700";
-  if (runtimeState === "approval_required") return "border-amber-200 bg-amber-50 text-amber-700";
-  if (runtimeState === "blocked") return "border-rose-200 bg-rose-50 text-rose-700";
-  if (runtimeState === "warning_issued") return "border-amber-200 bg-amber-50 text-amber-700";
-  if (result.warnings.includes("approval_required")) {
+  const complianceState = complianceReport
+    ? summarizeComplianceReport(complianceReport).state
+    : complianceWarningsState(result.warnings);
+  if (complianceState === "approved") return "border-sky-200 bg-sky-50 text-sky-700";
+  if (complianceState === "approval_required") {
     return "border-amber-200 bg-amber-50 text-amber-700";
   }
-  if (result.warnings.includes("blocked_by_compliance")) {
-    return "border-rose-200 bg-rose-50 text-rose-700";
-  }
-  if (result.warnings.includes("compliance_warning")) {
-    return "border-amber-200 bg-amber-50 text-amber-700";
+  if (complianceState === "blocked") return "border-rose-200 bg-rose-50 text-rose-700";
+  if (complianceState === "warning") return "border-amber-200 bg-amber-50 text-amber-700";
+  if (complianceState === "reviewing") {
+    return "border-slate-200 bg-slate-100 text-slate-500";
   }
   if (result.status === "error") return "border-rose-200 bg-rose-50 text-rose-700";
   if (result.outcome === "success_empty") return "border-amber-200 bg-amber-50 text-amber-700";
@@ -113,44 +101,12 @@ function outcomeBadgeText(call: ToolCall): string {
   const reviewStatus = evidenceReviewStatus(result);
   if (reviewStatus) return humanizeUnderscoreValue(reviewStatus);
   const complianceReport = getComplianceReport(result);
-  const runtimeState = complianceRuntimeState(complianceReport);
-  if (runtimeState) {
-    return humanizeUnderscoreValue(runtimeState);
+  if (complianceReport) {
+    return summarizeComplianceReport(complianceReport).label.toLowerCase();
   }
-  const finalDisposition = complianceFinalDisposition(complianceReport);
-  if (finalDisposition) {
-    return humanizeUnderscoreValue(finalDisposition);
-  }
-  if (call.tool === "compliance_preflight") {
-    if (result.warnings.includes("approval_required")) return "approval required";
-    if (result.warnings.includes("blocked_by_compliance")) return "blocked";
-    if (result.warnings.includes("compliance_warning")) return "warning";
-  }
+  const warningState = complianceWarningsState(result.warnings);
+  if (warningState) return warningState.replaceAll("_", " ");
   return result.outcome.replaceAll("_", " ");
-}
-
-function getComplianceReport(result?: ToolResultEnvelope): ComplianceReportArtifact | null {
-  const payload = result?.structured_payload;
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return null;
-  }
-  const report = (payload as Record<string, JsonValue>).report;
-  if (!report || typeof report !== "object" || Array.isArray(report)) {
-    return null;
-  }
-  if ((report as Record<string, JsonValue>).artifact_type !== "compliance_report") {
-    return null;
-  }
-  return report as unknown as ComplianceReportArtifact;
-}
-
-function getAuditLogPath(result?: ToolResultEnvelope): string | null {
-  const payload = result?.structured_payload;
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return null;
-  }
-  const auditLogPath = (payload as Record<string, JsonValue>).audit_log_path;
-  return typeof auditLogPath === "string" ? auditLogPath : null;
 }
 
 function evidenceReviewStatus(result?: ToolResultEnvelope): string | null {
@@ -281,6 +237,9 @@ function SingleCall({ call }: SingleCallProps) {
   const warnings = call.result?.warnings ?? [];
   const sourcePayload = call.result?.source_payload;
   const complianceReport = getComplianceReport(call.result);
+  const complianceSummary = complianceReport
+    ? summarizeComplianceReport(complianceReport)
+    : null;
   const auditLogPath = getAuditLogPath(call.result);
   const evidenceReview = getEvidenceReviewPayload(call.result);
   const metric = toolMetric(call);
@@ -355,28 +314,33 @@ function SingleCall({ call }: SingleCallProps) {
               <div className="space-y-1 text-xs">
                 <div>
                   <span className="text-slate-400">State:</span>{" "}
-                  {humanizeUnderscoreValue(complianceRuntimeState(complianceReport))}
+                  {complianceSummary?.label ?? "Recorded"}
+                </div>
+                <div>
+                  <span className="text-slate-400">Risk:</span>{" "}
+                  {labelizeComplianceValue(complianceReport.risk_category) ?? "Unknown"}
                 </div>
                 <div>
                   <span className="text-slate-400">Preflight:</span>{" "}
-                  {humanizeUnderscoreValue(
-                    compliancePreflightDisposition(complianceReport)
-                  )}
+                  {labelizeComplianceValue(complianceReport.preflight_disposition) ??
+                    "Unknown"}
                 </div>
                 <div>
                   <span className="text-slate-400">Final:</span>{" "}
-                  {humanizeUnderscoreValue(
-                    complianceFinalDisposition(complianceReport)
-                  )}
+                  {labelizeComplianceValue(complianceReport.final_disposition) ?? "Unknown"}
                 </div>
                 <div>
                   <span className="text-slate-400">Rules hit:</span>{" "}
                   {complianceReport.triggered_rules.length}
                 </div>
+                <div>
+                  <span className="text-slate-400">Human approval:</span>{" "}
+                  {complianceReport.human_approval_required ? "required" : "not required"}
+                </div>
                 {complianceReport.approval_scope && (
                   <div>
                     <span className="text-slate-400">Approval scope:</span>{" "}
-                    {complianceReport.approval_scope}
+                    {labelizeComplianceValue(complianceReport.approval_scope)}
                   </div>
                 )}
                 {complianceReport.approval && (

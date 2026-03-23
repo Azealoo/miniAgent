@@ -13,6 +13,8 @@ import {
   ShieldAlert,
   Workflow,
 } from "lucide-react";
+import ComplianceSummaryCard from "@/components/compliance/ComplianceSummaryCard";
+import { summarizeComplianceReport } from "@/lib/compliance";
 import { cn } from "@/lib/utils";
 import {
   buildWorkflowProgressRuns,
@@ -24,6 +26,7 @@ import {
   type WorkflowProgressStep,
 } from "@/lib/workflow-progress";
 import type {
+  ComplianceReportArtifact,
   WorkflowArtifactRef,
   WorkflowIssueDetail,
   WorkflowStreamEvent,
@@ -31,6 +34,8 @@ import type {
 
 interface WorkflowProgressCardProps {
   events: WorkflowStreamEvent[];
+  complianceReport?: ComplianceReportArtifact | null;
+  auditLogPath?: string | null;
 }
 
 function humanizeValue(value?: string | null): string {
@@ -57,6 +62,26 @@ function runStatusClass(status: WorkflowProgressRun["lifecycleStatus"]): string 
     return "border-rose-200 bg-rose-50 text-rose-700";
   }
   return "border-[rgba(35,130,83,0.16)] bg-[rgba(35,130,83,0.1)] text-[var(--apex-accent-strong)]";
+}
+
+function complianceStatusClass(state: string): string {
+  if (state === "blocked") {
+    return "border-rose-200 bg-rose-50 text-rose-700";
+  }
+
+  if (state === "approval_required" || state === "warning") {
+    return "border-amber-200 bg-amber-50 text-amber-700";
+  }
+
+  if (state === "approved") {
+    return "border-sky-200 bg-sky-50 text-sky-700";
+  }
+
+  if (state === "ready") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  }
+
+  return "border-slate-200 bg-slate-100 text-slate-500";
 }
 
 function stepStatusClass(status: WorkflowDisplayStepStatus, isCurrent: boolean): string {
@@ -368,11 +393,18 @@ function WorkflowStepCard({
   );
 }
 
-export default function WorkflowProgressCard({ events }: WorkflowProgressCardProps) {
+export default function WorkflowProgressCard({
+  events,
+  complianceReport = null,
+  auditLogPath = null,
+}: WorkflowProgressCardProps) {
   const runs = buildWorkflowProgressRuns(events);
   const run = selectDisplayRun(runs);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [runDetailsOpen, setRunDetailsOpen] = useState(false);
+  const complianceSummary = complianceReport
+    ? summarizeComplianceReport(complianceReport)
+    : null;
 
   const isLive = Boolean(
     run &&
@@ -407,7 +439,7 @@ export default function WorkflowProgressCard({ events }: WorkflowProgressCardPro
     elapsedWorkflowDuration(run.startedAt, run.endedAt, nowMs) ?? run.durationSeconds
   );
   const statusLabel = runStatusLabel(run);
-  const detailLabel = run.blockedReason
+  const baseDetailLabel = run.blockedReason
     ? run.blockedReason
     : run.currentStepLabel
       ? `Current step: ${run.currentStepLabel}`
@@ -416,6 +448,10 @@ export default function WorkflowProgressCard({ events }: WorkflowProgressCardPro
         : run.lifecycleStatus === "failed"
           ? "Run stopped before all planned steps completed."
           : "Preparing workflow execution.";
+  const detailLabel =
+    complianceSummary?.state === "approval_required"
+      ? "Waiting for operator approval before workflow execution can continue."
+      : baseDetailLabel;
   const runArtifacts = run.artifacts.filter((artifact) => !artifact.stepId);
   const showRunDetails = hasRunDetails(run, runArtifacts);
 
@@ -437,6 +473,16 @@ export default function WorkflowProgressCard({ events }: WorkflowProgressCardPro
               >
                 {statusLabel}
               </span>
+              {complianceSummary && (
+                <span
+                  className={cn(
+                    "rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                    complianceStatusClass(complianceSummary.state)
+                  )}
+                >
+                  {complianceSummary.label}
+                </span>
+              )}
               {run.resumed && (
                 <span className="rounded-full border border-slate-200 bg-white/85 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
                   Resumed
@@ -450,6 +496,17 @@ export default function WorkflowProgressCard({ events }: WorkflowProgressCardPro
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
               {detailLabel}
             </p>
+
+            {complianceReport && (
+              <ComplianceSummaryCard
+                report={complianceReport}
+                auditLogPath={auditLogPath}
+                title="Run gate"
+                compact
+                maxRules={2}
+                className="mt-3"
+              />
+            )}
 
             <div className="mt-3 flex flex-wrap items-center gap-2.5 text-[11px] text-slate-500">
               {currentPosition && totalSteps ? (
@@ -483,6 +540,11 @@ export default function WorkflowProgressCard({ events }: WorkflowProgressCardPro
             <span className="text-[11px] text-slate-500">
               {totalSteps ? "steps complete" : "completed"}
             </span>
+            {complianceSummary ? (
+              <span className="mt-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                Gate: {complianceSummary.label}
+              </span>
+            ) : null}
           </div>
         </div>
 

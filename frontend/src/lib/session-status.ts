@@ -1,13 +1,12 @@
 import type {
-  ComplianceDisposition,
   ComplianceReportArtifact,
-  JsonValue,
   Message,
   ToolCall,
   ToolResultEnvelope,
   WorkflowLifecycleStatus,
   WorkflowStreamEvent,
 } from "./types";
+import { getComplianceReport, summarizeComplianceReport } from "./compliance";
 
 export type WorkflowSummaryStatus =
   | "idle"
@@ -413,94 +412,13 @@ function summarizeReadinessFromToolCall(call: ToolCall): ReadinessSummary | null
 function summarizeReadinessFromReport(
   report: ComplianceReportArtifact
 ): ReadinessSummary {
-  const runtimeState =
-    typeof report.runtime_state === "string" ? report.runtime_state : null;
-  const finalDisposition = normalizeDisposition(report.final_disposition);
-  const preflightDisposition = normalizeDisposition(report.preflight_disposition);
-  const triggeredRules = report.triggered_rules.length;
-  const rulesLabel =
-    triggeredRules === 1 ? "1 rule triggered." : `${triggeredRules} rules triggered.`;
-
-  if (runtimeState === "blocked" || finalDisposition === "block" || preflightDisposition === "block") {
-    return {
-      state: "blocked",
-      label: "Blocked",
-      detail: triggeredRules > 0 ? rulesLabel : "Compliance blocked this action.",
-    };
-  }
-
-  if (
-    runtimeState === "approval_required" ||
-    finalDisposition === "require_approval" ||
-    preflightDisposition === "require_approval" ||
-    report.human_approval_required
-  ) {
-    return {
-      state: "approval_required",
-      label: "Approval",
-      detail: triggeredRules > 0 ? rulesLabel : "Approval is required before proceeding.",
-    };
-  }
-
-  if (runtimeState === "approved_override") {
-    return {
-      state: "approved",
-      label: "Approved",
-      detail: report.approval?.rationale ?? "Approval override recorded.",
-    };
-  }
-
-  if (
-    runtimeState === "warning_issued" ||
-    finalDisposition === "allow_with_warning" ||
-    preflightDisposition === "allow_with_warning"
-  ) {
-    return {
-      state: "warning",
-      label: "Warning",
-      detail: triggeredRules > 0 ? rulesLabel : "Compliance warning issued.",
-    };
-  }
-
-  if (runtimeState === "preflight_pending") {
-    return {
-      state: "reviewing",
-      label: "Reviewing",
-      detail: "Compliance preflight is still running.",
-    };
-  }
+  const summary = summarizeComplianceReport(report);
 
   return {
-    state: "ready",
-    label: "Ready",
-    detail: triggeredRules > 0 ? rulesLabel : "Compliance checks are clear.",
+    state: summary.state,
+    label: summary.label,
+    detail: summary.detail,
   };
-}
-
-function normalizeDisposition(
-  disposition?: ComplianceDisposition | null
-): ComplianceDisposition | null {
-  return disposition ?? null;
-}
-
-function getComplianceReport(
-  result?: ToolResultEnvelope
-): ComplianceReportArtifact | null {
-  const payload = result?.structured_payload;
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return null;
-  }
-
-  const report = (payload as Record<string, JsonValue>).report;
-  if (!report || typeof report !== "object" || Array.isArray(report)) {
-    return null;
-  }
-
-  if ((report as Record<string, JsonValue>).artifact_type !== "compliance_report") {
-    return null;
-  }
-
-  return report as unknown as ComplianceReportArtifact;
 }
 
 function getSelectedWorkflowFromResult(

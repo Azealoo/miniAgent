@@ -28,10 +28,17 @@ import {
   Trash2,
 } from "lucide-react";
 import {
+  getAuditLogPath,
+  getComplianceReport,
+  getLatestComplianceToolCallForWorkflow,
+  getLatestComplianceToolCallFromMessages,
+} from "@/lib/compliance";
+import {
   FilePreviewSurface,
   useFilePreview,
   type FilePreviewTarget,
 } from "@/components/preview/FilePreviewSurface";
+import ComplianceSummaryCard from "@/components/compliance/ComplianceSummaryCard";
 import {
   getArtifactRegistryDescription,
   getArtifactRegistryDisplayName,
@@ -77,6 +84,7 @@ import type {
   SourcesInspectorChecklistItem,
   SourcesInspectorSummary,
   TokenStats,
+  ToolCall,
   ToolResultEnvelope,
   WorkflowArtifactScope,
   WorkflowStreamEvent,
@@ -984,6 +992,39 @@ function getSourceScopeMessages(
   return messages.filter((message) => scopedIds.has(message.id));
 }
 
+function getWorkflowRequestId(
+  messages: Message[],
+  workflowRunId: string | null
+): string | null {
+  if (!workflowRunId) {
+    return null;
+  }
+
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!message?.request_id) {
+      continue;
+    }
+
+    if ((message.workflow_events ?? []).some((event) => event.run_id === workflowRunId)) {
+      return message.request_id;
+    }
+  }
+
+  return null;
+}
+
+function filterMessagesByRequestId(
+  messages: Message[],
+  requestId: string | null
+): Message[] {
+  if (!requestId) {
+    return [];
+  }
+
+  return messages.filter((message) => message.request_id === requestId);
+}
+
 function mergeSourceItemWithMetadata(
   item: SourceInspectorItem,
   metadata?: EvidenceArtifactMetadata | null
@@ -1079,42 +1120,6 @@ function getSupportPercentFromRetrievalScore(score: number): number | null {
   return clampPercent(score);
 }
 
-function getComplianceReport(
-  result?: ToolResultEnvelope
-): ComplianceReportArtifact | null {
-  const payload = result?.structured_payload;
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return null;
-  }
-
-  const report = (payload as Record<string, unknown>).report;
-  if (!report || typeof report !== "object" || Array.isArray(report)) {
-    return null;
-  }
-
-  if ((report as Record<string, unknown>).artifact_type !== "compliance_report") {
-    return null;
-  }
-
-  return report as ComplianceReportArtifact;
-}
-
-function getLatestComplianceReport(
-  messages: Message[]
-): ComplianceReportArtifact | null {
-  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
-    const toolCalls = messages[messageIndex]?.tool_calls ?? [];
-    for (let callIndex = toolCalls.length - 1; callIndex >= 0; callIndex -= 1) {
-      const report = getComplianceReport(toolCalls[callIndex]?.result);
-      if (report) {
-        return report;
-      }
-    }
-  }
-
-  return null;
-}
-
 function getComplianceChecklistState(
   report: ComplianceReportArtifact | null
 ): SourcesInspectorChecklistItem["state"] {
@@ -1187,6 +1192,7 @@ function getComplianceSummaryDetail(
 
 function buildSourcesInspectorSummary(args: {
   scopedMessages: Message[];
+  complianceToolCall: ToolCall | null;
   reviewedItems: SourceInspectorItem[];
   retrievedItems: RetrievedSourceSummary[];
 }): SourcesInspectorSummary {
@@ -1253,7 +1259,12 @@ function buildSourcesInspectorSummary(args: {
 
   citations.sort((left, right) => right.last_seen_order - left.last_seen_order);
 
-  const complianceReport = getLatestComplianceReport(args.scopedMessages);
+  const complianceReport = args.complianceToolCall
+    ? getComplianceReport(args.complianceToolCall.result)
+    : null;
+  const auditLogPath = args.complianceToolCall
+    ? getAuditLogPath(args.complianceToolCall.result)
+    : null;
   const complianceState = getComplianceChecklistState(complianceReport);
   const hasLoggedParams = complianceReport
     ? Boolean(
@@ -1283,6 +1294,8 @@ function buildSourcesInspectorSummary(args: {
         args.scopedMessages.length
       ),
       state: complianceState,
+      report: complianceReport,
+      audit_log_path: auditLogPath,
       items: [
         {
           id: "provenance-verified",
@@ -2440,6 +2453,26 @@ export default function InspectorPanel() {
   const hasActiveRun = workflowSummary.events.length > 0;
   const artifactItems = collectArtifacts(workflowSummary.events);
   const latestWorkflowEvent = workflowSummary.events.at(-1);
+  const latestRequestMessages = getLatestRequestMessages(messages);
+  const workflowRequestId = getWorkflowRequestId(
+    messages,
+    latestWorkflowEvent?.run_id ?? null
+  );
+  const workflowRequestMessages = filterMessagesByRequestId(messages, workflowRequestId);
+  const runComplianceToolCall =
+    workflowRequestMessages.length > 0
+      ? getLatestComplianceToolCallFromMessages(workflowRequestMessages)
+      : getLatestComplianceToolCallForWorkflow(
+          messages,
+          latestWorkflowEvent?.workflow_id ?? null
+        ) ??
+        getLatestComplianceToolCallFromMessages(latestRequestMessages);
+  const runComplianceReport = runComplianceToolCall
+    ? getComplianceReport(runComplianceToolCall.result)
+    : null;
+  const runComplianceAuditLogPath = runComplianceToolCall
+    ? getAuditLogPath(runComplianceToolCall.result)
+    : null;
   const sourceInspectorData = collectSourceInspectorData(messages, workflowSummary);
   const reviewedSourceItems = sourceInspectorData.reviewedItems.map((item) =>
     item.path
@@ -2448,6 +2481,7 @@ export default function InspectorPanel() {
   );
   const sourcesSummary = buildSourcesInspectorSummary({
     scopedMessages: sourceInspectorData.scopedMessages,
+    complianceToolCall: runComplianceToolCall,
     reviewedItems: reviewedSourceItems,
     retrievedItems: sourceInspectorData.retrievedItems,
   });
@@ -3095,6 +3129,17 @@ export default function InspectorPanel() {
             </div>
 
             <p className="text-[11px] leading-5 text-slate-600">{runDetail}</p>
+
+            {runComplianceReport ? (
+              <ComplianceSummaryCard
+                report={runComplianceReport}
+                auditLogPath={runComplianceAuditLogPath}
+                title="Run compliance"
+                compact
+                maxRules={2}
+                className="mt-2"
+              />
+            ) : null}
           </div>
         ) : (
           <EmptyState>
@@ -3342,6 +3387,13 @@ export default function InspectorPanel() {
           ))}
         </div>
       </section>
+
+      <ComplianceSummaryCard
+        report={sourcesSummary.compliance.report}
+        auditLogPath={sourcesSummary.compliance.audit_log_path}
+        title="Compliance detail"
+        emptyMessage="Compliance preflight results will appear here once the current turn or workflow run produces them."
+      />
     </div>
   );
 

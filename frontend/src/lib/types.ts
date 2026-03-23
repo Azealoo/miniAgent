@@ -230,6 +230,8 @@ export interface SourcesInspectorComplianceCard {
   detail: string | null;
   state: SourcesInspectorChecklistState;
   items: SourcesInspectorChecklistItem[];
+  report: ComplianceReportArtifact | null;
+  audit_log_path: string | null;
 }
 
 export interface SourcesInspectorSummary {

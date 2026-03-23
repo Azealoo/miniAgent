@@ -3,6 +3,13 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
+import ComplianceSummaryCard from "@/components/compliance/ComplianceSummaryCard";
+import {
+  getAuditLogPath,
+  getComplianceReport,
+  getLatestComplianceToolCall,
+  reportAppliesToWorkflow,
+} from "@/lib/compliance";
 import { cn } from "@/lib/utils";
 import ThoughtChain from "./ThoughtChain";
 import RetrievalCard from "./RetrievalCard";
@@ -103,14 +110,37 @@ function MarkdownContent({
 
 export default function ChatMessage({ message }: ChatMessageProps) {
   const isUser = message.role === "user";
+  const complianceToolCall = getLatestComplianceToolCall(message.tool_calls ?? []);
+  const complianceReport = complianceToolCall
+    ? getComplianceReport(complianceToolCall.result)
+    : null;
+  const complianceAuditLogPath = complianceToolCall
+    ? getAuditLogPath(complianceToolCall.result)
+    : null;
   const hasRetrievals = Boolean(message.retrievals && message.retrievals.length > 0);
   const hasWorkflowProgress = Boolean(
     message.workflow_events && message.workflow_events.length > 0
   );
+  const workflowComplianceReport =
+    hasWorkflowProgress &&
+    complianceReport &&
+    reportAppliesToWorkflow(
+      complianceReport,
+      message.workflow_events?.at(-1)?.workflow_id ?? null
+    )
+      ? complianceReport
+      : null;
+  const workflowComplianceAuditLogPath = workflowComplianceReport
+    ? complianceAuditLogPath
+    : null;
+  const hasCompliance = Boolean(complianceReport);
+  const showStandaloneCompliance =
+    complianceReport !== null &&
+    (!workflowComplianceReport || workflowComplianceReport.id !== complianceReport.id);
   const hasToolTrace =
     Boolean(message.tool_calls && message.tool_calls.length > 0) ||
     Boolean(message.pendingTool);
-  const hasSupport = hasRetrievals || hasWorkflowProgress || hasToolTrace;
+  const hasSupport = hasCompliance || hasRetrievals || hasWorkflowProgress || hasToolTrace;
   const hasContent = Boolean(message.content);
 
   if (isUser) {
@@ -145,9 +175,19 @@ export default function ChatMessage({ message }: ChatMessageProps) {
 
         {hasSupport && (
           <div className="mt-3 space-y-2.5">
+            {showStandaloneCompliance && (
+              <ComplianceSummaryCard
+                report={complianceReport}
+                auditLogPath={complianceAuditLogPath}
+              />
+            )}
             {hasRetrievals && <RetrievalCard results={message.retrievals ?? []} />}
             {hasWorkflowProgress && (
-              <WorkflowProgressCard events={message.workflow_events ?? []} />
+              <WorkflowProgressCard
+                events={message.workflow_events ?? []}
+                complianceReport={workflowComplianceReport}
+                auditLogPath={workflowComplianceAuditLogPath}
+              />
             )}
             {hasToolTrace && (
               <ThoughtChain
