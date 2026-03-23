@@ -9,8 +9,11 @@ import {
   type ReactNode,
 } from "react";
 import {
+  AlertTriangle,
   BookOpen,
   Brain,
+  Check,
+  Clock3,
   Copy,
   Download,
   FileText,
@@ -44,9 +47,14 @@ import {
 import { useApp } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type {
+  ComplianceReportArtifact,
   ConfidenceLevel,
   Message,
   SkillRegistryEntry,
+  SourcesInspectorCitation,
+  SourcesInspectorCitationTone,
+  SourcesInspectorChecklistItem,
+  SourcesInspectorSummary,
   TokenStats,
   ToolResultEnvelope,
   WorkflowArtifactScope,
@@ -93,13 +101,7 @@ type InspectorPreviewMode = "text" | "image" | "pdf" | "unsupported";
 
 type SourceInspectorItemKind = "review" | "evidence" | "retrieval";
 
-type SourceInspectorTone =
-  | "supported"
-  | "mixed"
-  | "insufficient"
-  | "retrieved"
-  | "warning"
-  | "neutral";
+type SourceInspectorTone = SourcesInspectorCitationTone;
 
 type SourceInspectorItem = {
   id: string;
@@ -1177,6 +1179,287 @@ function mergeSourceItemWithMetadata(
   return nextItem;
 }
 
+function clampPercent(value: number): number {
+  return Math.max(0, Math.min(99, Math.round(value)));
+}
+
+function getSupportPercentFromTone(
+  tone: SourceInspectorTone
+): number | null {
+  if (tone === "supported") {
+    return 94;
+  }
+
+  if (tone === "mixed") {
+    return 81;
+  }
+
+  if (tone === "insufficient") {
+    return 58;
+  }
+
+  if (tone === "warning") {
+    return 64;
+  }
+
+  if (tone === "retrieved") {
+    return 91;
+  }
+
+  return null;
+}
+
+function getSupportPercentFromRetrievalScore(score: number): number | null {
+  if (!Number.isFinite(score)) {
+    return null;
+  }
+
+  if (score >= 0 && score <= 1) {
+    return clampPercent(score * 100);
+  }
+
+  return clampPercent(score);
+}
+
+function getComplianceReport(
+  result?: ToolResultEnvelope
+): ComplianceReportArtifact | null {
+  const payload = result?.structured_payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+
+  const report = (payload as Record<string, unknown>).report;
+  if (!report || typeof report !== "object" || Array.isArray(report)) {
+    return null;
+  }
+
+  if ((report as Record<string, unknown>).artifact_type !== "compliance_report") {
+    return null;
+  }
+
+  return report as ComplianceReportArtifact;
+}
+
+function getLatestComplianceReport(
+  messages: Message[]
+): ComplianceReportArtifact | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const toolCalls = messages[messageIndex]?.tool_calls ?? [];
+    for (let callIndex = toolCalls.length - 1; callIndex >= 0; callIndex -= 1) {
+      const report = getComplianceReport(toolCalls[callIndex]?.result);
+      if (report) {
+        return report;
+      }
+    }
+  }
+
+  return null;
+}
+
+function getComplianceChecklistState(
+  report: ComplianceReportArtifact | null
+): SourcesInspectorChecklistItem["state"] {
+  if (!report) {
+    return "pending";
+  }
+
+  if (
+    report.runtime_state === "blocked" ||
+    report.final_disposition === "block" ||
+    report.preflight_disposition === "block"
+  ) {
+    return "blocked";
+  }
+
+  if (
+    report.runtime_state === "approval_required" ||
+    report.runtime_state === "warning_issued" ||
+    report.final_disposition === "require_approval" ||
+    report.final_disposition === "allow_with_warning"
+  ) {
+    return "warning";
+  }
+
+  if (report.runtime_state === "preflight_pending") {
+    return "pending";
+  }
+
+  return "complete";
+}
+
+function getComplianceSummaryLabel(
+  report: ComplianceReportArtifact | null
+): string | null {
+  if (!report) {
+    return null;
+  }
+
+  if (report.runtime_state === "approved_override") {
+    return "Approved";
+  }
+
+  return (
+    humanizeLabel(report.runtime_state) ??
+    humanizeLabel(report.final_disposition) ??
+    null
+  );
+}
+
+function getComplianceSummaryDetail(
+  report: ComplianceReportArtifact | null,
+  scopedMessageCount: number
+): string | null {
+  if (!report) {
+    return scopedMessageCount > 0
+      ? "No compliance report is attached to the current source scope yet."
+      : "Compliance preflight results will appear here once the current turn or workflow run produces them.";
+  }
+
+  if (report.approval?.rationale) {
+    return report.approval.rationale;
+  }
+
+  if (report.triggered_rules.length > 0) {
+    return `${pluralize(report.triggered_rules.length, "rule")} triggered during the latest compliance review.`;
+  }
+
+  return `Latest compliance state: ${humanizeLabel(report.runtime_state) ?? "Recorded"}.`;
+}
+
+function buildSourcesInspectorSummary(args: {
+  scopedMessages: Message[];
+  reviewedItems: SourceInspectorItem[];
+  retrievedItems: RetrievedSourceSummary[];
+}): SourcesInspectorSummary {
+  const citations: SourcesInspectorCitation[] = [];
+  const seenCitationKeys = new Set<string>();
+
+  args.reviewedItems.forEach((item) => {
+    if (item.kind !== "evidence") {
+      return;
+    }
+
+    const supportPercent = getSupportPercentFromTone(item.tone);
+    if (supportPercent === null) {
+      return;
+    }
+
+    const citation: SourcesInspectorCitation = {
+      id: item.id,
+      title: item.title,
+      identifier: item.identifier,
+      source_type: item.sourceType,
+      support_percent: supportPercent,
+      tone: item.tone,
+      detail: item.detail,
+      path: item.path,
+      last_seen_order: item.lastSeenOrder,
+    };
+    const citationKey =
+      citation.identifier?.toLowerCase() ??
+      citation.path ??
+      citation.title.toLowerCase();
+    if (seenCitationKeys.has(citationKey)) {
+      return;
+    }
+    seenCitationKeys.add(citationKey);
+    citations.push(citation);
+  });
+
+  args.retrievedItems.forEach((item) => {
+    const supportPercent = getSupportPercentFromRetrievalScore(item.score);
+    if (supportPercent === null) {
+      return;
+    }
+
+    const citation: SourcesInspectorCitation = {
+      id: item.source,
+      title: item.source,
+      identifier: item.identifier,
+      source_type: "Retrieved context",
+      support_percent: supportPercent,
+      tone: "retrieved",
+      detail: `${pluralize(item.count, "hit")} attached to the latest turn.`,
+      path: null,
+      last_seen_order: item.lastSeenOrder,
+    };
+    const citationKey =
+      citation.identifier?.toLowerCase() ?? citation.title.toLowerCase();
+    if (seenCitationKeys.has(citationKey)) {
+      return;
+    }
+    seenCitationKeys.add(citationKey);
+    citations.push(citation);
+  });
+
+  citations.sort((left, right) => right.last_seen_order - left.last_seen_order);
+
+  const complianceReport = getLatestComplianceReport(args.scopedMessages);
+  const complianceState = getComplianceChecklistState(complianceReport);
+  const hasLoggedParams = complianceReport
+    ? Boolean(
+        complianceReport.request_context.user_message.trim() ||
+          complianceReport.request_context.attached_identifiers.length > 0 ||
+          complianceReport.request_context.selected_workflow ||
+          complianceReport.request_context.session_id
+      )
+    : false;
+  const provenanceBackedCount = citations.filter((citation) => citation.path).length;
+  const provenanceState: SourcesInspectorChecklistItem["state"] =
+    citations.length === 0
+      ? "pending"
+      : provenanceBackedCount === citations.length
+        ? "complete"
+        : "warning";
+
+  return {
+    scoped_message_count: args.scopedMessages.length,
+    citations: citations.slice(0, 8),
+    compliance: {
+      summary_label:
+        getComplianceSummaryLabel(complianceReport) ??
+        (citations.length > 0 ? "Awaiting report" : null),
+      detail: getComplianceSummaryDetail(
+        complianceReport,
+        args.scopedMessages.length
+      ),
+      state: complianceState,
+      items: [
+        {
+          id: "provenance-verified",
+          label: "Provenance verified",
+          state: provenanceState,
+          detail:
+            citations.length === 0
+              ? "Waiting for source-backed evidence."
+              : provenanceBackedCount === citations.length
+                ? "Each citation is backed by an inspectable artifact in the current scope."
+                : "Some visible citations are not yet backed by inspectable source artifacts.",
+        },
+        {
+          id: "params-logged",
+          label: "Params logged",
+          state: hasLoggedParams ? "complete" : "pending",
+          detail: hasLoggedParams
+            ? "Request parameters were captured for the latest scope."
+            : "No structured compliance request context is attached yet.",
+        },
+        {
+          id: "audit-complete",
+          label: "Audit complete",
+          state: complianceState,
+          detail:
+            complianceReport != null
+              ? humanizeLabel(complianceReport.runtime_state) ??
+                humanizeLabel(complianceReport.final_disposition)
+              : "Compliance review has not run for this scope yet.",
+        },
+      ],
+    },
+  };
+}
+
 function collectSourceInspectorData(
   messages: Message[],
   workflowSummary: ReturnType<typeof getWorkflowSummary>
@@ -1781,60 +2064,6 @@ function EmptyState({ children }: { children: ReactNode }) {
   );
 }
 
-function getSourceItemTone(tone: SourceInspectorTone) {
-  if (tone === "supported") {
-    return {
-      badge: "border-emerald-200 bg-emerald-50 text-emerald-700",
-      icon: "bg-emerald-50 text-emerald-700",
-      surface:
-        "border-[rgba(16,185,129,0.14)] bg-[linear-gradient(180deg,rgba(244,251,247,0.98),rgba(237,249,241,0.96))]",
-    };
-  }
-
-  if (tone === "mixed") {
-    return {
-      badge: "border-amber-200 bg-amber-50 text-amber-700",
-      icon: "bg-amber-50 text-amber-700",
-      surface:
-        "border-[rgba(245,158,11,0.14)] bg-[linear-gradient(180deg,rgba(255,251,235,0.96),rgba(254,243,199,0.74))]",
-    };
-  }
-
-  if (tone === "insufficient") {
-    return {
-      badge: "border-rose-200 bg-rose-50 text-rose-700",
-      icon: "bg-rose-50 text-rose-700",
-      surface:
-        "border-[rgba(244,63,94,0.12)] bg-[linear-gradient(180deg,rgba(255,244,246,0.96),rgba(255,228,230,0.76))]",
-    };
-  }
-
-  if (tone === "retrieved") {
-    return {
-      badge: "border-sky-200 bg-sky-50 text-sky-700",
-      icon: "bg-sky-50 text-sky-700",
-      surface:
-        "border-[rgba(14,165,233,0.12)] bg-[linear-gradient(180deg,rgba(240,249,255,0.96),rgba(224,242,254,0.74))]",
-    };
-  }
-
-  if (tone === "warning") {
-    return {
-      badge: "border-orange-200 bg-orange-50 text-orange-700",
-      icon: "bg-orange-50 text-orange-700",
-      surface:
-        "border-[rgba(249,115,22,0.12)] bg-[linear-gradient(180deg,rgba(255,247,237,0.96),rgba(255,237,213,0.78))]",
-    };
-  }
-
-  return {
-    badge: "border-slate-200 bg-slate-100 text-slate-600",
-    icon: "bg-slate-100 text-slate-600",
-    surface:
-      "border-[rgba(148,163,184,0.14)] bg-[linear-gradient(180deg,rgba(248,250,252,0.96),rgba(241,245,249,0.82))]",
-  };
-}
-
 function GeneratedFileRow({
   item,
   active,
@@ -1901,99 +2130,176 @@ function GeneratedFileRow({
   );
 }
 
-function SourceRecordRow({
-  item,
+function getCitationPercentClass(tone: SourcesInspectorCitationTone) {
+  if (tone === "supported") {
+    return "text-emerald-700";
+  }
+
+  if (tone === "mixed") {
+    return "text-amber-700";
+  }
+
+  if (tone === "insufficient") {
+    return "text-rose-700";
+  }
+
+  if (tone === "warning") {
+    return "text-orange-700";
+  }
+
+  if (tone === "retrieved") {
+    return "text-slate-500";
+  }
+
+  return "text-slate-500";
+}
+
+function getComplianceCardClass(
+  state: SourcesInspectorChecklistItem["state"]
+) {
+  if (state === "blocked") {
+    return "border-rose-200 bg-[linear-gradient(180deg,rgba(255,247,247,0.98),rgba(254,241,241,0.98))]";
+  }
+
+  if (state === "warning") {
+    return "border-amber-200 bg-[linear-gradient(180deg,rgba(255,251,235,0.98),rgba(254,243,199,0.7))]";
+  }
+
+  if (state === "complete") {
+    return "border-[rgba(35,130,83,0.14)] bg-[linear-gradient(180deg,rgba(248,251,248,0.98),rgba(242,247,243,0.98))]";
+  }
+
+  return "border-[rgba(211,219,210,0.86)] bg-[linear-gradient(180deg,rgba(252,252,251,0.98),rgba(247,249,246,0.98))]";
+}
+
+function getComplianceBadgeClass(
+  state: SourcesInspectorChecklistItem["state"]
+) {
+  if (state === "blocked") {
+    return "border-rose-200 bg-rose-50 text-rose-700";
+  }
+
+  if (state === "warning") {
+    return "border-amber-200 bg-amber-50 text-amber-700";
+  }
+
+  if (state === "complete") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  }
+
+  return "border-[rgba(211,219,210,0.86)] bg-white/80 text-slate-500";
+}
+
+function getComplianceItemPresentation(
+  state: SourcesInspectorChecklistItem["state"]
+) {
+  if (state === "blocked") {
+    return {
+      icon: AlertTriangle,
+      iconClass: "bg-rose-50 text-rose-600",
+    };
+  }
+
+  if (state === "warning") {
+    return {
+      icon: AlertTriangle,
+      iconClass: "bg-amber-50 text-amber-600",
+    };
+  }
+
+  if (state === "complete") {
+    return {
+      icon: Check,
+      iconClass: "bg-emerald-50 text-emerald-600",
+    };
+  }
+
+  return {
+    icon: Clock3,
+    iconClass: "bg-slate-100 text-slate-500",
+  };
+}
+
+function SourceCitationRow({
+  citation,
   onInspect,
 }: {
-  item: SourceInspectorItem;
+  citation: SourcesInspectorCitation;
   onInspect: (path: string) => void;
 }) {
-  const tone = getSourceItemTone(item.tone);
-  const Icon =
-    item.kind === "review"
-      ? BookOpen
-      : item.kind === "retrieval"
-        ? Search
-        : FileText;
-
-  return (
-    <div
-      className={cn(
-        "rounded-[12px] border px-2.5 py-2 shadow-[0_1px_1px_rgba(32,43,35,0.02)]",
-        tone.surface
-      )}
-    >
-      <div className="flex items-start gap-2">
-        <span
-          className={cn(
-            "mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[9px]",
-            tone.icon
-          )}
-        >
-          <Icon size={12} />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0">
-              <p className="text-[12px] font-semibold leading-5 text-slate-700">
-                {item.title}
-              </p>
-              <p className="mt-0.5 text-[10px] font-medium uppercase tracking-[0.12em] text-slate-400">
-                {item.sourceType}
-              </p>
-            </div>
-            {item.stateLabel ? (
-              <span
-                className={cn(
-                  "inline-flex shrink-0 items-center rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em]",
-                  tone.badge
-                )}
-              >
-                {item.stateLabel}
-              </span>
-            ) : null}
-          </div>
-
-          {item.identifier || item.metadata.length > 0 ? (
-            <div className="mt-1 flex flex-wrap gap-1">
-              {item.identifier ? (
-                <span className="rounded-full border border-white/80 bg-white/82 px-1.5 py-0.5 font-mono text-[9px] text-slate-500">
-                  {item.identifier}
-                </span>
-              ) : null}
-              {item.metadata.map((value) => (
-                <span
-                  key={`${item.id}-${value}`}
-                  className="rounded-full border border-white/70 bg-white/75 px-1.5 py-0.5 text-[9px] font-medium text-slate-500"
-                >
-                  {value}
-                </span>
-              ))}
-            </div>
+  const interactive = Boolean(citation.path);
+  const body = (
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0 flex-1">
+        <p className="text-[13px] font-medium leading-5 text-slate-700">
+          {citation.title}
+        </p>
+        <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+          {citation.identifier ? (
+            <span className="rounded-full border border-[rgba(35,130,83,0.12)] bg-[rgba(35,130,83,0.08)] px-1.5 py-0.5 font-mono text-[9px] font-semibold text-[var(--apex-accent-strong)]">
+              {citation.identifier}
+            </span>
           ) : null}
-
-          {item.detail ? (
-            <p className="mt-1 text-[11px] leading-5 text-slate-600">
-              {item.detail}
-            </p>
-          ) : null}
-
-          {item.path ? (
-            <div className="mt-1.5 flex items-center justify-between gap-2">
-              <span className="truncate font-mono text-[9px] text-slate-400">
-                {shortenPath(item.path, 4)}
-              </span>
-              <button
-                type="button"
-                onClick={() => onInspect(item.path!)}
-                className="shrink-0 rounded-full border border-white/80 bg-white/82 px-2 py-0.5 text-[10px] font-medium text-slate-600 transition-colors hover:text-slate-800"
-              >
-                Open artifact
-              </button>
-            </div>
+          {!citation.identifier ? (
+            <span className="text-[9px] font-medium uppercase tracking-[0.12em] text-slate-400">
+              {citation.source_type}
+            </span>
           ) : null}
         </div>
       </div>
+      <span
+        className={cn(
+          "shrink-0 pt-0.5 text-[13px] font-semibold",
+          getCitationPercentClass(citation.tone)
+        )}
+      >
+        {citation.support_percent !== null ? `${citation.support_percent}%` : "--"}
+      </span>
+    </div>
+  );
+
+  if (!interactive || !citation.path) {
+    return (
+      <div className="rounded-[14px] border border-transparent px-2 py-1.5">
+        {body}
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => onInspect(citation.path!)}
+      title={citation.path}
+      className={cn(
+        "w-full rounded-[14px] border border-transparent px-2 py-1.5 text-left transition-colors",
+        "hover:border-[rgba(211,219,210,0.9)] hover:bg-white/75"
+      )}
+    >
+      {body}
+    </button>
+  );
+}
+
+function ComplianceChecklistRow({
+  item,
+}: {
+  item: SourcesInspectorChecklistItem;
+}) {
+  const presentation = getComplianceItemPresentation(item.state);
+  const Icon = presentation.icon;
+
+  return (
+    <div className="flex items-center gap-2">
+      <span
+        className={cn(
+          "flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
+          presentation.iconClass
+        )}
+      >
+        <Icon size={11} />
+      </span>
+      <span className="text-[12px] leading-5 text-slate-600">{item.label}</span>
     </div>
   );
 }
@@ -2132,8 +2438,11 @@ export default function InspectorPanel() {
       ? mergeSourceItemWithMetadata(item, sourceArtifactMetadata[item.path])
       : item
   );
-  const retrievedSourceItems = sourceInspectorData.retrievedItems;
-  const scopedSourceMessageCount = sourceInspectorData.scopedMessages.length;
+  const sourcesSummary = buildSourcesInspectorSummary({
+    scopedMessages: sourceInspectorData.scopedMessages,
+    reviewedItems: reviewedSourceItems,
+    retrievedItems: sourceInspectorData.retrievedItems,
+  });
   const runStatusLabel = getRunStatusLabel(workflowSummary);
   const stepCountLabel = getStepCountLabel(workflowSummary);
   const progressLabel = getProgressLabel(workflowSummary);
@@ -2783,79 +3092,72 @@ export default function InspectorPanel() {
   );
 
   const renderSourcesTab = () => (
-    <div className="space-y-2">
-      <InspectorCard
-        title="Reviewed Evidence"
-        meta={`${reviewedSourceItems.length} item${reviewedSourceItems.length === 1 ? "" : "s"}`}
-      >
-        {reviewedSourceItems.length > 0 ? (
-          <div className="space-y-1">
-            {reviewedSourceItems.slice(0, 8).map((item) => (
-              <SourceRecordRow
-                key={item.id}
-                item={item}
-                onInspect={openInspectorPath}
-              />
-            ))}
-          </div>
-        ) : (
-          <EmptyState>
-            No reviewed evidence or attached source cards are linked to the current turn or workflow run yet. Evidence retrieval, evidence review, or source-backed workflows will populate this view.
-          </EmptyState>
-        )}
-      </InspectorCard>
-
-      <InspectorCard
-        title="Retrieved Context"
-        meta={`${retrievedSourceItems.length} source${retrievedSourceItems.length === 1 ? "" : "s"}`}
-      >
-        {retrievedSourceItems.length > 0 ? (
-          <div className="space-y-1">
-            {retrievedSourceItems.slice(0, 8).map((source) => (
-              <SourceRecordRow
-                key={source.source}
-                item={{
-                  id: source.source,
-                  kind: "retrieval",
-                  artifactType: null,
-                  title: source.source,
-                  sourceType: "Retrieved context",
-                  identifier: source.identifier,
-                  stateLabel: null,
-                  detail: `${pluralize(source.count, "hit")} attached to the latest turn.`,
-                  metadata: [`Top score ${source.score.toFixed(3)}`],
-                  tone: "retrieved",
-                  path: null,
-                  lastSeenOrder: source.lastSeenOrder,
-                }}
-                onInspect={openInspectorPath}
-              />
-            ))}
-          </div>
-        ) : (
-          <EmptyState>
-            No retrieved context is attached to the current turn or workflow run. Retrieval remains visible in the center trace when RAG-backed context is used.
-          </EmptyState>
-        )}
-      </InspectorCard>
-
-      <InspectorCard title="Sources Context" meta={ragMode ? "RAG on" : "RAG off"}>
-        <div className="space-y-1 text-[11px] text-slate-600">
-          <p>
-            {scopedSourceMessageCount > 0
-              ? `Showing evidence and sources from the current request or workflow run (${pluralize(scopedSourceMessageCount, "message")}).`
-              : "No current turn or workflow run has attached evidence or retrieval context yet."}
-          </p>
-          <p>
-            {ragMode
-              ? "Retrieved context stays separate from reviewed evidence so source inspection remains concrete and reviewable."
-              : "RAG is currently disabled, so only explicit evidence artifacts or review outputs will appear here."}
-          </p>
-          {workflowSummary.workflowId ? (
-            <p>Latest workflow context: {workflowSummary.workflowId}</p>
+    <div className="space-y-3">
+      <section className="space-y-2">
+        <div className="flex items-baseline justify-between gap-2 px-0.5">
+          <h3 className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+            Citations
+          </h3>
+          {sourcesSummary.scoped_message_count > 0 ? (
+            <span className="text-[10px] text-slate-400">
+              {pluralize(sourcesSummary.scoped_message_count, "message")}
+            </span>
           ) : null}
         </div>
-      </InspectorCard>
+
+        {sourcesSummary.citations.length > 0 ? (
+          <div className="space-y-1">
+            {sourcesSummary.citations.map((citation) => (
+              <SourceCitationRow
+                key={citation.id}
+                citation={citation}
+                onInspect={openInspectorPath}
+              />
+            ))}
+          </div>
+        ) : (
+          <EmptyState>
+            No reviewed evidence or retrieval-backed citations are linked to the current turn or workflow run yet. Evidence retrieval and evidence review outputs will populate this view.
+          </EmptyState>
+        )}
+      </section>
+
+      <section
+        className={cn(
+          "rounded-[16px] border px-3 py-3 shadow-[0_1px_2px_rgba(32,43,35,0.03)]",
+          getComplianceCardClass(sourcesSummary.compliance.state)
+        )}
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <h3 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--apex-accent-strong)]">
+              Compliance
+            </h3>
+            {sourcesSummary.compliance.detail &&
+            sourcesSummary.compliance.state !== "complete" ? (
+              <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                {sourcesSummary.compliance.detail}
+              </p>
+            ) : null}
+          </div>
+          {sourcesSummary.compliance.summary_label ? (
+            <span
+              className={cn(
+                "inline-flex shrink-0 items-center rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em]",
+                getComplianceBadgeClass(sourcesSummary.compliance.state)
+              )}
+            >
+              {sourcesSummary.compliance.summary_label}
+            </span>
+          ) : null}
+        </div>
+
+        <div className="mt-3 space-y-2">
+          {sourcesSummary.compliance.items.map((item) => (
+            <ComplianceChecklistRow key={item.id} item={item} />
+          ))}
+        </div>
+      </section>
     </div>
   );
 

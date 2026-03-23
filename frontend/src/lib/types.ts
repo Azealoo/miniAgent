@@ -188,6 +188,52 @@ export interface ComplianceReportArtifact {
   final_disposition: ComplianceDisposition;
 }
 
+export type SourcesInspectorCitationTone =
+  | "supported"
+  | "mixed"
+  | "insufficient"
+  | "retrieved"
+  | "warning"
+  | "neutral";
+
+export interface SourcesInspectorCitation {
+  id: string;
+  title: string;
+  identifier: string | null;
+  source_type: string;
+  support_percent: number | null;
+  tone: SourcesInspectorCitationTone;
+  detail: string | null;
+  path: string | null;
+  last_seen_order: number;
+}
+
+export type SourcesInspectorChecklistState =
+  | "complete"
+  | "warning"
+  | "blocked"
+  | "pending";
+
+export interface SourcesInspectorChecklistItem {
+  id: string;
+  label: string;
+  state: SourcesInspectorChecklistState;
+  detail: string | null;
+}
+
+export interface SourcesInspectorComplianceCard {
+  summary_label: string | null;
+  detail: string | null;
+  state: SourcesInspectorChecklistState;
+  items: SourcesInspectorChecklistItem[];
+}
+
+export interface SourcesInspectorSummary {
+  scoped_message_count: number;
+  citations: SourcesInspectorCitation[];
+  compliance: SourcesInspectorComplianceCard;
+}
+
 export type WorkflowLifecycleStatus =
   | "created"
   | "preflight_checked"
