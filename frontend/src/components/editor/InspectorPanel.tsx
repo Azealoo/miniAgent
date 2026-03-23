@@ -56,6 +56,7 @@ import {
   openRawFileInNewTab,
   readFile,
   saveFile,
+  updateSkillRegistryEntry,
 } from "@/lib/api";
 import {
   getPreviewableFileLabel,
@@ -697,11 +698,51 @@ function getSkillVersionLabel(skill: SkillRegistryEntry): string {
 
 function getSkillMetadata(skill: SkillRegistryEntry): string[] {
   return uniqueStrings([
-    skill.enabled ? "Enabled" : "Available",
     humanizeLabel(skill.category),
     humanizeLabel(skill.stage),
     humanizeLabel(skill.stability),
   ]);
+}
+
+function getSkillRegistryBadges(skill: SkillRegistryEntry): string[] {
+  return uniqueStrings([
+    humanizeLabel(skill.category),
+    humanizeLabel(skill.stage),
+    humanizeLabel(skill.species),
+    humanizeLabel(skill.modality),
+    humanizeLabel(skill.stability),
+    humanizeLabel(skill.safety_level),
+    skill.requires_network ? "Network" : null,
+    skill.user_invocable ? "User invocable" : "Internal only",
+  ]);
+}
+
+function getSkillRegistryMutationErrorMessage(error: unknown): string {
+  const rawMessage =
+    error instanceof Error ? error.message.trim() : "Could not update this skill.";
+  const message = rawMessage.toLowerCase();
+
+  if (
+    message.includes("environment variable") ||
+    message.includes("http 503")
+  ) {
+    return "The admin update route is configured, but the server token is unavailable.";
+  }
+
+  if (
+    message.includes("bearer token required") ||
+    message.includes("configured bearer token") ||
+    message.includes("local access or a configured bearer token") ||
+    message.includes("http 401") ||
+    message.includes("http 403")
+  ) {
+    return "Admin access is required to change skill registry state.";
+  }
+
+  const compactMessage = compactText(rawMessage, 140);
+  return compactMessage
+    ? `Could not update the registry entry. ${compactMessage}`
+    : "Could not update this skill registry entry.";
 }
 
 function getUsageShare(value: number, total: number): string {
@@ -1896,22 +1937,24 @@ function SkillRegistryRow({
   onClick: () => void;
 }) {
   const Icon = skill.enabled ? Sparkles : Package;
+  const rowMetadata = getSkillMetadata(skill).slice(0, 2);
 
   return (
     <button
       type="button"
       onClick={onClick}
+      title={skill.location}
       aria-pressed={selected}
       className={cn(
-        "flex w-full items-center gap-2 rounded-[12px] px-2 py-2 text-left transition-colors",
+        "flex w-full items-start gap-2 rounded-[12px] border px-2.5 py-2 text-left transition-colors",
         selected
-          ? "bg-[rgba(35,130,83,0.08)]"
-          : "hover:bg-[rgba(255,255,255,0.82)]"
+          ? "border-[rgba(35,130,83,0.16)] bg-[rgba(35,130,83,0.08)]"
+          : "border-transparent hover:border-[rgba(211,219,210,0.9)] hover:bg-white"
       )}
     >
       <span
         className={cn(
-          "flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full",
+          "mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[10px]",
           selected && "bg-[rgba(35,130,83,0.12)] text-[var(--apex-accent-strong)]",
           !selected && skill.enabled && "bg-[rgba(35,130,83,0.08)] text-[var(--apex-accent-strong)]",
           !selected &&
@@ -1919,12 +1962,31 @@ function SkillRegistryRow({
             "bg-[rgba(211,219,210,0.42)] text-slate-500"
         )}
       >
-        <Icon size={12} />
+      <Icon size={12} />
       </span>
-      <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-slate-700">
-        {skill.name}
+      <span className="min-w-0 flex-1">
+        <span className="flex items-start justify-between gap-2">
+          <span className="min-w-0">
+            <span className="block truncate text-[13px] font-medium text-slate-700">
+              {skill.name}
+            </span>
+            <span className="mt-0.5 block truncate text-[10px] leading-4 text-slate-500">
+              {shortenPath(skill.location, 3)}
+            </span>
+          </span>
+          <MetaBadge tone={skill.enabled ? "success" : "neutral"}>
+            {skill.enabled ? "Enabled" : "Disabled"}
+          </MetaBadge>
+        </span>
+        {rowMetadata.length > 0 ? (
+          <span className="mt-1.5 flex flex-wrap gap-1">
+            {rowMetadata.map((value) => (
+              <MetaBadge key={`${skill.location}-${value}`}>{value}</MetaBadge>
+            ))}
+          </span>
+        ) : null}
       </span>
-      <span className="flex-shrink-0 text-[11px] text-slate-400">
+      <span className="mt-0.5 flex-shrink-0 text-[11px] text-slate-400">
         {getSkillVersionLabel(skill)}
       </span>
     </button>
@@ -2035,6 +2097,32 @@ function UsageMetadataRow({
       >
         {value}
       </span>
+    </div>
+  );
+}
+
+function SkillDetailField({
+  label,
+  value,
+  monospace = false,
+}: {
+  label: string;
+  value: string;
+  monospace?: boolean;
+}) {
+  return (
+    <div className="space-y-1 rounded-[10px] border border-[rgba(211,219,210,0.72)] bg-[rgba(251,252,248,0.84)] px-2.5 py-2">
+      <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+        {label}
+      </p>
+      <p
+        className={cn(
+          "break-all text-[11px] leading-5 text-slate-700",
+          monospace && "font-mono text-[10px]"
+        )}
+      >
+        {value}
+      </p>
     </div>
   );
 }
@@ -2417,6 +2505,11 @@ export default function InspectorPanel() {
   const [skillFileLoadError, setSkillFileLoadError] = useState("");
   const [selectedSkillPath, setSelectedSkillPath] = useState<string | null>(null);
   const [skillsRegistryLoading, setSkillsRegistryLoading] = useState(false);
+  const [skillRegistryUpdatePendingName, setSkillRegistryUpdatePendingName] = useState<
+    string | null
+  >(null);
+  const [skillRegistryUpdateMsg, setSkillRegistryUpdateMsg] = useState("");
+  const [skillRegistryUpdateError, setSkillRegistryUpdateError] = useState("");
   const [skillFileLoading, setSkillFileLoading] = useState(false);
   const [skillSaving, setSkillSaving] = useState(false);
   const [skillSaveMsg, setSkillSaveMsg] = useState("");
@@ -2499,6 +2592,8 @@ export default function InspectorPanel() {
     skills.find((skill) => skill.location === selectedSkillPath) ?? null;
   const activeSkills = skills.filter((skill) => skill.enabled);
   const availableSkills = skills.filter((skill) => !skill.enabled);
+  const selectedSkillUpdatePending =
+    selectedSkill !== null && skillRegistryUpdatePendingName === selectedSkill.name;
   const sessionUsage =
     currentSessionId && tokens?.session_id === currentSessionId ? tokens : null;
   const trackedTotalTokens =
@@ -2817,7 +2912,6 @@ export default function InspectorPanel() {
       if (skillsRequestIdRef.current !== requestId) return;
 
       hasLoadedSkillsRef.current = true;
-      setSkills([]);
       setSkillsLoadError(
         "Could not load the skills registry. Refresh this tab once the backend skill scan is available."
       );
@@ -2898,6 +2992,11 @@ export default function InspectorPanel() {
     window.setTimeout(() => setSkillActionMsg(""), 2000);
   };
 
+  const clearSkillRegistryMutationState = () => {
+    setSkillRegistryUpdateMsg("");
+    setSkillRegistryUpdateError("");
+  };
+
   const handleInspectorExport = () => {
     if (typeof window === "undefined" || messages.length === 0) {
       return;
@@ -2942,6 +3041,36 @@ export default function InspectorPanel() {
       nextSkills?.some((skill) => skill.location === keepSelectedPath)
     ) {
       await loadSkillFile(keepSelectedPath);
+    }
+  };
+
+  const handleSkillRegistryToggle = async (skill: SkillRegistryEntry) => {
+    const nextEnabled = !skill.enabled;
+    setSkillRegistryUpdatePendingName(skill.name);
+    setSkillRegistryUpdateMsg("");
+    setSkillRegistryUpdateError("");
+
+    try {
+      await updateSkillRegistryEntry(skill.name, { enabled: nextEnabled });
+      setSkills((current) =>
+        current.map((entry) =>
+          entry.name === skill.name ? { ...entry, enabled: nextEnabled } : entry
+        )
+      );
+      const refreshedSkills = await refreshSkills(skill.location);
+      setSkillRegistryUpdateMsg(
+        refreshedSkills
+          ? nextEnabled
+            ? "Registry entry enabled. Underlying skill file unchanged."
+            : "Registry entry disabled. Underlying skill file unchanged."
+          : nextEnabled
+            ? "Registry entry enabled. Latest registry refresh failed; showing last known state."
+            : "Registry entry disabled. Latest registry refresh failed; showing last known state."
+      );
+    } catch (error) {
+      setSkillRegistryUpdateError(getSkillRegistryMutationErrorMessage(error));
+    } finally {
+      setSkillRegistryUpdatePendingName(null);
     }
   };
 
@@ -3054,6 +3183,7 @@ export default function InspectorPanel() {
 
     setSkillSaveMsg("");
     setSkillEditorOpen(false);
+    clearSkillRegistryMutationState();
     await loadSkillFile(path);
   };
 
@@ -3076,6 +3206,7 @@ export default function InspectorPanel() {
     setSkillFileLoadError("");
     setSkillSaveMsg("");
     setSkillEditorOpen(false);
+    clearSkillRegistryMutationState();
   };
 
   const renderFilesTab = () => (
@@ -3695,20 +3826,79 @@ export default function InspectorPanel() {
   );
 
   const renderSkillsTab = () => (
-    <div className="space-y-4">
-      <section>
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <h3 className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-            Active
-          </h3>
+    <div className="space-y-2">
+      <InspectorCard
+        title="Registry"
+        meta="Operational skill registry backed by the backend skills scan."
+        controls={
           <ActionButton onClick={() => void handleSkillsRefresh()}>
             <RefreshCw size={11} />
             Refresh
           </ActionButton>
-        </div>
-
+        }
+      >
         {skillsRegistryLoading && skills.length === 0 ? (
           <LoadingState label="Loading skills..." />
+        ) : skillsLoadError && skills.length === 0 ? (
+          <EmptyState>{skillsLoadError}</EmptyState>
+        ) : (
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <MiniStat
+                label="Enabled"
+                value={String(activeSkills.length)}
+                accent={activeSkills.length > 0}
+                detail={`${skills.length} scanned`}
+              />
+              <MiniStat
+                label="Disabled"
+                value={String(availableSkills.length)}
+                detail="Config-managed"
+              />
+            </div>
+
+            <div className="rounded-[10px] border border-[rgba(211,219,210,0.72)] bg-[rgba(251,252,248,0.86)] px-2.5 py-2.5">
+              <div className="flex items-start gap-2">
+                <Info size={13} className="mt-0.5 text-slate-400" />
+                <div className="space-y-1">
+                  <p className="text-[11px] font-semibold text-slate-700">
+                    Registry state and file edits are separate.
+                  </p>
+                  <p className="text-[10px] leading-4 text-slate-500">
+                    Enable or disable changes write registry config and trigger a
+                    rescan. Editing below only changes the underlying `SKILL.md`
+                    file.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {skillsLoadError ? (
+              <div className="flex flex-wrap gap-1.5">
+                <MetaBadge tone="warning">{skillsLoadError}</MetaBadge>
+              </div>
+            ) : null}
+          </div>
+        )}
+      </InspectorCard>
+
+      <InspectorCard
+        title="Enabled"
+        meta={
+          activeSkills.length > 0
+            ? `${activeSkills.length} registry entr${activeSkills.length === 1 ? "y" : "ies"} enabled`
+            : "No enabled skills yet"
+        }
+        controls={
+          skillsLoadError ? (
+            <MetaBadge tone="warning">
+              {skills.length > 0 ? "Refresh failed" : "Load failed"}
+            </MetaBadge>
+          ) : undefined
+        }
+      >
+        {skillsRegistryLoading && skills.length === 0 ? (
+          <LoadingState label="Loading enabled skills..." />
         ) : skillsLoadError && skills.length === 0 ? (
           <EmptyState>{skillsLoadError}</EmptyState>
         ) : activeSkills.length > 0 ? (
@@ -3724,23 +3914,26 @@ export default function InspectorPanel() {
           </div>
         ) : (
           <EmptyState>
-            No active skills are enabled right now. Refresh after the registry scan
-            finishes or after enabling a local skill entry.
+            No skills are enabled right now. Select a disabled entry below to inspect
+            it and enable it from the registry controls.
           </EmptyState>
         )}
+      </InspectorCard>
 
-        {skillsLoadError && skills.length > 0 ? (
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            <MetaBadge tone="warning">{skillsLoadError}</MetaBadge>
-          </div>
-        ) : null}
-      </section>
-
-      <section className="border-t border-[rgba(211,219,210,0.72)] pt-3">
-        <p className="text-[12px] font-semibold text-slate-600">Available Skills</p>
-        <p className="mt-1 text-[11px] leading-5 text-slate-400">
-          Add more analysis tools, data processors, or custom workflows to expand
-          capabilities.
+      <InspectorCard
+        title="Available"
+        meta="Local or discovered entries that are not currently enabled."
+        controls={
+          skillsLoadError ? (
+            <MetaBadge tone="warning">
+              {skills.length > 0 ? "Refresh failed" : "Load failed"}
+            </MetaBadge>
+          ) : undefined
+        }
+      >
+        <p className="text-[11px] leading-5 text-slate-500">
+          Add more analysis tools, data processors, or custom workflows without
+          losing the file-first skill model.
         </p>
 
         <div className="mt-3">
@@ -3756,7 +3949,7 @@ export default function InspectorPanel() {
           </div>
         ) : null}
 
-        {skillsLoadError ? (
+        {skillsLoadError && skills.length === 0 ? (
           <div className="mt-3">
             <EmptyState>{skillsLoadError}</EmptyState>
           </div>
@@ -3771,100 +3964,251 @@ export default function InspectorPanel() {
               />
             ))}
           </div>
-        ) : null}
-
-        {availableSkills.length === 0 && !skillsLoadError ? (
+        ) : (
           <div className="mt-3">
             <EmptyState>
-              No additional local skill entries are available yet. Install a new
-              skill or add a `SKILL.md` file to expand this registry.
+              No additional disabled entries are available yet. Install a new skill
+              or add a `SKILL.md` file to expand this registry.
             </EmptyState>
           </div>
-        ) : null}
-      </section>
+        )}
+      </InspectorCard>
+
+      {selectedSkill ? (
+        <InspectorCard
+          title="Registry Entry"
+          meta={selectedSkill.name}
+          controls={
+            <MetaBadge tone={selectedSkill.enabled ? "success" : "neutral"}>
+              {selectedSkill.enabled ? "Enabled" : "Disabled"}
+            </MetaBadge>
+          }
+        >
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-[13px] font-semibold text-slate-700">
+                    {selectedSkill.name}
+                  </p>
+                  <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                    {selectedSkill.description || "No registry description was provided."}
+                  </p>
+                </div>
+                <MetaBadge tone={selectedSkill.enabled ? "success" : "neutral"}>
+                  {getSkillVersionLabel(selectedSkill)}
+                </MetaBadge>
+              </div>
+
+              <div className="flex flex-wrap gap-1.5">
+                {getSkillRegistryBadges(selectedSkill).map((value) => (
+                  <MetaBadge key={`${selectedSkill.location}-${value}`}>{value}</MetaBadge>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <MiniStat
+                label="Tools"
+                value={
+                  selectedSkill.requires_tools.length > 0
+                    ? pluralize(selectedSkill.requires_tools.length, "dependency")
+                    : "None"
+                }
+                accent={selectedSkill.requires_tools.length > 0}
+                detail={
+                  selectedSkill.requires_network ? "Network-enabled" : "Local execution"
+                }
+              />
+              <MiniStat
+                label="Mode"
+                value={selectedSkill.user_invocable ? "User" : "Internal"}
+                detail={
+                  selectedSkill.aliases.length > 0
+                    ? pluralize(selectedSkill.aliases.length, "alias")
+                    : "No aliases"
+                }
+              />
+            </div>
+
+            <div className="space-y-2">
+              <SkillDetailField
+                label="Location"
+                value={selectedSkill.location}
+                monospace
+              />
+              {selectedSkill.source_path &&
+              selectedSkill.source_path !== selectedSkill.location ? (
+                <SkillDetailField
+                  label="Source Path"
+                  value={selectedSkill.source_path}
+                  monospace
+                />
+              ) : null}
+            </div>
+
+            {selectedSkill.tags.length > 0 ? (
+              <div className="space-y-1.5">
+                <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Tags
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {selectedSkill.tags.map((tag) => (
+                    <MetaBadge key={`${selectedSkill.location}-tag-${tag}`}>{tag}</MetaBadge>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {selectedSkill.aliases.length > 0 ? (
+              <div className="space-y-1.5">
+                <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Aliases
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {selectedSkill.aliases.map((alias) => (
+                    <MetaBadge key={`${selectedSkill.location}-alias-${alias}`}>
+                      {alias}
+                    </MetaBadge>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {selectedSkill.requires_tools.length > 0 ? (
+              <div className="space-y-1.5">
+                <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Required Tools
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {selectedSkill.requires_tools.map((tool) => (
+                    <MetaBadge key={`${selectedSkill.location}-tool-${tool}`}>
+                      {tool}
+                    </MetaBadge>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="rounded-[12px] border border-amber-200 bg-[linear-gradient(180deg,rgba(255,251,235,0.96),rgba(255,247,237,0.96))] px-3 py-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="space-y-1">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-amber-700">
+                    Admin Controls
+                  </p>
+                  <p className="text-[11px] leading-5 text-amber-900/80">
+                    Registry mutations require admin access and do not edit the
+                    underlying file.
+                  </p>
+                </div>
+                <MetaBadge tone="warning">Admin only</MetaBadge>
+              </div>
+
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                <PrimaryActionButton
+                  onClick={() => void handleSkillRegistryToggle(selectedSkill)}
+                  disabled={selectedSkillUpdatePending}
+                >
+                  {selectedSkillUpdatePending ? (
+                    <Clock3 size={11} />
+                  ) : selectedSkill.enabled ? (
+                    <Package size={11} />
+                  ) : (
+                    <Sparkles size={11} />
+                  )}
+                  {selectedSkillUpdatePending
+                    ? "Updating…"
+                    : selectedSkill.enabled
+                      ? "Disable Skill"
+                      : "Enable Skill"}
+                </PrimaryActionButton>
+              </div>
+
+              {selectedSkillUpdatePending || skillRegistryUpdateMsg || skillRegistryUpdateError ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {selectedSkillUpdatePending ? (
+                    <MetaBadge tone="accent">Registry update pending</MetaBadge>
+                  ) : null}
+                  {skillRegistryUpdateMsg ? (
+                    <MetaBadge tone="success">{skillRegistryUpdateMsg}</MetaBadge>
+                  ) : null}
+                  {skillRegistryUpdateError ? (
+                    <MetaBadge tone="warning">{skillRegistryUpdateError}</MetaBadge>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </InspectorCard>
+      ) : null}
 
       {selectedSkillPath ? (
-        <section className="rounded-[14px] border border-[rgba(211,219,210,0.86)] bg-[rgba(255,255,255,0.88)] px-3 py-3 shadow-[0_1px_2px_rgba(32,43,35,0.03)]">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0">
-              <p className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-                Selected Skill
-              </p>
-              <p className="mt-1 text-[13px] font-semibold text-slate-700">
-                {selectedSkill?.name ?? "Skill File"}
-              </p>
-              <p className="mt-1 truncate text-[10px] leading-4 text-slate-500">
-                {shortenPath(selectedSkillPath, 3)}
-              </p>
-              <p className="mt-2 text-[10px] leading-4 text-slate-500">
-                {selectedSkill?.description || "Local skill definition file."}
-              </p>
-            </div>
-            {selectedSkill ? (
-              <MetaBadge tone={selectedSkill.enabled ? "success" : "neutral"}>
-                {getSkillVersionLabel(selectedSkill)}
-              </MetaBadge>
-            ) : null}
-          </div>
-
-          {selectedSkill ? (
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {getSkillMetadata(selectedSkill).map((value) => (
-                <MetaBadge key={`${selectedSkill.location}-${value}`}>{value}</MetaBadge>
-              ))}
-            </div>
-          ) : null}
-
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            <ActionButton onClick={() => void handleSelectedSkillRefresh()}>
-              <RefreshCw size={11} />
-              Refresh
-            </ActionButton>
-            <ActionButton onClick={() => setSkillEditorOpen((value) => !value)}>
-              <BookOpen size={11} />
-              {skillEditorOpen ? "Preview" : "Edit"}
-            </ActionButton>
-            <ActionButton onClick={() => openRawFile(selectedSkillPath)}>
-              Open raw
-            </ActionButton>
-            <ActionButton onClick={() => inspectPathInFiles(selectedSkillPath)}>
-              Inspect
-            </ActionButton>
+        <InspectorCard
+          title="Skill File"
+          meta={shortenPath(selectedSkillPath, 3)}
+          controls={
             <ActionButton onClick={clearSelectedSkill}>Hide</ActionButton>
-          </div>
+          }
+        >
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-[13px] font-semibold text-slate-700">
+                    {selectedSkill?.name ?? "Selected skill file"}
+                  </p>
+                  <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                    Edit or preview the on-disk `SKILL.md` file. Saving here does not
+                    enable the skill in the registry.
+                  </p>
+                </div>
+                {selectedSkill ? (
+                  <MetaBadge tone={selectedSkill.enabled ? "success" : "neutral"}>
+                    {getSkillVersionLabel(selectedSkill)}
+                  </MetaBadge>
+                ) : null}
+              </div>
 
-          <div className="mt-3 flex items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-1.5">
-              {skillSaveMsg ? (
-                <MetaBadge tone={skillSaveMsg === "Saved" ? "success" : "warning"}>
-                  {skillSaveMsg}
-                </MetaBadge>
-              ) : null}
-              {skillFileLoadError ? (
-                <MetaBadge tone="warning">Load failed</MetaBadge>
-              ) : (
-                <MetaBadge tone={isSkillDirty ? "warning" : "neutral"}>
-                  {isSkillDirty ? "Unsaved edits" : "File synced"}
-                </MetaBadge>
-              )}
+              <div className="flex flex-wrap gap-1.5">
+                {skillSaveMsg ? (
+                  <MetaBadge tone={skillSaveMsg === "Saved" ? "success" : "warning"}>
+                    {skillSaveMsg}
+                  </MetaBadge>
+                ) : null}
+                {skillFileLoadError ? (
+                  <MetaBadge tone="warning">Load failed</MetaBadge>
+                ) : (
+                  <MetaBadge tone={isSkillDirty ? "warning" : "neutral"}>
+                    {isSkillDirty ? "Unsaved edits" : "File synced"}
+                  </MetaBadge>
+                )}
+              </div>
             </div>
-            <button
-              type="button"
-              onClick={() => void handleSkillSave()}
-              disabled={!isSkillDirty || skillSaving || !!skillFileLoadError}
-              className={cn(
-                "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors",
-                isSkillDirty && !skillSaving && !skillFileLoadError
-                  ? "bg-[var(--apex-accent)] text-white hover:bg-[var(--apex-accent-strong)]"
-                  : "cursor-not-allowed bg-slate-200 text-slate-400"
-              )}
-            >
-              <Save size={11} />
-              {skillSaving ? "Saving…" : "Save"}
-            </button>
-          </div>
 
-          <div className="mt-3">
+            <div className="flex flex-wrap gap-1.5">
+              <ActionButton onClick={() => void handleSelectedSkillRefresh()}>
+                <RefreshCw size={11} />
+                Refresh
+              </ActionButton>
+              <ActionButton onClick={() => setSkillEditorOpen((value) => !value)}>
+                <BookOpen size={11} />
+                {skillEditorOpen ? "Preview" : "Edit"}
+              </ActionButton>
+              <ActionButton onClick={() => openRawFile(selectedSkillPath)}>
+                Open raw
+              </ActionButton>
+              <ActionButton onClick={() => inspectPathInFiles(selectedSkillPath)}>
+                Inspect
+              </ActionButton>
+              <PrimaryActionButton
+                onClick={() => void handleSkillSave()}
+                disabled={!isSkillDirty || skillSaving || !!skillFileLoadError}
+              >
+                <Save size={11} />
+                {skillSaving ? "Saving…" : "Save"}
+              </PrimaryActionButton>
+            </div>
+
             {skillFileLoading ? (
               <LoadingState label="Loading skill..." />
             ) : skillFileLoadError ? (
@@ -3895,7 +4239,7 @@ export default function InspectorPanel() {
               <PreviewPane content={skillContent} className="max-h-[220px]" />
             )}
           </div>
-        </section>
+        </InspectorCard>
       ) : null}
     </div>
   );
