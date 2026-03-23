@@ -428,7 +428,12 @@ export interface SessionHistoryMessage {
   retrievals?: RetrievalResult[];
 }
 
-export type WorkspaceMode = "sessions" | "flows" | "docs" | "files";
+export type WorkspaceMode =
+  | "sessions"
+  | "flows"
+  | "docs"
+  | "files"
+  | "artifacts";
 
 export interface Session {
   id: string;

@@ -6,6 +6,7 @@ import {
   Files,
   FlaskConical,
   MessageSquare,
+  Package,
   ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
@@ -77,6 +78,7 @@ export const primaryNavItems: WorkspaceNavItem[] = [
   { id: "flows", label: "Flows", icon: FlaskConical },
   { id: "docs", label: "Docs", icon: BookOpen },
   { id: "files", label: "Files", icon: Files },
+  { id: "artifacts", label: "Artifacts", icon: Package },
 ];
 
 export const quickStartItems: QuickStartItem[] = [

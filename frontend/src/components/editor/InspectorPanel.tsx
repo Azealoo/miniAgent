@@ -29,8 +29,19 @@ import {
   Trash2,
 } from "lucide-react";
 import {
+  getArtifactRegistryDescription,
+  getArtifactRegistryDisplayName,
+  getArtifactRegistryMetadataSummary,
+  getArtifactRegistryRunRecordPath,
+  getArtifactRegistryTimestamp,
+  humanizeArtifactToken,
+  shortenArtifactPath,
+  sortArtifactRegistryRecords,
+} from "@/lib/artifact-registry";
+import {
   createRawFileObjectUrl,
   getSessionTokens,
+  listArtifactRegistry,
   listSkillsRegistry,
   openRawFileInNewTab,
   readFile,
@@ -47,8 +58,9 @@ import {
   type EvidenceArtifactMetadata,
 } from "@/lib/evidence";
 import { useApp } from "@/lib/store";
-import { cn } from "@/lib/utils";
+import { cn, formatRelativeTime } from "@/lib/utils";
 import type {
+  ArtifactRegistryRecord,
   ComplianceReportArtifact,
   ConfidenceLevel,
   Message,
@@ -2188,6 +2200,73 @@ function EmptyState({ children }: { children: ReactNode }) {
   );
 }
 
+function formatArtifactRegistryInspectorTime(record: ArtifactRegistryRecord): string {
+  const timestamp = getArtifactRegistryTimestamp(record);
+  return timestamp ? formatRelativeTime(timestamp) : "Unknown time";
+}
+
+function ArtifactRegistryInspectorRow({
+  record,
+  active,
+  onClick,
+}: {
+  record: ArtifactRegistryRecord;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const Icon = record.status === "invalid" ? AlertTriangle : Package;
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={record.path}
+      className={cn(
+        "flex w-full items-start gap-2 rounded-[12px] border px-2.5 py-2 text-left transition-colors",
+        active
+          ? record.status === "invalid"
+            ? "border-rose-200 bg-rose-50"
+            : "border-[rgba(35,130,83,0.16)] bg-[rgba(35,130,83,0.08)]"
+          : "border-transparent hover:border-[rgba(211,219,210,0.9)] hover:bg-white"
+      )}
+    >
+      <span
+        className={cn(
+          "mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[9px]",
+          record.status === "invalid"
+            ? "bg-rose-100 text-rose-600"
+            : active
+              ? "bg-white text-[var(--apex-accent-strong)]"
+              : "bg-[rgba(211,219,210,0.42)] text-slate-500"
+        )}
+      >
+        <Icon size={12} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="flex items-start justify-between gap-2">
+          <span className="min-w-0 truncate text-[12px] font-semibold text-slate-700">
+            {getArtifactRegistryDisplayName(record)}
+          </span>
+          <MetaBadge tone={record.status === "invalid" ? "warning" : "accent"}>
+            {record.status}
+          </MetaBadge>
+        </span>
+        <span className="mt-1 block truncate text-[10px] font-medium text-slate-500">
+          {getArtifactRegistryDescription(record)}
+        </span>
+        <span className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[9px] uppercase tracking-[0.08em] text-slate-400">
+          <span>{humanizeArtifactToken(record.artifact_type) ?? "Artifact"}</span>
+          <span>{formatArtifactRegistryInspectorTime(record)}</span>
+          <span>{record.run_id}</span>
+        </span>
+        <span className="mt-1 block truncate font-mono text-[9px] text-slate-400">
+          {shortenArtifactPath(record.path, 4)}
+        </span>
+      </span>
+    </button>
+  );
+}
+
 function GeneratedFileRow({
   item,
   active,
@@ -2504,6 +2583,7 @@ export default function InspectorPanel() {
     inspectorTab,
     inspectorPreviewPath,
     setInspectorTab,
+    setWorkspaceMode,
     openInspectorPath,
     clearInspectorPath,
     primeDraftMessage,
@@ -2538,6 +2618,11 @@ export default function InspectorPanel() {
   const [previewError, setPreviewError] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewRawUrl, setPreviewRawUrl] = useState<string | null>(null);
+  const [artifactRegistryRecords, setArtifactRegistryRecords] = useState<
+    ArtifactRegistryRecord[]
+  >([]);
+  const [artifactRegistryLoading, setArtifactRegistryLoading] = useState(false);
+  const [artifactRegistryError, setArtifactRegistryError] = useState("");
   const [sourceArtifactMetadata, setSourceArtifactMetadata] = useState<
     Record<string, EvidenceArtifactMetadata | null>
   >({});
@@ -2564,6 +2649,7 @@ export default function InspectorPanel() {
   const workflowSummary = getWorkflowSummary(messages);
   const hasActiveRun = workflowSummary.events.length > 0;
   const artifactItems = collectArtifacts(workflowSummary.events);
+  const latestWorkflowEvent = workflowSummary.events.at(-1);
   const sourceInspectorData = collectSourceInspectorData(messages, workflowSummary);
   const reviewedSourceItems = sourceInspectorData.reviewedItems.map((item) =>
     item.path
@@ -2575,6 +2661,12 @@ export default function InspectorPanel() {
     reviewedItems: reviewedSourceItems,
     retrievedItems: sourceInspectorData.retrievedItems,
   });
+  const artifactRegistryRefreshKey =
+    `${currentSessionId ?? "none"}:` +
+    `${latestWorkflowEvent?.run_id ?? "none"}:` +
+    `${latestWorkflowEvent?.type ?? "none"}:` +
+    `${workflowSummary.events.length}:` +
+    `${artifactItems.length}`;
   const runStatusLabel = getRunStatusLabel(workflowSummary);
   const stepCountLabel = getStepCountLabel(workflowSummary);
   const progressLabel = getProgressLabel(workflowSummary);
@@ -2600,6 +2692,27 @@ export default function InspectorPanel() {
     : null;
   const usageModeLabel = ragMode ? "Grounded" : "Chat";
   const showStreamingUsageNotice = Boolean(sessionUsage && isStreaming);
+  const selectedRegistryRecord =
+    artifactRegistryRecords.find((record) => record.path === inspectorPreviewPath) ?? null;
+  const registryScopedRunId =
+    selectedRegistryRecord?.run_id ?? latestWorkflowEvent?.run_id ?? null;
+  const artifactRegistryListItems = (
+    registryScopedRunId
+      ? artifactRegistryRecords.filter((record) => record.run_id === registryScopedRunId)
+      : artifactRegistryRecords
+  ).slice(0, 6);
+  const artifactRegistryListLabel = selectedRegistryRecord
+    ? `Run scope: ${selectedRegistryRecord.run_id}`
+    : registryScopedRunId
+      ? `Current run: ${registryScopedRunId}`
+      : "Recent registry entries";
+  const registryMetadataSummary = selectedRegistryRecord
+    ? getArtifactRegistryMetadataSummary(selectedRegistryRecord).filter(
+        (item) =>
+          item !== humanizeArtifactToken(selectedRegistryRecord.workflow) &&
+          item !== selectedRegistryRecord.workflow
+      )
+    : [];
 
   useEffect(() => {
     if (!currentSessionId) {
@@ -2664,6 +2777,44 @@ export default function InspectorPanel() {
       }
     }
   }, [inspectorTab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (inspectorTab !== "files") {
+      return;
+    }
+
+    let cancelled = false;
+    setArtifactRegistryLoading(true);
+    setArtifactRegistryError("");
+
+    void listArtifactRegistry({ include_invalid: true })
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+
+        setArtifactRegistryRecords(sortArtifactRegistryRecords(response.records));
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+
+        setArtifactRegistryRecords([]);
+        setArtifactRegistryError(
+          "Could not load the artifact registry. Open the Artifacts workspace and try again."
+        );
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setArtifactRegistryLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [artifactRegistryRefreshKey, inspectorTab]);
 
   useEffect(() => {
     const pendingPaths = reviewedSourceItems
@@ -3229,6 +3380,128 @@ export default function InspectorPanel() {
           </EmptyState>
         )}
       </InspectorCard>
+
+      <InspectorCard
+        title="Artifact Registry"
+        meta={artifactRegistryListLabel}
+        controls={
+          <ActionButton onClick={() => setWorkspaceMode("artifacts")}>
+            Open workspace
+          </ActionButton>
+        }
+      >
+        {artifactRegistryLoading ? (
+          <LoadingState label="Loading registry entries..." />
+        ) : artifactRegistryError ? (
+          <EmptyState>{artifactRegistryError}</EmptyState>
+        ) : artifactRegistryListItems.length > 0 ? (
+          <div className="space-y-1">
+            {artifactRegistryListItems.map((record) => (
+              <ArtifactRegistryInspectorRow
+                key={record.path}
+                record={record}
+                active={inspectorPreviewPath === record.path}
+                onClick={() => openInspectorPath(record.path)}
+              />
+            ))}
+          </div>
+        ) : (
+          <EmptyState>
+            Durable registry entries will appear here once BioAPEX indexes artifacts on disk.
+          </EmptyState>
+        )}
+      </InspectorCard>
+
+      {selectedRegistryRecord ? (
+        <InspectorCard
+          title="Registry Metadata"
+          meta={shortenArtifactPath(selectedRegistryRecord.path, 4)}
+          controls={
+            <>
+              <ActionButton
+                onClick={() =>
+                  openInspectorPath(getArtifactRegistryRunRecordPath(selectedRegistryRecord))
+                }
+              >
+                Run record
+              </ActionButton>
+              <ActionButton onClick={() => setWorkspaceMode("artifacts")}>
+                Open workspace
+              </ActionButton>
+            </>
+          }
+        >
+          {selectedRegistryRecord.status === "invalid" ? (
+            <EmptyState>
+              {selectedRegistryRecord.error ??
+                "This registry entry is marked invalid. Review the run record or raw file before relying on it."}
+            </EmptyState>
+          ) : null}
+
+          <div className="grid grid-cols-2 gap-1.5">
+            <MiniStat
+              label="Status"
+              value={selectedRegistryRecord.status}
+              accent={selectedRegistryRecord.status === "valid"}
+            />
+            <MiniStat
+              label="Type"
+              value={
+                humanizeArtifactToken(selectedRegistryRecord.artifact_type) ?? "Artifact"
+              }
+              accent={selectedRegistryRecord.status === "valid"}
+            />
+          </div>
+
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <MetaBadge tone={selectedRegistryRecord.status === "invalid" ? "warning" : "accent"}>
+              {humanizeArtifactToken(selectedRegistryRecord.workflow) ??
+                selectedRegistryRecord.workflow}
+            </MetaBadge>
+            {registryMetadataSummary.map((item) => (
+              <MetaBadge key={`${selectedRegistryRecord.path}-${item}`}>{item}</MetaBadge>
+            ))}
+          </div>
+
+          <div className="mt-3 space-y-2">
+            <UsageMetadataRow
+              label="Artifact ID"
+              value={selectedRegistryRecord.artifact_id}
+              monospace
+            />
+            <UsageMetadataRow
+              label="Declared ID"
+              value={selectedRegistryRecord.declared_id ?? "Not declared"}
+              monospace
+            />
+            <UsageMetadataRow
+              label="Created"
+              value={selectedRegistryRecord.created_at ?? "Unknown"}
+            />
+            <UsageMetadataRow
+              label="Indexed"
+              value={selectedRegistryRecord.indexed_at}
+            />
+            <UsageMetadataRow
+              label="Source"
+              value={
+                humanizeArtifactToken(selectedRegistryRecord.source_tool) ??
+                humanizeArtifactToken(selectedRegistryRecord.source_workflow) ??
+                "Registry artifact"
+              }
+            />
+            <UsageMetadataRow
+              label="Dataset"
+              value={selectedRegistryRecord.dataset_id ?? "Not recorded"}
+            />
+          </div>
+
+          <PreviewPane
+            className="mt-3"
+            content={`${selectedRegistryRecord.path}\n${selectedRegistryRecord.hash ?? "No content hash recorded"}`}
+          />
+        </InspectorCard>
+      ) : null}
 
       {inspectorPreviewPath ? (
         <InspectorCard

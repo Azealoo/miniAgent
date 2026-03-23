@@ -274,7 +274,7 @@ export default function Sidebar() {
       </div>
 
       <div className="border-b border-[var(--shell-border)] px-1.5 py-1.5">
-        <div className="grid grid-cols-4 gap-0.5">
+        <div className="grid grid-cols-5 gap-0.5">
           {primaryNavItems.map((item) => {
             const Icon = item.icon;
             const active = workspaceMode === item.id;

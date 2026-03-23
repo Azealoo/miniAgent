@@ -5,6 +5,7 @@ import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { useEffect, useState, type ReactNode } from "react";
 import {
+  AlertTriangle,
   ArrowRight,
   BookOpen,
   ExternalLink,
@@ -20,6 +21,22 @@ import {
 } from "lucide-react";
 import ChatPanel from "@/components/chat/ChatPanel";
 import {
+  DEFAULT_ARTIFACT_REGISTRY_FILTERS,
+  artifactRegistryHasActiveFilters,
+  getArtifactRegistryDescription,
+  getArtifactRegistryDisplayName,
+  getArtifactRegistryMetadataSummary,
+  getArtifactRegistryPreviewMode,
+  getArtifactRegistryRunRecordPath,
+  getArtifactRegistryTimestamp,
+  humanizeArtifactToken,
+  isArtifactRegistryTextPreviewable,
+  normalizeArtifactRegistryQuery,
+  shortenArtifactPath,
+  sortArtifactRegistryRecords,
+  type ArtifactRegistryFilterState,
+} from "@/lib/artifact-registry";
+import {
   getWorkflowSummary,
 } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
@@ -27,10 +44,13 @@ import {
   createRawFileObjectUrl,
   getFilesWorkspaceSummary,
   getFlowsWorkspaceSummary,
+  listArtifactRegistry,
   openRawFileInNewTab,
   readFile,
 } from "@/lib/api";
 import type {
+  ArtifactRegistryLookupResult,
+  ArtifactRegistryRecord,
   FilesWorkspaceItem,
   FlowsWorkspaceStatus,
   FlowsWorkspaceSummaryItem,
@@ -51,6 +71,9 @@ import {
 type PreviewStatus = "idle" | "loading" | "ready" | "error";
 type DocsWorkspaceStatus = "loading" | "ready" | "error";
 type FilesWorkspaceStatus = "idle" | "loading" | "ready" | "error";
+type ArtifactRegistryWorkspaceStatus = "loading" | "ready" | "error";
+
+const EMPTY_ARTIFACT_REGISTRY_RECORDS: ArtifactRegistryRecord[] = [];
 
 interface LoadedWorkspaceDocument extends WorkspaceDocument {
   parsed: ParsedWorkspaceDocument;
@@ -107,6 +130,62 @@ function usePreviewContent(path: string | null) {
   }, [path]);
 
   return { status, content, error };
+}
+
+function useRawPreviewObjectUrl(path: string | null, enabled: boolean) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    let revoke: (() => void) | null = null;
+
+    if (!path || !enabled) {
+      setUrl(null);
+      setError(null);
+      setLoading(false);
+      return () => {
+        active = false;
+      };
+    }
+
+    const controller = new AbortController();
+    setLoading(true);
+    setError(null);
+    setUrl(null);
+
+    void createRawFileObjectUrl(path, controller.signal)
+      .then((result) => {
+        if (!active) {
+          result.revoke();
+          return;
+        }
+
+        revoke = result.revoke;
+        setUrl(result.url);
+      })
+      .catch(() => {
+        if (!active) {
+          return;
+        }
+
+        setError("Could not load the raw preview. Use Open Raw File to inspect it.");
+      })
+      .finally(() => {
+        if (active) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+      revoke?.();
+    };
+  }, [enabled, path]);
+
+  return { url, error, loading };
 }
 
 function previewText(content: string): string {
@@ -385,14 +464,16 @@ function WorkspaceShell({
   mode,
 }: {
   children: ReactNode;
-  mode: "flows" | "docs" | "files";
+  mode: "flows" | "docs" | "files" | "artifacts";
 }) {
   const backgroundClass =
     mode === "flows"
       ? "bg-[linear-gradient(180deg,rgba(247,250,246,0.98)_0%,rgba(242,247,242,0.92)_100%)]"
       : mode === "docs"
         ? "bg-[linear-gradient(180deg,rgba(250,251,248,0.98)_0%,rgba(246,248,243,0.94)_100%)]"
-        : "bg-[linear-gradient(180deg,rgba(248,250,247,0.98)_0%,rgba(243,246,242,0.94)_100%)]";
+        : mode === "files"
+          ? "bg-[linear-gradient(180deg,rgba(248,250,247,0.98)_0%,rgba(243,246,242,0.94)_100%)]"
+          : "bg-[linear-gradient(180deg,rgba(250,249,245,0.98)_0%,rgba(245,244,238,0.95)_100%)]";
 
   return (
     <section className="apex-panel flex h-full min-h-0 flex-col overflow-hidden rounded-[18px] shadow-[var(--panel-shadow-soft)]">
@@ -1570,9 +1651,7 @@ function FilesDetailPane({
   onOpenInspector?: () => void;
 }) {
   const previewMode = item ? getFilesWorkspacePreviewMode(item) : null;
-  const [rawPreviewUrl, setRawPreviewUrl] = useState<string | null>(null);
-  const [rawPreviewError, setRawPreviewError] = useState<string | null>(null);
-  const [rawPreviewLoading, setRawPreviewLoading] = useState(false);
+  const [openRawFileError, setOpenRawFileError] = useState<string | null>(null);
   const previewUnavailableMessage = item
     ? inferFilesWorkspaceKind(item) === "plot"
       ? "This plot is ready to open in the inspector or raw-file view."
@@ -1581,61 +1660,23 @@ function FilesDetailPane({
         : "This file type is tracked here even though it is not previewed inline yet."
     : null;
   const supportsRawInlinePreview = previewMode === "image" || previewMode === "pdf";
+  const {
+    url: rawPreviewUrl,
+    error: rawPreviewError,
+    loading: rawPreviewLoading,
+  } = useRawPreviewObjectUrl(item?.path ?? null, supportsRawInlinePreview);
 
   useEffect(() => {
-    let active = true;
-    let revoke: (() => void) | null = null;
-
-    if (!item?.path || !supportsRawInlinePreview) {
-      setRawPreviewUrl(null);
-      setRawPreviewError(null);
-      setRawPreviewLoading(false);
-      return;
-    }
-
-    const controller = new AbortController();
-    setRawPreviewLoading(true);
-    setRawPreviewError(null);
-    setRawPreviewUrl(null);
-
-    void createRawFileObjectUrl(item.path, controller.signal)
-      .then((result) => {
-        if (!active) {
-          result.revoke();
-          return;
-        }
-        revoke = result.revoke;
-        setRawPreviewUrl(result.url);
-      })
-      .catch(() => {
-        if (!active) {
-          return;
-        }
-        setRawPreviewError(
-          "Could not load the raw preview. Use Open Raw File to inspect the artifact."
-        );
-      })
-      .finally(() => {
-        if (active) {
-          setRawPreviewLoading(false);
-        }
-      });
-
-    return () => {
-      active = false;
-      controller.abort();
-      revoke?.();
-    };
-  }, [item?.path, supportsRawInlinePreview]);
+    setOpenRawFileError(null);
+  }, [item?.path]);
 
   const handleOpenRawFile = () => {
     if (!item?.path) {
       return;
     }
-
-    setRawPreviewError(null);
+    setOpenRawFileError(null);
     void openRawFileInNewTab(item.path).catch(() => {
-      setRawPreviewError("Could not open the raw file right now.");
+      setOpenRawFileError("Could not open the raw file right now.");
     });
   };
 
@@ -1776,8 +1817,10 @@ function FilesDetailPane({
                   <WorkspaceStateCard>{previewUnavailableMessage}</WorkspaceStateCard>
                 ) : supportsRawInlinePreview && rawPreviewLoading ? (
                   <WorkspaceStateCard>Loading raw preview…</WorkspaceStateCard>
-                ) : rawPreviewError ? (
-                  <WorkspaceStateCard tone="error">{rawPreviewError}</WorkspaceStateCard>
+                ) : openRawFileError || rawPreviewError ? (
+                  <WorkspaceStateCard tone="error">
+                    {openRawFileError ?? rawPreviewError}
+                  </WorkspaceStateCard>
                 ) : previewMode === "image" && rawPreviewUrl ? (
                   <div className="overflow-hidden rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-[rgba(248,250,246,0.95)]">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -2051,6 +2094,854 @@ function FilesWorkspace() {
   );
 }
 
+function artifactRegistryTypeTone(record: ArtifactRegistryRecord): string {
+  if (record.status === "invalid") {
+    return "border-[rgba(244,63,94,0.18)] bg-[rgba(255,241,242,0.95)] text-rose-700";
+  }
+
+  if (
+    record.artifact_type.includes("evidence") ||
+    record.artifact_type.includes("claim") ||
+    record.artifact_type.includes("grounding")
+  ) {
+    return "border-[rgba(2,132,199,0.16)] bg-[rgba(240,249,255,0.95)] text-sky-700";
+  }
+
+  if (
+    record.artifact_type.includes("compliance") ||
+    record.artifact_type.includes("qa") ||
+    record.artifact_type.includes("checklist")
+  ) {
+    return "border-[rgba(217,119,6,0.18)] bg-[rgba(255,247,237,0.95)] text-amber-700";
+  }
+
+  if (
+    record.artifact_type.includes("provenance") ||
+    record.artifact_type.includes("biocompute") ||
+    record.artifact_type.includes("eln")
+  ) {
+    return "border-[rgba(120,53,15,0.14)] bg-[rgba(250,245,235,0.94)] text-stone-700";
+  }
+
+  return "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.08)] text-[var(--apex-accent-strong)]";
+}
+
+function artifactRegistryStatusTone(record: ArtifactRegistryRecord): string {
+  return record.status === "invalid"
+    ? "border-[rgba(244,63,94,0.18)] bg-[rgba(255,241,242,0.95)] text-rose-700"
+    : "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.08)] text-[var(--apex-accent-strong)]";
+}
+
+function artifactRegistryTimestampLabel(record: ArtifactRegistryRecord): string {
+  const timestamp = getArtifactRegistryTimestamp(record);
+  return timestamp ? formatRelativeTime(timestamp) : "Unknown time";
+}
+
+function formatArtifactRegistryGeneratedAt(value?: string | null): string {
+  if (!value) {
+    return "Waiting";
+  }
+
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? "Waiting" : formatRelativeTime(timestamp);
+}
+
+function ArtifactRegistryTypeBadge({
+  record,
+}: {
+  record: ArtifactRegistryRecord;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+        artifactRegistryTypeTone(record)
+      )}
+    >
+      {humanizeArtifactToken(record.artifact_type) ?? "Artifact"}
+    </span>
+  );
+}
+
+function ArtifactRegistryStatusBadge({
+  record,
+}: {
+  record: ArtifactRegistryRecord;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+        artifactRegistryStatusTone(record)
+      )}
+    >
+      {record.status}
+    </span>
+  );
+}
+
+function ArtifactRegistryFilterField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  type = "text",
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  type?: "text" | "date";
+}) {
+  return (
+    <label className="flex min-w-0 flex-col gap-1.5">
+      <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+        {label}
+      </span>
+      <input
+        type={type}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded-[12px] border border-[rgba(214,221,212,0.9)] bg-white/96 px-3 py-2 text-[13px] text-slate-700 outline-none placeholder:text-slate-400 focus:border-[var(--apex-accent)]"
+      />
+    </label>
+  );
+}
+
+function ArtifactRegistryFiltersCard({
+  filters,
+  onChange,
+  onReset,
+}: {
+  filters: ArtifactRegistryFilterState;
+  onChange: (next: ArtifactRegistryFilterState) => void;
+  onReset: () => void;
+}) {
+  const hasActiveFilters = artifactRegistryHasActiveFilters(filters);
+
+  return (
+    <div className="rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/92 p-4 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="max-w-2xl">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+            Registry Filters
+          </p>
+          <p className="mt-1 text-sm leading-6 text-slate-500">
+            These fields map directly to the backend registry contract, so each
+            filter uses the exact stored `run_id`, `artifact_type`, `workflow`,
+            `date`, and `dataset_id` values.
+          </p>
+        </div>
+
+        {hasActiveFilters ? (
+          <WorkspaceAction onClick={onReset}>
+            <Files size={12} />
+            Clear Filters
+          </WorkspaceAction>
+        ) : null}
+      </div>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+        <ArtifactRegistryFilterField
+          label="Run ID"
+          value={filters.run_id}
+          onChange={(run_id) => onChange({ ...filters, run_id })}
+          placeholder="run-20260322T..."
+        />
+        <ArtifactRegistryFilterField
+          label="Artifact Type"
+          value={filters.artifact_type}
+          onChange={(artifact_type) => onChange({ ...filters, artifact_type })}
+          placeholder="compliance_report"
+        />
+        <ArtifactRegistryFilterField
+          label="Workflow"
+          value={filters.workflow}
+          onChange={(workflow) => onChange({ ...filters, workflow })}
+          placeholder="rnaseq_qc_de"
+        />
+        <ArtifactRegistryFilterField
+          label="Date"
+          value={filters.date}
+          onChange={(date) => onChange({ ...filters, date })}
+          placeholder="YYYY-MM-DD"
+          type="date"
+        />
+        <ArtifactRegistryFilterField
+          label="Dataset ID"
+          value={filters.dataset_id}
+          onChange={(dataset_id) => onChange({ ...filters, dataset_id })}
+          placeholder="dataset-..."
+        />
+      </div>
+
+      <label className="mt-4 inline-flex items-center gap-2 rounded-full border border-[rgba(211,219,210,0.88)] bg-[rgba(248,250,246,0.94)] px-3 py-2 text-[12px] font-medium text-slate-600">
+        <input
+          type="checkbox"
+          checked={filters.include_invalid}
+          onChange={(event) =>
+            onChange({ ...filters, include_invalid: event.target.checked })
+          }
+          className="h-4 w-4 rounded border-[rgba(211,219,210,0.9)] text-[var(--apex-accent)] focus:ring-[var(--apex-accent)]"
+        />
+        Include invalid registry entries
+      </label>
+    </div>
+  );
+}
+
+function ArtifactRegistryRow({
+  record,
+  active,
+  onSelect,
+}: {
+  record: ArtifactRegistryRecord;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  const Icon = record.status === "invalid" ? AlertTriangle : Package;
+  const metadataSummary = getArtifactRegistryMetadataSummary(record);
+
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={cn(
+        "w-full rounded-[18px] border px-4 py-4 text-left transition-colors",
+        active
+          ? "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.08)] shadow-[0_10px_24px_rgba(35,130,83,0.08)]"
+          : "border-[rgba(211,219,210,0.85)] bg-[rgba(255,255,255,0.92)] hover:border-[rgba(35,130,83,0.16)] hover:bg-[rgba(248,251,247,0.95)]"
+      )}
+    >
+      <div className="flex items-start gap-3">
+        <div
+          className={cn(
+            "mt-0.5 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-[12px]",
+            record.status === "invalid"
+              ? "bg-[rgba(255,241,242,0.95)] text-rose-600"
+              : active
+                ? "bg-white text-[var(--apex-accent-strong)]"
+                : "bg-[rgba(247,249,245,0.9)] text-slate-500"
+          )}
+        >
+          <Icon size={18} />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="truncate text-sm font-semibold text-slate-900">
+              {getArtifactRegistryDisplayName(record)}
+            </p>
+            <ArtifactRegistryTypeBadge record={record} />
+            {record.status === "invalid" ? (
+              <ArtifactRegistryStatusBadge record={record} />
+            ) : null}
+          </div>
+          <p className="mt-2 text-[12px] leading-5 text-slate-500">
+            {getArtifactRegistryDescription(record)}
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+            <span>{artifactRegistryTimestampLabel(record)}</span>
+            {metadataSummary.map((item) => (
+              <span key={`${record.path}-${item}`}>{item}</span>
+            ))}
+          </div>
+          <p className="mt-2 truncate font-mono text-[10px] text-slate-400">
+            {shortenArtifactPath(record.path)}
+          </p>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function ArtifactRegistryNavigatorCard({
+  status,
+  records,
+  selectedPath,
+  onSelect,
+  error,
+}: {
+  status: ArtifactRegistryWorkspaceStatus;
+  records: ArtifactRegistryRecord[];
+  selectedPath: string | null;
+  onSelect: (record: ArtifactRegistryRecord) => void;
+  error: string | null;
+}) {
+  return (
+    <div className="rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/92 p-3 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
+      <div className="border-b border-[rgba(211,219,210,0.72)] px-1 pb-3">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+          Registry Browser
+        </p>
+        <p className="mt-1 text-sm leading-6 text-slate-500">
+          Durable BioAPEX artifacts are listed here with their actual registry
+          metadata so workflow outputs, evidence, compliance reports, and
+          provenance bundles remain inspectable on disk.
+        </p>
+      </div>
+
+      <div className="mt-3 space-y-2">
+        {status === "loading" ? (
+          <WorkspaceStateCard>Loading artifact registry entries…</WorkspaceStateCard>
+        ) : status === "error" ? (
+          <WorkspaceStateCard tone="error">
+            {error ?? "Unable to load the artifact registry right now."}
+          </WorkspaceStateCard>
+        ) : records.length === 0 ? (
+          <WorkspaceStateCard>
+            No artifact registry entries match the current filters.
+          </WorkspaceStateCard>
+        ) : (
+          records.map((record) => (
+            <ArtifactRegistryRow
+              key={record.path}
+              record={record}
+              active={record.path === selectedPath}
+              onSelect={() => onSelect(record)}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ArtifactRegistryDetailPane({
+  status,
+  record,
+  error,
+  preview,
+  onOpenInspector,
+  onOpenRunRecord,
+}: {
+  status: ArtifactRegistryWorkspaceStatus;
+  record: ArtifactRegistryRecord | null;
+  error: string | null;
+  preview: {
+    status: PreviewStatus;
+    content: string;
+    error: string | null;
+  };
+  onOpenInspector?: () => void;
+  onOpenRunRecord?: () => void;
+}) {
+  const previewMode = record ? getArtifactRegistryPreviewMode(record) : null;
+  const [openRawFileError, setOpenRawFileError] = useState<string | null>(null);
+  const supportsRawInlinePreview = previewMode === "image" || previewMode === "pdf";
+  const {
+    url: rawPreviewUrl,
+    error: rawPreviewError,
+    loading: rawPreviewLoading,
+  } = useRawPreviewObjectUrl(record?.path ?? null, supportsRawInlinePreview);
+
+  useEffect(() => {
+    setOpenRawFileError(null);
+  }, [record?.path]);
+
+  const handleOpenRawFile = () => {
+    if (!record?.path) {
+      return;
+    }
+
+    setOpenRawFileError(null);
+    void openRawFileInNewTab(record.path).catch(() => {
+      setOpenRawFileError("Could not open the raw file right now.");
+    });
+  };
+
+  const previewUnavailableMessage = record
+    ? record.status === "invalid"
+      ? "This registry entry is invalid. Use the structured metadata and run record to inspect what failed."
+      : "This artifact is tracked in the registry even though it is not previewed inline yet."
+    : null;
+
+  return (
+    <div className="flex min-h-[32rem] flex-col rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/94 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
+      <div className="border-b border-[rgba(211,219,210,0.72)] px-5 py-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-3xl">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Structured Metadata
+            </p>
+            <h3 className="mt-2 text-[1.4rem] font-semibold tracking-[-0.03em] text-slate-900">
+              {record ? getArtifactRegistryDisplayName(record) : "Select an artifact"}
+            </h3>
+            <p className="mt-2 text-sm leading-6 text-slate-500">
+              {record
+                ? getArtifactRegistryDescription(record)
+                : "Choose an artifact registry entry to inspect its provenance, identifiers, and preview."}
+            </p>
+            {record?.path ? (
+              <p className="mt-2 break-all text-[11px] text-slate-400">{record.path}</p>
+            ) : null}
+          </div>
+
+          {record?.path ? (
+            <div className="flex flex-wrap gap-2">
+              {onOpenInspector ? (
+                <WorkspaceAction onClick={onOpenInspector} tone="accent">
+                  <FolderOpen size={12} />
+                  Open In Inspector
+                </WorkspaceAction>
+              ) : null}
+              <WorkspaceAction onClick={handleOpenRawFile}>
+                <ExternalLink size={12} />
+                Open Raw File
+              </WorkspaceAction>
+              {onOpenRunRecord ? (
+                <WorkspaceAction onClick={onOpenRunRecord}>
+                  <FileText size={12} />
+                  Open Run Record
+                </WorkspaceAction>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+
+        {record ? (
+          <div className="mt-4 flex flex-wrap gap-2">
+            <ArtifactRegistryTypeBadge record={record} />
+            <ArtifactRegistryStatusBadge record={record} />
+            <WorkspaceBadge icon={Package}>{artifactRegistryTimestampLabel(record)}</WorkspaceBadge>
+            <WorkspaceBadge icon={FileText}>{shortRunLabel(record.run_id)}</WorkspaceBadge>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+        {status === "loading" ? (
+          <WorkspaceStateCard>Loading selected registry metadata…</WorkspaceStateCard>
+        ) : status === "error" ? (
+          <WorkspaceStateCard tone="error">
+            {error ?? "Unable to load this artifact detail right now."}
+          </WorkspaceStateCard>
+        ) : !record ? (
+          <WorkspaceStateCard>
+            Select an artifact from the registry browser to load its metadata and preview.
+          </WorkspaceStateCard>
+        ) : (
+          <div className="space-y-4">
+            {record.status === "invalid" ? (
+              <WorkspaceStateCard tone="error">
+                {record.error ??
+                  "This registry entry is marked invalid. Review the run record or raw file path before relying on it."}
+              </WorkspaceStateCard>
+            ) : null}
+
+            <section className="rounded-[20px] border border-[rgba(211,219,210,0.88)] bg-[linear-gradient(180deg,rgba(250,251,248,0.97),rgba(255,255,255,0.98))] p-4 shadow-[0_8px_20px_rgba(29,42,33,0.03)]">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Registry Fields
+              </p>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Workflow
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-slate-900">
+                    {humanizeArtifactToken(record.workflow) ?? "Unknown workflow"}
+                  </p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Run
+                  </p>
+                  <p className="mt-2 break-all text-sm font-medium text-slate-900">
+                    {record.run_id}
+                  </p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Source
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-slate-900">
+                    {humanizeArtifactToken(record.source_tool) ??
+                      humanizeArtifactToken(record.source_workflow) ??
+                      "Registry artifact"}
+                  </p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Dataset
+                  </p>
+                  <p className="mt-2 break-all text-sm font-medium text-slate-900">
+                    {record.dataset_id ?? "Not recorded"}
+                  </p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Artifact ID
+                  </p>
+                  <p className="mt-2 break-all text-sm font-medium text-slate-900">
+                    {record.artifact_id}
+                  </p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Declared ID
+                  </p>
+                  <p className="mt-2 break-all text-sm font-medium text-slate-900">
+                    {record.declared_id ?? "Not declared"}
+                  </p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Created
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-slate-900">
+                    {record.created_at ?? "Unknown timestamp"}
+                  </p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Indexed
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-slate-900">
+                    {record.indexed_at}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-3 rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Path And Hash
+                </p>
+                <p className="mt-2 break-all text-sm font-medium text-slate-900">
+                  {record.path}
+                </p>
+                <p className="mt-2 break-all font-mono text-[11px] text-slate-500">
+                  {record.hash ?? "No content hash recorded"}
+                </p>
+              </div>
+            </section>
+
+            <section className="rounded-[20px] border border-[rgba(211,219,210,0.88)] bg-[linear-gradient(180deg,rgba(250,251,248,0.97),rgba(255,255,255,0.98))] p-4 shadow-[0_8px_20px_rgba(29,42,33,0.03)]">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                    Preview
+                  </p>
+                  <h4 className="mt-1 text-lg font-semibold tracking-[-0.02em] text-slate-900">
+                    {previewMode === "image"
+                      ? "Inline image"
+                      : previewMode === "pdf"
+                        ? "Inline document"
+                        : previewMode === "text"
+                          ? "Inline snippet"
+                          : "Open-backed artifact"}
+                  </h4>
+                </div>
+                <WorkspaceAction onClick={handleOpenRawFile}>
+                  <ExternalLink size={12} />
+                  Open Raw File
+                </WorkspaceAction>
+              </div>
+
+              <div className="mt-4 rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-4">
+                {previewMode === "unsupported" ? (
+                  <WorkspaceStateCard>{previewUnavailableMessage}</WorkspaceStateCard>
+                ) : supportsRawInlinePreview && rawPreviewLoading ? (
+                  <WorkspaceStateCard>Loading raw preview…</WorkspaceStateCard>
+                ) : openRawFileError || rawPreviewError ? (
+                  <WorkspaceStateCard tone="error">
+                    {openRawFileError ?? rawPreviewError}
+                  </WorkspaceStateCard>
+                ) : previewMode === "image" && rawPreviewUrl ? (
+                  <div className="overflow-hidden rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-[rgba(248,250,246,0.95)]">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={rawPreviewUrl}
+                      alt={getArtifactRegistryDisplayName(record)}
+                      className="max-h-[30rem] w-full object-contain"
+                    />
+                  </div>
+                ) : previewMode === "pdf" && rawPreviewUrl ? (
+                  <iframe
+                    src={rawPreviewUrl}
+                    title={getArtifactRegistryDisplayName(record)}
+                    className="h-[30rem] w-full rounded-[16px] border border-[rgba(214,221,212,0.86)]"
+                  />
+                ) : preview.status === "loading" ? (
+                  <WorkspaceStateCard>Loading preview…</WorkspaceStateCard>
+                ) : preview.status === "error" ? (
+                  <WorkspaceStateCard tone="error">
+                    {preview.error ?? "Unable to load that preview."}
+                  </WorkspaceStateCard>
+                ) : preview.status === "ready" ? (
+                  <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-[16px] bg-[rgba(248,250,246,0.95)] px-4 py-4 font-mono text-[12px] leading-6 text-slate-700">
+                    {previewText(preview.content)}
+                  </pre>
+                ) : (
+                  <WorkspaceStateCard>
+                    Select an artifact to preview it here.
+                  </WorkspaceStateCard>
+                )}
+              </div>
+            </section>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ArtifactsWorkspace() {
+  const {
+    workspaceMode,
+    inspectorPreviewPath,
+    openInspectorPath,
+    setWorkspaceMode,
+  } = useApp();
+  const [filters, setFilters] = useState<ArtifactRegistryFilterState>(
+    DEFAULT_ARTIFACT_REGISTRY_FILTERS
+  );
+  const [workspaceStatus, setWorkspaceStatus] =
+    useState<ArtifactRegistryWorkspaceStatus>("loading");
+  const [lookup, setLookup] = useState<ArtifactRegistryLookupResult | null>(null);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(null);
+  const {
+    artifact_type,
+    date,
+    dataset_id,
+    include_invalid,
+    run_id,
+    workflow,
+  } = filters;
+
+  useEffect(() => {
+    if (workspaceMode !== "artifacts") {
+      return;
+    }
+
+    let active = true;
+    setWorkspaceStatus("loading");
+    setWorkspaceError(null);
+    const query = normalizeArtifactRegistryQuery({
+      artifact_type,
+      date,
+      dataset_id,
+      include_invalid,
+      run_id,
+      workflow,
+    });
+
+    void listArtifactRegistry(query)
+      .then((response) => {
+        if (!active) return;
+
+        setLookup({
+          ...response,
+          records: sortArtifactRegistryRecords(response.records),
+        });
+        setWorkspaceStatus("ready");
+      })
+      .catch((artifactError) => {
+        if (!active) return;
+
+        setLookup(null);
+        setWorkspaceStatus("error");
+        setWorkspaceError(
+          artifactError instanceof Error
+            ? artifactError.message
+            : "Unable to load artifact registry entries right now."
+        );
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [
+    artifact_type,
+    date,
+    dataset_id,
+    include_invalid,
+    run_id,
+    workflow,
+    workspaceMode,
+  ]);
+
+  const registryRecords = lookup?.records ?? EMPTY_ARTIFACT_REGISTRY_RECORDS;
+
+  useEffect(() => {
+    if (workspaceMode !== "artifacts") return;
+
+    if (
+      inspectorPreviewPath &&
+      registryRecords.some((record) => record.path === inspectorPreviewPath)
+    ) {
+      setSelectedArtifactPath(inspectorPreviewPath);
+      return;
+    }
+
+    if (
+      selectedArtifactPath &&
+      registryRecords.some((record) => record.path === selectedArtifactPath)
+    ) {
+      return;
+    }
+
+    setSelectedArtifactPath(registryRecords[0]?.path ?? null);
+  }, [inspectorPreviewPath, registryRecords, selectedArtifactPath, workspaceMode]);
+
+  const selectedRecord =
+    registryRecords.find((record) => record.path === selectedArtifactPath) ??
+    registryRecords[0] ??
+    null;
+  const preview = usePreviewContent(
+    selectedRecord && isArtifactRegistryTextPreviewable(selectedRecord)
+      ? selectedRecord.path
+      : null
+  );
+  const hasActiveFilters = artifactRegistryHasActiveFilters(filters);
+  const generatedAtLabel = formatArtifactRegistryGeneratedAt(
+    lookup?.generated_at ?? null
+  );
+
+  return (
+    <WorkspaceShell mode="artifacts">
+      <WorkspaceHero
+        icon={Package}
+        title="Artifact Registry"
+        description="Browse the real BioAPEX artifact registry across workflow outputs, evidence artifacts, compliance reports, provenance bundles, and related records without depending on chat history alone."
+        badges={
+          <>
+            <WorkspaceBadge icon={Package}>
+              {workspaceStatus === "loading"
+                ? "Loading"
+                : `${lookup?.matched_count ?? 0} visible`}
+            </WorkspaceBadge>
+            <WorkspaceBadge icon={Sparkles}>
+              {hasActiveFilters ? "Filtered view" : "All records"}
+            </WorkspaceBadge>
+            {selectedRecord ? (
+              <ArtifactRegistryTypeBadge record={selectedRecord} />
+            ) : null}
+          </>
+        }
+        actions={
+          <>
+            {selectedRecord?.path ? (
+              <WorkspaceAction
+                onClick={() => openInspectorPath(selectedRecord.path)}
+                tone="accent"
+              >
+                <FolderOpen size={12} />
+                Inspect Selected Artifact
+              </WorkspaceAction>
+            ) : null}
+            {hasActiveFilters ? (
+              <WorkspaceAction onClick={() => setFilters(DEFAULT_ARTIFACT_REGISTRY_FILTERS)}>
+                <Files size={12} />
+                Reset Filters
+              </WorkspaceAction>
+            ) : null}
+            <WorkspaceAction onClick={() => setWorkspaceMode("sessions")}>
+              <MessageSquare size={12} />
+              Return To Session
+            </WorkspaceAction>
+          </>
+        }
+      />
+
+      <ArtifactRegistryFiltersCard
+        filters={filters}
+        onChange={setFilters}
+        onReset={() => setFilters(DEFAULT_ARTIFACT_REGISTRY_FILTERS)}
+      />
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        <SummaryCard
+          label="Visible Records"
+          value={
+            workspaceStatus === "loading"
+              ? "Loading"
+              : workspaceStatus === "error"
+                ? "Issue"
+                : `${lookup?.matched_count ?? 0}`
+          }
+          detail="Registry results stay aligned with the backend snapshot rather than a frontend-only artifact model."
+        />
+        <SummaryCard
+          label="Snapshot Total"
+          value={lookup ? `${lookup.total_count}` : "Waiting"}
+          detail="The total count reflects the durable registry snapshot, even when filters narrow the visible entries."
+        />
+        <SummaryCard
+          label="Invalid Visible"
+          value={
+            filters.include_invalid
+              ? `${lookup?.invalid_count ?? 0}`
+              : "Hidden"
+          }
+          detail={`Snapshot updated ${generatedAtLabel}. Invalid entries stay opt-in so broken records do not silently blend into normal browsing.`}
+        />
+      </div>
+
+      {workspaceStatus === "loading" ? (
+        <WorkspaceStateCard>Loading the artifact registry browser…</WorkspaceStateCard>
+      ) : workspaceStatus === "error" ? (
+        <WorkspaceStateCard tone="error">
+          {workspaceError ?? "Unable to load the artifact registry right now."}
+        </WorkspaceStateCard>
+      ) : (lookup?.total_count ?? 0) === 0 ? (
+        <EmptyWorkspaceState
+          title="The artifact registry is empty"
+          description="No durable BioAPEX artifacts are indexed yet. Run a workflow, evidence retrieval, compliance pass, or export flow and the registry browser will populate here."
+          action={
+            <WorkspaceAction onClick={() => setWorkspaceMode("sessions")} tone="accent">
+              <MessageSquare size={12} />
+              Start In Sessions
+            </WorkspaceAction>
+          }
+        />
+      ) : registryRecords.length === 0 ? (
+        <EmptyWorkspaceState
+          title="No artifacts match the current filters"
+          description="The registry snapshot exists, but the active filter combination did not return any records. Clear the filters or broaden one of the backend field values."
+          action={
+            <WorkspaceAction
+              onClick={() => setFilters(DEFAULT_ARTIFACT_REGISTRY_FILTERS)}
+              tone="accent"
+            >
+              <Files size={12} />
+              Clear Filters
+            </WorkspaceAction>
+          }
+        />
+      ) : (
+        <div className="grid min-h-0 gap-4 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
+          <ArtifactRegistryNavigatorCard
+            status={workspaceStatus}
+            records={registryRecords}
+            selectedPath={selectedRecord?.path ?? null}
+            onSelect={(record) => setSelectedArtifactPath(record.path)}
+            error={workspaceError}
+          />
+
+          <ArtifactRegistryDetailPane
+            status={workspaceStatus}
+            record={selectedRecord}
+            error={workspaceError}
+            preview={preview}
+            onOpenInspector={
+              selectedRecord?.path
+                ? () => openInspectorPath(selectedRecord.path)
+                : undefined
+            }
+            onOpenRunRecord={
+              selectedRecord
+                ? () => openInspectorPath(getArtifactRegistryRunRecordPath(selectedRecord))
+                : undefined
+            }
+          />
+        </div>
+      )}
+    </WorkspaceShell>
+  );
+}
+
 export default function WorkspacePanel() {
   const { workspaceMode } = useApp();
 
@@ -2066,6 +2957,7 @@ export default function WorkspacePanel() {
       {workspaceMode === "flows" ? <FlowsWorkspace /> : null}
       {workspaceMode === "docs" ? <DocsWorkspace /> : null}
       {workspaceMode === "files" ? <FilesWorkspace /> : null}
+      {workspaceMode === "artifacts" ? <ArtifactsWorkspace /> : null}
     </div>
   );
 }
