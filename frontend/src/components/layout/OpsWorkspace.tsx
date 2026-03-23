@@ -16,6 +16,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import {
+  listAuditEvents,
   getObservabilityDashboardDefinitions,
   getObservabilityOverview,
   listObservabilityMetrics,
@@ -23,6 +24,9 @@ import {
 } from "@/lib/api";
 import { useApp } from "@/lib/store";
 import type {
+  AuditEventRecord,
+  AuditEventsQuery,
+  AuditEventType,
   JsonValue,
   ObservabilityDashboardDefinition,
   ObservabilityMetricRecord,
@@ -37,18 +41,23 @@ import type {
 } from "@/lib/types";
 import { cn, formatRelativeTime } from "@/lib/utils";
 
-type OpsView = "overview" | "metrics" | "traces" | "dashboards";
+type OpsView = "overview" | "metrics" | "traces" | "audit" | "dashboards";
 type OpsWorkspaceStatus = "idle" | "loading" | "ready" | "error";
 
 interface OpsWorkspaceFilters {
   days: string;
   limit: string;
+  eventType: string;
   requestId: string;
   sessionId: string;
   runId: string;
   stepId: string;
+  jobId: string;
   workflowId: string;
   traceId: string;
+  toolName: string;
+  connectorName: string;
+  outcome: string;
 }
 
 interface FilterChip {
@@ -60,24 +69,48 @@ interface FilterChip {
 const DEFAULT_OPS_FILTERS: OpsWorkspaceFilters = {
   days: "7",
   limit: "100",
+  eventType: "",
   requestId: "",
   sessionId: "",
   runId: "",
   stepId: "",
+  jobId: "",
   workflowId: "",
   traceId: "",
+  toolName: "",
+  connectorName: "",
+  outcome: "",
 };
 
 const FILTER_LABELS: Record<keyof OpsWorkspaceFilters, string> = {
   days: "Window",
   limit: "List Limit",
+  eventType: "Event Type",
   requestId: "Request ID",
   sessionId: "Session ID",
   runId: "Run ID",
   stepId: "Step ID",
+  jobId: "Job ID",
   workflowId: "Workflow ID",
   traceId: "Trace ID",
+  toolName: "Tool",
+  connectorName: "Connector",
+  outcome: "Outcome",
 };
+
+const MAX_OPS_LIST_LIMIT = 500;
+const AUDIT_LIMIT_INCREMENT = 100;
+const AUDIT_EVENT_TYPE_OPTIONS: AuditEventType[] = [
+  "chat_request_received",
+  "compliance_decision",
+  "workflow_started",
+  "workflow_finished",
+  "tool_invoked",
+  "connector_action",
+  "file_written",
+  "job_submitted",
+  "export_generated",
+];
 
 const VIEW_CONFIG: Record<
   OpsView,
@@ -104,6 +137,7 @@ const VIEW_CONFIG: Record<
       "sessionId",
       "runId",
       "stepId",
+      "jobId",
       "workflowId",
       "traceId",
     ],
@@ -118,8 +152,26 @@ const VIEW_CONFIG: Record<
       "sessionId",
       "runId",
       "stepId",
+      "jobId",
       "workflowId",
       "traceId",
+    ],
+  },
+  audit: {
+    label: "Audit",
+    description: "Chronological audit events across runs, tools, connectors, and blocked actions.",
+    icon: ShieldCheck,
+    supportedFilters: [
+      "limit",
+      "eventType",
+      "sessionId",
+      "runId",
+      "stepId",
+      "jobId",
+      "workflowId",
+      "toolName",
+      "connectorName",
+      "outcome",
     ],
   },
   dashboards: {
@@ -157,11 +209,43 @@ function parsePositiveInteger(value: string): number | undefined {
   return parsed;
 }
 
+function resolveListLimit(value: string, fallback = 100): number {
+  const resolvedLimit = parsePositiveInteger(value) ?? fallback;
+  return Math.min(resolvedLimit, MAX_OPS_LIST_LIMIT);
+}
+
+function normalizeOpsFilters(filters: OpsWorkspaceFilters): OpsWorkspaceFilters {
+  return {
+    ...filters,
+    limit: String(resolveListLimit(filters.limit)),
+  };
+}
+
 function humanizeToken(value?: string | null): string | null {
   if (!value) {
     return null;
   }
   return value.replaceAll("_", " ").replaceAll("-", " ");
+}
+
+function toTitleCase(value: string): string {
+  return value.replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function formatTokenLabel(value?: string | null): string | null {
+  const humanized = humanizeToken(value);
+  if (!humanized) {
+    return null;
+  }
+  return toTitleCase(humanized);
+}
+
+function normalizeAuditEventType(value: string): AuditEventType | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return AUDIT_EVENT_TYPE_OPTIONS.find((eventType) => eventType === trimmed);
 }
 
 function formatNumber(value: number, maximumFractionDigits = 2): string {
@@ -272,6 +356,8 @@ function getAppliedFilterChips(filters: OpsWorkspaceFilters): FilterChip[] {
       value:
         key === "days"
           ? `${filters[key].trim()} days`
+          : key === "eventType"
+            ? formatTokenLabel(filters[key]) ?? filters[key].trim()
           : key === "limit"
             ? filters[key].trim()
             : filters[key].trim(),
@@ -301,6 +387,7 @@ function buildMetricsQuery(filters: OpsWorkspaceFilters): ObservabilityMetricsQu
     session_id: normalizeFilterValue(filters.sessionId),
     run_id: normalizeFilterValue(filters.runId),
     step_id: normalizeFilterValue(filters.stepId),
+    job_id: normalizeFilterValue(filters.jobId),
     workflow_id: normalizeFilterValue(filters.workflowId),
     trace_id: normalizeFilterValue(filters.traceId),
     limit: parsePositiveInteger(filters.limit),
@@ -313,8 +400,24 @@ function buildTracesQuery(filters: OpsWorkspaceFilters): ObservabilityTracesQuer
     session_id: normalizeFilterValue(filters.sessionId),
     run_id: normalizeFilterValue(filters.runId),
     step_id: normalizeFilterValue(filters.stepId),
+    job_id: normalizeFilterValue(filters.jobId),
     workflow_id: normalizeFilterValue(filters.workflowId),
     trace_id: normalizeFilterValue(filters.traceId),
+    limit: parsePositiveInteger(filters.limit),
+  };
+}
+
+function buildAuditQuery(filters: OpsWorkspaceFilters): AuditEventsQuery {
+  return {
+    event_type: normalizeAuditEventType(filters.eventType),
+    session_id: normalizeFilterValue(filters.sessionId),
+    run_id: normalizeFilterValue(filters.runId),
+    step_id: normalizeFilterValue(filters.stepId),
+    job_id: normalizeFilterValue(filters.jobId),
+    workflow_id: normalizeFilterValue(filters.workflowId),
+    tool_name: normalizeFilterValue(filters.toolName),
+    connector_name: normalizeFilterValue(filters.connectorName),
+    outcome: normalizeFilterValue(filters.outcome),
     limit: parsePositiveInteger(filters.limit),
   };
 }
@@ -362,6 +465,51 @@ function summarizeTraceScope(record: ObservabilityTraceRecord): string[] {
     record.step_id ? `Step ${shortenIdentifier(record.step_id)}` : null,
     record.workflow_id ? `Workflow ${humanizeToken(record.workflow_id)}` : null,
   ].filter((value): value is string => Boolean(value));
+}
+
+function summarizeAuditScope(record: AuditEventRecord): string[] {
+  return [
+    record.session_id ? `Session ${shortenIdentifier(record.session_id)}` : null,
+    record.run_id ? `Run ${shortenIdentifier(record.run_id)}` : null,
+    record.step_id ? `Step ${shortenIdentifier(record.step_id)}` : null,
+    record.job_id ? `Job ${shortenIdentifier(record.job_id, 6, 4)}` : null,
+    record.workflow_id ? `Workflow ${formatTokenLabel(record.workflow_id)}` : null,
+    record.tool_name ? `Tool ${record.tool_name}` : null,
+    record.connector_name ? `Connector ${record.connector_name}` : null,
+  ].filter((value): value is string => Boolean(value));
+}
+
+function formatAuditEventTypeLabel(eventType: AuditEventType): string {
+  return formatTokenLabel(eventType) ?? eventType;
+}
+
+function formatAuditOutcomeLabel(outcome?: string | null): string {
+  return formatTokenLabel(outcome) ?? "No outcome";
+}
+
+function auditOutcomeTone(outcome?: string | null): string {
+  const normalized = outcome?.trim().toLowerCase();
+  if (!normalized) {
+    return "border-[rgba(148,163,184,0.24)] bg-[rgba(248,250,252,0.94)] text-slate-600";
+  }
+  if (
+    normalized.includes("success") ||
+    normalized === "completed" ||
+    normalized === "received" ||
+    normalized === "written" ||
+    normalized === "submitted" ||
+    normalized === "allow"
+  ) {
+    return "border-[rgba(15,118,110,0.18)] bg-[rgba(240,253,250,0.94)] text-teal-700";
+  }
+  if (
+    normalized.includes("blocked") ||
+    normalized.includes("warning") ||
+    normalized.includes("approval")
+  ) {
+    return "border-[rgba(217,119,6,0.22)] bg-[rgba(255,247,237,0.95)] text-amber-700";
+  }
+  return "border-[rgba(220,38,38,0.18)] bg-[rgba(254,242,242,0.95)] text-rose-700";
 }
 
 function traceStatusTone(status: ObservabilityTraceStatus): string {
@@ -486,8 +634,8 @@ function OpsHero({
             Ops
           </h2>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
-            Inspect BioAPEX runtime health, workflow delivery, traces, and dashboard
-            definitions without leaving the production-operations surface.
+            Inspect BioAPEX runtime health, workflow delivery, traces, audit events,
+            and dashboard definitions without leaving the production-operations surface.
           </p>
           {badges ? <div className="mt-3 flex flex-wrap gap-2">{badges}</div> : null}
         </div>
@@ -602,6 +750,40 @@ function OpsFilterField({
         placeholder={placeholder}
         className="w-full rounded-[12px] border border-[rgba(203,213,225,0.95)] bg-white px-3 py-2 text-sm text-slate-700 outline-none placeholder:text-slate-400 focus:border-blue-400"
       />
+      <span className="text-[11px] leading-5 text-slate-400">{description}</span>
+    </label>
+  );
+}
+
+function OpsFilterSelect({
+  label,
+  description,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+        {label}
+      </span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="w-full rounded-[12px] border border-[rgba(203,213,225,0.95)] bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-400"
+      >
+        {options.map((option) => (
+          <option key={option.value || "all"} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
       <span className="text-[11px] leading-5 text-slate-400">{description}</span>
     </label>
   );
@@ -1236,6 +1418,409 @@ function TraceDetailPane({
   );
 }
 
+function AuditEventNavigator({
+  status,
+  events,
+  error,
+  retentionPolicy,
+  selectedEventId,
+  onSelect,
+  onLoadMore,
+  canLoadMore,
+  currentLimit,
+}: {
+  status: OpsWorkspaceStatus;
+  events: AuditEventRecord[];
+  error: string | null;
+  retentionPolicy: RetentionPolicy | null;
+  selectedEventId: string | null;
+  onSelect: (record: AuditEventRecord) => void;
+  onLoadMore: () => void;
+  canLoadMore: boolean;
+  currentLimit: number;
+}) {
+  const nextLimit = Math.min(currentLimit + AUDIT_LIMIT_INCREMENT, MAX_OPS_LIST_LIMIT);
+
+  return (
+    <OpsSectionCard
+      title="Audit Events"
+      description="Review the latest matching audit events, then inspect the selected record in detail."
+    >
+      <div className="space-y-4">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="rounded-[18px] border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.92)] px-4 py-4">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+              Retention
+            </p>
+            <p className="mt-2 text-sm font-semibold text-slate-900">
+              {retentionLabel(retentionPolicy)}
+            </p>
+            <p className="mt-1 text-[12px] leading-5 text-slate-500">
+              {retentionPolicy
+                ? `${formatTokenLabel(retentionPolicy.rotation_strategy) ?? retentionPolicy.rotation_strategy}. ${
+                    retentionPolicy.automatic_deletion
+                      ? "Automatic deletion is enabled."
+                      : "Automatic deletion is not enabled."
+                  }`
+                : "Retention metadata becomes available when audit events load."}
+            </p>
+          </div>
+          <div className="rounded-[18px] border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.92)] px-4 py-4">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+              Query Window
+            </p>
+            <p className="mt-2 text-sm font-semibold text-slate-900">
+              Showing {formatInteger(events.length)} loaded event
+              {events.length === 1 ? "" : "s"}
+            </p>
+            <p className="mt-1 text-[12px] leading-5 text-slate-500">
+              Current request cap: {formatInteger(currentLimit)}. Bounded loading keeps
+              the audit surface responsive while still allowing deeper review.
+            </p>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          {status === "loading" && events.length === 0 ? (
+            <OpsStateCard>Loading audit events…</OpsStateCard>
+          ) : status === "error" ? (
+            <OpsStateCard tone="error">
+              {error ?? "Could not load audit events right now."}
+            </OpsStateCard>
+          ) : events.length === 0 ? (
+            <OpsStateCard>No audit events matched the current filters.</OpsStateCard>
+          ) : (
+            events.map((record) => {
+              const active = record.event_id === selectedEventId;
+              const scope = summarizeAuditScope(record);
+              return (
+                <button
+                  key={record.event_id}
+                  type="button"
+                  onClick={() => onSelect(record)}
+                  className={cn(
+                    "w-full rounded-[18px] border px-4 py-4 text-left transition-colors",
+                    active
+                      ? "border-[rgba(37,99,235,0.22)] bg-[rgba(239,246,255,0.95)] shadow-[0_10px_24px_rgba(37,99,235,0.08)]"
+                      : "border-[rgba(210,218,230,0.88)] bg-[rgba(255,255,255,0.94)] hover:bg-[rgba(248,250,252,0.98)]"
+                  )}
+                >
+                  <div className="flex items-start gap-3">
+                    <div
+                      className={cn(
+                        "mt-0.5 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-[12px]",
+                        active
+                          ? "bg-white text-blue-700"
+                          : "bg-[rgba(248,250,252,0.92)] text-slate-500"
+                      )}
+                    >
+                      <ShieldCheck size={18} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center rounded-full border border-[rgba(191,219,254,0.92)] bg-[rgba(239,246,255,0.94)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-blue-700">
+                          {formatAuditEventTypeLabel(record.event_type)}
+                        </span>
+                        {record.outcome ? (
+                          <span
+                            className={cn(
+                              "inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                              auditOutcomeTone(record.outcome)
+                            )}
+                          >
+                            {formatAuditOutcomeLabel(record.outcome)}
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="mt-2 text-sm font-semibold text-slate-900">
+                        {record.summary}
+                      </p>
+                      <p className="mt-1 text-[12px] text-slate-500">
+                        {formatRelativeIsoTime(record.recorded_at)}
+                      </p>
+                      {scope.length > 0 ? (
+                        <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-slate-500">
+                          {scope.map((item) => (
+                            <span key={item}>{item}</span>
+                          ))}
+                        </div>
+                      ) : null}
+                      {record.artifact_paths.length > 0 || record.external_systems.length > 0 ? (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {record.artifact_paths.length > 0 ? (
+                            <span className="rounded-full border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.96)] px-2.5 py-1 text-[11px] text-slate-500">
+                              {`${record.artifact_paths.length} artifact path${record.artifact_paths.length === 1 ? "" : "s"}`}
+                            </span>
+                          ) : null}
+                          {record.external_systems.map((system) => (
+                            <span
+                              key={`${record.event_id}:${system}`}
+                              className="rounded-full border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.96)] px-2.5 py-1 text-[11px] text-slate-500"
+                            >
+                              {system}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                    <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-[rgba(226,232,240,0.95)] bg-white/92 text-slate-400">
+                      <ArrowRight size={14} />
+                    </div>
+                  </div>
+                </button>
+              );
+            })
+          )}
+        </div>
+
+        {status !== "error" ? (
+          <div className="flex flex-col gap-3 rounded-[18px] border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.9)] px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-[12px] leading-5 text-slate-500">
+              {canLoadMore
+                ? `Showing the latest ${formatInteger(events.length)} matching events. Load more raises the backend limit to ${formatInteger(nextLimit)}.`
+                : currentLimit >= MAX_OPS_LIST_LIMIT
+                  ? `The audit query is at the maximum frontend limit of ${formatInteger(MAX_OPS_LIST_LIMIT)} events.`
+                  : `Showing ${formatInteger(events.length)} matching event${events.length === 1 ? "" : "s"} within the current backend limit.`}
+            </p>
+            {canLoadMore ? (
+              <OpsAction
+                onClick={onLoadMore}
+                tone="accent"
+                disabled={status === "loading"}
+              >
+                <RefreshCw size={12} />
+                Load More
+              </OpsAction>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </OpsSectionCard>
+  );
+}
+
+function AuditEventDetailPane({
+  status,
+  record,
+  error,
+}: {
+  status: OpsWorkspaceStatus;
+  record: AuditEventRecord | null;
+  error: string | null;
+}) {
+  return (
+    <OpsSectionCard
+      title="Audit Detail"
+      description="Inspect the selected audit event, linked identifiers, artifact paths, and raw details."
+    >
+      {status === "error" ? (
+        <OpsStateCard tone="error">
+          {error ?? "Could not load the selected audit event detail."}
+        </OpsStateCard>
+      ) : !record ? (
+        <OpsStateCard>Select an audit event to inspect its runtime context.</OpsStateCard>
+      ) : (
+        <div className="space-y-4">
+          <div className="rounded-[20px] border border-[rgba(210,218,230,0.92)] bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.96))] px-4 py-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-[rgba(191,219,254,0.92)] bg-[rgba(239,246,255,0.94)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-blue-700">
+                {formatAuditEventTypeLabel(record.event_type)}
+              </span>
+              {record.outcome ? (
+                <span
+                  className={cn(
+                    "inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                    auditOutcomeTone(record.outcome)
+                  )}
+                >
+                  {formatAuditOutcomeLabel(record.outcome)}
+                </span>
+              ) : null}
+              <OpsBadge icon={Clock3} tone="neutral">
+                {formatRelativeIsoTime(record.recorded_at)}
+              </OpsBadge>
+            </div>
+            <h3 className="mt-3 text-lg font-semibold tracking-[-0.02em] text-slate-900">
+              {record.summary}
+            </h3>
+            <p className="mt-1 text-sm text-slate-500">
+              Recorded {formatAbsoluteIsoTime(record.recorded_at)} by {record.actor}.
+            </p>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <IdentifierRow label="Event ID" value={record.event_id} />
+            <IdentifierRow label="Session ID" value={record.session_id} />
+            <IdentifierRow label="Run ID" value={record.run_id} />
+            <IdentifierRow label="Step ID" value={record.step_id} />
+            <IdentifierRow label="Job ID" value={record.job_id} />
+            <IdentifierRow label="Workflow ID" value={record.workflow_id} />
+            <IdentifierRow label="Tool Name" value={record.tool_name} />
+            <IdentifierRow label="Connector Name" value={record.connector_name} />
+            <IdentifierRow label="Redaction Policy" value={record.redaction_policy} />
+          </div>
+
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,0.72fr)_minmax(0,1.28fr)]">
+            <div className="space-y-4">
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                  Artifact Paths
+                </p>
+                <div className="mt-2">
+                  {record.artifact_paths.length === 0 ? (
+                    <OpsStateCard>No artifact paths were recorded for this event.</OpsStateCard>
+                  ) : (
+                    <div className="space-y-2">
+                      {record.artifact_paths.map((path) => (
+                        <div
+                          key={path}
+                          className="rounded-[14px] border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.92)] px-3 py-2 font-mono text-[12px] leading-5 text-slate-700"
+                        >
+                          {path}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                  External Systems
+                </p>
+                <div className="mt-2">
+                  {record.external_systems.length === 0 ? (
+                    <OpsStateCard>No external systems were recorded for this event.</OpsStateCard>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {record.external_systems.map((system) => (
+                        <OpsBadge key={system} icon={ArrowRight} tone="neutral">
+                          {system}
+                        </OpsBadge>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Raw Details
+              </p>
+              <div className="mt-2">
+                <JsonPreview value={record.details} />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </OpsSectionCard>
+  );
+}
+
+function AuditView({
+  status,
+  events,
+  error,
+  retentionPolicy,
+  ignoredFilters,
+  selectedEventId,
+  onSelect,
+  onLoadMore,
+  canLoadMore,
+  currentLimit,
+}: {
+  status: OpsWorkspaceStatus;
+  events: AuditEventRecord[];
+  error: string | null;
+  retentionPolicy: RetentionPolicy | null;
+  ignoredFilters: FilterChip[];
+  selectedEventId: string | null;
+  onSelect: (record: AuditEventRecord) => void;
+  onLoadMore: () => void;
+  canLoadMore: boolean;
+  currentLimit: number;
+}) {
+  const selectedEvent =
+    events.find((record) => record.event_id === selectedEventId) ?? null;
+  const blockedEvents = events.filter((record) =>
+    record.outcome?.toLowerCase().includes("blocked")
+  ).length;
+  const toolLinkedEvents = events.filter(
+    (record) => record.event_type === "tool_invoked" || Boolean(record.tool_name)
+  ).length;
+  const connectorLinkedEvents = events.filter(
+    (record) =>
+      record.event_type === "connector_action" || Boolean(record.connector_name)
+  ).length;
+  const workflowLinkedEvents = events.filter(
+    (record) => Boolean(record.run_id || record.workflow_id)
+  ).length;
+
+  return (
+    <div className="space-y-4">
+      {ignoredFilters.length > 0 ? (
+        <OpsStateCard tone="warning">
+          Audit events ignore some active filters because the backend audit route only
+          accepts event type, session, run, step, job, workflow, tool, connector,
+          outcome, and list-limit constraints.
+          <div className="mt-3">
+            <FilterChipRow chips={ignoredFilters} tone="warning" />
+          </div>
+        </OpsStateCard>
+      ) : null}
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <OpsSummaryCard
+          label="Loaded Events"
+          value={
+            status === "loading" && events.length === 0
+              ? "Loading"
+              : formatInteger(events.length)
+          }
+          detail="Matching audit events currently loaded into the review surface."
+        />
+        <OpsSummaryCard
+          label="Blocked Outcomes"
+          value={formatInteger(blockedEvents)}
+          detail="Events whose recorded outcome indicates a blocked action or state."
+          tone={blockedEvents > 0 ? "warning" : "default"}
+        />
+        <OpsSummaryCard
+          label="Tool-Linked"
+          value={formatInteger(toolLinkedEvents)}
+          detail="Events tied directly to tool execution or tool-specific audit context."
+        />
+        <OpsSummaryCard
+          label="Workflow-Linked"
+          value={formatInteger(workflowLinkedEvents)}
+          detail={`Connector-linked events in view: ${formatInteger(connectorLinkedEvents)}.`}
+        />
+      </div>
+
+      <div className="grid min-h-0 gap-4 xl:grid-cols-[minmax(0,0.88fr)_minmax(0,1.12fr)]">
+        <AuditEventNavigator
+          status={status}
+          events={events}
+          error={error}
+          retentionPolicy={retentionPolicy}
+          selectedEventId={selectedEventId}
+          onSelect={onSelect}
+          onLoadMore={onLoadMore}
+          canLoadMore={canLoadMore}
+          currentLimit={currentLimit}
+        />
+        <AuditEventDetailPane
+          status={status}
+          record={selectedEvent}
+          error={error}
+        />
+      </div>
+    </div>
+  );
+}
+
 function DashboardDefinitionsView({
   status,
   dashboards,
@@ -1345,6 +1930,16 @@ export default function OpsWorkspace() {
   const [tracesError, setTracesError] = useState<string | null>(null);
   const [selectedTraceKey, setSelectedTraceKey] = useState<string | null>(null);
 
+  const [auditStatus, setAuditStatus] =
+    useState<OpsWorkspaceStatus>("idle");
+  const [auditEvents, setAuditEvents] = useState<AuditEventRecord[]>([]);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [auditRetentionPolicy, setAuditRetentionPolicy] =
+    useState<RetentionPolicy | null>(null);
+  const [selectedAuditEventId, setSelectedAuditEventId] = useState<string | null>(
+    null
+  );
+
   const [dashboardsStatus, setDashboardsStatus] =
     useState<OpsWorkspaceStatus>("idle");
   const [dashboards, setDashboards] = useState<ObservabilityDashboardDefinition[]>(
@@ -1361,6 +1956,10 @@ export default function OpsWorkspace() {
   );
   const tracesQuery = useMemo(
     () => buildTracesQuery(appliedFilters),
+    [appliedFilters]
+  );
+  const auditQuery = useMemo(
+    () => buildAuditQuery(appliedFilters),
     [appliedFilters]
   );
 
@@ -1520,6 +2119,56 @@ export default function OpsWorkspace() {
     };
   }, [activeView, refreshToken]);
 
+  useEffect(() => {
+    if (activeView !== "audit") {
+      return;
+    }
+
+    let active = true;
+    setAuditStatus("loading");
+    setAuditError(null);
+    setAuditEvents([]);
+    setAuditRetentionPolicy(null);
+
+    void listAuditEvents(auditQuery)
+      .then((response) => {
+        if (!active) {
+          return;
+        }
+        setAuditEvents(response.events);
+        setAuditRetentionPolicy(response.retention_policy);
+        setAuditStatus("ready");
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+        setAuditEvents([]);
+        setAuditRetentionPolicy(null);
+        setAuditStatus("error");
+        setAuditError(getObservabilityErrorMessage(error, "audit events"));
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [activeView, auditQuery, refreshToken]);
+
+  useEffect(() => {
+    if (auditEvents.length === 0) {
+      if (selectedAuditEventId !== null) {
+        setSelectedAuditEventId(null);
+      }
+      return;
+    }
+
+    if (selectedAuditEventId && auditEvents.some((event) => event.event_id === selectedAuditEventId)) {
+      return;
+    }
+
+    setSelectedAuditEventId(auditEvents[0].event_id);
+  }, [auditEvents, selectedAuditEventId]);
+
   const appliedFilterChips = useMemo(
     () => getAppliedFilterChips(appliedFilters),
     [appliedFilters]
@@ -1539,17 +2188,32 @@ export default function OpsWorkspace() {
   const selectedTrace =
     traces.find((record) => `${record.trace_id}:${record.span_id}` === selectedTraceKey) ??
     null;
+  const currentListLimit = resolveListLimit(appliedFilters.limit);
+  const canLoadMoreAuditEvents =
+    activeView === "audit" &&
+    currentListLimit < MAX_OPS_LIST_LIMIT &&
+    auditEvents.length >= currentListLimit;
 
   const currentRetentionPolicy =
-    overview?.retention_policy ?? null;
+    activeView === "audit"
+      ? auditRetentionPolicy
+      : overview?.retention_policy ?? null;
 
   const activeViewDescription = VIEW_CONFIG[activeView].description;
+  const activeScopeBadgeLabel =
+    activeView === "overview"
+      ? `${overviewQuery.days ?? 7} day window`
+      : activeView === "dashboards"
+        ? "Static definitions"
+        : `${formatInteger(currentListLimit)} row limit`;
   const viewSupportSummary =
     activeView === "overview"
       ? "Overview uses the time window plus request, session, and workflow filters."
+      : activeView === "audit"
+        ? "Audit applies event type, session, run, step, job, workflow, tool, connector, outcome, and list-limit filters."
       : activeView === "dashboards"
         ? "Dashboard definitions are static backend metadata and ignore runtime filters."
-        : "Metrics and traces apply request, session, run, step, workflow, trace, and list-limit filters.";
+        : "Metrics and traces apply request, session, run, step, job, workflow, trace, and list-limit filters.";
 
   return (
     <OpsShell>
@@ -1560,7 +2224,7 @@ export default function OpsWorkspace() {
               {VIEW_CONFIG[activeView].label}
             </OpsBadge>
             <OpsBadge icon={Clock3} tone="neutral">
-              {`${overviewQuery.days ?? 7} day window`}
+              {activeScopeBadgeLabel}
             </OpsBadge>
             <OpsBadge icon={Filter} tone={appliedFilterChips.length > 0 ? "warning" : "neutral"}>
               {appliedFilterChips.length === 0
@@ -1586,76 +2250,78 @@ export default function OpsWorkspace() {
         }
       />
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <OpsSummaryCard
-          label="Observed Records"
-          value={
-            overview
-              ? formatInteger(
-                  overview.record_counts.metric_records + overview.record_counts.trace_records
-                )
-              : overviewStatus === "loading"
-                ? "Loading"
-                : "Unavailable"
-          }
-          detail="Total overview-visible metric and trace records in the current time window."
-        />
-        <OpsSummaryCard
-          label="Chat Latency P95"
-          value={
-            overview
-              ? formatDurationSeconds(
-                  overview.chat_responsiveness.user_visible_latency_seconds.p95
-                )
-              : overviewStatus === "loading"
-                ? "Loading"
-                : "Unavailable"
-          }
-          detail="Recent user-visible response time at the 95th percentile."
-        />
-        <OpsSummaryCard
-          label="Workflow Failure Rate"
-          value={
-            overview
-              ? formatRateSummaryValue(overview.workflow_delivery.failure_rate)
-              : overviewStatus === "loading"
-                ? "Loading"
-                : "Unavailable"
-          }
-          detail="Recent failure frequency across workflow delivery records."
-          tone={
-            overview &&
-            overview.workflow_delivery.failure_rate.average !== null &&
-            overview.workflow_delivery.failure_rate.average > 0
-              ? "warning"
-              : "default"
-          }
-        />
-        <OpsSummaryCard
-          label="Evidence Coverage"
-          value={
-            overview
-              ? formatRateSummaryValue(overview.workflow_quality.evidence_coverage_rate)
-              : overviewStatus === "loading"
-                ? "Loading"
-                : "Unavailable"
-          }
-          detail="Recent evidence-link coverage for workflow quality tracking."
-          tone={
-            overview &&
-            overview.workflow_quality.evidence_coverage_rate.average !== null &&
-            overview.workflow_quality.evidence_coverage_rate.average < 0.5
-              ? "danger"
-              : "default"
-          }
-        />
-      </div>
+      {activeView !== "audit" ? (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <OpsSummaryCard
+            label="Observed Records"
+            value={
+              overview
+                ? formatInteger(
+                    overview.record_counts.metric_records + overview.record_counts.trace_records
+                  )
+                : overviewStatus === "loading"
+                  ? "Loading"
+                  : "Unavailable"
+            }
+            detail="Total overview-visible metric and trace records in the current time window."
+          />
+          <OpsSummaryCard
+            label="Chat Latency P95"
+            value={
+              overview
+                ? formatDurationSeconds(
+                    overview.chat_responsiveness.user_visible_latency_seconds.p95
+                  )
+                : overviewStatus === "loading"
+                  ? "Loading"
+                  : "Unavailable"
+            }
+            detail="Recent user-visible response time at the 95th percentile."
+          />
+          <OpsSummaryCard
+            label="Workflow Failure Rate"
+            value={
+              overview
+                ? formatRateSummaryValue(overview.workflow_delivery.failure_rate)
+                : overviewStatus === "loading"
+                  ? "Loading"
+                  : "Unavailable"
+            }
+            detail="Recent failure frequency across workflow delivery records."
+            tone={
+              overview &&
+              overview.workflow_delivery.failure_rate.average !== null &&
+              overview.workflow_delivery.failure_rate.average > 0
+                ? "warning"
+                : "default"
+            }
+          />
+          <OpsSummaryCard
+            label="Evidence Coverage"
+            value={
+              overview
+                ? formatRateSummaryValue(overview.workflow_quality.evidence_coverage_rate)
+                : overviewStatus === "loading"
+                  ? "Loading"
+                  : "Unavailable"
+            }
+            detail="Recent evidence-link coverage for workflow quality tracking."
+            tone={
+              overview &&
+              overview.workflow_quality.evidence_coverage_rate.average !== null &&
+              overview.workflow_quality.evidence_coverage_rate.average < 0.5
+                ? "danger"
+                : "default"
+            }
+          />
+        </div>
+      ) : null}
 
       <OpsSectionCard
         title="Filters"
-        description="Set runtime identifiers once, then apply them to the relevant observability views."
+        description="Set shared runtime and audit filters, then apply them to the relevant Ops views."
       >
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
           <OpsFilterField
             label="Days"
             description="Overview only"
@@ -1667,11 +2333,26 @@ export default function OpsWorkspace() {
           />
           <OpsFilterField
             label="List Limit"
-            description="Metrics and traces"
+            description="Metrics, traces, audit"
             value={draftFilters.limit}
             placeholder="100"
             onChange={(value) =>
               setDraftFilters((current) => ({ ...current, limit: value }))
+            }
+          />
+          <OpsFilterSelect
+            label="Event Type"
+            description="Audit only"
+            value={draftFilters.eventType}
+            options={[
+              { value: "", label: "Any event type" },
+              ...AUDIT_EVENT_TYPE_OPTIONS.map((eventType) => ({
+                value: eventType,
+                label: formatAuditEventTypeLabel(eventType),
+              })),
+            ]}
+            onChange={(value) =>
+              setDraftFilters((current) => ({ ...current, eventType: value }))
             }
           />
           <OpsFilterField
@@ -1685,7 +2366,7 @@ export default function OpsWorkspace() {
           />
           <OpsFilterField
             label="Session ID"
-            description="Overview, metrics, traces"
+            description="Overview, metrics, traces, audit"
             value={draftFilters.sessionId}
             placeholder="session_..."
             onChange={(value) =>
@@ -1694,7 +2375,7 @@ export default function OpsWorkspace() {
           />
           <OpsFilterField
             label="Run ID"
-            description="Metrics and traces"
+            description="Metrics, traces, audit"
             value={draftFilters.runId}
             placeholder="run_..."
             onChange={(value) =>
@@ -1703,7 +2384,7 @@ export default function OpsWorkspace() {
           />
           <OpsFilterField
             label="Step ID"
-            description="Metrics and traces"
+            description="Metrics, traces, audit"
             value={draftFilters.stepId}
             placeholder="step_..."
             onChange={(value) =>
@@ -1711,8 +2392,17 @@ export default function OpsWorkspace() {
             }
           />
           <OpsFilterField
+            label="Job ID"
+            description="Metrics, traces, audit"
+            value={draftFilters.jobId}
+            placeholder="job_..."
+            onChange={(value) =>
+              setDraftFilters((current) => ({ ...current, jobId: value }))
+            }
+          />
+          <OpsFilterField
             label="Workflow ID"
-            description="Overview, metrics, traces"
+            description="Overview, metrics, traces, audit"
             value={draftFilters.workflowId}
             placeholder="workflow_..."
             onChange={(value) =>
@@ -1728,6 +2418,33 @@ export default function OpsWorkspace() {
               setDraftFilters((current) => ({ ...current, traceId: value }))
             }
           />
+          <OpsFilterField
+            label="Tool Name"
+            description="Audit only"
+            value={draftFilters.toolName}
+            placeholder="read_file"
+            onChange={(value) =>
+              setDraftFilters((current) => ({ ...current, toolName: value }))
+            }
+          />
+          <OpsFilterField
+            label="Connector Name"
+            description="Audit only"
+            value={draftFilters.connectorName}
+            placeholder="benchling"
+            onChange={(value) =>
+              setDraftFilters((current) => ({ ...current, connectorName: value }))
+            }
+          />
+          <OpsFilterField
+            label="Outcome"
+            description="Audit only"
+            value={draftFilters.outcome}
+            placeholder="blocked"
+            onChange={(value) =>
+              setDraftFilters((current) => ({ ...current, outcome: value }))
+            }
+          />
         </div>
 
         <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -1737,7 +2454,14 @@ export default function OpsWorkspace() {
           </div>
 
           <div className="flex flex-wrap gap-2">
-            <OpsAction onClick={() => setAppliedFilters({ ...draftFilters })} tone="accent">
+            <OpsAction
+              onClick={() => {
+                const normalizedFilters = normalizeOpsFilters(draftFilters);
+                setDraftFilters(normalizedFilters);
+                setAppliedFilters(normalizedFilters);
+              }}
+              tone="accent"
+            >
               <Filter size={12} />
               Apply Filters
             </OpsAction>
@@ -1773,7 +2497,7 @@ export default function OpsWorkspace() {
               Inspection Views
             </p>
             <p className="mt-1 text-sm leading-6 text-slate-500">
-              Move between summary, metrics, traces, and dashboard definitions without leaving the Ops workspace.
+              Move between summary, metrics, traces, audit events, and dashboard definitions without leaving the Ops workspace.
             </p>
           </div>
           <OpsViewTabs activeView={activeView} onSelect={setActiveView} />
@@ -1823,6 +2547,27 @@ export default function OpsWorkspace() {
         </div>
       ) : null}
 
+      {activeView === "audit" ? (
+        <AuditView
+          status={auditStatus}
+          events={auditEvents}
+          error={auditError}
+          retentionPolicy={auditRetentionPolicy}
+          ignoredFilters={ignoredFilterChips}
+          selectedEventId={selectedAuditEventId}
+          onSelect={(record) => setSelectedAuditEventId(record.event_id)}
+          onLoadMore={() => {
+            const nextLimit = String(
+              Math.min(currentListLimit + AUDIT_LIMIT_INCREMENT, MAX_OPS_LIST_LIMIT)
+            );
+            setDraftFilters((current) => ({ ...current, limit: nextLimit }));
+            setAppliedFilters((current) => ({ ...current, limit: nextLimit }));
+          }}
+          canLoadMore={canLoadMoreAuditEvents}
+          currentLimit={currentListLimit}
+        />
+      ) : null}
+
       {activeView === "dashboards" ? (
         <DashboardDefinitionsView
           status={dashboardsStatus}
@@ -1834,6 +2579,7 @@ export default function OpsWorkspace() {
 
       {overviewStatus === "error" &&
       activeView !== "overview" &&
+      activeView !== "audit" &&
       overviewError ? (
         <OpsStateCard tone="warning">
           The summary header is currently operating without overview data.
@@ -1842,6 +2588,7 @@ export default function OpsWorkspace() {
       ) : null}
 
       {overview &&
+      activeView !== "audit" &&
       overview.workflow_delivery.failure_rate.average !== null &&
       overview.workflow_delivery.failure_rate.average > 0 ? (
         <OpsStateCard tone="warning">
@@ -1851,6 +2598,7 @@ export default function OpsWorkspace() {
       ) : null}
 
       {overview &&
+      activeView !== "audit" &&
       overview.workflow_quality.evidence_coverage_rate.average !== null &&
       overview.workflow_quality.evidence_coverage_rate.average < 0.5 ? (
         <OpsStateCard tone="warning">
