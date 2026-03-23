@@ -115,6 +115,7 @@ export default function Sidebar() {
     isStreaming,
     isReferenceUploading,
     ragMode,
+    canManageRagMode,
     workspaceMode,
     selectedWorkflow,
     draftMessage,
@@ -528,9 +529,15 @@ export default function Sidebar() {
       <div className="border-t border-[var(--shell-border)] px-2.5 py-3">
         <div
           className="flex items-center justify-between text-[10px] font-medium text-slate-400"
-          title="Use the top bar RAG control to change retrieval mode."
+          title={
+            canManageRagMode
+              ? "Use the top bar RAG control to change retrieval mode."
+              : "RAG mode is not available for this client."
+          }
         >
-          <span>{ragMode ? "RAG: On" : "RAG: Off"}</span>
+          <span>
+            {canManageRagMode ? (ragMode ? "RAG: On" : "RAG: Off") : "RAG: Restricted"}
+          </span>
           <span>
             {isStreaming
               ? "Streaming"

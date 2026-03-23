@@ -13,10 +13,9 @@ import { getLatestSelectedWorkflow } from "./session-status";
 import { uid } from "./utils";
 import type {
   Message,
-  RetrievalResult,
   Session,
+  SessionHistoryMessage,
   ToolCall,
-  WorkflowStreamEvent,
   WorkspaceMode,
 } from "./types";
 
@@ -32,6 +31,7 @@ interface AppContextValue {
   isReferenceUploading: boolean;
   isSessionLoading: boolean;
   ragMode: boolean;
+  canManageRagMode: boolean;
   workspaceMode: WorkspaceMode;
   selectedWorkflow: string | null;
   attachedIdentifiers: string[];
@@ -84,6 +84,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [isReferenceUploading, setIsReferenceUploading] = useState(false);
   const [isSessionLoading, setIsSessionLoading] = useState(true);
   const [ragMode, setRagModeState] = useState(false);
+  const [canManageRagMode, setCanManageRagMode] = useState(false);
   const [workspaceMode, setWorkspaceModeState] = useState<WorkspaceMode>("sessions");
   const [selectedWorkflow, setSelectedWorkflow] = useState<string | null>(null);
   const [attachedIdentifiers, setAttachedIdentifiers] = useState<string[]>([]);
@@ -102,14 +103,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // ── Bootstrap ────────────────────────────────────────────────
 
   useEffect(() => {
-    (async () => {
+    let cancelled = false;
+
+    const loadSessions = async () => {
       try {
-        const [sessionList, ragCfg] = await Promise.all([
-          api.listSessions(),
-          api.getRagMode(),
-        ]);
+        const sessionList = await api.listSessions();
+        if (cancelled) {
+          return;
+        }
         setSessions(sessionList);
-        setRagModeState(ragCfg.rag_mode);
         if (sessionList.length > 0) {
           await _loadSession(
             sessionList[0].id,
@@ -121,9 +123,33 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       } catch {
         // Backend not ready yet — that's fine
       } finally {
-        setIsSessionLoading(false);
+        if (!cancelled) {
+          setIsSessionLoading(false);
+        }
       }
-    })();
+    };
+
+    const loadRagMode = async () => {
+      try {
+        const ragCfg = await api.getRagMode();
+        if (cancelled) {
+          return;
+        }
+        setRagModeState(ragCfg.rag_mode);
+        setCanManageRagMode(true);
+      } catch {
+        if (!cancelled) {
+          setCanManageRagMode(false);
+        }
+      }
+    };
+
+    void loadSessions();
+    void loadRagMode();
+
+    return () => {
+      cancelled = true;
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -199,9 +225,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // ── RAG mode ─────────────────────────────────────────────────
 
   const setRagMode = useCallback(async (enabled: boolean) => {
-    await api.setRagMode(enabled);
-    setRagModeState(enabled);
-  }, []);
+    if (!canManageRagMode) {
+      return;
+    }
+
+    try {
+      const response = await api.setRagMode(enabled);
+      setRagModeState(response.rag_mode);
+      setCanManageRagMode(true);
+    } catch {
+      setCanManageRagMode(false);
+    }
+  }, [canManageRagMode]);
 
   const setWorkspaceMode = useCallback((mode: WorkspaceMode) => {
     setWorkspaceModeState(mode);
@@ -296,7 +331,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     await api.compressSession(currentSessionId);
     // Reload messages after compression
     const history = await api.getHistory(currentSessionId);
-    const msgs = _historyToMessages(history as RawMessage[]);
+    const msgs = _historyToMessages(history);
     setMessages(msgs);
     setSelectedWorkflow(getLatestSelectedWorkflow(msgs));
     await refreshSessions();
@@ -352,7 +387,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           setMessages((prev) =>
             prev.map((m) =>
               m.id === id
-                ? { ...m, retrievals: results as RetrievalResult[] }
+                ? { ...m, retrievals: results }
                 : m
             )
           );
@@ -518,6 +553,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         isReferenceUploading,
         isSessionLoading,
         ragMode,
+        canManageRagMode,
         workspaceMode,
         selectedWorkflow,
         attachedIdentifiers,
@@ -585,16 +621,7 @@ async function readReferenceUpload(file: File): Promise<string> {
 // Internal helpers
 // ────────────────────────────────────────────────────────────────
 
-interface RawMessage {
-  role: string;
-  content: string;
-  request_id?: string;
-  tool_calls?: ToolCall[];
-  workflow_events?: WorkflowStreamEvent[];
-  retrievals?: RetrievalResult[];
-}
-
-function _historyToMessages(raw: RawMessage[]): Message[] {
+function _historyToMessages(raw: SessionHistoryMessage[]): Message[] {
   return raw
     .filter((m) => m.role === "user" || m.role === "assistant")
     .map((m) => ({
@@ -617,7 +644,7 @@ async function _loadSession(
   setCurrentSessionId(id);
   try {
     const history = await api.getHistory(id);
-    const messages = _historyToMessages(history as RawMessage[]);
+    const messages = _historyToMessages(history);
     setMessages(messages);
     setSelectedWorkflow(getLatestSelectedWorkflow(messages));
   } catch {

@@ -257,6 +257,7 @@ export default function Navbar() {
     currentSessionId,
     messages,
     ragMode,
+    canManageRagMode,
     setRagMode,
     isStreaming,
     selectedWorkflow,
@@ -438,24 +439,26 @@ export default function Navbar() {
             leading={<GitBranch size={12} className="flex-shrink-0" />}
           />
 
-          <button
-            type="button"
-            onClick={() => void setRagMode(!ragMode)}
-            className={cn(
-              "hidden min-w-0 items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] font-medium transition-colors sm:inline-flex",
-              ragMode
-                ? "border-[rgba(35,130,83,0.18)] bg-[var(--apex-accent-soft)] text-[var(--apex-accent-strong)] hover:bg-[rgba(35,130,83,0.16)]"
-                : "border-[var(--shell-border)] bg-[var(--panel-soft)] text-slate-500 hover:bg-white hover:text-slate-700"
-            )}
-            title={
-              ragMode
-                ? "Retrieval-augmented generation is enabled. Click to disable it."
-                : "Retrieval-augmented generation is disabled. Click to enable it."
-            }
-          >
-            <Sparkles size={12} className="flex-shrink-0" />
-            <span className="truncate">{ragMode ? "RAG On" : "RAG Off"}</span>
-          </button>
+          {canManageRagMode ? (
+            <button
+              type="button"
+              onClick={() => void setRagMode(!ragMode)}
+              className={cn(
+                "hidden min-w-0 items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] font-medium transition-colors sm:inline-flex",
+                ragMode
+                  ? "border-[rgba(35,130,83,0.18)] bg-[var(--apex-accent-soft)] text-[var(--apex-accent-strong)] hover:bg-[rgba(35,130,83,0.16)]"
+                  : "border-[var(--shell-border)] bg-[var(--panel-soft)] text-slate-500 hover:bg-white hover:text-slate-700"
+              )}
+              title={
+                ragMode
+                  ? "Retrieval-augmented generation is enabled. Click to disable it."
+                  : "Retrieval-augmented generation is disabled. Click to enable it."
+              }
+            >
+              <Sparkles size={12} className="flex-shrink-0" />
+              <span className="truncate">{ragMode ? "RAG On" : "RAG Off"}</span>
+            </button>
+          ) : null}
 
           <StatusPill
             label={readinessSummary.label}

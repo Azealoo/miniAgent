@@ -6,6 +6,10 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
+export interface JsonObject {
+  [key: string]: JsonValue;
+}
+
 export interface ToolArtifactRef {
   path?: string | null;
   label?: string | null;
@@ -39,7 +43,7 @@ export interface ToolResultEnvelope {
     | "retriable_failure"
     | "execution_failure";
   error?: ToolResultError | null;
-  metadata: { [key: string]: JsonValue };
+  metadata: JsonObject;
   source_payload?: JsonValue;
 }
 
@@ -415,6 +419,15 @@ export interface Message {
   pendingTool?: { tool: string; input: string; runId: string };
 }
 
+export interface SessionHistoryMessage {
+  role: string;
+  content: string;
+  request_id?: string;
+  tool_calls?: ToolCall[];
+  workflow_events?: WorkflowStreamEvent[];
+  retrievals?: RetrievalResult[];
+}
+
 export type WorkspaceMode = "sessions" | "flows" | "docs" | "files";
 
 export interface Session {
@@ -492,5 +505,463 @@ export interface SkillRegistryEntry {
   stage: string;
   stability: string;
   safety_level: string;
+  enabled: boolean;
+}
+
+export interface FileContentsResponse {
+  path: string;
+  content: string;
+}
+
+export interface FileSaveResponse {
+  path: string;
+  saved: boolean;
+}
+
+export interface RawFileTextResponse {
+  path: string;
+  contentType: string | null;
+  content: string;
+}
+
+export interface SessionTitleResponse {
+  session_id: string;
+  title: string;
+}
+
+export interface SessionCompressionResponse {
+  archived_count: number;
+  remaining_count: number;
+  summary: string;
+}
+
+export interface RagModeResponse {
+  rag_mode: boolean;
+}
+
+export interface RetentionPolicy {
+  rotation_strategy: string;
+  retention_expectation_days: number;
+  automatic_deletion: boolean;
+}
+
+export interface ArtifactRegistryRecord {
+  artifact_id: string;
+  declared_id?: string | null;
+  artifact_type: string;
+  path: string;
+  hash?: string | null;
+  created_at?: string | null;
+  run_id: string;
+  workflow: string;
+  date: string;
+  source_workflow?: string | null;
+  source_tool?: string | null;
+  dataset_id?: string | null;
+  status: "valid" | "invalid";
+  error?: string | null;
+  indexed_at: string;
+}
+
+export interface ArtifactRegistrySnapshot {
+  schema_version: string;
+  generated_at: string;
+  artifact_root: string;
+  registry_path: string;
+  record_count: number;
+  valid_count: number;
+  invalid_count: number;
+  records: ArtifactRegistryRecord[];
+}
+
+export interface ArtifactRegistryLookupResult {
+  generated_at: string;
+  artifact_root: string;
+  registry_path: string;
+  total_count: number;
+  matched_count: number;
+  valid_count: number;
+  invalid_count: number;
+  records: ArtifactRegistryRecord[];
+}
+
+export interface ArtifactRegistryQuery {
+  run_id?: string;
+  artifact_type?: string;
+  workflow?: string;
+  date?: string;
+  dataset_id?: string;
+  include_invalid?: boolean;
+}
+
+export type AuditEventType =
+  | "chat_request_received"
+  | "compliance_decision"
+  | "workflow_started"
+  | "workflow_finished"
+  | "tool_invoked"
+  | "connector_action"
+  | "file_written"
+  | "job_submitted"
+  | "export_generated";
+
+export interface AuditEventRecord {
+  contract_version: string;
+  event_id: string;
+  event_type: AuditEventType;
+  recorded_at: string;
+  summary: string;
+  outcome?: string | null;
+  session_id?: string | null;
+  run_id?: string | null;
+  step_id?: string | null;
+  job_id?: string | null;
+  workflow_id?: string | null;
+  tool_name?: string | null;
+  connector_name?: string | null;
+  actor: string;
+  artifact_paths: string[];
+  external_systems: string[];
+  redaction_policy: string;
+  details: JsonObject;
+}
+
+export interface AuditEventsResponse {
+  events: AuditEventRecord[];
+  retention_policy: RetentionPolicy;
+}
+
+export interface AuditEventsQuery {
+  event_type?: AuditEventType;
+  session_id?: string;
+  run_id?: string;
+  step_id?: string;
+  job_id?: string;
+  workflow_id?: string;
+  tool_name?: string;
+  connector_name?: string;
+  outcome?: string;
+  limit?: number;
+}
+
+export type ObservabilityMetricKind = "duration" | "rate" | "count" | "gauge";
+
+export type ObservabilityTraceStatus = "ok" | "error" | "blocked";
+
+export interface ObservabilityMetricRecord {
+  contract_version: "observability_metric.v1";
+  record_id: string;
+  recorded_at: string;
+  metric_name: string;
+  metric_kind: ObservabilityMetricKind;
+  value: number;
+  unit: string;
+  request_id?: string | null;
+  session_id?: string | null;
+  run_id?: string | null;
+  step_id?: string | null;
+  job_id?: string | null;
+  workflow_id?: string | null;
+  trace_id?: string | null;
+  span_id?: string | null;
+  attributes: JsonObject;
+}
+
+export interface ObservabilityTraceRecord {
+  contract_version: "observability_trace.v1";
+  trace_id: string;
+  span_id: string;
+  parent_span_id?: string | null;
+  span_name: string;
+  started_at: string;
+  ended_at: string;
+  duration_seconds: number;
+  status: ObservabilityTraceStatus;
+  request_id?: string | null;
+  session_id?: string | null;
+  run_id?: string | null;
+  step_id?: string | null;
+  job_id?: string | null;
+  workflow_id?: string | null;
+  attributes: JsonObject;
+}
+
+export interface ObservabilityDashboardPanelDefinition {
+  title: string;
+  metric_name: string;
+  aggregation: string;
+  filters?: JsonObject;
+}
+
+export interface ObservabilityDashboardDefinition {
+  id: string;
+  title: string;
+  description: string;
+  panels: ObservabilityDashboardPanelDefinition[];
+}
+
+export interface ObservabilityMetricsResponse {
+  metrics: ObservabilityMetricRecord[];
+  retention_policy: RetentionPolicy;
+}
+
+export interface ObservabilityTracesResponse {
+  traces: ObservabilityTraceRecord[];
+  retention_policy: RetentionPolicy;
+}
+
+export interface ObservabilityDashboardDefinitionsResponse {
+  dashboards: ObservabilityDashboardDefinition[];
+  retention_policy: RetentionPolicy;
+}
+
+export interface ObservabilityDurationSummary {
+  count: number;
+  average: number | null;
+  p50: number | null;
+  p95: number | null;
+  min: number | null;
+  max: number | null;
+}
+
+export interface ObservabilityRateSummary {
+  count: number;
+  average: number | null;
+}
+
+export interface ObservabilityOverviewFilters {
+  workflow_id: string | null;
+  session_id: string | null;
+  request_id: string | null;
+}
+
+export interface ObservabilityOverviewRecordCounts {
+  metric_records: number;
+  trace_records: number;
+}
+
+export interface ObservabilityOverview {
+  generated_at: string;
+  window_days: number;
+  filters: ObservabilityOverviewFilters;
+  record_counts: ObservabilityOverviewRecordCounts;
+  chat_responsiveness: {
+    user_visible_latency_seconds: ObservabilityDurationSummary;
+    backend_execution_latency_seconds: ObservabilityDurationSummary;
+  };
+  workflow_delivery: {
+    workflow_duration_seconds: ObservabilityDurationSummary;
+    step_duration_seconds: ObservabilityDurationSummary;
+    failure_rate: ObservabilityRateSummary;
+    block_rate: ObservabilityRateSummary;
+  };
+  workflow_quality: {
+    qc_pass_rate: ObservabilityRateSummary;
+    evidence_coverage_rate: ObservabilityRateSummary;
+  };
+  dashboards: ObservabilityDashboardDefinition[];
+  retention_policy: RetentionPolicy;
+}
+
+export interface ObservabilityMetricsQuery {
+  metric_name?: string;
+  request_id?: string;
+  session_id?: string;
+  run_id?: string;
+  step_id?: string;
+  job_id?: string;
+  workflow_id?: string;
+  trace_id?: string;
+  span_id?: string;
+  limit?: number;
+}
+
+export interface ObservabilityTracesQuery {
+  trace_id?: string;
+  span_id?: string;
+  parent_span_id?: string;
+  span_name?: string;
+  request_id?: string;
+  session_id?: string;
+  run_id?: string;
+  step_id?: string;
+  job_id?: string;
+  workflow_id?: string;
+  status?: ObservabilityTraceStatus;
+  limit?: number;
+}
+
+export interface ObservabilityOverviewQuery {
+  days?: number;
+  request_id?: string;
+  session_id?: string;
+  workflow_id?: string;
+  limit?: number;
+}
+
+export type ConnectorAction =
+  | "configure"
+  | "validate"
+  | "import"
+  | "export"
+  | "sync_status";
+
+export type ConnectorExecutionAction = "import" | "export" | "sync_status";
+
+export type ConnectorActionStatus = "success" | "failed";
+
+export type ConnectorActionOutcome =
+  | "success"
+  | "invalid_input"
+  | "blocked"
+  | "unsupported"
+  | "execution_failure";
+
+export type ConnectorFailureMode =
+  | "invalid_configuration"
+  | "unsupported_capability"
+  | "blocked_action"
+  | "remote_failure"
+  | "sync_conflict"
+  | "partial_result";
+
+export type ConnectorTransportPattern =
+  | "file_drop"
+  | "rest_api"
+  | "webhook_callback";
+
+export type ConnectorConfigFieldKind =
+  | "string"
+  | "url"
+  | "directory_path"
+  | "route_path"
+  | "env_var"
+  | "string_list"
+  | "boolean"
+  | "enum";
+
+export type ConnectorSystemKind =
+  | "eln"
+  | "lims"
+  | "instrument"
+  | "external_service";
+
+export type ConnectorArtifactDomain =
+  | "dataset_manifest"
+  | "workflow_run"
+  | "protocol_run"
+  | "evidence_card"
+  | "evidence_review"
+  | "entity_grounding"
+  | "claim_graph"
+  | "compliance_report"
+  | "qa_report"
+  | "eln_export"
+  | "report_bundle"
+  | "report_bundle_manifest";
+
+export interface ConnectorGuardrails {
+  requires_compliance_gate: boolean;
+  requires_provenance_records: boolean;
+  requires_artifact_registration: boolean;
+  allow_destructive_sync: boolean;
+}
+
+export interface ConnectorConfigField {
+  key: string;
+  kind: ConnectorConfigFieldKind;
+  description: string;
+  required: boolean;
+  allowed_values: string[];
+  secret_reference: boolean;
+}
+
+export interface ConnectorCapabilities {
+  supported_actions: ConnectorAction[];
+  transport_patterns: ConnectorTransportPattern[];
+  artifact_domains: ConnectorArtifactDomain[];
+  guardrails: ConnectorGuardrails;
+}
+
+export interface ConnectorConfigSummary {
+  configured: boolean;
+  configured_fields: string[];
+  missing_required_fields: string[];
+  uses_secret_references: boolean;
+}
+
+export interface ConnectorRegistryEntry {
+  name: string;
+  display_name: string;
+  description: string;
+  system_kind: ConnectorSystemKind;
+  external_system: string;
+  capabilities: ConnectorCapabilities;
+  config_fields: ConnectorConfigField[];
+  enabled: boolean;
+  config_summary: ConnectorConfigSummary;
+  notes: string[];
+}
+
+export interface ConnectorValidationIssue {
+  field?: string | null;
+  code: string;
+  message: string;
+}
+
+export interface ConnectorActionRequest {
+  dry_run?: boolean;
+  artifact_path?: string | null;
+  payload?: JsonObject | null;
+  compliance_artifact_path?: string | null;
+  provenance_artifact_paths?: string[];
+  event_type?: string | null;
+  delivery_signature?: string | null;
+  session_id?: string | null;
+  run_id?: string | null;
+  workflow_id?: string | null;
+}
+
+export interface ConnectorActionResult {
+  contract_version: string;
+  connector_name: string;
+  action: ConnectorAction;
+  status: ConnectorActionStatus;
+  outcome: ConnectorActionOutcome;
+  summary: string;
+  action_supported: boolean;
+  non_destructive: boolean;
+  failure_mode?: ConnectorFailureMode | null;
+  issues: ConnectorValidationIssue[];
+  config_summary?: ConnectorConfigSummary | null;
+  artifact_paths: string[];
+  external_paths: string[];
+  metadata: JsonObject;
+}
+
+export interface ConnectorRegistryListResponse {
+  connectors: ConnectorRegistryEntry[];
+}
+
+export interface ConnectorRegistryUpdateRequest {
+  enabled: boolean;
+  config?: JsonObject | null;
+}
+
+export interface ConnectorRegistryUpdateResponse {
+  connector: ConnectorRegistryEntry;
+  result: ConnectorActionResult;
+}
+
+export interface ConnectorValidationRequest {
+  config?: JsonObject | null;
+}
+
+export interface SkillRegistryUpdateRequest {
+  enabled: boolean;
+}
+
+export interface SkillRegistryUpdateResponse {
+  name: string;
   enabled: boolean;
 }

@@ -24,9 +24,10 @@ import {
 } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
 import {
+  createRawFileObjectUrl,
   getFilesWorkspaceSummary,
   getFlowsWorkspaceSummary,
-  getRawFileUrl,
+  openRawFileInNewTab,
   readFile,
 } from "@/lib/api";
 import type {
@@ -376,32 +377,6 @@ function WorkspaceAction({
     >
       {children}
     </button>
-  );
-}
-
-function WorkspaceLinkAction({
-  children,
-  href,
-  tone = "default",
-}: {
-  children: ReactNode;
-  href: string;
-  tone?: "default" | "accent";
-}) {
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      className={cn(
-        "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors",
-        tone === "accent"
-          ? "border-[rgba(35,130,83,0.18)] bg-[var(--apex-accent-soft)] text-[var(--apex-accent-strong)] hover:bg-[rgba(35,130,83,0.16)]"
-          : "border-[var(--shell-border)] bg-white/90 text-slate-600 hover:bg-[var(--panel-soft)] hover:text-slate-800"
-      )}
-    >
-      {children}
-    </a>
   );
 }
 
@@ -1594,8 +1569,10 @@ function FilesDetailPane({
   };
   onOpenInspector?: () => void;
 }) {
-  const rawUrl = item?.path ? getRawFileUrl(item.path) : null;
   const previewMode = item ? getFilesWorkspacePreviewMode(item) : null;
+  const [rawPreviewUrl, setRawPreviewUrl] = useState<string | null>(null);
+  const [rawPreviewError, setRawPreviewError] = useState<string | null>(null);
+  const [rawPreviewLoading, setRawPreviewLoading] = useState(false);
   const previewUnavailableMessage = item
     ? inferFilesWorkspaceKind(item) === "plot"
       ? "This plot is ready to open in the inspector or raw-file view."
@@ -1603,6 +1580,64 @@ function FilesDetailPane({
         ? "This archive is tracked in the workspace and can be opened through the raw-file endpoint."
         : "This file type is tracked here even though it is not previewed inline yet."
     : null;
+  const supportsRawInlinePreview = previewMode === "image" || previewMode === "pdf";
+
+  useEffect(() => {
+    let active = true;
+    let revoke: (() => void) | null = null;
+
+    if (!item?.path || !supportsRawInlinePreview) {
+      setRawPreviewUrl(null);
+      setRawPreviewError(null);
+      setRawPreviewLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setRawPreviewLoading(true);
+    setRawPreviewError(null);
+    setRawPreviewUrl(null);
+
+    void createRawFileObjectUrl(item.path, controller.signal)
+      .then((result) => {
+        if (!active) {
+          result.revoke();
+          return;
+        }
+        revoke = result.revoke;
+        setRawPreviewUrl(result.url);
+      })
+      .catch(() => {
+        if (!active) {
+          return;
+        }
+        setRawPreviewError(
+          "Could not load the raw preview. Use Open Raw File to inspect the artifact."
+        );
+      })
+      .finally(() => {
+        if (active) {
+          setRawPreviewLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+      revoke?.();
+    };
+  }, [item?.path, supportsRawInlinePreview]);
+
+  const handleOpenRawFile = () => {
+    if (!item?.path) {
+      return;
+    }
+
+    setRawPreviewError(null);
+    void openRawFileInNewTab(item.path).catch(() => {
+      setRawPreviewError("Could not open the raw file right now.");
+    });
+  };
 
   return (
     <div className="flex min-h-[32rem] flex-col rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/94 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
@@ -1633,11 +1668,11 @@ function FilesDetailPane({
                   Open In Inspector
                 </WorkspaceAction>
               ) : null}
-              {rawUrl ? (
-                <WorkspaceLinkAction href={rawUrl}>
+              {item?.path ? (
+                <WorkspaceAction onClick={handleOpenRawFile}>
                   <ExternalLink size={12} />
                   Open Raw File
-                </WorkspaceLinkAction>
+                </WorkspaceAction>
               ) : null}
             </div>
           ) : null}
@@ -1728,29 +1763,33 @@ function FilesDetailPane({
                           : "Open-backed artifact"}
                   </h4>
                 </div>
-                {rawUrl ? (
-                  <WorkspaceLinkAction href={rawUrl}>
+                {item?.path ? (
+                  <WorkspaceAction onClick={handleOpenRawFile}>
                     <ExternalLink size={12} />
                     Open Raw File
-                  </WorkspaceLinkAction>
+                  </WorkspaceAction>
                 ) : null}
               </div>
 
               <div className="mt-4 rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-4">
                 {previewMode === "unsupported" ? (
                   <WorkspaceStateCard>{previewUnavailableMessage}</WorkspaceStateCard>
-                ) : previewMode === "image" && rawUrl ? (
+                ) : supportsRawInlinePreview && rawPreviewLoading ? (
+                  <WorkspaceStateCard>Loading raw preview…</WorkspaceStateCard>
+                ) : rawPreviewError ? (
+                  <WorkspaceStateCard tone="error">{rawPreviewError}</WorkspaceStateCard>
+                ) : previewMode === "image" && rawPreviewUrl ? (
                   <div className="overflow-hidden rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-[rgba(248,250,246,0.95)]">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
-                      src={rawUrl}
+                      src={rawPreviewUrl}
                       alt={item.name}
                       className="max-h-[30rem] w-full object-contain"
                     />
                   </div>
-                ) : previewMode === "pdf" && rawUrl ? (
+                ) : previewMode === "pdf" && rawPreviewUrl ? (
                   <iframe
-                    src={rawUrl}
+                    src={rawPreviewUrl}
                     title={item.name}
                     className="h-[30rem] w-full rounded-[16px] border border-[rgba(214,221,212,0.86)]"
                   />

@@ -29,9 +29,10 @@ import {
   Trash2,
 } from "lucide-react";
 import {
-  getRawFileUrl,
+  createRawFileObjectUrl,
   getSessionTokens,
   listSkillsRegistry,
+  openRawFileInNewTab,
   readFile,
   saveFile,
 } from "@/lib/api";
@@ -2536,6 +2537,7 @@ export default function InspectorPanel() {
   const [previewContent, setPreviewContent] = useState("");
   const [previewError, setPreviewError] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewRawUrl, setPreviewRawUrl] = useState<string | null>(null);
   const [sourceArtifactMetadata, setSourceArtifactMetadata] = useState<
     Record<string, EvidenceArtifactMetadata | null>
   >({});
@@ -2543,6 +2545,7 @@ export default function InspectorPanel() {
   const skillsRequestIdRef = useRef(0);
   const skillFileRequestIdRef = useRef(0);
   const previewRequestIdRef = useRef(0);
+  const previewObjectUrlRevokeRef = useRef<(() => void) | null>(null);
   const sourceMetadataRequestIdRef = useRef(0);
   const hasLoadedMemoryRef = useRef(false);
   const hasLoadedSkillsRef = useRef(false);
@@ -2578,9 +2581,6 @@ export default function InspectorPanel() {
   const runDetail = getRunDetail(workflowSummary);
   const previewMode = inspectorPreviewPath
     ? getInspectorPreviewMode(inspectorPreviewPath)
-    : null;
-  const previewRawUrl = inspectorPreviewPath
-    ? getRawFileUrl(inspectorPreviewPath)
     : null;
   const selectedSkill =
     skills.find((skill) => skill.location === selectedSkillPath) ?? null;
@@ -2861,10 +2861,15 @@ export default function InspectorPanel() {
   const loadPreview = async (path: string) => {
     const requestId = previewRequestIdRef.current + 1;
     previewRequestIdRef.current = requestId;
+    previewObjectUrlRevokeRef.current?.();
+    previewObjectUrlRevokeRef.current = null;
+    setPreviewRawUrl(null);
     setPreviewContent("");
     setPreviewError("");
 
-    if (getInspectorPreviewMode(path) !== "text") {
+    const mode = getInspectorPreviewMode(path);
+
+    if (mode === "unsupported") {
       setPreviewLoading(false);
       return;
     }
@@ -2872,15 +2877,28 @@ export default function InspectorPanel() {
     setPreviewLoading(true);
 
     try {
-      const res = await readFile(path);
-      if (previewRequestIdRef.current !== requestId) return;
+      if (mode === "text") {
+        const res = await readFile(path);
+        if (previewRequestIdRef.current !== requestId) return;
 
-      setPreviewContent(res.content);
+        setPreviewContent(res.content);
+      } else {
+        const rawPreview = await createRawFileObjectUrl(path);
+        if (previewRequestIdRef.current !== requestId) {
+          rawPreview.revoke();
+          return;
+        }
+
+        previewObjectUrlRevokeRef.current = rawPreview.revoke;
+        setPreviewRawUrl(rawPreview.url);
+      }
     } catch {
       if (previewRequestIdRef.current !== requestId) return;
 
       setPreviewError(
-        "Could not load file preview. Use Open raw to inspect the artifact."
+        mode === "text"
+          ? "Could not load file preview. Use Open raw to inspect the artifact."
+          : "Could not load the raw preview. Use Open raw to inspect the artifact."
       );
     } finally {
       if (previewRequestIdRef.current === requestId) {
@@ -2891,6 +2909,9 @@ export default function InspectorPanel() {
 
   useEffect(() => {
     if (!inspectorPreviewPath) {
+      previewObjectUrlRevokeRef.current?.();
+      previewObjectUrlRevokeRef.current = null;
+      setPreviewRawUrl(null);
       setPreviewContent("");
       setPreviewError("");
       setPreviewLoading(false);
@@ -2900,12 +2921,21 @@ export default function InspectorPanel() {
     void loadPreview(inspectorPreviewPath);
   }, [inspectorPreviewPath]);
 
+  useEffect(() => {
+    return () => {
+      previewObjectUrlRevokeRef.current?.();
+      previewObjectUrlRevokeRef.current = null;
+    };
+  }, []);
+
   const openPreviewRawFile = () => {
-    if (!previewRawUrl || typeof window === "undefined") {
+    if (!inspectorPreviewPath || typeof window === "undefined") {
       return;
     }
 
-    window.open(previewRawUrl, "_blank", "noopener,noreferrer");
+    void openRawFileInNewTab(inspectorPreviewPath).catch(() => {
+      setPreviewError("Could not open the raw file right now.");
+    });
   };
 
   const openRawFile = (path: string) => {
@@ -2913,7 +2943,15 @@ export default function InspectorPanel() {
       return;
     }
 
-    window.open(getRawFileUrl(path), "_blank", "noopener,noreferrer");
+    void openRawFileInNewTab(path).catch(() => {
+      if (path === MEMORY_PATH) {
+        setMemoryActionMsg("Raw file unavailable");
+        window.setTimeout(() => setMemoryActionMsg(""), 2000);
+        return;
+      }
+
+      flashSkillAction("Raw file unavailable");
+    });
   };
 
   const inspectPathInFiles = (path: string) => {
