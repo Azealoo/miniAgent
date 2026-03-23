@@ -20,6 +20,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import ChatPanel from "@/components/chat/ChatPanel";
+import OpsWorkspace from "@/components/layout/OpsWorkspace";
 import {
   FilePreviewSurface,
   useFilePreview,
@@ -2627,6 +2628,7 @@ export default function WorkspacePanel() {
       {workspaceMode === "flows" ? <FlowsWorkspace /> : null}
       {workspaceMode === "docs" ? <DocsWorkspace /> : null}
       {workspaceMode === "files" ? <FilesWorkspace /> : null}
+      {workspaceMode === "ops" ? <OpsWorkspace /> : null}
       {workspaceMode === "artifacts" ? <ArtifactsWorkspace /> : null}
     </div>
   );

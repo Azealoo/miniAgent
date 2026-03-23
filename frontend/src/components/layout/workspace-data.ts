@@ -1,12 +1,16 @@
 "use client";
 
 import {
+  Activity,
   BookOpen,
   FileText,
   Files,
   FlaskConical,
+  Gauge,
+  LayoutDashboard,
   MessageSquare,
   Package,
+  Route,
   ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
@@ -78,7 +82,39 @@ export const primaryNavItems: WorkspaceNavItem[] = [
   { id: "flows", label: "Flows", icon: FlaskConical },
   { id: "docs", label: "Docs", icon: BookOpen },
   { id: "files", label: "Files", icon: Files },
+  { id: "ops", label: "Ops", icon: Activity },
   { id: "artifacts", label: "Artifacts", icon: Package },
+];
+
+export const opsWorkspaceSections: SurfaceItem[] = [
+  {
+    id: "ops-overview",
+    label: "Overview",
+    description: "Read the latest health, latency, workflow delivery, and quality summaries.",
+    meta: "System snapshot",
+    icon: Gauge,
+  },
+  {
+    id: "ops-metrics",
+    label: "Metrics",
+    description: "Inspect recent metric records with request, session, run, and trace filters.",
+    meta: "Record browser",
+    icon: Activity,
+  },
+  {
+    id: "ops-traces",
+    label: "Traces",
+    description: "Follow trace and span activity to debug workflow execution and tool behavior.",
+    meta: "Execution timeline",
+    icon: Route,
+  },
+  {
+    id: "ops-dashboards",
+    label: "Dashboards",
+    description: "Review backend dashboard definitions without leaving the inspection workspace.",
+    meta: "Definitions",
+    icon: LayoutDashboard,
+  },
 ];
 
 export const quickStartItems: QuickStartItem[] = [

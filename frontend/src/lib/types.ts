@@ -435,6 +435,7 @@ export type WorkspaceMode =
   | "flows"
   | "docs"
   | "files"
+  | "ops"
   | "artifacts";
 
 export interface Session {

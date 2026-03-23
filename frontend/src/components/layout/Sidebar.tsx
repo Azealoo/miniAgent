@@ -15,6 +15,7 @@ import { cn, formatRelativeTime } from "@/lib/utils";
 import {
   getWorkflowSurfaceItems,
   matchesQuery,
+  opsWorkspaceSections,
   primaryNavItems,
   type QuickStartItem,
   quickStartItems,
@@ -146,6 +147,9 @@ export default function Sidebar() {
   const filteredDocs = workspaceDocs.filter((item) =>
     matchesQuery(query, item.label, item.description, item.meta)
   );
+  const filteredOpsItems = opsWorkspaceSections.filter((item) =>
+    matchesQuery(query, item.label, item.description, item.meta)
+  );
   const pendingWorkflowSelection = isWorkflowSelectionPending(
     messages,
     selectedWorkflow
@@ -237,6 +241,8 @@ export default function Sidebar() {
         ? "Working Docs"
         : workspaceMode === "files"
           ? "Generated"
+          : workspaceMode === "ops"
+            ? "Inspection"
           : null;
   const focusItems =
     workspaceMode === "flows"
@@ -245,6 +251,8 @@ export default function Sidebar() {
         ? filteredDocs
         : workspaceMode === "files"
           ? filteredFileItems
+          : workspaceMode === "ops"
+            ? filteredOpsItems
           : [];
 
   return (
@@ -274,7 +282,7 @@ export default function Sidebar() {
       </div>
 
       <div className="border-b border-[var(--shell-border)] px-1.5 py-1.5">
-        <div className="grid grid-cols-5 gap-0.5">
+        <div className="grid grid-cols-6 gap-0.5">
           {primaryNavItems.map((item) => {
             const Icon = item.icon;
             const active = workspaceMode === item.id;
@@ -374,7 +382,9 @@ export default function Sidebar() {
                     ? "No selected or recent workflow runs yet."
                     : workspaceMode === "docs"
                       ? "No working docs match this search."
-                      : "No generated files are visible in this session yet."}
+                      : workspaceMode === "files"
+                        ? "No generated files are visible in this session yet."
+                        : "No inspection views match this search."}
                 </EmptyRailState>
               ) : (
                 focusItems.map((item) => {
