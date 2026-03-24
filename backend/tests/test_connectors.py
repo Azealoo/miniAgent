@@ -122,6 +122,8 @@ def test_connector_registry_lists_builtin_connectors_with_safe_defaults(isolated
     assert connectors["eln_file_drop"]["enabled"] is False
     assert connectors["eln_file_drop"]["capabilities"]["transport_patterns"] == ["file_drop"]
     assert connectors["eln_file_drop"]["config_summary"]["missing_required_fields"] == ["outgoing_dir"]
+    assert connectors["eln_file_drop"]["validation_result"]["action"] == "validate"
+    assert connectors["eln_file_drop"]["validation_result"]["outcome"] == "invalid_input"
     assert connectors["lims_rest_bridge"]["capabilities"]["transport_patterns"] == ["rest_api"]
     assert connectors["instrument_webhook_ingest"]["capabilities"]["transport_patterns"] == ["webhook_callback"]
 
@@ -173,6 +175,7 @@ def test_connector_registry_reads_allow_non_local_clients_with_inspection_token(
 
     assert any(item["name"] == "eln_file_drop" for item in listing["connectors"])
     assert detail["name"] == "eln_file_drop"
+    assert detail["validation_result"]["action"] == "validate"
 
 
 def test_malformed_persisted_connector_config_fails_closed(isolated_connector_state):
@@ -238,13 +241,25 @@ def test_connector_runtime_actions_can_be_disabled_by_policy(isolated_connector_
 
 
 def test_connector_mutation_routes_block_non_local_clients_without_admin_token(isolated_connector_state):
-    from api.connectors import ConnectorEntryUpdate, run_connector_registry_action, update_connector_registry_entry
+    from api.connectors import (
+        ConnectorEntryUpdate,
+        get_connector_registry_admin_detail,
+        run_connector_registry_action,
+        update_connector_registry_entry,
+    )
 
     with pytest.raises(HTTPException) as exc_info:
         update_connector_registry_entry(
             "eln_file_drop",
             ConnectorEntryUpdate(enabled=True, config={"outgoing_dir": "workspace/drop"}),
             _request("/api/connectors/registry/eln_file_drop", method="PUT", host="10.0.0.8"),
+        )
+    assert exc_info.value.status_code == 403
+
+    with pytest.raises(HTTPException) as exc_info:
+        get_connector_registry_admin_detail(
+            "eln_file_drop",
+            _request("/api/connectors/registry/eln_file_drop/admin-detail", host="10.0.0.8"),
         )
     assert exc_info.value.status_code == 403
 
@@ -262,7 +277,13 @@ def test_connector_mutation_routes_block_non_local_clients_without_admin_token(i
 
 
 def test_connector_mutation_routes_allow_non_local_clients_with_admin_token(isolated_connector_state):
-    from api.connectors import ConnectorActionRequest, ConnectorEntryUpdate, run_connector_registry_action, update_connector_registry_entry
+    from api.connectors import (
+        ConnectorActionRequest,
+        ConnectorEntryUpdate,
+        get_connector_registry_admin_detail,
+        run_connector_registry_action,
+        update_connector_registry_entry,
+    )
 
     config_path = isolated_connector_state / "config.json"
     config_path.write_text(
@@ -290,6 +311,14 @@ def test_connector_mutation_routes_allow_non_local_clients_with_admin_token(isol
             ConnectorEntryUpdate(enabled=True, config={"outgoing_dir": "workspace/drop"}),
             _request("/api/connectors/registry/eln_file_drop", method="PUT", host="10.0.0.8", headers=headers),
         )
+        admin_detail = get_connector_registry_admin_detail(
+            "eln_file_drop",
+            _request(
+                "/api/connectors/registry/eln_file_drop/admin-detail",
+                host="10.0.0.8",
+                headers=headers,
+            ),
+        )
         action_response = run_connector_registry_action(
             "eln_file_drop",
             "export",
@@ -303,6 +332,8 @@ def test_connector_mutation_routes_allow_non_local_clients_with_admin_token(isol
         )
 
     assert configure_response["result"]["outcome"] == "success"
+    assert admin_detail["config"] == {"outgoing_dir": "workspace/drop"}
+    assert admin_detail["validation_result"]["outcome"] == "success"
     assert action_response["outcome"] in {"invalid_input", "execution_failure", "blocked"}
 
 
@@ -372,8 +403,49 @@ def test_configure_connector_persists_enabled_state_and_uses_safe_summary(isolat
     assert response["result"]["outcome"] == "success"
     assert response["connector"]["enabled"] is True
     assert "config" not in response["connector"]
+    assert response["connector"]["validation_result"]["action"] == "validate"
+    assert response["connector"]["validation_result"]["outcome"] == "success"
     assert detail["config_summary"]["configured_fields"] == ["outgoing_dir", "include_archive"]
     assert detail["config_summary"]["uses_secret_references"] is False
+    assert detail["validation_result"]["outcome"] == "success"
+
+
+def test_connector_registry_validation_result_catches_invalid_persisted_values_with_all_fields_present(
+    isolated_connector_state,
+):
+    from api.connectors import get_connector_registry_detail, list_connector_registry
+    from config import set_connector_entry
+
+    with patch("config._CONFIG_FILE", isolated_connector_state / "config.json"):
+        set_connector_entry(
+            "instrument_webhook_ingest",
+            enabled=True,
+            config={
+                "callback_path": "callbacks/instrument",
+                "shared_secret_env": "bad-secret",
+                "accepted_event_types": ["run.finished"],
+            },
+        )
+        listing = list_connector_registry()
+        detail = get_connector_registry_detail("instrument_webhook_ingest")
+
+    listed = next(
+        item for item in listing["connectors"] if item["name"] == "instrument_webhook_ingest"
+    )
+    assert listed["config_summary"]["configured"] is True
+    assert listed["config_summary"]["missing_required_fields"] == []
+    assert listed["validation_result"]["outcome"] == "invalid_input"
+    assert {issue["field"] for issue in listed["validation_result"]["issues"]} == {
+        "callback_path",
+        "shared_secret_env",
+    }
+    assert detail["config_summary"]["configured"] is True
+    assert detail["config_summary"]["missing_required_fields"] == []
+    assert detail["validation_result"]["outcome"] == "invalid_input"
+    assert {issue["field"] for issue in detail["validation_result"]["issues"]} == {
+        "callback_path",
+        "shared_secret_env",
+    }
 
 
 def test_invalid_configure_reports_attempted_config_summary(isolated_connector_state):

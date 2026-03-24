@@ -69,6 +69,26 @@ def get_connector_registry_detail(connector_name: str, request: Request = None):
     return entry.model_dump(mode="json")
 
 
+@router.get("/connectors/registry/{connector_name}/admin-detail")
+def get_connector_registry_admin_detail(
+    connector_name: str,
+    request: Request = None,
+):
+    require_admin_access(request)
+    try:
+        entry = get_connector_registry_entry(connector_name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    stored = cfg.get_connector_entry(entry.name)
+    return {
+        "connector_name": entry.name,
+        "enabled": stored["enabled"],
+        "config": stored["config"],
+        "validation_result": entry.validation_result.model_dump(mode="json"),
+    }
+
+
 @router.put("/connectors/registry/{connector_name}")
 def update_connector_registry_entry(
     connector_name: str,

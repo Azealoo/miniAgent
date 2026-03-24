@@ -7,6 +7,7 @@ import type {
   ConnectorActionRequest,
   ConnectorActionResult,
   ConnectorExecutionAction,
+  ConnectorRegistryAdminDetailResponse,
   ConnectorRegistryEntry,
   ConnectorRegistryListResponse,
   ConnectorRegistryUpdateRequest,
@@ -541,6 +542,11 @@ export const listConnectorRegistry = () =>
 export const getConnectorRegistryDetail = (connectorName: string) =>
   inspectReq<ConnectorRegistryEntry>(
     `/api/connectors/registry/${encodeURIComponent(connectorName)}`
+  );
+
+export const getConnectorRegistryAdminDetail = (connectorName: string) =>
+  adminReq<ConnectorRegistryAdminDetailResponse>(
+    `/api/connectors/registry/${encodeURIComponent(connectorName)}/admin-detail`
   );
 
 // Execution routes

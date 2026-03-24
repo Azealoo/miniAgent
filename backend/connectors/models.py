@@ -263,6 +263,7 @@ class ConnectorRegistryEntry(BaseModel):
     config_fields: list[ConnectorConfigField] = Field(default_factory=list)
     enabled: bool = False
     config_summary: ConnectorConfigSummary
+    validation_result: ConnectorActionResult | None = None
     notes: list[str] = Field(default_factory=list)
 
     @field_validator("name")

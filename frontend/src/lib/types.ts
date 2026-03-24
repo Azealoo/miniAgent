@@ -908,6 +908,7 @@ export interface ConnectorRegistryEntry {
   config_fields: ConnectorConfigField[];
   enabled: boolean;
   config_summary: ConnectorConfigSummary;
+  validation_result?: ConnectorActionResult | null;
   notes: string[];
 }
 
@@ -959,6 +960,13 @@ export interface ConnectorRegistryUpdateRequest {
 export interface ConnectorRegistryUpdateResponse {
   connector: ConnectorRegistryEntry;
   result: ConnectorActionResult;
+}
+
+export interface ConnectorRegistryAdminDetailResponse {
+  connector_name: string;
+  enabled: boolean;
+  config: JsonObject;
+  validation_result: ConnectorActionResult;
 }
 
 export interface ConnectorValidationRequest {

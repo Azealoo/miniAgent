@@ -216,6 +216,10 @@ def list_connector_registry_entries() -> list[ConnectorRegistryEntry]:
     for definition in list_connector_definitions():
         stored = cfg.get_connector_entry(definition.name)
         config_payload = stored["config"]
+        validation_result = validate_connector_entry(
+            definition.name,
+            config=config_payload,
+        )
         entries.append(
             ConnectorRegistryEntry(
                 name=definition.name,
@@ -227,6 +231,7 @@ def list_connector_registry_entries() -> list[ConnectorRegistryEntry]:
                 config_fields=definition.config_fields,
                 enabled=stored["enabled"],
                 config_summary=summarize_connector_config(definition, config_payload),
+                validation_result=validation_result,
                 notes=definition.notes,
             )
         )
@@ -236,6 +241,10 @@ def list_connector_registry_entries() -> list[ConnectorRegistryEntry]:
 def get_connector_registry_entry(connector_name: str) -> ConnectorRegistryEntry:
     definition = get_connector_definition(connector_name)
     stored = cfg.get_connector_entry(definition.name)
+    validation_result = validate_connector_entry(
+        definition.name,
+        config=stored["config"],
+    )
     return ConnectorRegistryEntry(
         name=definition.name,
         display_name=definition.display_name,
@@ -246,6 +255,7 @@ def get_connector_registry_entry(connector_name: str) -> ConnectorRegistryEntry:
         config_fields=definition.config_fields,
         enabled=stored["enabled"],
         config_summary=summarize_connector_config(definition, stored["config"]),
+        validation_result=validation_result,
         notes=definition.notes,
     )
 

@@ -3,30 +3,48 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Activity,
+  AlertTriangle,
   ArrowRight,
+  Check,
+  CircleOff,
   Clock3,
+  FileJson,
   Filter,
   Gauge,
   LayoutDashboard,
   MessageSquare,
+  Play,
+  Plug,
   RefreshCw,
   Route,
+  Save,
   ShieldCheck,
   X,
   type LucideIcon,
 } from "lucide-react";
 import {
-  listAuditEvents,
+  getConnectorRegistryAdminDetail,
+  getConnectorRegistryDetail,
   getObservabilityDashboardDefinitions,
   getObservabilityOverview,
+  listAuditEvents,
+  listConnectorRegistry,
   listObservabilityMetrics,
   listObservabilityTraces,
+  runConnectorRegistryAction,
+  updateConnectorRegistryEntry,
+  validateConnectorRegistryEntry,
 } from "@/lib/api";
 import { useApp } from "@/lib/store";
 import type {
   AuditEventRecord,
   AuditEventsQuery,
   AuditEventType,
+  ConnectorAction,
+  ConnectorActionResult,
+  ConnectorExecutionAction,
+  ConnectorRegistryEntry,
+  JsonObject,
   JsonValue,
   ObservabilityDashboardDefinition,
   ObservabilityMetricRecord,
@@ -41,8 +59,21 @@ import type {
 } from "@/lib/types";
 import { cn, formatRelativeTime } from "@/lib/utils";
 
-type OpsView = "overview" | "metrics" | "traces" | "audit" | "dashboards";
+type OpsView =
+  | "overview"
+  | "metrics"
+  | "traces"
+  | "audit"
+  | "connectors"
+  | "dashboards";
 type OpsWorkspaceStatus = "idle" | "loading" | "ready" | "error";
+
+interface ConnectorActionReceipt {
+  action: ConnectorAction;
+  kind: "success" | "error";
+  message: string;
+  recordedAt: string;
+}
 
 interface OpsWorkspaceFilters {
   days: string;
@@ -111,6 +142,11 @@ const AUDIT_EVENT_TYPE_OPTIONS: AuditEventType[] = [
   "job_submitted",
   "export_generated",
 ];
+const CONNECTOR_EXECUTION_ACTIONS: ConnectorExecutionAction[] = [
+  "import",
+  "export",
+  "sync_status",
+];
 
 const VIEW_CONFIG: Record<
   OpsView,
@@ -173,6 +209,12 @@ const VIEW_CONFIG: Record<
       "connectorName",
       "outcome",
     ],
+  },
+  connectors: {
+    label: "Connectors",
+    description: "Registry inspection and admin-only runtime controls for external integration points.",
+    icon: Plug,
+    supportedFilters: ["connectorName"],
   },
   dashboards: {
     label: "Dashboards",
@@ -332,6 +374,115 @@ function formatJsonValue(value: JsonValue | undefined): string {
   }
 
   return JSON.stringify(value, null, 2);
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseJsonObjectEditor(
+  value: string,
+  label: string
+): { value: JsonObject | null; error: string | null } {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return { value: null, error: null };
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (!isJsonObject(parsed)) {
+      return {
+        value: null,
+      error: `${label} must be a JSON object.`,
+      };
+    }
+    return {
+      value: parsed,
+      error: null,
+    };
+  } catch {
+    return {
+      value: null,
+      error: `${label} must be valid JSON.`,
+    };
+  }
+}
+
+function isConnectorActionResult(value: unknown): value is ConnectorActionResult {
+  return (
+    isJsonObject(value) &&
+    typeof value.connector_name === "string" &&
+    typeof value.action === "string" &&
+    typeof value.status === "string" &&
+    typeof value.outcome === "string" &&
+    typeof value.summary === "string" &&
+    Array.isArray(value.issues)
+  );
+}
+
+function parseConnectorActionResultFromError(
+  error: unknown
+): ConnectorActionResult | null {
+  if (!(error instanceof Error)) {
+    return null;
+  }
+
+  const rawMessage = error.message.trim();
+  if (!rawMessage) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(rawMessage);
+    if (isConnectorActionResult(parsed)) {
+      return parsed;
+    }
+    if (isJsonObject(parsed) && isConnectorActionResult(parsed.detail)) {
+      return parsed.detail;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function getConnectorMutationErrorMessage(error: unknown): string {
+  const rawMessage =
+    error instanceof Error
+      ? error.message.trim()
+      : "Could not complete the connector action.";
+  const message = rawMessage.toLowerCase();
+
+  if (
+    message.includes("disabled by production hardening policy") ||
+    message.includes("policy_disabled")
+  ) {
+    return "This connector action is blocked by the current production hardening policy.";
+  }
+
+  if (
+    message.includes("environment variable") ||
+    message.includes("http 503")
+  ) {
+    return "The admin connector route is configured, but the server token is unavailable.";
+  }
+
+  if (
+    message.includes("bearer token required") ||
+    message.includes("configured bearer token") ||
+    message.includes("local access or a configured bearer token") ||
+    message.includes("http 401") ||
+    message.includes("http 403")
+  ) {
+    return "Admin access is required to mutate connector state or invoke runtime actions.";
+  }
+
+  const compactMessage = compactText(rawMessage, 160);
+  return compactMessage
+    ? `Could not complete the connector action. ${compactMessage}`
+    : "Could not complete the connector action.";
 }
 
 function isFilterActive(
@@ -535,6 +686,98 @@ function metricKindTone(kind: ObservabilityMetricRecord["metric_kind"]): string 
   return "border-[rgba(71,85,105,0.18)] bg-[rgba(248,250,252,0.95)] text-slate-700";
 }
 
+function connectorResultTone(result: ConnectorActionResult): string {
+  if (result.status === "success") {
+    return "border-[rgba(15,118,110,0.18)] bg-[rgba(240,253,250,0.94)] text-teal-700";
+  }
+
+  if (result.outcome === "blocked" || result.failure_mode === "blocked_action") {
+    return "border-[rgba(217,119,6,0.22)] bg-[rgba(255,247,237,0.95)] text-amber-700";
+  }
+
+  return "border-[rgba(220,38,38,0.18)] bg-[rgba(254,242,242,0.95)] text-rose-700";
+}
+
+function connectorEnabledTone(enabled: boolean): string {
+  return enabled
+    ? "border-[rgba(15,118,110,0.18)] bg-[rgba(240,253,250,0.94)] text-teal-700"
+    : "border-[rgba(148,163,184,0.24)] bg-[rgba(248,250,252,0.94)] text-slate-600";
+}
+
+function getConnectorHealthSummary(
+  connector: ConnectorRegistryEntry
+): { label: string; detail: string; tone: "default" | "warning" | "danger" } {
+  const validationResult = connector.validation_result ?? null;
+  const hasPersistedValidationFailure =
+    validationResult !== null && validationResult.outcome !== "success";
+
+  if (!connector.enabled) {
+    return {
+      label: "Disabled",
+      detail: hasPersistedValidationFailure
+        ? `Runtime actions remain blocked until the registry entry is enabled. Persisted validation still reports: ${validationResult?.summary ?? "the stored config is invalid."}`
+        : "Runtime actions remain blocked until the registry entry is enabled.",
+      tone: "warning",
+    };
+  }
+
+  if (hasPersistedValidationFailure) {
+    return {
+      label: "Validation Failed",
+      detail: validationResult?.summary ?? "Persisted validation failed.",
+      tone:
+        validationResult?.outcome === "invalid_input" ? "warning" : "danger",
+    };
+  }
+
+  if (
+    !connector.config_summary.configured ||
+    connector.config_summary.missing_required_fields.length > 0
+  ) {
+    return {
+      label: "Needs Config",
+      detail:
+        connector.config_summary.missing_required_fields.length > 0
+          ? `Missing required fields: ${connector.config_summary.missing_required_fields.join(", ")}.`
+          : "This connector still needs configuration before runtime actions will succeed.",
+      tone: "warning",
+    };
+  }
+
+  return {
+    label: "Ready",
+    detail: "Enabled and configured for controlled runtime actions.",
+    tone: "default",
+  };
+}
+
+function createConnectorRequestDraft(): JsonObject {
+  return { dry_run: true };
+}
+
+function filterConnectorsByName(
+  connectors: ConnectorRegistryEntry[],
+  query: string
+): ConnectorRegistryEntry[] {
+  const trimmed = query.trim().toLowerCase();
+  if (!trimmed) {
+    return connectors;
+  }
+
+  return connectors.filter((connector) =>
+    [
+      connector.name,
+      connector.display_name,
+      connector.external_system,
+      connector.system_kind,
+    ].some((value) => value.toLowerCase().includes(trimmed))
+  );
+}
+
+function formatConnectorFieldLabel(value: string): string {
+  return formatTokenLabel(value) ?? value;
+}
+
 function retentionLabel(policy?: RetentionPolicy | null): string {
   if (!policy) {
     return "Retention unavailable";
@@ -635,7 +878,8 @@ function OpsHero({
           </h2>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
             Inspect BioAPEX runtime health, workflow delivery, traces, audit events,
-            and dashboard definitions without leaving the production-operations surface.
+            connector registry state, and dashboard definitions without leaving the
+            production-operations surface.
           </p>
           {badges ? <div className="mt-3 flex flex-wrap gap-2">{badges}</div> : null}
         </div>
@@ -1821,6 +2065,915 @@ function AuditView({
   );
 }
 
+function ConnectorRegistryNavigator({
+  status,
+  connectors,
+  error,
+  selectedConnectorName,
+  onSelect,
+}: {
+  status: OpsWorkspaceStatus;
+  connectors: ConnectorRegistryEntry[];
+  error: string | null;
+  selectedConnectorName: string | null;
+  onSelect: (connector: ConnectorRegistryEntry) => void;
+}) {
+  return (
+    <OpsSectionCard
+      title="Connector Registry"
+      description="Inspect registered integration points, then open a connector to manage configuration and runtime actions."
+    >
+      <div className="space-y-2">
+        {status === "loading" && connectors.length === 0 ? (
+          <OpsStateCard>Loading connector registry entries…</OpsStateCard>
+        ) : status === "error" ? (
+          <OpsStateCard tone="error">
+            {error ?? "Could not load the connector registry right now."}
+          </OpsStateCard>
+        ) : connectors.length === 0 ? (
+          <OpsStateCard>No connectors matched the current filters.</OpsStateCard>
+        ) : (
+          connectors.map((connector) => {
+            const active = connector.name === selectedConnectorName;
+            const health = getConnectorHealthSummary(connector);
+            return (
+              <button
+                key={connector.name}
+                type="button"
+                onClick={() => onSelect(connector)}
+                className={cn(
+                  "w-full rounded-[18px] border px-4 py-4 text-left transition-colors",
+                  active
+                    ? "border-[rgba(37,99,235,0.22)] bg-[rgba(239,246,255,0.95)] shadow-[0_10px_24px_rgba(37,99,235,0.08)]"
+                    : "border-[rgba(210,218,230,0.88)] bg-[rgba(255,255,255,0.94)] hover:bg-[rgba(248,250,252,0.98)]"
+                )}
+              >
+                <div className="flex items-start gap-3">
+                  <div
+                    className={cn(
+                      "mt-0.5 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-[12px]",
+                      active
+                        ? "bg-white text-blue-700"
+                        : "bg-[rgba(248,250,252,0.92)] text-slate-500"
+                    )}
+                  >
+                    <Plug size={18} />
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="truncate text-sm font-semibold text-slate-900">
+                        {connector.display_name}
+                      </p>
+                      <span
+                        className={cn(
+                          "inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                          connectorEnabledTone(connector.enabled)
+                        )}
+                      >
+                        {connector.enabled ? "Enabled" : "Disabled"}
+                      </span>
+                      <span
+                        className={cn(
+                          "inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                          health.tone === "default" &&
+                            "border-[rgba(15,118,110,0.18)] bg-[rgba(240,253,250,0.94)] text-teal-700",
+                          health.tone === "warning" &&
+                            "border-[rgba(217,119,6,0.22)] bg-[rgba(255,247,237,0.95)] text-amber-700",
+                          health.tone === "danger" &&
+                            "border-[rgba(220,38,38,0.18)] bg-[rgba(254,242,242,0.95)] text-rose-700"
+                        )}
+                      >
+                        {health.label}
+                      </span>
+                    </div>
+
+                    <p className="mt-1 text-[12px] text-slate-500">
+                      {connector.name} · {formatConnectorFieldLabel(connector.system_kind)} ·{" "}
+                      {connector.external_system}
+                    </p>
+                    <p className="mt-2 text-[12px] leading-5 text-slate-500">
+                      {compactText(connector.description, 180)}
+                    </p>
+                    <p className="mt-2 text-[11px] leading-5 text-slate-500">
+                      {health.detail}
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <span className="rounded-full border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.96)] px-2.5 py-1 text-[11px] text-slate-500">
+                        {connector.capabilities.supported_actions.length} supported action
+                        {connector.capabilities.supported_actions.length === 1 ? "" : "s"}
+                      </span>
+                      <span className="rounded-full border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.96)] px-2.5 py-1 text-[11px] text-slate-500">
+                        {connector.config_summary.configured_fields.length} configured field
+                        {connector.config_summary.configured_fields.length === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-[rgba(226,232,240,0.95)] bg-white/92 text-slate-400">
+                    <ArrowRight size={14} />
+                  </div>
+                </div>
+              </button>
+            );
+          })
+        )}
+      </div>
+    </OpsSectionCard>
+  );
+}
+
+function ConnectorDetailPane({
+  status,
+  connector,
+  error,
+  adminConfigStatus,
+  adminConfigError,
+  configLoaded,
+  configDraft,
+  requestDraft,
+  pendingActionKey,
+  currentValidationResult,
+  latestResult,
+  latestReceipt,
+  onConfigDraftChange,
+  onRequestDraftChange,
+  onResetConfigDraft,
+  onResetRequestDraft,
+  onToggleEnabled,
+  onSaveConfig,
+  onValidateDraft,
+  onRunAction,
+}: {
+  status: OpsWorkspaceStatus;
+  connector: ConnectorRegistryEntry | null;
+  error: string | null;
+  adminConfigStatus: OpsWorkspaceStatus;
+  adminConfigError: string | null;
+  configLoaded: boolean;
+  configDraft: string;
+  requestDraft: string;
+  pendingActionKey: string | null;
+  currentValidationResult: ConnectorActionResult | null;
+  latestResult: ConnectorActionResult | null;
+  latestReceipt: ConnectorActionReceipt | null;
+  onConfigDraftChange: (value: string) => void;
+  onRequestDraftChange: (value: string) => void;
+  onResetConfigDraft: () => void;
+  onResetRequestDraft: () => void;
+  onToggleEnabled: () => void;
+  onSaveConfig: () => void;
+  onValidateDraft: () => void;
+  onRunAction: (action: ConnectorExecutionAction) => void;
+}) {
+  if (status === "loading" && !connector) {
+    return (
+      <OpsSectionCard
+        title="Connector Detail"
+        description="Load a connector from the registry to inspect its admin surface."
+      >
+        <OpsStateCard>Loading connector detail…</OpsStateCard>
+      </OpsSectionCard>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <OpsSectionCard
+        title="Connector Detail"
+        description="Load a connector from the registry to inspect its admin surface."
+      >
+        <OpsStateCard tone="error">
+          {error ?? "Could not load the selected connector detail."}
+        </OpsStateCard>
+      </OpsSectionCard>
+    );
+  }
+
+  if (!connector) {
+    return (
+      <OpsSectionCard
+        title="Connector Detail"
+        description="Load a connector from the registry to inspect its admin surface."
+      >
+        <OpsStateCard>Select a connector to inspect its configuration summary and action controls.</OpsStateCard>
+      </OpsSectionCard>
+    );
+  }
+
+  const health = getConnectorHealthSummary(connector);
+  const supportedRuntimeActions = CONNECTOR_EXECUTION_ACTIONS.filter((action) =>
+    connector.capabilities.supported_actions.includes(action)
+  );
+
+  return (
+    <OpsSectionCard
+      title="Connector Detail"
+      description="Inspect configuration readiness, admin-only controls, validation results, and runtime action receipts."
+    >
+      <div className="space-y-4">
+        <div className="rounded-[20px] border border-[rgba(210,218,230,0.92)] bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.96))] px-4 py-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-lg font-semibold tracking-[-0.02em] text-slate-900">
+                  {connector.display_name}
+                </h3>
+                <span
+                  className={cn(
+                    "inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                    connectorEnabledTone(connector.enabled)
+                  )}
+                >
+                  {connector.enabled ? "Enabled" : "Disabled"}
+                </span>
+                <span
+                  className={cn(
+                    "inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                    health.tone === "default" &&
+                      "border-[rgba(15,118,110,0.18)] bg-[rgba(240,253,250,0.94)] text-teal-700",
+                    health.tone === "warning" &&
+                      "border-[rgba(217,119,6,0.22)] bg-[rgba(255,247,237,0.95)] text-amber-700",
+                    health.tone === "danger" &&
+                      "border-[rgba(220,38,38,0.18)] bg-[rgba(254,242,242,0.95)] text-rose-700"
+                  )}
+                >
+                  {health.label}
+                </span>
+                <OpsBadge icon={ShieldCheck} tone="warning">
+                  Admin only
+                </OpsBadge>
+              </div>
+              <p className="mt-1 text-sm text-slate-500">
+                {connector.name} · {formatConnectorFieldLabel(connector.system_kind)} ·{" "}
+                {connector.external_system}
+              </p>
+              <p className="mt-2 text-sm leading-6 text-slate-500">
+                {connector.description}
+              </p>
+              <p className="mt-2 text-[12px] leading-5 text-slate-500">
+                {health.detail}
+              </p>
+            </div>
+
+            <OpsAction
+              onClick={onToggleEnabled}
+              tone="accent"
+              disabled={pendingActionKey !== null}
+            >
+              {pendingActionKey === `${connector.name}:toggle` ? (
+                <Clock3 size={12} />
+              ) : connector.enabled ? (
+                <CircleOff size={12} />
+              ) : (
+                <Check size={12} />
+              )}
+              {pendingActionKey === `${connector.name}:toggle`
+                ? "Updating…"
+                : connector.enabled
+                  ? "Disable Connector"
+                  : "Enable Connector"}
+            </OpsAction>
+          </div>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <OpsSummaryCard
+            label="Configured Fields"
+            value={formatInteger(connector.config_summary.configured_fields.length)}
+            detail="Fields currently represented in the stored connector config."
+          />
+          <OpsSummaryCard
+            label="Missing Required"
+            value={formatInteger(connector.config_summary.missing_required_fields.length)}
+            detail="Required config keys still absent from the current registry state."
+            tone={
+              connector.config_summary.missing_required_fields.length > 0
+                ? "warning"
+                : "default"
+            }
+          />
+          <OpsSummaryCard
+            label="Runtime Actions"
+            value={formatInteger(supportedRuntimeActions.length)}
+            detail="Supported import, export, and status-sync actions."
+          />
+          <OpsSummaryCard
+            label="Secret References"
+            value={connector.config_summary.uses_secret_references ? "Yes" : "No"}
+            detail="The registry summary indicates whether secret-backed config references are in use."
+          />
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <div className="space-y-4">
+            <div className="rounded-[18px] border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.92)] px-4 py-4">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                Config Summary
+              </p>
+              <div className="mt-3 space-y-3">
+                <div>
+                  <p className="text-[11px] font-semibold text-slate-700">
+                    Configured fields
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {connector.config_summary.configured_fields.length === 0 ? (
+                      <span className="text-[12px] text-slate-500">
+                        No configured fields are exposed in the current summary.
+                      </span>
+                    ) : (
+                      connector.config_summary.configured_fields.map((field) => (
+                        <span
+                          key={`${connector.name}:configured:${field}`}
+                          className="rounded-full border border-[rgba(191,219,254,0.92)] bg-[rgba(239,246,255,0.94)] px-2.5 py-1 text-[11px] text-blue-700"
+                        >
+                          {field}
+                        </span>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <p className="text-[11px] font-semibold text-slate-700">
+                    Missing required fields
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {connector.config_summary.missing_required_fields.length === 0 ? (
+                      <span className="text-[12px] text-slate-500">
+                        No missing required fields are reported.
+                      </span>
+                    ) : (
+                      connector.config_summary.missing_required_fields.map((field) => (
+                        <span
+                          key={`${connector.name}:missing:${field}`}
+                          className="rounded-full border border-[rgba(253,230,138,0.96)] bg-[rgba(255,251,235,0.96)] px-2.5 py-1 text-[11px] text-amber-700"
+                        >
+                          {field}
+                        </span>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {connector.notes.length > 0 ? (
+                  <div>
+                    <p className="text-[11px] font-semibold text-slate-700">Notes</p>
+                    <div className="mt-2 space-y-2">
+                      {connector.notes.map((note) => (
+                        <div
+                          key={`${connector.name}:note:${note}`}
+                          className="rounded-[14px] border border-[rgba(226,232,240,0.95)] bg-white/92 px-3 py-2 text-[12px] leading-5 text-slate-600"
+                        >
+                          {note}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="rounded-[18px] border border-[rgba(226,232,240,0.95)] bg-white/94 px-4 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Config Draft Editor
+                  </p>
+                  <p className="mt-1 text-[12px] leading-5 text-slate-500">
+                    Edit a JSON object for the next registry update. Stored secret values are
+                    intentionally not returned by the detail API, so this editor is an explicit
+                    operator draft rather than a live config mirror.
+                  </p>
+                </div>
+                <OpsBadge icon={FileJson} tone="neutral">
+                  JSON object
+                </OpsBadge>
+              </div>
+
+              <div className="mt-3">
+                <textarea
+                  value={configDraft}
+                  onChange={(event) => onConfigDraftChange(event.target.value)}
+                  disabled={!configLoaded}
+                  spellCheck={false}
+                  className="min-h-[15rem] w-full rounded-[16px] border border-[rgba(203,213,225,0.95)] bg-[rgba(248,250,252,0.96)] px-4 py-3 font-mono text-[12px] leading-6 text-slate-700 outline-none focus:border-blue-400 disabled:cursor-not-allowed disabled:opacity-60"
+                />
+              </div>
+
+              {adminConfigStatus === "loading" && !configLoaded ? (
+                <div className="mt-3">
+                  <OpsStateCard>Loading the persisted connector config for safe editing…</OpsStateCard>
+                </div>
+              ) : adminConfigStatus === "error" && !configLoaded ? (
+                <div className="mt-3">
+                  <OpsStateCard tone="warning">
+                    {adminConfigError ??
+                      "Current connector config could not be loaded for editing."}
+                  </OpsStateCard>
+                </div>
+              ) : null}
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                <OpsAction
+                  onClick={onSaveConfig}
+                  tone="accent"
+                  disabled={pendingActionKey !== null || !configLoaded}
+                >
+                  {pendingActionKey === `${connector.name}:configure` ? (
+                    <Clock3 size={12} />
+                  ) : (
+                    <Save size={12} />
+                  )}
+                  {pendingActionKey === `${connector.name}:configure`
+                    ? "Saving…"
+                    : "Save Config Draft"}
+                </OpsAction>
+                <OpsAction
+                  onClick={onValidateDraft}
+                  disabled={pendingActionKey !== null || !configLoaded}
+                >
+                  {pendingActionKey === `${connector.name}:validate` ? (
+                    <Clock3 size={12} />
+                  ) : (
+                    <ShieldCheck size={12} />
+                  )}
+                  {pendingActionKey === `${connector.name}:validate`
+                    ? "Validating…"
+                    : "Validate Draft"}
+                </OpsAction>
+                <OpsAction
+                  onClick={onResetConfigDraft}
+                  disabled={pendingActionKey !== null || !configLoaded}
+                >
+                  <RefreshCw size={12} />
+                  Reset Draft
+                </OpsAction>
+              </div>
+            </div>
+
+            <div className="rounded-[18px] border border-[rgba(226,232,240,0.95)] bg-white/94 px-4 py-4">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                Config Fields
+              </p>
+              <div className="mt-3 space-y-2">
+                {connector.config_fields.length === 0 ? (
+                  <OpsStateCard>No typed config fields are declared for this connector.</OpsStateCard>
+                ) : (
+                  connector.config_fields.map((field) => (
+                    <div
+                      key={`${connector.name}:field:${field.key}`}
+                      className="rounded-[16px] border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.92)] px-3 py-3"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-semibold text-slate-900">{field.key}</p>
+                        <span className="rounded-full border border-[rgba(226,232,240,0.95)] bg-white/92 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                          {formatConnectorFieldLabel(field.kind)}
+                        </span>
+                        <span
+                          className={cn(
+                            "rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                            field.required
+                              ? "border-[rgba(191,219,254,0.92)] bg-[rgba(239,246,255,0.94)] text-blue-700"
+                              : "border-[rgba(226,232,240,0.95)] bg-white/92 text-slate-500"
+                          )}
+                        >
+                          {field.required ? "Required" : "Optional"}
+                        </span>
+                        {field.secret_reference ? (
+                          <span className="rounded-full border border-[rgba(253,230,138,0.96)] bg-[rgba(255,251,235,0.96)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-amber-700">
+                            Secret reference
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="mt-2 text-[12px] leading-5 text-slate-500">
+                        {field.description}
+                      </p>
+                      {field.allowed_values.length > 0 ? (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {field.allowed_values.map((value) => (
+                            <span
+                              key={`${connector.name}:field:${field.key}:${value}`}
+                              className="rounded-full border border-[rgba(226,232,240,0.95)] bg-white/92 px-2.5 py-1 text-[11px] text-slate-500"
+                            >
+                              {value}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div className="rounded-[18px] border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.92)] px-4 py-4">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                Validation State
+              </p>
+              {adminConfigStatus === "loading" && !currentValidationResult ? (
+                <div className="mt-3">
+                  <OpsStateCard>Loading the current persisted validation state…</OpsStateCard>
+                </div>
+              ) : adminConfigStatus === "error" && !currentValidationResult ? (
+                <div className="mt-3">
+                  <OpsStateCard tone="warning">
+                    {adminConfigError ??
+                      "Current validation state could not be loaded."}
+                  </OpsStateCard>
+                </div>
+              ) : currentValidationResult ? (
+                <div className="mt-3 space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className={cn(
+                        "inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                        connectorResultTone(currentValidationResult)
+                      )}
+                    >
+                      {formatTokenLabel(currentValidationResult.outcome) ??
+                        currentValidationResult.outcome}
+                    </span>
+                    <OpsBadge icon={ShieldCheck} tone="neutral">
+                      {formatTokenLabel(currentValidationResult.action) ??
+                        currentValidationResult.action}
+                    </OpsBadge>
+                    {latestReceipt &&
+                    latestReceipt.action === currentValidationResult.action ? (
+                      <OpsBadge icon={Clock3} tone="neutral">
+                        {formatRelativeIsoTime(latestReceipt.recordedAt)}
+                      </OpsBadge>
+                    ) : null}
+                  </div>
+                  <p className="text-sm font-semibold text-slate-900">
+                    {currentValidationResult.summary}
+                  </p>
+                  {currentValidationResult.issues.length > 0 ? (
+                    <div className="space-y-2">
+                      {currentValidationResult.issues.map((issue, index) => (
+                        <div
+                          key={`${connector.name}:validation:${issue.code}:${index}`}
+                          className="rounded-[14px] border border-[rgba(253,230,138,0.96)] bg-[rgba(255,251,235,0.96)] px-3 py-2 text-[12px] leading-5 text-amber-800"
+                        >
+                          <span className="font-semibold">
+                            {issue.field ? `${issue.field}: ` : ""}
+                          </span>
+                          {issue.message}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-[12px] leading-5 text-slate-500">
+                      No validation issues were reported for the current persisted connector config.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="mt-3">
+                  <OpsStateCard>
+                    No persisted validation state is available for this connector yet.
+                  </OpsStateCard>
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-[18px] border border-[rgba(245,158,11,0.22)] bg-[linear-gradient(180deg,rgba(255,251,235,0.96),rgba(255,247,237,0.96))] px-4 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-amber-700">
+                    Runtime Actions
+                  </p>
+                  <p className="mt-1 text-[12px] leading-5 text-amber-900/80">
+                    These actions call the backend connector runtime directly and are
+                    intentionally admin-only. Each action records a visible local receipt and
+                    surfaces backend blocks or permission failures clearly.
+                  </p>
+                </div>
+                <OpsBadge icon={ShieldCheck} tone="warning">
+                  Admin only
+                </OpsBadge>
+              </div>
+
+              {!connector.enabled ? (
+                <div className="mt-3">
+                  <OpsStateCard tone="warning">
+                    This registry entry is disabled. Runtime actions remain available for
+                    inspection, but the backend will block them until the connector is enabled.
+                  </OpsStateCard>
+                </div>
+              ) : null}
+
+              <div className="mt-3">
+                <textarea
+                  value={requestDraft}
+                  onChange={(event) => onRequestDraftChange(event.target.value)}
+                  spellCheck={false}
+                  className="min-h-[12rem] w-full rounded-[16px] border border-[rgba(251,191,36,0.32)] bg-white/92 px-4 py-3 font-mono text-[12px] leading-6 text-slate-700 outline-none focus:border-amber-400"
+                />
+              </div>
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                {supportedRuntimeActions.length === 0 ? (
+                  <OpsStateCard>No runtime actions are registered for this connector.</OpsStateCard>
+                ) : (
+                  supportedRuntimeActions.map((action) => (
+                    <OpsAction
+                      key={`${connector.name}:run:${action}`}
+                      onClick={() => onRunAction(action)}
+                      tone={action === "sync_status" ? "default" : "accent"}
+                      disabled={pendingActionKey !== null}
+                    >
+                      {pendingActionKey === `${connector.name}:${action}` ? (
+                        <Clock3 size={12} />
+                      ) : (
+                        <Play size={12} />
+                      )}
+                      {pendingActionKey === `${connector.name}:${action}`
+                        ? `${formatTokenLabel(action) ?? action}…`
+                        : formatTokenLabel(action) ?? action}
+                    </OpsAction>
+                  ))
+                )}
+                <OpsAction
+                  onClick={onResetRequestDraft}
+                  disabled={pendingActionKey !== null}
+                >
+                  <RefreshCw size={12} />
+                  Reset Request
+                </OpsAction>
+              </div>
+            </div>
+
+            <div className="rounded-[18px] border border-[rgba(226,232,240,0.95)] bg-white/94 px-4 py-4">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                Latest Result
+              </p>
+              {latestResult ? (
+                <div className="mt-3 space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className={cn(
+                        "inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em]",
+                        connectorResultTone(latestResult)
+                      )}
+                    >
+                      {formatTokenLabel(latestResult.outcome) ?? latestResult.outcome}
+                    </span>
+                    <OpsBadge icon={ArrowRight} tone="neutral">
+                      {formatTokenLabel(latestResult.action) ?? latestResult.action}
+                    </OpsBadge>
+                    {latestReceipt ? (
+                      <OpsBadge
+                        icon={latestReceipt.kind === "error" ? AlertTriangle : Clock3}
+                        tone={latestReceipt.kind === "error" ? "warning" : "neutral"}
+                      >
+                        {formatRelativeIsoTime(latestReceipt.recordedAt)}
+                      </OpsBadge>
+                    ) : null}
+                  </div>
+
+                  <p className="text-sm font-semibold text-slate-900">
+                    {latestResult.summary}
+                  </p>
+
+                  {latestResult.issues.length > 0 ? (
+                    <div className="space-y-2">
+                      {latestResult.issues.map((issue, index) => (
+                        <div
+                          key={`${connector.name}:result:${latestResult.action}:${issue.code}:${index}`}
+                          className="rounded-[14px] border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.92)] px-3 py-2 text-[12px] leading-5 text-slate-600"
+                        >
+                          <span className="font-semibold">
+                            {issue.field ? `${issue.field}: ` : ""}
+                          </span>
+                          {issue.message}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {(latestResult.artifact_paths.length > 0 ||
+                    latestResult.external_paths.length > 0) ? (
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <p className="text-[11px] font-semibold text-slate-700">
+                          Artifact paths
+                        </p>
+                        <div className="mt-2 space-y-2">
+                          {latestResult.artifact_paths.length === 0 ? (
+                            <p className="text-[12px] text-slate-500">
+                              No artifact paths were returned.
+                            </p>
+                          ) : (
+                            latestResult.artifact_paths.map((path) => (
+                              <div
+                                key={`${connector.name}:artifact:${path}`}
+                                className="rounded-[14px] border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.92)] px-3 py-2 font-mono text-[12px] leading-5 text-slate-700"
+                              >
+                                {path}
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+
+                      <div>
+                        <p className="text-[11px] font-semibold text-slate-700">
+                          External paths
+                        </p>
+                        <div className="mt-2 space-y-2">
+                          {latestResult.external_paths.length === 0 ? (
+                            <p className="text-[12px] text-slate-500">
+                              No external paths were returned.
+                            </p>
+                          ) : (
+                            latestResult.external_paths.map((path) => (
+                              <div
+                                key={`${connector.name}:external:${path}`}
+                                className="rounded-[14px] border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.92)] px-3 py-2 text-[12px] leading-5 text-slate-700"
+                              >
+                                {path}
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div>
+                    <p className="text-[11px] font-semibold text-slate-700">Metadata</p>
+                    <div className="mt-2">
+                      <JsonPreview value={latestResult.metadata} />
+                    </div>
+                  </div>
+                </div>
+              ) : latestReceipt ? (
+                <div className="mt-3">
+                  <OpsStateCard tone={latestReceipt.kind === "error" ? "error" : "neutral"}>
+                    {latestReceipt.message}
+                  </OpsStateCard>
+                </div>
+              ) : (
+                <div className="mt-3">
+                  <OpsStateCard>
+                    No connector mutation or runtime result has been recorded in this session yet.
+                  </OpsStateCard>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </OpsSectionCard>
+  );
+}
+
+function ConnectorsView({
+  listStatus,
+  connectors,
+  listError,
+  detailStatus,
+  connector,
+  detailError,
+  adminConfigStatus,
+  adminConfigError,
+  configLoaded,
+  ignoredFilters,
+  selectedConnectorName,
+  configDraft,
+  requestDraft,
+  pendingActionKey,
+  latestResult,
+  currentValidationResult,
+  latestReceipt,
+  onSelect,
+  onConfigDraftChange,
+  onRequestDraftChange,
+  onResetConfigDraft,
+  onResetRequestDraft,
+  onToggleEnabled,
+  onSaveConfig,
+  onValidateDraft,
+  onRunAction,
+}: {
+  listStatus: OpsWorkspaceStatus;
+  connectors: ConnectorRegistryEntry[];
+  listError: string | null;
+  detailStatus: OpsWorkspaceStatus;
+  connector: ConnectorRegistryEntry | null;
+  detailError: string | null;
+  adminConfigStatus: OpsWorkspaceStatus;
+  adminConfigError: string | null;
+  configLoaded: boolean;
+  ignoredFilters: FilterChip[];
+  selectedConnectorName: string | null;
+  configDraft: string;
+  requestDraft: string;
+  pendingActionKey: string | null;
+  latestResult: ConnectorActionResult | null;
+  currentValidationResult: ConnectorActionResult | null;
+  latestReceipt: ConnectorActionReceipt | null;
+  onSelect: (connector: ConnectorRegistryEntry) => void;
+  onConfigDraftChange: (value: string) => void;
+  onRequestDraftChange: (value: string) => void;
+  onResetConfigDraft: () => void;
+  onResetRequestDraft: () => void;
+  onToggleEnabled: () => void;
+  onSaveConfig: () => void;
+  onValidateDraft: () => void;
+  onRunAction: (action: ConnectorExecutionAction) => void;
+}) {
+  const enabledCount = connectors.filter((connector) => connector.enabled).length;
+  const validationReadyCount = connectors.filter((connector) =>
+    connector.validation_result
+      ? connector.validation_result.outcome === "success"
+      : connector.config_summary.configured &&
+        connector.config_summary.missing_required_fields.length === 0
+  ).length;
+  const attentionCount = connectors.filter((connector) => {
+    const health = getConnectorHealthSummary(connector);
+    return health.tone !== "default";
+  }).length;
+
+  return (
+    <div className="space-y-4">
+      {ignoredFilters.length > 0 ? (
+        <OpsStateCard tone="warning">
+          The connectors view only applies the shared connector-name filter. Other
+          Ops filters are ignored because the registry routes expose administrative
+          metadata rather than runtime records.
+          <div className="mt-3">
+            <FilterChipRow chips={ignoredFilters} tone="warning" />
+          </div>
+        </OpsStateCard>
+      ) : null}
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <OpsSummaryCard
+          label="Registry Entries"
+          value={
+            listStatus === "loading" && connectors.length === 0
+              ? "Loading"
+              : formatInteger(connectors.length)
+          }
+          detail="Connector definitions currently visible in the registry view."
+        />
+        <OpsSummaryCard
+          label="Enabled"
+          value={formatInteger(enabledCount)}
+          detail="Entries currently enabled for runtime execution."
+        />
+        <OpsSummaryCard
+          label="Config Ready"
+          value={formatInteger(validationReadyCount)}
+          detail="Entries whose persisted config currently validates successfully."
+        />
+        <OpsSummaryCard
+          label="Needs Attention"
+          value={formatInteger(attentionCount)}
+          detail="Disabled or validation-impaired entries that need operator review."
+          tone={attentionCount > 0 ? "warning" : "default"}
+        />
+      </div>
+
+      <div className="grid min-h-0 gap-4 xl:grid-cols-[minmax(0,0.78fr)_minmax(0,1.22fr)]">
+        <ConnectorRegistryNavigator
+          status={listStatus}
+          connectors={connectors}
+          error={listError}
+          selectedConnectorName={selectedConnectorName}
+          onSelect={onSelect}
+        />
+        <ConnectorDetailPane
+          status={detailStatus}
+          connector={connector}
+          error={detailError}
+          adminConfigStatus={adminConfigStatus}
+          adminConfigError={adminConfigError}
+          configLoaded={configLoaded}
+          configDraft={configDraft}
+          requestDraft={requestDraft}
+          pendingActionKey={pendingActionKey}
+          currentValidationResult={currentValidationResult}
+          latestResult={latestResult}
+          latestReceipt={latestReceipt}
+          onConfigDraftChange={onConfigDraftChange}
+          onRequestDraftChange={onRequestDraftChange}
+          onResetConfigDraft={onResetConfigDraft}
+          onResetRequestDraft={onResetRequestDraft}
+          onToggleEnabled={onToggleEnabled}
+          onSaveConfig={onSaveConfig}
+          onValidateDraft={onValidateDraft}
+          onRunAction={onRunAction}
+        />
+      </div>
+    </div>
+  );
+}
+
 function DashboardDefinitionsView({
   status,
   dashboards,
@@ -1940,6 +3093,47 @@ export default function OpsWorkspace() {
     null
   );
 
+  const [connectorsStatus, setConnectorsStatus] =
+    useState<OpsWorkspaceStatus>("idle");
+  const [connectors, setConnectors] = useState<ConnectorRegistryEntry[]>([]);
+  const [connectorsError, setConnectorsError] = useState<string | null>(null);
+  const [selectedConnectorName, setSelectedConnectorName] = useState<string | null>(
+    null
+  );
+  const [connectorDetailStatus, setConnectorDetailStatus] =
+    useState<OpsWorkspaceStatus>("idle");
+  const [connectorDetail, setConnectorDetail] =
+    useState<ConnectorRegistryEntry | null>(null);
+  const [connectorDetailError, setConnectorDetailError] = useState<string | null>(
+    null
+  );
+  const [connectorAdminDetailStatus, setConnectorAdminDetailStatus] =
+    useState<OpsWorkspaceStatus>("idle");
+  const [connectorAdminDetailError, setConnectorAdminDetailError] = useState<
+    string | null
+  >(null);
+  const [connectorStoredConfigs, setConnectorStoredConfigs] = useState<
+    Record<string, JsonObject>
+  >({});
+  const [connectorConfigDrafts, setConnectorConfigDrafts] = useState<
+    Record<string, string>
+  >({});
+  const [connectorRequestDrafts, setConnectorRequestDrafts] = useState<
+    Record<string, string>
+  >({});
+  const [connectorLatestResults, setConnectorLatestResults] = useState<
+    Record<string, ConnectorActionResult>
+  >({});
+  const [connectorValidationResults, setConnectorValidationResults] = useState<
+    Record<string, ConnectorActionResult>
+  >({});
+  const [connectorReceipts, setConnectorReceipts] = useState<
+    Record<string, ConnectorActionReceipt>
+  >({});
+  const [connectorPendingActionKey, setConnectorPendingActionKey] = useState<
+    string | null
+  >(null);
+
   const [dashboardsStatus, setDashboardsStatus] =
     useState<OpsWorkspaceStatus>("idle");
   const [dashboards, setDashboards] = useState<ObservabilityDashboardDefinition[]>(
@@ -1961,6 +3155,10 @@ export default function OpsWorkspace() {
   const auditQuery = useMemo(
     () => buildAuditQuery(appliedFilters),
     [appliedFilters]
+  );
+  const filteredConnectors = useMemo(
+    () => filterConnectorsByName(connectors, appliedFilters.connectorName),
+    [appliedFilters.connectorName, connectors]
   );
 
   useEffect(() => {
@@ -2169,6 +3367,154 @@ export default function OpsWorkspace() {
     setSelectedAuditEventId(auditEvents[0].event_id);
   }, [auditEvents, selectedAuditEventId]);
 
+  useEffect(() => {
+    if (activeView !== "connectors") {
+      return;
+    }
+
+    let active = true;
+    setConnectorsStatus("loading");
+    setConnectorsError(null);
+    setConnectors([]);
+
+    void listConnectorRegistry()
+      .then((response) => {
+        if (!active) {
+          return;
+        }
+        setConnectors(response.connectors);
+        setConnectorsStatus("ready");
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+        setConnectors([]);
+        setConnectorsStatus("error");
+        setConnectorsError(getObservabilityErrorMessage(error, "the connector registry"));
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [activeView, refreshToken]);
+
+  useEffect(() => {
+    if (activeView !== "connectors") {
+      return;
+    }
+
+    if (filteredConnectors.length === 0) {
+      if (selectedConnectorName !== null) {
+        setSelectedConnectorName(null);
+      }
+      return;
+    }
+
+    if (
+      selectedConnectorName &&
+      filteredConnectors.some((connector) => connector.name === selectedConnectorName)
+    ) {
+      return;
+    }
+
+    setSelectedConnectorName(filteredConnectors[0].name);
+  }, [activeView, filteredConnectors, selectedConnectorName]);
+
+  useEffect(() => {
+    if (activeView !== "connectors") {
+      return;
+    }
+
+    if (!selectedConnectorName) {
+      setConnectorDetail(null);
+      setConnectorDetailError(null);
+      setConnectorDetailStatus("idle");
+      return;
+    }
+
+    let active = true;
+    setConnectorDetailStatus("loading");
+    setConnectorDetailError(null);
+    setConnectorDetail((current) =>
+      current?.name === selectedConnectorName ? current : null
+    );
+
+    void getConnectorRegistryDetail(selectedConnectorName)
+      .then((response) => {
+        if (!active) {
+          return;
+        }
+        setConnectorDetail(response);
+        setConnectorDetailStatus("ready");
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+        setConnectorDetail(null);
+        setConnectorDetailStatus("error");
+        setConnectorDetailError(
+          getObservabilityErrorMessage(error, "the selected connector detail")
+        );
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [activeView, refreshToken, selectedConnectorName]);
+
+  useEffect(() => {
+    if (activeView !== "connectors") {
+      return;
+    }
+
+    if (!selectedConnectorName) {
+      setConnectorAdminDetailStatus("idle");
+      setConnectorAdminDetailError(null);
+      return;
+    }
+
+    let active = true;
+    setConnectorAdminDetailStatus("loading");
+    setConnectorAdminDetailError(null);
+
+    void getConnectorRegistryAdminDetail(selectedConnectorName)
+      .then((response) => {
+        if (!active) {
+          return;
+        }
+        setConnectorStoredConfigs((current) => ({
+          ...current,
+          [response.connector_name]: response.config,
+        }));
+        setConnectorValidationResults((current) => ({
+          ...current,
+          [response.connector_name]: response.validation_result,
+        }));
+        setConnectorConfigDrafts((current) =>
+          response.connector_name in current
+            ? current
+            : {
+                ...current,
+                [response.connector_name]: formatJsonValue(response.config),
+              }
+        );
+        setConnectorAdminDetailStatus("ready");
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+        setConnectorAdminDetailStatus("error");
+        setConnectorAdminDetailError(getConnectorMutationErrorMessage(error));
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [activeView, selectedConnectorName]);
+
   const appliedFilterChips = useMemo(
     () => getAppliedFilterChips(appliedFilters),
     [appliedFilters]
@@ -2198,11 +3544,295 @@ export default function OpsWorkspace() {
     activeView === "audit"
       ? auditRetentionPolicy
       : overview?.retention_policy ?? null;
+  const selectedConnector =
+    connectorDetail && connectorDetail.name === selectedConnectorName
+      ? connectorDetail
+      : filteredConnectors.find((connector) => connector.name === selectedConnectorName) ??
+        null;
+  const selectedConnectorConfigLoaded = selectedConnectorName
+    ? selectedConnectorName in connectorStoredConfigs
+    : false;
+  const selectedConnectorStoredConfig =
+    selectedConnectorName && selectedConnectorConfigLoaded
+      ? connectorStoredConfigs[selectedConnectorName]
+      : null;
+  const selectedConnectorConfigDraft = selectedConnectorName
+    ? connectorConfigDrafts[selectedConnectorName] ??
+      (selectedConnectorStoredConfig
+        ? formatJsonValue(selectedConnectorStoredConfig)
+        : "")
+    : "{}";
+  const selectedConnectorRequestDraft = selectedConnectorName
+    ? connectorRequestDrafts[selectedConnectorName] ??
+      formatJsonValue(createConnectorRequestDraft())
+    : formatJsonValue(createConnectorRequestDraft());
+  const selectedConnectorLatestResult = selectedConnectorName
+    ? connectorLatestResults[selectedConnectorName] ?? null
+    : null;
+  const selectedConnectorValidationResult = selectedConnectorName
+    ? selectedConnector?.validation_result ??
+      connectorValidationResults[selectedConnectorName] ??
+      null
+    : null;
+  const selectedConnectorReceipt = selectedConnectorName
+    ? connectorReceipts[selectedConnectorName] ?? null
+    : null;
+
+  const syncConnectorEntry = (entry: ConnectorRegistryEntry) => {
+    setConnectors((current) =>
+      current.map((candidate) =>
+        candidate.name === entry.name ? entry : candidate
+      )
+    );
+    setConnectorDetail((current) =>
+      current?.name === entry.name ? entry : current
+    );
+  };
+
+  const recordConnectorReceipt = (
+    connectorName: string,
+    action: ConnectorAction,
+    kind: "success" | "error",
+    message: string
+  ) => {
+    setConnectorReceipts((current) => ({
+      ...current,
+      [connectorName]: {
+        action,
+        kind,
+        message,
+        recordedAt: new Date().toISOString(),
+      },
+    }));
+  };
+
+  const recordConnectorResult = (
+    result: ConnectorActionResult,
+    kind: "success" | "error" = result.status === "success" ? "success" : "error"
+  ) => {
+    setConnectorLatestResults((current) => ({
+      ...current,
+      [result.connector_name]: result,
+    }));
+    recordConnectorReceipt(result.connector_name, result.action, kind, result.summary);
+  };
+
+  const handleConnectorReceiptError = (
+    connectorName: string,
+    action: ConnectorAction,
+    error: unknown
+  ) => {
+    const parsedResult = parseConnectorActionResultFromError(error);
+    if (parsedResult) {
+      recordConnectorResult(parsedResult, "error");
+      return;
+    }
+
+    setConnectorLatestResults((current) => {
+      if (!(connectorName in current)) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[connectorName];
+      return next;
+    });
+    recordConnectorReceipt(
+      connectorName,
+      action,
+      "error",
+      getConnectorMutationErrorMessage(error)
+    );
+  };
+
+  const handleToggleConnector = () => {
+    if (!selectedConnector) {
+      return;
+    }
+
+    const actionKey = `${selectedConnector.name}:toggle`;
+    setConnectorPendingActionKey(actionKey);
+
+    void updateConnectorRegistryEntry(selectedConnector.name, {
+      enabled: !selectedConnector.enabled,
+    })
+      .then((response) => {
+        syncConnectorEntry(response.connector);
+        const persistedValidationResult = response.connector.validation_result;
+        if (persistedValidationResult) {
+          setConnectorValidationResults((current) => ({
+            ...current,
+            [response.connector.name]: persistedValidationResult,
+          }));
+        }
+        recordConnectorResult(response.result);
+      })
+      .catch((error) => {
+        const parsedResult = parseConnectorActionResultFromError(error);
+        if (parsedResult) {
+          recordConnectorResult(parsedResult, "error");
+          return;
+        }
+        handleConnectorReceiptError(selectedConnector.name, "configure", error);
+      })
+      .finally(() => {
+        setConnectorPendingActionKey((current) =>
+          current === actionKey ? null : current
+        );
+      });
+  };
+
+  const handleSaveConnectorConfig = () => {
+    if (!selectedConnector) {
+      return;
+    }
+
+    if (!selectedConnectorConfigLoaded) {
+      recordConnectorReceipt(
+        selectedConnector.name,
+        "configure",
+        "error",
+        "Load the persisted connector config before editing it."
+      );
+      return;
+    }
+
+    const parsed = parseJsonObjectEditor(
+      selectedConnectorConfigDraft,
+      "Connector config draft"
+    );
+    if (parsed.error || parsed.value === null) {
+      recordConnectorReceipt(
+        selectedConnector.name,
+        "configure",
+        "error",
+        parsed.error ?? "Connector config draft must be a JSON object."
+      );
+      return;
+    }
+    const nextConfig = parsed.value;
+
+    const actionKey = `${selectedConnector.name}:configure`;
+    setConnectorPendingActionKey(actionKey);
+
+    void updateConnectorRegistryEntry(selectedConnector.name, {
+      enabled: selectedConnector.enabled,
+      config: nextConfig,
+    })
+      .then((response) => {
+        setConnectorStoredConfigs((current) => ({
+          ...current,
+          [response.connector.name]: nextConfig,
+        }));
+        const persistedValidationResult = response.connector.validation_result;
+        if (persistedValidationResult) {
+          setConnectorValidationResults((current) => ({
+            ...current,
+            [response.connector.name]: persistedValidationResult,
+          }));
+        }
+        syncConnectorEntry(response.connector);
+        recordConnectorResult(response.result);
+      })
+      .catch((error) => {
+        handleConnectorReceiptError(selectedConnector.name, "configure", error);
+      })
+      .finally(() => {
+        setConnectorPendingActionKey((current) =>
+          current === actionKey ? null : current
+        );
+      });
+  };
+
+  const handleValidateConnectorDraft = () => {
+    if (!selectedConnector) {
+      return;
+    }
+
+    if (!selectedConnectorConfigLoaded) {
+      recordConnectorReceipt(
+        selectedConnector.name,
+        "validate",
+        "error",
+        "Load the persisted connector config before validating edits."
+      );
+      return;
+    }
+
+    const parsed = parseJsonObjectEditor(
+      selectedConnectorConfigDraft,
+      "Connector config draft"
+    );
+    if (parsed.error || parsed.value === null) {
+      recordConnectorReceipt(
+        selectedConnector.name,
+        "validate",
+        "error",
+        parsed.error ?? "Connector config draft must be a JSON object."
+      );
+      return;
+    }
+
+    const actionKey = `${selectedConnector.name}:validate`;
+    setConnectorPendingActionKey(actionKey);
+
+    void validateConnectorRegistryEntry(
+      selectedConnector.name,
+      { config: parsed.value }
+    )
+      .then((result) => {
+        recordConnectorResult(result);
+      })
+      .catch((error) => {
+        handleConnectorReceiptError(selectedConnector.name, "validate", error);
+      })
+      .finally(() => {
+        setConnectorPendingActionKey((current) =>
+          current === actionKey ? null : current
+        );
+      });
+  };
+
+  const handleRunConnectorAction = (action: ConnectorExecutionAction) => {
+    if (!selectedConnector) {
+      return;
+    }
+
+    const parsed = parseJsonObjectEditor(
+      selectedConnectorRequestDraft,
+      "Connector runtime request"
+    );
+    if (parsed.error) {
+      recordConnectorReceipt(selectedConnector.name, action, "error", parsed.error);
+      return;
+    }
+
+    const actionKey = `${selectedConnector.name}:${action}`;
+    setConnectorPendingActionKey(actionKey);
+
+    void runConnectorRegistryAction(
+      selectedConnector.name,
+      action,
+      parsed.value !== null ? parsed.value : undefined
+    )
+      .then((result) => {
+        recordConnectorResult(result);
+      })
+      .catch((error) => {
+        handleConnectorReceiptError(selectedConnector.name, action, error);
+      })
+      .finally(() => {
+        setConnectorPendingActionKey((current) =>
+          current === actionKey ? null : current
+        );
+      });
+  };
 
   const activeViewDescription = VIEW_CONFIG[activeView].description;
   const activeScopeBadgeLabel =
     activeView === "overview"
       ? `${overviewQuery.days ?? 7} day window`
+      : activeView === "connectors"
+        ? "Registry + detail"
       : activeView === "dashboards"
         ? "Static definitions"
         : `${formatInteger(currentListLimit)} row limit`;
@@ -2211,6 +3841,8 @@ export default function OpsWorkspace() {
       ? "Overview uses the time window plus request, session, and workflow filters."
       : activeView === "audit"
         ? "Audit applies event type, session, run, step, job, workflow, tool, connector, outcome, and list-limit filters."
+      : activeView === "connectors"
+        ? "Connectors uses the shared connector-name filter and otherwise shows registry metadata plus admin-only action controls."
       : activeView === "dashboards"
         ? "Dashboard definitions are static backend metadata and ignore runtime filters."
         : "Metrics and traces apply request, session, run, step, job, workflow, trace, and list-limit filters.";
@@ -2250,7 +3882,7 @@ export default function OpsWorkspace() {
         }
       />
 
-      {activeView !== "audit" ? (
+      {activeView !== "audit" && activeView !== "connectors" ? (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <OpsSummaryCard
             label="Observed Records"
@@ -2319,7 +3951,7 @@ export default function OpsWorkspace() {
 
       <OpsSectionCard
         title="Filters"
-        description="Set shared runtime and audit filters, then apply them to the relevant Ops views."
+        description="Set shared runtime, audit, and connector filters, then apply them to the relevant Ops views."
       >
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
           <OpsFilterField
@@ -2429,7 +4061,7 @@ export default function OpsWorkspace() {
           />
           <OpsFilterField
             label="Connector Name"
-            description="Audit only"
+            description="Audit, connectors"
             value={draftFilters.connectorName}
             placeholder="benchling"
             onChange={(value) =>
@@ -2497,7 +4129,7 @@ export default function OpsWorkspace() {
               Inspection Views
             </p>
             <p className="mt-1 text-sm leading-6 text-slate-500">
-              Move between summary, metrics, traces, audit events, and dashboard definitions without leaving the Ops workspace.
+              Move between summary, metrics, traces, audit events, connector registry controls, and dashboard definitions without leaving the Ops workspace.
             </p>
           </div>
           <OpsViewTabs activeView={activeView} onSelect={setActiveView} />
@@ -2568,6 +4200,69 @@ export default function OpsWorkspace() {
         />
       ) : null}
 
+      {activeView === "connectors" ? (
+        <ConnectorsView
+          listStatus={connectorsStatus}
+          connectors={filteredConnectors}
+          listError={connectorsError}
+          detailStatus={connectorDetailStatus}
+          connector={selectedConnector}
+          detailError={connectorDetailError}
+          adminConfigStatus={connectorAdminDetailStatus}
+          adminConfigError={connectorAdminDetailError}
+          configLoaded={selectedConnectorConfigLoaded}
+          ignoredFilters={ignoredFilterChips}
+          selectedConnectorName={selectedConnectorName}
+          configDraft={selectedConnectorConfigDraft}
+          requestDraft={selectedConnectorRequestDraft}
+          pendingActionKey={connectorPendingActionKey}
+          latestResult={selectedConnectorLatestResult}
+          currentValidationResult={selectedConnectorValidationResult}
+          latestReceipt={selectedConnectorReceipt}
+          onSelect={(connector) => setSelectedConnectorName(connector.name)}
+          onConfigDraftChange={(value) => {
+            if (!selectedConnectorName) {
+              return;
+            }
+            setConnectorConfigDrafts((current) => ({
+              ...current,
+              [selectedConnectorName]: value,
+            }));
+          }}
+          onRequestDraftChange={(value) => {
+            if (!selectedConnectorName) {
+              return;
+            }
+            setConnectorRequestDrafts((current) => ({
+              ...current,
+              [selectedConnectorName]: value,
+            }));
+          }}
+          onResetConfigDraft={() => {
+            if (!selectedConnectorName || !selectedConnectorStoredConfig) {
+              return;
+            }
+            setConnectorConfigDrafts((current) => ({
+              ...current,
+              [selectedConnectorName]: formatJsonValue(selectedConnectorStoredConfig),
+            }));
+          }}
+          onResetRequestDraft={() => {
+            if (!selectedConnectorName) {
+              return;
+            }
+            setConnectorRequestDrafts((current) => ({
+              ...current,
+              [selectedConnectorName]: formatJsonValue(createConnectorRequestDraft()),
+            }));
+          }}
+          onToggleEnabled={handleToggleConnector}
+          onSaveConfig={handleSaveConnectorConfig}
+          onValidateDraft={handleValidateConnectorDraft}
+          onRunAction={handleRunConnectorAction}
+        />
+      ) : null}
+
       {activeView === "dashboards" ? (
         <DashboardDefinitionsView
           status={dashboardsStatus}
@@ -2580,6 +4275,7 @@ export default function OpsWorkspace() {
       {overviewStatus === "error" &&
       activeView !== "overview" &&
       activeView !== "audit" &&
+      activeView !== "connectors" &&
       overviewError ? (
         <OpsStateCard tone="warning">
           The summary header is currently operating without overview data.
@@ -2589,6 +4285,7 @@ export default function OpsWorkspace() {
 
       {overview &&
       activeView !== "audit" &&
+      activeView !== "connectors" &&
       overview.workflow_delivery.failure_rate.average !== null &&
       overview.workflow_delivery.failure_rate.average > 0 ? (
         <OpsStateCard tone="warning">
@@ -2599,6 +4296,7 @@ export default function OpsWorkspace() {
 
       {overview &&
       activeView !== "audit" &&
+      activeView !== "connectors" &&
       overview.workflow_quality.evidence_coverage_rate.average !== null &&
       overview.workflow_quality.evidence_coverage_rate.average < 0.5 ? (
         <OpsStateCard tone="warning">
