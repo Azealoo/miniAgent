@@ -62,6 +62,7 @@ function ControlButton({
     <button
       type="button"
       title={title}
+      aria-label={title}
       onClick={onClick}
       disabled={disabled}
       className={cn(
@@ -360,6 +361,13 @@ export default function ChatInput({
         <button
           type="button"
           title={
+            isReferenceUploading
+              ? "Waiting for reference upload"
+              : isStreaming
+                ? "Streaming"
+                : "Send message"
+          }
+          aria-label={
             isReferenceUploading
               ? "Waiting for reference upload"
               : isStreaming

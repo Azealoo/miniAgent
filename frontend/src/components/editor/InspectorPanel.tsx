@@ -1732,17 +1732,20 @@ function TabButton({
   active,
   icon: Icon,
   label,
+  ariaLabel,
   onClick,
 }: {
   active: boolean;
   icon: typeof FileText;
   label: string;
+  ariaLabel: string;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      aria-label={ariaLabel}
       className={cn(
         "flex min-h-[42px] flex-col items-center justify-center gap-0.5 rounded-[10px] border px-1 py-1 text-center transition-colors",
         active
@@ -4499,6 +4502,7 @@ export default function InspectorPanel() {
               active={inspectorTab === tab.id}
               icon={tab.icon}
               label={tab.label}
+              ariaLabel={`Inspector ${tab.label}`}
               onClick={() => setInspectorTab(tab.id)}
             />
           ))}

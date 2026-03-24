@@ -318,6 +318,7 @@ export default function Sidebar() {
                 key={item.id}
                 type="button"
                 onClick={() => setWorkspaceMode(item.id)}
+                aria-label={`Open ${item.label} workspace`}
                 className={cn(
                   "flex flex-col items-center gap-0 rounded-[8px] px-0.5 py-1 text-[9px] leading-tight transition-colors",
                   active
