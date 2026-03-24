@@ -126,6 +126,116 @@ class TestHealthEndpoint:
         ]
 
 
+class TestAccessEndpoints:
+    def test_access_probe_reports_loopback_grant_mode(self, isolated_api_state):
+        from api.access import probe_route_access
+
+        response = probe_route_access("inspection", _request("/api/access/probe?scope=inspection"))
+
+        assert response == {
+            "scope": "inspection",
+            "authorization_mode": "loopback",
+        }
+
+    def test_access_probe_blocks_non_local_clients_without_token(self, isolated_api_state):
+        from api.access import probe_route_access
+
+        config_path = isolated_api_state / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "production_hardening": {
+                        "api": {
+                            "allow_loopback_without_auth": False,
+                            "inspection_bearer_token_env_var": "BIOAPEX_INSPECTION_TOKEN",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("config._CONFIG_FILE", config_path), patch.dict(
+            os.environ,
+            {"BIOAPEX_INSPECTION_TOKEN": "inspection-token"},
+            clear=False,
+        ), pytest.raises(HTTPException) as exc_info:
+            probe_route_access(
+                "inspection",
+                _request("/api/access/probe?scope=inspection", host="10.0.0.8"),
+            )
+
+        assert exc_info.value.status_code == 401
+
+    def test_access_probe_accepts_matching_scope_token(self, isolated_api_state):
+        from api.access import probe_route_access
+
+        config_path = isolated_api_state / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "production_hardening": {
+                        "api": {
+                            "allow_loopback_without_auth": False,
+                            "execution_bearer_token_env_var": "BIOAPEX_EXECUTION_TOKEN",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        headers = [(b"authorization", b"Bearer execution-token")]
+
+        with patch("config._CONFIG_FILE", config_path), patch.dict(
+            os.environ,
+            {"BIOAPEX_EXECUTION_TOKEN": "execution-token"},
+            clear=False,
+        ):
+            response = probe_route_access(
+                "execution",
+                _request(
+                    "/api/access/probe?scope=execution",
+                    host="10.0.0.8",
+                    headers=headers,
+                ),
+            )
+
+        assert response == {
+            "scope": "execution",
+            "authorization_mode": "bearer",
+        }
+
+    def test_access_probe_reports_empty_token_configuration(self, isolated_api_state):
+        from api.access import probe_route_access
+
+        config_path = isolated_api_state / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "production_hardening": {
+                        "api": {
+                            "allow_loopback_without_auth": False,
+                            "admin_bearer_token_env_var": "BIOAPEX_ADMIN_TOKEN",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("config._CONFIG_FILE", config_path), patch.dict(
+            os.environ,
+            {"BIOAPEX_ADMIN_TOKEN": ""},
+            clear=False,
+        ), pytest.raises(HTTPException) as exc_info:
+            probe_route_access(
+                "admin",
+                _request("/api/access/probe?scope=admin", host="10.0.0.8"),
+            )
+
+        assert exc_info.value.status_code == 503
+
+
 class TestSessionsEndpoints:
     def test_list_sessions_empty(self, isolated_api_state):
         from api.sessions import list_sessions

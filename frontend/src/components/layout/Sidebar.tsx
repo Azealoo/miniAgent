@@ -9,6 +9,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { getOverallAccessSummary } from "@/lib/access-control";
 import { isWorkflowSelectionPending } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
 import { cn, formatRelativeTime } from "@/lib/utils";
@@ -106,6 +107,9 @@ function SurfaceRow({
 
 export default function Sidebar() {
   const {
+    accessByScope,
+    hasExecutionAccess,
+    hasInspectionAccess,
     sessions,
     currentSessionId,
     messages,
@@ -133,10 +137,18 @@ export default function Sidebar() {
   const [editTitle, setEditTitle] = useState("");
   const [query, setQuery] = useState("");
   const trimmedQuery = query.trim();
-  const sessionActionsLocked = isStreaming || isReferenceUploading;
-  const sessionActionLockTitle = isStreaming
+  const accessSummary = getOverallAccessSummary(accessByScope);
+  const sessionMutationLocked =
+    isStreaming || isReferenceUploading || !hasExecutionAccess;
+  const sessionMutationLockTitle = !hasExecutionAccess
+    ? accessByScope.execution.detail
+    : isStreaming
     ? "Wait for streaming to finish before editing sessions"
     : "Wait for the current reference upload to finish before editing sessions";
+  const sessionSelectionLocked = isReferenceUploading || !hasInspectionAccess;
+  const sessionSelectionLockTitle = !hasInspectionAccess
+    ? accessByScope.inspection.detail
+    : "Inspection access is required to switch between saved sessions.";
 
   const filteredQuickStartItems = quickStartItems.filter((item) =>
     matchesQuery(query, item.label, item.description, item.kind)
@@ -164,41 +176,43 @@ export default function Sidebar() {
   );
   const sessionSectionLabel = "Recent";
   const sessionEmptyMessage =
-    sessions.length === 0
+    !hasInspectionAccess
+      ? "Inspection access is required to browse saved sessions."
+      : sessions.length === 0
       ? "No sessions yet. Start a new workspace to see it here."
       : trimmedQuery
         ? `No sessions match "${trimmedQuery}".`
         : "No recent sessions yet.";
 
   useEffect(() => {
-    if (!sessionActionsLocked) return;
+    if (!sessionMutationLocked) return;
     setEditingId(null);
     setEditTitle("");
-  }, [sessionActionsLocked]);
+  }, [sessionMutationLocked]);
 
   const handleCreate = async () => {
-    if (sessionActionsLocked) return;
+    if (sessionMutationLocked) return;
     setWorkspaceMode("sessions");
     setEditingId(null);
     await createSession();
   };
 
   const handleSelect = async (id: string) => {
-    if (sessionActionsLocked) return;
+    if (sessionSelectionLocked) return;
     setWorkspaceMode("sessions");
     await selectSession(id);
     setEditingId(null);
   };
 
   const startEdit = (id: string, title: string, e: MouseEvent<HTMLButtonElement>) => {
-    if (sessionActionsLocked) return;
+    if (sessionMutationLocked) return;
     e.stopPropagation();
     setEditingId(id);
     setEditTitle(title);
   };
 
   const confirmEdit = async (id: string) => {
-    if (sessionActionsLocked) return;
+    if (sessionMutationLocked) return;
     if (editTitle.trim()) {
       await renameSession(id, editTitle.trim());
     }
@@ -206,7 +220,7 @@ export default function Sidebar() {
   };
 
   const handleDelete = async (id: string, e: MouseEvent<HTMLButtonElement>) => {
-    if (sessionActionsLocked) return;
+    if (sessionMutationLocked) return;
     e.stopPropagation();
     if (confirm("Delete this session?")) {
       await deleteSession(id);
@@ -219,7 +233,7 @@ export default function Sidebar() {
       : !selectedWorkflow && draftMessage === item.draftMessage;
 
   const handleQuickStart = (item: QuickStartItem) => {
-    if (sessionActionsLocked) return;
+    if (sessionMutationLocked) return;
 
     if (isQuickStartActive(item)) {
       selectWorkflow(null);
@@ -260,7 +274,12 @@ export default function Sidebar() {
       <div className="border-b border-[var(--shell-border)] px-2.5 py-3">
         <button
           onClick={handleCreate}
-          disabled={sessionActionsLocked}
+          disabled={sessionMutationLocked}
+          title={
+            !hasExecutionAccess
+              ? accessByScope.execution.detail
+              : undefined
+          }
           className="flex w-full items-center justify-center gap-2 rounded-[12px] bg-[var(--apex-accent)] px-3 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[var(--apex-accent-strong)] disabled:cursor-not-allowed disabled:opacity-60"
         >
           <Plus size={15} />
@@ -332,7 +351,7 @@ export default function Sidebar() {
                 key={item.id}
                 type="button"
                 onClick={() => handleQuickStart(item)}
-                disabled={sessionActionsLocked}
+                disabled={sessionMutationLocked}
                 className={cn(
                   "flex w-full items-center gap-2 border-b border-[rgba(211,219,210,0.8)] border-l-2 px-1 py-1.5 text-left transition-colors last:border-b-0 disabled:cursor-not-allowed disabled:opacity-60",
                   active
@@ -418,9 +437,13 @@ export default function Sidebar() {
             </span>
           </div>
 
-          {sessionActionsLocked ? (
+          {sessionMutationLocked || sessionSelectionLocked ? (
             <div className="mt-2 rounded-[12px] border border-[rgba(226,232,240,0.95)] bg-white/70 px-3 py-2 text-[11px] leading-5 text-slate-500">
-              Session switching is locked while the current response or reference upload is in progress.
+              {!hasInspectionAccess
+                ? accessByScope.inspection.detail
+                : !hasExecutionAccess
+                  ? accessByScope.execution.detail
+                  : "Session switching is locked while the current response or reference upload is in progress."}
             </div>
           ) : null}
 
@@ -456,7 +479,7 @@ export default function Sidebar() {
                       <button
                         type="button"
                         onClick={() => confirmEdit(session.id)}
-                        disabled={sessionActionsLocked}
+                        disabled={sessionMutationLocked}
                         className="rounded-full p-1.5 text-[var(--apex-accent)] hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <Check size={12} />
@@ -464,7 +487,7 @@ export default function Sidebar() {
                       <button
                         type="button"
                         onClick={() => setEditingId(null)}
-                        disabled={sessionActionsLocked}
+                        disabled={sessionMutationLocked}
                         className="rounded-full p-1.5 text-slate-400 hover:text-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <X size={12} />
@@ -475,8 +498,13 @@ export default function Sidebar() {
                       <button
                         type="button"
                         onClick={() => handleSelect(session.id)}
-                        disabled={sessionActionsLocked}
+                        disabled={sessionSelectionLocked}
                         className="min-w-0 flex flex-1 items-start gap-2.5 text-left disabled:cursor-not-allowed disabled:opacity-60"
+                        title={
+                          sessionSelectionLocked
+                            ? sessionSelectionLockTitle
+                            : undefined
+                        }
                       >
                         <div
                           className={cn(
@@ -503,11 +531,11 @@ export default function Sidebar() {
                         <button
                           type="button"
                           onClick={(e) => startEdit(session.id, session.title, e)}
-                          disabled={sessionActionsLocked}
+                          disabled={sessionMutationLocked}
                           className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
                           title={
-                            sessionActionsLocked
-                              ? sessionActionLockTitle
+                            sessionMutationLocked
+                              ? sessionMutationLockTitle
                               : "Rename session"
                           }
                         >
@@ -516,11 +544,11 @@ export default function Sidebar() {
                         <button
                           type="button"
                           onClick={(e) => handleDelete(session.id, e)}
-                          disabled={sessionActionsLocked}
+                          disabled={sessionMutationLocked}
                           className="rounded-full p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-50"
                           title={
-                            sessionActionsLocked
-                              ? sessionActionLockTitle
+                            sessionMutationLocked
+                              ? sessionMutationLockTitle
                               : "Delete session"
                           }
                         >
@@ -539,24 +567,39 @@ export default function Sidebar() {
       <div className="border-t border-[var(--shell-border)] px-2.5 py-3">
         <div
           className="flex items-center justify-between text-[10px] font-medium text-slate-400"
-          title={
-            canManageRagMode
-              ? "Use the top bar RAG control to change retrieval mode."
-              : "RAG mode is not available for this client."
-          }
+          title={accessSummary.detail}
         >
           <span>
-            {canManageRagMode ? (ragMode ? "RAG: On" : "RAG: Off") : "RAG: Restricted"}
+            {accessSummary.label}
           </span>
           <span>
-            {isStreaming
-              ? "Streaming"
-              : isReferenceUploading
-                ? "Uploading ref"
-                : "Ready"}
+            {canManageRagMode
+              ? ragMode
+                ? "RAG On"
+                : "RAG Off"
+              : accessStatusLabel(accessByScope.admin.status)}
           </span>
         </div>
       </div>
     </aside>
   );
+}
+
+function accessStatusLabel(status: "checking" | "granted" | "token_required" | "server_misconfigured" | "forbidden" | "unavailable"): string {
+  if (status === "granted") {
+    return "Admin Ready";
+  }
+  if (status === "checking") {
+    return "Checking";
+  }
+  if (status === "token_required") {
+    return "Token needed";
+  }
+  if (status === "server_misconfigured") {
+    return "Token empty";
+  }
+  if (status === "forbidden") {
+    return "Remote blocked";
+  }
+  return "Unavailable";
 }

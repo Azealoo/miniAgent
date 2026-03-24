@@ -8,6 +8,8 @@ import ChatMessage from "./ChatMessage";
 
 export default function ChatPanel() {
   const {
+    accessByScope,
+    hasExecutionAccess,
     messages,
     isStreaming,
     isReferenceUploading,
@@ -47,6 +49,11 @@ export default function ChatPanel() {
     await sendMessage(text);
   };
 
+  const chatDisabled = isSessionLoading || !hasExecutionAccess;
+  const chatDisabledReason = !hasExecutionAccess
+    ? accessByScope.execution.detail
+    : "Loading workspace";
+
   return (
     <section className="apex-panel flex h-full min-h-0 flex-col overflow-hidden rounded-[18px] shadow-[var(--panel-shadow-soft)]">
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[linear-gradient(180deg,rgba(248,250,246,0.92)_0%,rgba(244,246,242,0.82)_100%)]">
@@ -77,7 +84,8 @@ export default function ChatPanel() {
               onSend={handleSend}
               isStreaming={isStreaming}
               isReferenceUploading={isReferenceUploading}
-              disabled={isSessionLoading}
+              disabled={chatDisabled}
+              disabledReason={chatDisabledReason}
               selectedWorkflow={selectedWorkflow}
               onSelectWorkflow={selectWorkflow}
               attachedIdentifiers={attachedIdentifiers}

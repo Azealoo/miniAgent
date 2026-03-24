@@ -1,4 +1,5 @@
 import type {
+  AccessProbeResponse,
   ArtifactRegistryLookupResult,
   ArtifactRegistryQuery,
   ArtifactRegistrySnapshot,
@@ -46,6 +47,7 @@ function getBase(): string {
 }
 
 export type ApiAccessScope = "public" | "inspection" | "execution" | "admin";
+export type ProtectedApiAccessScope = Exclude<ApiAccessScope, "public">;
 
 export interface ApiAuthState {
   inspectionBearerToken?: string | null;
@@ -63,6 +65,29 @@ interface ApiRequestOptions extends Omit<RequestInit, "body"> {
   jsonBody?: unknown;
   query?: QueryParams;
   scope?: ApiAccessScope;
+}
+
+interface ApiErrorOptions {
+  bodyText: string;
+  path: string;
+  scope: ApiAccessScope;
+  status: number;
+}
+
+export class ApiError extends Error {
+  readonly bodyText: string;
+  readonly path: string;
+  readonly scope: ApiAccessScope;
+  readonly status: number;
+
+  constructor(message: string, options: ApiErrorOptions) {
+    super(message);
+    this.name = "ApiError";
+    this.bodyText = options.bodyText;
+    this.path = options.path;
+    this.scope = options.scope;
+    this.status = options.status;
+  }
 }
 
 let apiAuthProvider: ApiAuthProvider | null = null;
@@ -146,21 +171,84 @@ async function apiFetch(
   });
 }
 
-async function throwForFailedResponse(response: Response): Promise<void> {
+function extractApiErrorMessage(
+  bodyText: string,
+  status: number,
+  statusText: string
+): string {
+  const trimmed = bodyText.trim();
+  if (trimmed) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (typeof parsed === "string" && parsed.trim()) {
+        return parsed.trim();
+      }
+      if (parsed && typeof parsed === "object" && "detail" in parsed) {
+        const detail = (parsed as { detail?: unknown }).detail;
+        if (typeof detail === "string" && detail.trim()) {
+          return detail.trim();
+        }
+        if (detail !== undefined) {
+          return JSON.stringify(detail);
+        }
+      }
+    } catch {
+      return trimmed;
+    }
+
+    return trimmed;
+  }
+
+  const fallbackStatusText = statusText.trim();
+  return fallbackStatusText ? `HTTP ${status}: ${fallbackStatusText}` : `HTTP ${status}`;
+}
+
+export function isApiError(error: unknown): error is ApiError {
+  return error instanceof ApiError;
+}
+
+export function getApiErrorBodyText(error: unknown): string {
+  if (error instanceof ApiError) {
+    return error.bodyText.trim();
+  }
+  if (error instanceof Error) {
+    return error.message.trim();
+  }
+  return "";
+}
+
+export function getApiErrorStatus(error: unknown): number | null {
+  return error instanceof ApiError ? error.status : null;
+}
+
+async function throwForFailedResponse(
+  response: Response,
+  path: string,
+  scope: ApiAccessScope
+): Promise<void> {
   if (response.ok) {
     return;
   }
 
   const text = await response.text().catch(() => response.statusText);
-  throw new Error(text || `HTTP ${response.status}`);
+  throw new ApiError(
+    extractApiErrorMessage(text, response.status, response.statusText),
+    {
+      bodyText: text,
+      path,
+      scope,
+      status: response.status,
+    }
+  );
 }
 
 async function req<T>(
   path: string,
   options: ApiRequestOptions = {}
 ): Promise<T> {
+  const scope = options.scope ?? "inspection";
   const response = await apiFetch(path, options);
-  await throwForFailedResponse(response);
+  await throwForFailedResponse(response, path, scope);
 
   if (response.status === 204) {
     return undefined as T;
@@ -195,6 +283,13 @@ export const getHealth = (signal?: AbortSignal) =>
     signal,
   });
 
+export const probeAccess = (scope: ProtectedApiAccessScope) =>
+  req<AccessProbeResponse>("/api/access/probe", {
+    cache: "no-store",
+    query: { scope },
+    scope,
+  });
+
 // Inspection routes
 
 export const listSessions = () => inspectReq<Session[]>("/api/sessions");
@@ -227,7 +322,7 @@ export const readRawFileText = async (
   signal?: AbortSignal
 ): Promise<RawFileTextResponse> => {
   const response = await fetchRawFile(path, signal);
-  await throwForFailedResponse(response);
+  await throwForFailedResponse(response, "/api/files/raw", "inspection");
   return {
     path,
     content: await response.text(),
@@ -253,7 +348,7 @@ export const readRawFileBlob = async (
   signal?: AbortSignal
 ): Promise<RawFileBlobResponse> => {
   const response = await fetchRawFile(path, signal);
-  await throwForFailedResponse(response);
+  await throwForFailedResponse(response, "/api/files/raw", "inspection");
   return {
     path,
     blob: await response.blob(),
@@ -692,7 +787,10 @@ export async function streamChat(
   });
 
   if (!response.ok || !response.body) {
-    callbacks.onError(`HTTP ${response.status}: ${response.statusText}`);
+    const text = await response.text().catch(() => response.statusText);
+    callbacks.onError(
+      extractApiErrorMessage(text, response.status, response.statusText)
+    );
     return;
   }
 

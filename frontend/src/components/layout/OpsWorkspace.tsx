@@ -23,6 +23,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import {
+  getApiErrorBodyText,
   getConnectorRegistryAdminDetail,
   getConnectorRegistryDetail,
   getObservabilityDashboardDefinitions,
@@ -35,8 +36,11 @@ import {
   updateConnectorRegistryEntry,
   validateConnectorRegistryEntry,
 } from "@/lib/api";
+import { classifyAccessError } from "@/lib/access-control";
 import { useApp } from "@/lib/store";
 import type {
+  AccessScope,
+  AccessScopeState,
   AuditEventRecord,
   AuditEventsQuery,
   AuditEventType,
@@ -424,11 +428,7 @@ function isConnectorActionResult(value: unknown): value is ConnectorActionResult
 function parseConnectorActionResultFromError(
   error: unknown
 ): ConnectorActionResult | null {
-  if (!(error instanceof Error)) {
-    return null;
-  }
-
-  const rawMessage = error.message.trim();
+  const rawMessage = getApiErrorBodyText(error);
   if (!rawMessage) {
     return null;
   }
@@ -448,11 +448,28 @@ function parseConnectorActionResultFromError(
   return null;
 }
 
-function getConnectorMutationErrorMessage(error: unknown): string {
+function getScopedAccessErrorMessage(
+  scope: AccessScope,
+  accessState: AccessScopeState,
+  error: unknown,
+  fallbackMessage: string
+): string {
+  const scopedState = classifyAccessError(scope, error, accessState.hasToken);
+  if (scopedState.status !== "unavailable") {
+    return scopedState.detail;
+  }
+
   const rawMessage =
-    error instanceof Error
-      ? error.message.trim()
-      : "Could not complete the connector action.";
+    error instanceof Error ? error.message.trim() : fallbackMessage;
+  const compactMessage = compactText(rawMessage, 160);
+  return compactMessage || fallbackMessage;
+}
+
+function getConnectorMutationErrorMessage(
+  error: unknown,
+  adminAccessState: AccessScopeState
+): string {
+  const rawMessage = getApiErrorBodyText(error) || "Could not complete the connector action.";
   const message = rawMessage.toLowerCase();
 
   if (
@@ -462,27 +479,12 @@ function getConnectorMutationErrorMessage(error: unknown): string {
     return "This connector action is blocked by the current production hardening policy.";
   }
 
-  if (
-    message.includes("environment variable") ||
-    message.includes("http 503")
-  ) {
-    return "The admin connector route is configured, but the server token is unavailable.";
-  }
-
-  if (
-    message.includes("bearer token required") ||
-    message.includes("configured bearer token") ||
-    message.includes("local access or a configured bearer token") ||
-    message.includes("http 401") ||
-    message.includes("http 403")
-  ) {
-    return "Admin access is required to mutate connector state or invoke runtime actions.";
-  }
-
-  const compactMessage = compactText(rawMessage, 160);
-  return compactMessage
-    ? `Could not complete the connector action. ${compactMessage}`
-    : "Could not complete the connector action.";
+  return getScopedAccessErrorMessage(
+    "admin",
+    adminAccessState,
+    error,
+    "Could not complete the connector action."
+  );
 }
 
 function isFilterActive(
@@ -573,29 +575,17 @@ function buildAuditQuery(filters: OpsWorkspaceFilters): AuditEventsQuery {
   };
 }
 
-function getObservabilityErrorMessage(error: unknown, target: string): string {
-  const rawMessage =
-    error instanceof Error
-      ? error.message.trim()
-      : `Could not load ${target} right now.`;
-  const message = rawMessage.toLowerCase();
-
-  if (message.includes("environment variable") || message.includes("http 503")) {
-    return "Inspection routes are configured, but the inspection bearer token is unavailable on the server.";
-  }
-
-  if (
-    message.includes("bearer token required") ||
-    message.includes("configured bearer token") ||
-    message.includes("local access or a configured bearer token") ||
-    message.includes("http 401") ||
-    message.includes("http 403")
-  ) {
-    return "Inspection access is required to view Ops data. Use a loopback client or configure an inspection bearer token.";
-  }
-
-  const compactMessage = compactText(rawMessage, 160);
-  return compactMessage || `Could not load ${target} right now.`;
+function getObservabilityErrorMessage(
+  error: unknown,
+  target: string,
+  inspectionAccessState: AccessScopeState
+): string {
+  return getScopedAccessErrorMessage(
+    "inspection",
+    inspectionAccessState,
+    error,
+    `Could not load ${target} right now.`
+  );
 }
 
 function summarizeMetricScope(record: ObservabilityMetricRecord): string[] {
@@ -2189,6 +2179,8 @@ function ConnectorDetailPane({
   error,
   adminConfigStatus,
   adminConfigError,
+  adminAccessAllowed,
+  adminAccessMessage,
   configLoaded,
   configDraft,
   requestDraft,
@@ -2210,6 +2202,8 @@ function ConnectorDetailPane({
   error: string | null;
   adminConfigStatus: OpsWorkspaceStatus;
   adminConfigError: string | null;
+  adminAccessAllowed: boolean;
+  adminAccessMessage: string;
   configLoaded: boolean;
   configDraft: string;
   requestDraft: string;
@@ -2319,7 +2313,7 @@ function ConnectorDetailPane({
             <OpsAction
               onClick={onToggleEnabled}
               tone="accent"
-              disabled={pendingActionKey !== null}
+              disabled={pendingActionKey !== null || !adminAccessAllowed}
             >
               {pendingActionKey === `${connector.name}:toggle` ? (
                 <Clock3 size={12} />
@@ -2336,6 +2330,10 @@ function ConnectorDetailPane({
             </OpsAction>
           </div>
         </div>
+
+        {!adminAccessAllowed ? (
+          <OpsStateCard tone="warning">{adminAccessMessage}</OpsStateCard>
+        ) : null}
 
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <OpsSummaryCard
@@ -2455,7 +2453,7 @@ function ConnectorDetailPane({
                 <textarea
                   value={configDraft}
                   onChange={(event) => onConfigDraftChange(event.target.value)}
-                  disabled={!configLoaded}
+                  disabled={!configLoaded || !adminAccessAllowed}
                   spellCheck={false}
                   className="min-h-[15rem] w-full rounded-[16px] border border-[rgba(203,213,225,0.95)] bg-[rgba(248,250,252,0.96)] px-4 py-3 font-mono text-[12px] leading-6 text-slate-700 outline-none focus:border-blue-400 disabled:cursor-not-allowed disabled:opacity-60"
                 />
@@ -2478,7 +2476,9 @@ function ConnectorDetailPane({
                 <OpsAction
                   onClick={onSaveConfig}
                   tone="accent"
-                  disabled={pendingActionKey !== null || !configLoaded}
+                  disabled={
+                    pendingActionKey !== null || !configLoaded || !adminAccessAllowed
+                  }
                 >
                   {pendingActionKey === `${connector.name}:configure` ? (
                     <Clock3 size={12} />
@@ -2491,7 +2491,9 @@ function ConnectorDetailPane({
                 </OpsAction>
                 <OpsAction
                   onClick={onValidateDraft}
-                  disabled={pendingActionKey !== null || !configLoaded}
+                  disabled={
+                    pendingActionKey !== null || !configLoaded || !adminAccessAllowed
+                  }
                 >
                   {pendingActionKey === `${connector.name}:validate` ? (
                     <Clock3 size={12} />
@@ -2504,7 +2506,9 @@ function ConnectorDetailPane({
                 </OpsAction>
                 <OpsAction
                   onClick={onResetConfigDraft}
-                  disabled={pendingActionKey !== null || !configLoaded}
+                  disabled={
+                    pendingActionKey !== null || !configLoaded || !adminAccessAllowed
+                  }
                 >
                   <RefreshCw size={12} />
                   Reset Draft
@@ -2669,8 +2673,9 @@ function ConnectorDetailPane({
                 <textarea
                   value={requestDraft}
                   onChange={(event) => onRequestDraftChange(event.target.value)}
+                  disabled={!adminAccessAllowed}
                   spellCheck={false}
-                  className="min-h-[12rem] w-full rounded-[16px] border border-[rgba(251,191,36,0.32)] bg-white/92 px-4 py-3 font-mono text-[12px] leading-6 text-slate-700 outline-none focus:border-amber-400"
+                  className="min-h-[12rem] w-full rounded-[16px] border border-[rgba(251,191,36,0.32)] bg-white/92 px-4 py-3 font-mono text-[12px] leading-6 text-slate-700 outline-none focus:border-amber-400 disabled:cursor-not-allowed disabled:opacity-60"
                 />
               </div>
 
@@ -2683,7 +2688,7 @@ function ConnectorDetailPane({
                       key={`${connector.name}:run:${action}`}
                       onClick={() => onRunAction(action)}
                       tone={action === "sync_status" ? "default" : "accent"}
-                      disabled={pendingActionKey !== null}
+                      disabled={pendingActionKey !== null || !adminAccessAllowed}
                     >
                       {pendingActionKey === `${connector.name}:${action}` ? (
                         <Clock3 size={12} />
@@ -2698,7 +2703,7 @@ function ConnectorDetailPane({
                 )}
                 <OpsAction
                   onClick={onResetRequestDraft}
-                  disabled={pendingActionKey !== null}
+                  disabled={pendingActionKey !== null || !adminAccessAllowed}
                 >
                   <RefreshCw size={12} />
                   Reset Request
@@ -2840,6 +2845,8 @@ function ConnectorsView({
   detailError,
   adminConfigStatus,
   adminConfigError,
+  adminAccessAllowed,
+  adminAccessMessage,
   configLoaded,
   ignoredFilters,
   selectedConnectorName,
@@ -2867,6 +2874,8 @@ function ConnectorsView({
   detailError: string | null;
   adminConfigStatus: OpsWorkspaceStatus;
   adminConfigError: string | null;
+  adminAccessAllowed: boolean;
+  adminAccessMessage: string;
   configLoaded: boolean;
   ignoredFilters: FilterChip[];
   selectedConnectorName: string | null;
@@ -2953,6 +2962,8 @@ function ConnectorsView({
           error={detailError}
           adminConfigStatus={adminConfigStatus}
           adminConfigError={adminConfigError}
+          adminAccessAllowed={adminAccessAllowed}
+          adminAccessMessage={adminAccessMessage}
           configLoaded={configLoaded}
           configDraft={configDraft}
           requestDraft={requestDraft}
@@ -3054,7 +3065,12 @@ function DashboardDefinitionsView({
 }
 
 export default function OpsWorkspace() {
-  const { setWorkspaceMode } = useApp();
+  const {
+    accessByScope,
+    hasAdminAccess,
+    hasInspectionAccess,
+    setWorkspaceMode,
+  } = useApp();
   const [activeView, setActiveView] = useState<OpsView>("overview");
   const [draftFilters, setDraftFilters] = useState<OpsWorkspaceFilters>({
     ...DEFAULT_OPS_FILTERS,
@@ -3162,6 +3178,13 @@ export default function OpsWorkspace() {
   );
 
   useEffect(() => {
+    if (!hasInspectionAccess) {
+      setOverview(null);
+      setOverviewStatus("error");
+      setOverviewError(accessByScope.inspection.detail);
+      return;
+    }
+
     let active = true;
     setOverviewStatus("loading");
     setOverviewError(null);
@@ -3181,16 +3204,29 @@ export default function OpsWorkspace() {
         }
         setOverview(null);
         setOverviewStatus("error");
-        setOverviewError(getObservabilityErrorMessage(error, "the ops overview"));
+        setOverviewError(
+          getObservabilityErrorMessage(
+            error,
+            "the ops overview",
+            accessByScope.inspection
+          )
+        );
       });
 
     return () => {
       active = false;
     };
-  }, [overviewQuery, refreshToken]);
+  }, [accessByScope.inspection, hasInspectionAccess, overviewQuery, refreshToken]);
 
   useEffect(() => {
     if (activeView !== "metrics") {
+      return;
+    }
+
+    if (!hasInspectionAccess) {
+      setMetrics([]);
+      setMetricsStatus("error");
+      setMetricsError(accessByScope.inspection.detail);
       return;
     }
 
@@ -3213,13 +3249,19 @@ export default function OpsWorkspace() {
         }
         setMetrics([]);
         setMetricsStatus("error");
-        setMetricsError(getObservabilityErrorMessage(error, "metric records"));
+        setMetricsError(
+          getObservabilityErrorMessage(
+            error,
+            "metric records",
+            accessByScope.inspection
+          )
+        );
       });
 
     return () => {
       active = false;
     };
-  }, [activeView, metricsQuery, refreshToken]);
+  }, [accessByScope.inspection, activeView, hasInspectionAccess, metricsQuery, refreshToken]);
 
   useEffect(() => {
     if (metrics.length === 0) {
@@ -3238,6 +3280,13 @@ export default function OpsWorkspace() {
 
   useEffect(() => {
     if (activeView !== "traces") {
+      return;
+    }
+
+    if (!hasInspectionAccess) {
+      setTraces([]);
+      setTracesStatus("error");
+      setTracesError(accessByScope.inspection.detail);
       return;
     }
 
@@ -3260,13 +3309,19 @@ export default function OpsWorkspace() {
         }
         setTraces([]);
         setTracesStatus("error");
-        setTracesError(getObservabilityErrorMessage(error, "trace records"));
+        setTracesError(
+          getObservabilityErrorMessage(
+            error,
+            "trace records",
+            accessByScope.inspection
+          )
+        );
       });
 
     return () => {
       active = false;
     };
-  }, [activeView, refreshToken, tracesQuery]);
+  }, [accessByScope.inspection, activeView, hasInspectionAccess, refreshToken, tracesQuery]);
 
   useEffect(() => {
     if (traces.length === 0) {
@@ -3285,6 +3340,13 @@ export default function OpsWorkspace() {
 
   useEffect(() => {
     if (activeView !== "dashboards") {
+      return;
+    }
+
+    if (!hasInspectionAccess) {
+      setDashboards([]);
+      setDashboardsStatus("error");
+      setDashboardsError(accessByScope.inspection.detail);
       return;
     }
 
@@ -3308,17 +3370,29 @@ export default function OpsWorkspace() {
         setDashboards([]);
         setDashboardsStatus("error");
         setDashboardsError(
-          getObservabilityErrorMessage(error, "dashboard definitions")
+          getObservabilityErrorMessage(
+            error,
+            "dashboard definitions",
+            accessByScope.inspection
+          )
         );
       });
 
     return () => {
       active = false;
     };
-  }, [activeView, refreshToken]);
+  }, [accessByScope.inspection, activeView, hasInspectionAccess, refreshToken]);
 
   useEffect(() => {
     if (activeView !== "audit") {
+      return;
+    }
+
+    if (!hasInspectionAccess) {
+      setAuditEvents([]);
+      setAuditRetentionPolicy(null);
+      setAuditStatus("error");
+      setAuditError(accessByScope.inspection.detail);
       return;
     }
 
@@ -3344,13 +3418,19 @@ export default function OpsWorkspace() {
         setAuditEvents([]);
         setAuditRetentionPolicy(null);
         setAuditStatus("error");
-        setAuditError(getObservabilityErrorMessage(error, "audit events"));
+        setAuditError(
+          getObservabilityErrorMessage(
+            error,
+            "audit events",
+            accessByScope.inspection
+          )
+        );
       });
 
     return () => {
       active = false;
     };
-  }, [activeView, auditQuery, refreshToken]);
+  }, [accessByScope.inspection, activeView, auditQuery, hasInspectionAccess, refreshToken]);
 
   useEffect(() => {
     if (auditEvents.length === 0) {
@@ -3369,6 +3449,13 @@ export default function OpsWorkspace() {
 
   useEffect(() => {
     if (activeView !== "connectors") {
+      return;
+    }
+
+    if (!hasInspectionAccess) {
+      setConnectors([]);
+      setConnectorsStatus("error");
+      setConnectorsError(accessByScope.inspection.detail);
       return;
     }
 
@@ -3391,13 +3478,19 @@ export default function OpsWorkspace() {
         }
         setConnectors([]);
         setConnectorsStatus("error");
-        setConnectorsError(getObservabilityErrorMessage(error, "the connector registry"));
+        setConnectorsError(
+          getObservabilityErrorMessage(
+            error,
+            "the connector registry",
+            accessByScope.inspection
+          )
+        );
       });
 
     return () => {
       active = false;
     };
-  }, [activeView, refreshToken]);
+  }, [accessByScope.inspection, activeView, hasInspectionAccess, refreshToken]);
 
   useEffect(() => {
     if (activeView !== "connectors") {
@@ -3433,6 +3526,13 @@ export default function OpsWorkspace() {
       return;
     }
 
+    if (!hasInspectionAccess) {
+      setConnectorDetail(null);
+      setConnectorDetailStatus("error");
+      setConnectorDetailError(accessByScope.inspection.detail);
+      return;
+    }
+
     let active = true;
     setConnectorDetailStatus("loading");
     setConnectorDetailError(null);
@@ -3455,14 +3555,18 @@ export default function OpsWorkspace() {
         setConnectorDetail(null);
         setConnectorDetailStatus("error");
         setConnectorDetailError(
-          getObservabilityErrorMessage(error, "the selected connector detail")
+          getObservabilityErrorMessage(
+            error,
+            "the selected connector detail",
+            accessByScope.inspection
+          )
         );
       });
 
     return () => {
       active = false;
     };
-  }, [activeView, refreshToken, selectedConnectorName]);
+  }, [accessByScope.inspection, activeView, hasInspectionAccess, refreshToken, selectedConnectorName]);
 
   useEffect(() => {
     if (activeView !== "connectors") {
@@ -3472,6 +3576,12 @@ export default function OpsWorkspace() {
     if (!selectedConnectorName) {
       setConnectorAdminDetailStatus("idle");
       setConnectorAdminDetailError(null);
+      return;
+    }
+
+    if (!hasAdminAccess) {
+      setConnectorAdminDetailStatus("error");
+      setConnectorAdminDetailError(accessByScope.admin.detail);
       return;
     }
 
@@ -3507,13 +3617,15 @@ export default function OpsWorkspace() {
           return;
         }
         setConnectorAdminDetailStatus("error");
-        setConnectorAdminDetailError(getConnectorMutationErrorMessage(error));
+        setConnectorAdminDetailError(
+          getConnectorMutationErrorMessage(error, accessByScope.admin)
+        );
       });
 
     return () => {
       active = false;
     };
-  }, [activeView, selectedConnectorName]);
+  }, [accessByScope.admin, activeView, hasAdminAccess, selectedConnectorName]);
 
   const appliedFilterChips = useMemo(
     () => getAppliedFilterChips(appliedFilters),
@@ -3640,12 +3752,20 @@ export default function OpsWorkspace() {
       connectorName,
       action,
       "error",
-      getConnectorMutationErrorMessage(error)
+      getConnectorMutationErrorMessage(error, accessByScope.admin)
     );
   };
 
   const handleToggleConnector = () => {
-    if (!selectedConnector) {
+    if (!selectedConnector || !hasAdminAccess) {
+      if (selectedConnector) {
+        recordConnectorReceipt(
+          selectedConnector.name,
+          "configure",
+          "error",
+          accessByScope.admin.detail
+        );
+      }
       return;
     }
 
@@ -3682,7 +3802,15 @@ export default function OpsWorkspace() {
   };
 
   const handleSaveConnectorConfig = () => {
-    if (!selectedConnector) {
+    if (!selectedConnector || !hasAdminAccess) {
+      if (selectedConnector) {
+        recordConnectorReceipt(
+          selectedConnector.name,
+          "configure",
+          "error",
+          accessByScope.admin.detail
+        );
+      }
       return;
     }
 
@@ -3744,7 +3872,15 @@ export default function OpsWorkspace() {
   };
 
   const handleValidateConnectorDraft = () => {
-    if (!selectedConnector) {
+    if (!selectedConnector || !hasAdminAccess) {
+      if (selectedConnector) {
+        recordConnectorReceipt(
+          selectedConnector.name,
+          "validate",
+          "error",
+          accessByScope.admin.detail
+        );
+      }
       return;
     }
 
@@ -3793,7 +3929,15 @@ export default function OpsWorkspace() {
   };
 
   const handleRunConnectorAction = (action: ConnectorExecutionAction) => {
-    if (!selectedConnector) {
+    if (!selectedConnector || !hasAdminAccess) {
+      if (selectedConnector) {
+        recordConnectorReceipt(
+          selectedConnector.name,
+          action,
+          "error",
+          accessByScope.admin.detail
+        );
+      }
       return;
     }
 
@@ -4210,6 +4354,8 @@ export default function OpsWorkspace() {
           detailError={connectorDetailError}
           adminConfigStatus={connectorAdminDetailStatus}
           adminConfigError={connectorAdminDetailError}
+          adminAccessAllowed={hasAdminAccess}
+          adminAccessMessage={accessByScope.admin.detail}
           configLoaded={selectedConnectorConfigLoaded}
           ignoredFilters={ignoredFilterChips}
           selectedConnectorName={selectedConnectorName}

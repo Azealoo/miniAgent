@@ -11,6 +11,8 @@ from fastapi import HTTPException, Request
 import config as cfg
 
 _LOCALHOST_CLIENTS = {"127.0.0.1", "::1", "localhost"}
+AccessScope = Literal["inspection", "execution", "admin"]
+AccessGrantMode = Literal["loopback", "bearer"]
 
 
 def is_loopback_client(request: Request | None) -> bool:
@@ -19,7 +21,7 @@ def is_loopback_client(request: Request | None) -> bool:
     return host in _LOCALHOST_CLIENTS
 
 
-def _configured_token(scope: Literal["inspection", "execution", "admin"]) -> tuple[str | None, str | None]:
+def _configured_token(scope: AccessScope) -> tuple[str | None, str | None]:
     policy = cfg.get_production_hardening_policy()
     env_var = policy.api.execution_bearer_token_env_var
     if scope == "inspection":
@@ -40,19 +42,19 @@ def _authorization_bearer_token(request: Request) -> str | None:
     return cleaned or None
 
 
-def require_route_access(
+def determine_route_access_mode(
     request: Request | None,
     *,
-    scope: Literal["inspection", "execution", "admin"],
-) -> None:
+    scope: AccessScope,
+) -> AccessGrantMode | None:
     # Route unit tests call handlers directly without an ASGI Request; only enforce
     # the network-layer access policy when an actual HTTP request is present.
     if request is None:
-        return
+        return None
 
     policy = cfg.get_production_hardening_policy()
     if policy.api.allow_loopback_without_auth and is_loopback_client(request):
-        return
+        return "loopback"
 
     env_var, expected_token = _configured_token(scope)
     if env_var is None:
@@ -63,6 +65,15 @@ def require_route_access(
     presented_token = _authorization_bearer_token(request)
     if presented_token is None or not secrets.compare_digest(presented_token, expected_token):
         raise HTTPException(401, "Bearer token required.")
+    return "bearer"
+
+
+def require_route_access(
+    request: Request | None,
+    *,
+    scope: AccessScope,
+) -> None:
+    determine_route_access_mode(request, scope=scope)
 
 
 def require_execution_access(request: Request | None) -> None:
@@ -78,6 +89,9 @@ def require_admin_access(request: Request | None) -> None:
 
 
 __all__ = [
+    "AccessGrantMode",
+    "AccessScope",
+    "determine_route_access_mode",
     "is_loopback_client",
     "require_admin_access",
     "require_execution_access",

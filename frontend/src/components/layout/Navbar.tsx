@@ -5,10 +5,18 @@ import {
   ChevronDown,
   Download,
   GitBranch,
+  KeyRound,
+  RefreshCw,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
+import {
+  ACCESS_SCOPES,
+  accessStatusBadgeLabel,
+  getOverallAccessSummary,
+  scopeRequirement,
+} from "@/lib/access-control";
 import { getHealth } from "@/lib/api";
 import {
   getReadinessSummary,
@@ -18,7 +26,7 @@ import {
   type WorkflowSummary,
 } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
-import type { Message, WorkflowStreamEvent } from "@/lib/types";
+import type { AccessScope, Message, WorkflowStreamEvent } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 function buildExportMarkdown(title: string, messages: Message[]) {
@@ -142,6 +150,18 @@ function ConnectionDot({ tone }: { tone: StatusTone }) {
   return <span className={cn("h-1.5 w-1.5 rounded-full", dotClass)} />;
 }
 
+function authDraftsFromState(state: {
+  inspectionBearerToken?: string | null;
+  executionBearerToken?: string | null;
+  adminBearerToken?: string | null;
+}): Record<AccessScope, string> {
+  return {
+    inspection: state.inspectionBearerToken ?? "",
+    execution: state.executionBearerToken ?? "",
+    admin: state.adminBearerToken ?? "",
+  };
+}
+
 function readinessTone(state: ReadinessState): StatusTone {
   if (state === "blocked") return "danger";
   if (state === "warning" || state === "approval_required") return "warning";
@@ -253,6 +273,11 @@ function exportFilename(title: string): string {
 
 export default function Navbar() {
   const {
+    apiAuthState,
+    accessByScope,
+    setAccessToken,
+    clearAccessTokens,
+    refreshAccessState,
     sessions,
     currentSessionId,
     messages,
@@ -264,7 +289,33 @@ export default function Navbar() {
   } = useApp();
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("checking");
+  const [accessPanelOpen, setAccessPanelOpen] = useState(false);
+  const [accessDrafts, setAccessDrafts] = useState<Record<AccessScope, string>>(
+    authDraftsFromState(apiAuthState)
+  );
   const hasResolvedConnection = useRef(false);
+  const accessPanelRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setAccessDrafts(authDraftsFromState(apiAuthState));
+  }, [apiAuthState]);
+
+  useEffect(() => {
+    if (!accessPanelOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!accessPanelRef.current?.contains(event.target as Node)) {
+        setAccessPanelOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+    };
+  }, [accessPanelOpen]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -374,6 +425,24 @@ export default function Navbar() {
         : connectionState === "offline" || connectionState === "unavailable"
           ? "danger"
           : "neutral";
+  const accessSummary = getOverallAccessSummary(accessByScope);
+
+  const handleAccessDraftChange = (scope: AccessScope, value: string) => {
+    setAccessDrafts((current) => ({
+      ...current,
+      [scope]: value,
+    }));
+  };
+
+  const handleApplyAccessTokens = () => {
+    ACCESS_SCOPES.forEach((scope) => {
+      setAccessToken(scope, accessDrafts[scope]);
+    });
+  };
+
+  const handleClearAccessTokens = () => {
+    clearAccessTokens();
+  };
 
   const handleExport = () => {
     const content = buildExportMarkdown(title, messages);
@@ -415,13 +484,137 @@ export default function Navbar() {
           </div>
         </div>
 
-        <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
+        <div className="relative ml-auto flex items-center gap-1.5 sm:gap-2">
           <StatusPill
             label={connectionLabel}
             tone={connectionTone}
             title="Backend connection status"
             leading={<ConnectionDot tone={connectionTone} />}
           />
+
+          <div ref={accessPanelRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setAccessPanelOpen((value) => !value)}
+              className={cn(
+                "inline-flex min-w-0 items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] font-medium transition-colors",
+                accessSummary.tone === "accent"
+                  ? "border-[rgba(35,130,83,0.18)] bg-[var(--apex-accent-soft)] text-[var(--apex-accent-strong)] hover:bg-[rgba(35,130,83,0.16)]"
+                  : accessSummary.tone === "warning"
+                    ? "border-[rgba(194,136,47,0.2)] bg-[rgba(194,136,47,0.1)] text-[rgb(142,98,29)] hover:bg-[rgba(194,136,47,0.16)]"
+                    : accessSummary.tone === "danger"
+                      ? "border-[rgba(189,72,72,0.18)] bg-[rgba(189,72,72,0.1)] text-[rgb(149,49,49)] hover:bg-[rgba(189,72,72,0.16)]"
+                      : "border-[var(--shell-border)] bg-[var(--panel-soft)] text-slate-500 hover:bg-white hover:text-slate-700"
+              )}
+              title={accessSummary.detail}
+            >
+              <KeyRound size={12} className="flex-shrink-0" />
+              <span className="hidden truncate sm:inline">{accessSummary.label}</span>
+            </button>
+
+            {accessPanelOpen ? (
+              <div className="absolute right-0 top-full z-50 mt-2 w-[min(26rem,calc(100vw-2rem))] rounded-[22px] border border-[var(--shell-border)] bg-[rgba(255,255,255,0.98)] p-4 shadow-[0_20px_48px_rgba(29,42,33,0.14)] backdrop-blur">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                      Access Control
+                    </p>
+                    <p className="mt-1 text-sm font-semibold text-slate-900">
+                      {accessSummary.label}
+                    </p>
+                    <p className="mt-1 text-[12px] leading-5 text-slate-500">
+                      {accessSummary.detail}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void refreshAccessState()}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--shell-border)] bg-white text-slate-500 transition-colors hover:bg-[var(--panel-soft)] hover:text-slate-700"
+                    title="Recheck access scopes"
+                  >
+                    <RefreshCw size={13} />
+                  </button>
+                </div>
+
+                <div className="mt-4 space-y-3">
+                  {ACCESS_SCOPES.map((scope) => {
+                    const state = accessByScope[scope];
+                    return (
+                      <div
+                        key={scope}
+                        className="rounded-[18px] border border-[rgba(226,232,240,0.95)] bg-[rgba(248,250,252,0.9)] px-3 py-3"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-700">
+                              {scope}
+                            </p>
+                            <p className="mt-1 text-[11px] leading-5 text-slate-500">
+                              {scopeRequirement(scope)}
+                            </p>
+                          </div>
+                          <span
+                            className={cn(
+                              "inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]",
+                              state.status === "granted"
+                                ? "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.08)] text-[var(--apex-accent-strong)]"
+                                : state.status === "checking"
+                                  ? "border-[rgba(148,163,184,0.24)] bg-[rgba(248,250,252,0.94)] text-slate-600"
+                                  : state.status === "server_misconfigured"
+                                    ? "border-[rgba(217,119,6,0.22)] bg-[rgba(255,247,237,0.95)] text-amber-700"
+                                    : "border-[rgba(220,38,38,0.18)] bg-[rgba(254,242,242,0.95)] text-rose-700"
+                            )}
+                          >
+                            {accessStatusBadgeLabel(state)}
+                          </span>
+                        </div>
+
+                        <p className="mt-2 text-[12px] leading-5 text-slate-600">
+                          {state.detail}
+                        </p>
+
+                        <label className="mt-3 block">
+                          <span className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                            Bearer token
+                          </span>
+                          <input
+                            type="password"
+                            value={accessDrafts[scope]}
+                            onChange={(event) =>
+                              handleAccessDraftChange(scope, event.target.value)
+                            }
+                            placeholder={`Optional ${scope} token`}
+                            className="w-full rounded-[12px] border border-[var(--shell-border)] bg-white px-3 py-2 text-[13px] text-slate-700 outline-none placeholder:text-slate-400 focus:border-[var(--apex-accent)]"
+                          />
+                        </label>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <p className="w-full text-[11px] leading-5 text-slate-500">
+                    Tokens stay in memory for this browser tab and clear on reload.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleApplyAccessTokens}
+                    className="inline-flex items-center gap-2 rounded-full border border-[rgba(35,130,83,0.18)] bg-[var(--apex-accent-soft)] px-3 py-1.5 text-[11px] font-semibold text-[var(--apex-accent-strong)] transition-colors hover:bg-[rgba(35,130,83,0.16)]"
+                  >
+                    <ShieldCheck size={12} />
+                    Apply Tokens
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleClearAccessTokens}
+                    className="inline-flex items-center gap-2 rounded-full border border-[var(--shell-border)] bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 transition-colors hover:bg-[var(--panel-soft)] hover:text-slate-800"
+                  >
+                    Clear Tokens
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
 
           <StatusPill
             label={activeWorkflowLabel ?? "No workflow"}

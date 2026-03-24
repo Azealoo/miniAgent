@@ -50,6 +50,7 @@ import {
   sortArtifactRegistryRecords,
 } from "@/lib/artifact-registry";
 import {
+  getApiErrorBodyText,
   getSessionTokens,
   listArtifactRegistry,
   listSkillsRegistry,
@@ -58,6 +59,7 @@ import {
   saveFile,
   updateSkillRegistryEntry,
 } from "@/lib/api";
+import { classifyAccessError } from "@/lib/access-control";
 import {
   getPreviewableFileLabel,
   inferPreviewableFileKind,
@@ -75,6 +77,7 @@ import {
 import { useApp } from "@/lib/store";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import type {
+  AccessScopeState,
   ArtifactRegistryRecord,
   ComplianceReportArtifact,
   ConfidenceLevel,
@@ -717,28 +720,22 @@ function getSkillRegistryBadges(skill: SkillRegistryEntry): string[] {
   ]);
 }
 
-function getSkillRegistryMutationErrorMessage(error: unknown): string {
+function getSkillRegistryMutationErrorMessage(
+  error: unknown,
+  adminAccessState: AccessScopeState
+): string {
+  const scopedState = classifyAccessError(
+    "admin",
+    error,
+    adminAccessState.hasToken
+  );
+  if (scopedState.status !== "unavailable") {
+    return scopedState.detail;
+  }
+
   const rawMessage =
-    error instanceof Error ? error.message.trim() : "Could not update this skill.";
-  const message = rawMessage.toLowerCase();
-
-  if (
-    message.includes("environment variable") ||
-    message.includes("http 503")
-  ) {
-    return "The admin update route is configured, but the server token is unavailable.";
-  }
-
-  if (
-    message.includes("bearer token required") ||
-    message.includes("configured bearer token") ||
-    message.includes("local access or a configured bearer token") ||
-    message.includes("http 401") ||
-    message.includes("http 403")
-  ) {
-    return "Admin access is required to change skill registry state.";
-  }
-
+    getApiErrorBodyText(error) ||
+    (error instanceof Error ? error.message.trim() : "Could not update this skill.");
   const compactMessage = compactText(rawMessage, 140);
   return compactMessage
     ? `Could not update the registry entry. ${compactMessage}`
@@ -2471,6 +2468,9 @@ function LoadingState({ label }: { label: string }) {
 
 export default function InspectorPanel() {
   const {
+    accessByScope,
+    hasAdminAccess,
+    hasInspectionAccess,
     currentSessionId,
     sessions,
     messages,
@@ -2530,6 +2530,7 @@ export default function InspectorPanel() {
   const sourceMetadataRequestIdRef = useRef(0);
   const hasLoadedMemoryRef = useRef(false);
   const hasLoadedSkillsRef = useRef(false);
+  const inspectionAccessStatus = accessByScope.inspection.status;
 
   const isMemoryDirty = memoryContent !== savedMemoryContent;
   const isSkillDirty = skillContent !== savedSkillContent;
@@ -2665,6 +2666,13 @@ export default function InspectorPanel() {
       return;
     }
 
+    if (!hasInspectionAccess) {
+      setTokens(null);
+      setUsageLoading(false);
+      setUsageLoadError(accessByScope.inspection.detail);
+      return;
+    }
+
     if (isStreaming) {
       setUsageLoading(false);
       setUsageLoadError("");
@@ -2697,7 +2705,20 @@ export default function InspectorPanel() {
     return () => {
       cancelled = true;
     };
-  }, [currentSessionId, isStreaming]);
+  }, [accessByScope.inspection.detail, currentSessionId, hasInspectionAccess, isStreaming]);
+
+  useEffect(() => {
+    if (
+      inspectionAccessStatus === "granted" ||
+      inspectionAccessStatus === "checking" ||
+      inspectionAccessStatus === "unavailable"
+    ) {
+      return;
+    }
+
+    hasLoadedMemoryRef.current = false;
+    hasLoadedSkillsRef.current = false;
+  }, [inspectionAccessStatus]);
 
   useEffect(() => {
     setMemoryFileOpen(false);
@@ -2707,7 +2728,12 @@ export default function InspectorPanel() {
     if (inspectorTab === "memory") {
       setMemorySaveMsg("");
       setMemoryActionMsg("");
-      if (!hasLoadedMemoryRef.current) {
+      if (
+        inspectionAccessStatus !== "granted" &&
+        inspectionAccessStatus !== "checking" &&
+        inspectionAccessStatus !== "unavailable" &&
+        !hasLoadedMemoryRef.current
+      ) {
         void loadMemory();
       }
     }
@@ -2715,14 +2741,84 @@ export default function InspectorPanel() {
     if (inspectorTab === "skills") {
       setSkillSaveMsg("");
       setSkillActionMsg("");
-      if (!hasLoadedSkillsRef.current) {
-        void refreshSkills();
+      if (
+        inspectionAccessStatus !== "granted" &&
+        inspectionAccessStatus !== "checking" &&
+        inspectionAccessStatus !== "unavailable" &&
+        !hasLoadedSkillsRef.current
+      ) {
+        const preferredPath = selectedSkillPath ?? undefined;
+        void refreshSkills(preferredPath).then((nextSkills) => {
+          if (
+            preferredPath &&
+            nextSkills?.some((skill) => skill.location === preferredPath)
+          ) {
+            void loadSkillFile(preferredPath);
+          }
+        });
       }
     }
   }, [inspectorTab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    if (!hasInspectionAccess) {
+      return;
+    }
+
+    if (inspectorTab === "memory" && !hasLoadedMemoryRef.current) {
+      void loadMemory();
+    }
+
+    if (inspectorTab === "skills" && !hasLoadedSkillsRef.current) {
+      const preferredPath = selectedSkillPath ?? undefined;
+      void refreshSkills(preferredPath).then((nextSkills) => {
+        if (
+          preferredPath &&
+          nextSkills?.some((skill) => skill.location === preferredPath)
+        ) {
+          void loadSkillFile(preferredPath);
+        }
+      });
+    }
+  }, [hasInspectionAccess, inspectorTab, selectedSkillPath]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (
+      inspectionAccessStatus === "granted" ||
+      inspectionAccessStatus === "checking" ||
+      inspectionAccessStatus === "unavailable"
+    ) {
+      return;
+    }
+
+    setMemoryContent("");
+    setSavedMemoryContent("");
+    setMemoryItemDraft(null);
+    setMemoryFileOpen(false);
+    setMemoryEditorOpen(false);
+    setMemorySaveMsg("");
+    setMemoryActionMsg("");
+    setMemoryLoadError(accessByScope.inspection.detail);
+    setSkills([]);
+    setSelectedSkillPath(null);
+    setSkillContent("");
+    setSavedSkillContent("");
+    setSkillsLoadError(accessByScope.inspection.detail);
+    setSkillFileLoadError("");
+    setSkillSaveMsg("");
+    setSkillActionMsg("");
+    setSkillEditorOpen(false);
+  }, [accessByScope.inspection.detail, inspectionAccessStatus]);
+
+  useEffect(() => {
     if (inspectorTab !== "files") {
+      return;
+    }
+
+    if (!hasInspectionAccess) {
+      setArtifactRegistryLoading(false);
+      setArtifactRegistryRecords([]);
+      setArtifactRegistryError(accessByScope.inspection.detail);
       return;
     }
 
@@ -2757,7 +2853,7 @@ export default function InspectorPanel() {
     return () => {
       cancelled = true;
     };
-  }, [artifactRegistryRefreshKey, inspectorTab]);
+  }, [accessByScope.inspection.detail, artifactRegistryRefreshKey, hasInspectionAccess, inspectorTab]);
 
   useEffect(() => {
     const pendingPaths = reviewedSourceItems
@@ -2833,6 +2929,20 @@ export default function InspectorPanel() {
     setMemoryLoading(true);
     setMemoryLoadError("");
 
+    if (!hasInspectionAccess) {
+      setMemoryContent("");
+      setSavedMemoryContent("");
+      setMemoryItemDraft(null);
+      setMemoryFileOpen(false);
+      setMemoryEditorOpen(false);
+      setMemorySaveMsg("");
+      setMemoryActionMsg("");
+      setMemoryLoadError(accessByScope.inspection.detail);
+      hasLoadedMemoryRef.current = false;
+      setMemoryLoading(false);
+      return;
+    }
+
     try {
       const res = await readFile(MEMORY_PATH);
       if (memoryRequestIdRef.current !== requestId) return;
@@ -2865,6 +2975,19 @@ export default function InspectorPanel() {
     skillsRequestIdRef.current = requestId;
     setSkillsRegistryLoading(true);
     setSkillsLoadError("");
+
+    if (!hasInspectionAccess) {
+      hasLoadedSkillsRef.current = false;
+      setSkills([]);
+      setSelectedSkillPath(null);
+      setSkillContent("");
+      setSavedSkillContent("");
+      setSkillFileLoadError("");
+      setSkillEditorOpen(false);
+      setSkillsLoadError(accessByScope.inspection.detail);
+      setSkillsRegistryLoading(false);
+      return null;
+    }
 
     try {
       const nextSkills = await listSkillsRegistry();
@@ -2929,6 +3052,15 @@ export default function InspectorPanel() {
     setSkillFileLoading(true);
     setSkillFileLoadError("");
     setSelectedSkillPath(path);
+
+    if (!hasInspectionAccess) {
+      setSkillContent("");
+      setSavedSkillContent("");
+      setSkillEditorOpen(false);
+      setSkillFileLoadError(accessByScope.inspection.detail);
+      setSkillFileLoading(false);
+      return;
+    }
 
     try {
       const res = await readFile(path);
@@ -3045,6 +3177,12 @@ export default function InspectorPanel() {
   };
 
   const handleSkillRegistryToggle = async (skill: SkillRegistryEntry) => {
+    if (!hasAdminAccess) {
+      setSkillRegistryUpdateMsg("");
+      setSkillRegistryUpdateError(accessByScope.admin.detail);
+      return;
+    }
+
     const nextEnabled = !skill.enabled;
     setSkillRegistryUpdatePendingName(skill.name);
     setSkillRegistryUpdateMsg("");
@@ -3068,7 +3206,9 @@ export default function InspectorPanel() {
             : "Registry entry disabled. Latest registry refresh failed; showing last known state."
       );
     } catch (error) {
-      setSkillRegistryUpdateError(getSkillRegistryMutationErrorMessage(error));
+      setSkillRegistryUpdateError(
+        getSkillRegistryMutationErrorMessage(error, accessByScope.admin)
+      );
     } finally {
       setSkillRegistryUpdatePendingName(null);
     }
@@ -4107,7 +4247,7 @@ export default function InspectorPanel() {
               <div className="mt-3 flex flex-wrap gap-1.5">
                 <PrimaryActionButton
                   onClick={() => void handleSkillRegistryToggle(selectedSkill)}
-                  disabled={selectedSkillUpdatePending}
+                  disabled={selectedSkillUpdatePending || !hasAdminAccess}
                 >
                   {selectedSkillUpdatePending ? (
                     <Clock3 size={11} />
@@ -4123,6 +4263,12 @@ export default function InspectorPanel() {
                       : "Enable Skill"}
                 </PrimaryActionButton>
               </div>
+
+              {!hasAdminAccess ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <MetaBadge tone="warning">{accessByScope.admin.detail}</MetaBadge>
+                </div>
+              ) : null}
 
               {selectedSkillUpdatePending || skillRegistryUpdateMsg || skillRegistryUpdateError ? (
                 <div className="mt-2 flex flex-wrap gap-1.5">

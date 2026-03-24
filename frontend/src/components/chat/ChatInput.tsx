@@ -9,6 +9,7 @@ interface ChatInputProps {
   isStreaming: boolean;
   isReferenceUploading: boolean;
   disabled?: boolean;
+  disabledReason?: string;
   selectedWorkflow: string | null;
   onSelectWorkflow: (workflowId: string | null) => void;
   attachedIdentifiers: string[];
@@ -82,6 +83,7 @@ export default function ChatInput({
   isStreaming,
   isReferenceUploading,
   disabled,
+  disabledReason,
   selectedWorkflow,
   onSelectWorkflow,
   attachedIdentifiers,
@@ -177,7 +179,7 @@ export default function ChatInput({
   );
 
   const helperText = disabled
-    ? "Loading workspace"
+    ? disabledReason ?? "Loading workspace"
     : isReferenceUploading
       ? "Uploading reference..."
       : uploadError
@@ -306,7 +308,8 @@ export default function ChatInput({
         onKeyDown={handleTextKeyDown}
         placeholder={
           disabled
-            ? "The workspace is still loading. Input will unlock once the session is ready."
+            ? disabledReason ??
+              "The workspace is still loading. Input will unlock once the session is ready."
             : "Describe the scientific question, workflow step, or evidence task you want BioAPEX to handle."
         }
         disabled={disabled || isStreaming}

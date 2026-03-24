@@ -543,6 +543,31 @@ export interface SessionCompressionResponse {
   summary: string;
 }
 
+export type AccessScope = "inspection" | "execution" | "admin";
+
+export type AccessAuthorizationMode = "loopback" | "bearer";
+
+export type AccessScopeStateCode =
+  | "checking"
+  | "granted"
+  | "token_required"
+  | "server_misconfigured"
+  | "forbidden"
+  | "unavailable";
+
+export interface AccessProbeResponse {
+  scope: AccessScope;
+  authorization_mode: AccessAuthorizationMode | null;
+}
+
+export interface AccessScopeState {
+  scope: AccessScope;
+  status: AccessScopeStateCode;
+  authorizationMode: AccessAuthorizationMode | null;
+  hasToken: boolean;
+  detail: string;
+}
+
 export interface RagModeResponse {
   rag_mode: boolean;
 }

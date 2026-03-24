@@ -8,10 +8,23 @@ import React, {
   useRef,
   useState,
 } from "react";
+import {
+  ACCESS_SCOPES,
+  clearAllBearerTokens,
+  classifyAccessError,
+  createCheckingAccessState,
+  createGrantedAccessState,
+  EMPTY_API_AUTH_STATE,
+  hasScopeBearerToken,
+  isAccessGranted,
+  withScopeBearerToken,
+} from "./access-control";
 import * as api from "./api";
 import { getLatestSelectedWorkflow } from "./session-status";
 import { uid } from "./utils";
 import type {
+  AccessScope,
+  AccessScopeState,
   Message,
   Session,
   SessionHistoryMessage,
@@ -24,6 +37,11 @@ import type {
 // ────────────────────────────────────────────────────────────────
 
 interface AppContextValue {
+  apiAuthState: api.ApiAuthState;
+  accessByScope: Record<AccessScope, AccessScopeState>;
+  hasInspectionAccess: boolean;
+  hasExecutionAccess: boolean;
+  hasAdminAccess: boolean;
   sessions: Session[];
   currentSessionId: string | null;
   messages: Message[];
@@ -42,6 +60,7 @@ interface AppContextValue {
 
   // Actions
   refreshSessions: () => Promise<void>;
+  refreshAccessState: () => Promise<void>;
   createSession: () => Promise<void>;
   selectSession: (id: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
@@ -55,6 +74,8 @@ interface AppContextValue {
   clearAttachedIdentifiers: () => void;
   primeDraftMessage: (text: string) => void;
   clearDraftMessage: () => void;
+  setAccessToken: (scope: AccessScope, token: string) => void;
+  clearAccessTokens: () => void;
   setInspectorTab: (
     tab: "files" | "sources" | "memory" | "skills" | "usage"
   ) => void;
@@ -77,6 +98,13 @@ export function useApp(): AppContextValue {
 // ────────────────────────────────────────────────────────────────
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
+  const [apiAuthState, setApiAuthState] = useState<api.ApiAuthState>({
+    ...EMPTY_API_AUTH_STATE,
+  });
+  const [hasLoadedApiAuthState, setHasLoadedApiAuthState] = useState(false);
+  const [accessByScope, setAccessByScope] = useState<
+    Record<AccessScope, AccessScopeState>
+  >(() => buildCheckingAccessStates(EMPTY_API_AUTH_STATE));
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -99,35 +127,222 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const streamingIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
   const referenceUploadTokenRef = useRef(0);
+  const apiAuthStateRef = useRef(apiAuthState);
+  const accessRefreshIdRef = useRef(0);
+  const hasInspectionAccess = isAccessGranted(accessByScope.inspection);
+  const hasExecutionAccess = isAccessGranted(accessByScope.execution);
+  const hasAdminAccess = isAccessGranted(accessByScope.admin);
 
   // ── Bootstrap ────────────────────────────────────────────────
 
   useEffect(() => {
+    setHasLoadedApiAuthState(true);
+  }, []);
+
+  useEffect(() => {
+    apiAuthStateRef.current = apiAuthState;
+  }, [apiAuthState]);
+
+  useEffect(() => {
+    api.setApiAuthProvider(() => apiAuthStateRef.current);
+    return () => {
+      api.setApiAuthProvider(null);
+    };
+  }, []);
+
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
+
+  const runAccessProbe = useCallback(async (showChecking: boolean) => {
+    const requestId = accessRefreshIdRef.current + 1;
+    accessRefreshIdRef.current = requestId;
+
+    const currentAuthState = apiAuthStateRef.current;
+    if (showChecking) {
+      setAccessByScope(buildCheckingAccessStates(currentAuthState));
+    }
+
+    const entries = await Promise.all(
+      ACCESS_SCOPES.map(async (scope) => {
+        const hasToken = hasScopeBearerToken(currentAuthState, scope);
+
+        try {
+          const response = await api.probeAccess(scope);
+          return [
+            scope,
+            createGrantedAccessState(
+              scope,
+              response.authorization_mode,
+              hasToken
+            ),
+          ] as const;
+        } catch (error) {
+          return [scope, classifyAccessError(scope, error, hasToken)] as const;
+        }
+      })
+    );
+
+    if (accessRefreshIdRef.current !== requestId) {
+      return;
+    }
+
+    setAccessByScope(buildAccessStateRecord(entries));
+  }, []);
+
+  const refreshAccessState = useCallback(async () => {
+    await runAccessProbe(true);
+  }, [runAccessProbe]);
+
+  useEffect(() => {
+    if (!hasLoadedApiAuthState) {
+      return;
+    }
+
+    void refreshAccessState();
+  }, [apiAuthState, hasLoadedApiAuthState, refreshAccessState]);
+
+  const shouldPollAccessRecovery = ACCESS_SCOPES.some((scope) => {
+    const status = accessByScope[scope].status;
+    return (
+      status === "checking" ||
+      status === "unavailable" ||
+      status === "server_misconfigured"
+    );
+  });
+
+  useEffect(() => {
+    if (!hasLoadedApiAuthState || typeof window === "undefined") {
+      return;
+    }
+
+    // Re-probe access after outages or server restarts without flashing the UI
+    // back into a blocking "checking" state.
+    const handleBackgroundProbe = () => {
+      if (!window.navigator.onLine) {
+        return;
+      }
+      void runAccessProbe(false);
+    };
+
+    window.addEventListener("focus", handleBackgroundProbe);
+    window.addEventListener("online", handleBackgroundProbe);
+
+    const intervalId = shouldPollAccessRecovery
+      ? window.setInterval(handleBackgroundProbe, 30_000)
+      : null;
+
+    return () => {
+      window.removeEventListener("focus", handleBackgroundProbe);
+      window.removeEventListener("online", handleBackgroundProbe);
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
+    };
+  }, [hasLoadedApiAuthState, runAccessProbe, shouldPollAccessRecovery]);
+
+  useEffect(() => {
+    if (!hasLoadedApiAuthState) {
+      return;
+    }
+
+    const inspectionStatus = accessByScope.inspection.status;
+    if (
+      inspectionStatus === "granted" ||
+      inspectionStatus === "checking" ||
+      inspectionStatus === "unavailable"
+    ) {
+      return;
+    }
+
+    setSessions([]);
+    setCurrentSessionId(null);
+    setMessages([]);
+    setSelectedWorkflow(null);
+    setInspectorPreviewPath(null);
+  }, [accessByScope.inspection.status, hasLoadedApiAuthState]);
+
+  useEffect(() => {
+    if (!hasLoadedApiAuthState) {
+      return;
+    }
+
+    if (accessByScope.inspection.status === "checking") {
+      setIsSessionLoading(true);
+      return;
+    }
+
+    if (!hasInspectionAccess) {
+      setIsSessionLoading(false);
+      return;
+    }
+
     let cancelled = false;
 
     const loadSessions = async () => {
+      setIsSessionLoading(true);
       try {
         const sessionList = await api.listSessions();
         if (cancelled) {
           return;
         }
+
         setSessions(sessionList);
-        if (sessionList.length > 0) {
-          await _loadSession(
-            sessionList[0].id,
-            setMessages,
-            setCurrentSessionId,
-            setSelectedWorkflow
-          );
+        const activeId = currentSessionIdRef.current;
+        const nextSessionId =
+          activeId && sessionList.some((session) => session.id === activeId)
+            ? activeId
+            : sessionList[0]?.id ?? null;
+
+        if (!nextSessionId) {
+          setCurrentSessionId(null);
+          setMessages([]);
+          setSelectedWorkflow(null);
+          return;
         }
-      } catch {
-        // Backend not ready yet — that's fine
+
+        await _loadSession(
+          nextSessionId,
+          setMessages,
+          setCurrentSessionId,
+          setSelectedWorkflow
+        );
+      } catch (error) {
+        if (!cancelled) {
+          setAccessByScope((current) => ({
+            ...current,
+            inspection: classifyAccessError(
+              "inspection",
+              error,
+              hasScopeBearerToken(apiAuthStateRef.current, "inspection")
+            ),
+          }));
+        }
       } finally {
         if (!cancelled) {
           setIsSessionLoading(false);
         }
       }
     };
+
+    void loadSessions();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [accessByScope.inspection.status, hasInspectionAccess, hasLoadedApiAuthState]);
+
+  useEffect(() => {
+    if (!hasLoadedApiAuthState || accessByScope.admin.status === "checking") {
+      return;
+    }
+
+    if (!hasAdminAccess) {
+      setCanManageRagMode(false);
+      return;
+    }
+
+    let cancelled = false;
 
     const loadRagMode = async () => {
       try {
@@ -137,34 +352,51 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
         setRagModeState(ragCfg.rag_mode);
         setCanManageRagMode(true);
-      } catch {
+      } catch (error) {
         if (!cancelled) {
           setCanManageRagMode(false);
+          setAccessByScope((current) => ({
+            ...current,
+            admin: classifyAccessError(
+              "admin",
+              error,
+              hasScopeBearerToken(apiAuthStateRef.current, "admin")
+            ),
+          }));
         }
       }
     };
 
-    void loadSessions();
     void loadRagMode();
 
     return () => {
       cancelled = true;
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    currentSessionIdRef.current = currentSessionId;
-  }, [currentSessionId]);
+  }, [accessByScope.admin.status, hasAdminAccess, hasLoadedApiAuthState]);
 
   // ── Session helpers ──────────────────────────────────────────
 
   const refreshSessions = useCallback(async () => {
-    const list = await api.listSessions();
-    setSessions(list);
-  }, []);
+    if (!isAccessGranted(accessByScope.inspection)) {
+      return;
+    }
+    try {
+      const list = await api.listSessions();
+      setSessions(list);
+    } catch (error) {
+      setAccessByScope((current) => ({
+        ...current,
+        inspection: classifyAccessError(
+          "inspection",
+          error,
+          hasScopeBearerToken(apiAuthStateRef.current, "inspection")
+        ),
+      }));
+    }
+  }, [accessByScope.inspection]);
 
   const createSession = useCallback(async () => {
-    if (isReferenceUploading) return;
+    if (isReferenceUploading || !hasExecutionAccess) return;
     const session = await api.createSession();
     setSessions((prev) => [session, ...prev]);
     setCurrentSessionId(session.id);
@@ -176,10 +408,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setDraftRevision((prev) => prev + 1);
     setInspectorPreviewPath(null);
     setInspectorTabState("files");
-  }, [isReferenceUploading]);
+  }, [hasExecutionAccess, isReferenceUploading]);
 
   const selectSession = useCallback(async (id: string) => {
-    if (isReferenceUploading) return;
+    if (isReferenceUploading || !hasInspectionAccess) return;
     if (id === currentSessionId) return;
     setIsSessionLoading(true);
     try {
@@ -193,11 +425,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsSessionLoading(false);
     }
-  }, [currentSessionId, isReferenceUploading]);
+  }, [currentSessionId, hasInspectionAccess, isReferenceUploading]);
 
   const deleteSession = useCallback(
     async (id: string) => {
-      if (isReferenceUploading) return;
+      if (isReferenceUploading || !hasExecutionAccess) return;
       await api.deleteSession(id);
       setSessions((prev) => prev.filter((s) => s.id !== id));
       if (id === currentSessionId) {
@@ -212,20 +444,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setInspectorTabState("files");
       }
     },
-    [currentSessionId, isReferenceUploading]
+    [currentSessionId, hasExecutionAccess, isReferenceUploading]
   );
 
   const renameSession = useCallback(async (id: string, title: string) => {
+    if (!hasExecutionAccess) {
+      return;
+    }
     await api.renameSession(id, title);
     setSessions((prev) =>
       prev.map((s) => (s.id === id ? { ...s, title } : s))
     );
-  }, []);
+  }, [hasExecutionAccess]);
 
   // ── RAG mode ─────────────────────────────────────────────────
 
   const setRagMode = useCallback(async (enabled: boolean) => {
-    if (!canManageRagMode) {
+    if (!canManageRagMode || !hasAdminAccess) {
       return;
     }
 
@@ -233,10 +468,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const response = await api.setRagMode(enabled);
       setRagModeState(response.rag_mode);
       setCanManageRagMode(true);
-    } catch {
+    } catch (error) {
       setCanManageRagMode(false);
+      setAccessByScope((current) => ({
+        ...current,
+        admin: classifyAccessError(
+          "admin",
+          error,
+          hasScopeBearerToken(apiAuthStateRef.current, "admin")
+        ),
+      }));
     }
-  }, [canManageRagMode]);
+  }, [canManageRagMode, hasAdminAccess]);
 
   const setWorkspaceMode = useCallback((mode: WorkspaceMode) => {
     setWorkspaceModeState(mode);
@@ -247,6 +490,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const uploadAttachedReference = useCallback(async (file: File) => {
+    if (!hasExecutionAccess) {
+      throw new Error(accessByScope.execution.detail);
+    }
+
     if (file.size > MAX_REFERENCE_UPLOAD_BYTES) {
       throw new Error("Reference files must be 500 KB or smaller.");
     }
@@ -279,7 +526,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setIsReferenceUploading(false);
       }
     }
-  }, [isReferenceUploading]);
+  }, [accessByScope.execution.detail, hasExecutionAccess, isReferenceUploading]);
 
   const addAttachedIdentifier = useCallback((identifier: string) => {
     const trimmed = identifier.trim();
@@ -308,6 +555,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setDraftRevision((prev) => prev + 1);
   }, []);
 
+  const setAccessToken = useCallback((scope: AccessScope, token: string) => {
+    setApiAuthState((current) => withScopeBearerToken(current, scope, token));
+  }, []);
+
+  const clearAccessTokens = useCallback(() => {
+    setApiAuthState(clearAllBearerTokens());
+  }, []);
+
   const setInspectorTab = useCallback(
     (tab: "files" | "sources" | "memory" | "skills" | "usage") => {
       setInspectorTabState(tab);
@@ -327,21 +582,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // ── Compression ──────────────────────────────────────────────
 
   const compressSession = useCallback(async () => {
-    if (!currentSessionId) return;
+    if (!currentSessionId || !hasExecutionAccess) return;
     await api.compressSession(currentSessionId);
-    // Reload messages after compression
-    const history = await api.getHistory(currentSessionId);
-    const msgs = _historyToMessages(history);
-    setMessages(msgs);
-    setSelectedWorkflow(getLatestSelectedWorkflow(msgs));
+    if (hasInspectionAccess) {
+      const history = await api.getHistory(currentSessionId);
+      const msgs = _historyToMessages(history);
+      setMessages(msgs);
+      setSelectedWorkflow(getLatestSelectedWorkflow(msgs));
+    }
     await refreshSessions();
-  }, [currentSessionId, refreshSessions]);
+  }, [currentSessionId, hasExecutionAccess, hasInspectionAccess, refreshSessions]);
 
   // ── Send message ─────────────────────────────────────────────
 
   const sendMessage = useCallback(
     async (content: string, context?: api.ChatRequestContext) => {
-      if (isStreaming || isReferenceUploading) return;
+      if (isStreaming || isReferenceUploading || !hasExecutionAccess) return;
       const requestedWorkflow =
         context && "selectedWorkflow" in context
           ? context.selectedWorkflow ?? null
@@ -536,6 +792,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [
       attachedIdentifiers,
       currentSessionId,
+      hasExecutionAccess,
       isReferenceUploading,
       isStreaming,
       refreshSessions,
@@ -546,6 +803,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   return (
     <AppContext.Provider
       value={{
+        apiAuthState,
+        accessByScope,
+        hasInspectionAccess,
+        hasExecutionAccess,
+        hasAdminAccess,
         sessions,
         currentSessionId,
         messages,
@@ -562,6 +824,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         inspectorTab,
         inspectorPreviewPath,
         refreshSessions,
+        refreshAccessState,
         createSession,
         selectSession,
         deleteSession,
@@ -575,6 +838,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         clearAttachedIdentifiers,
         primeDraftMessage,
         clearDraftMessage,
+        setAccessToken,
+        clearAccessTokens,
         setInspectorTab,
         openInspectorPath,
         clearInspectorPath,
@@ -588,6 +853,33 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 }
 
 const MAX_REFERENCE_UPLOAD_BYTES = 500_000;
+
+function buildCheckingAccessStates(
+  authState: api.ApiAuthState
+): Record<AccessScope, AccessScopeState> {
+  return ACCESS_SCOPES.reduce(
+    (result, scope) => {
+      result[scope] = createCheckingAccessState(
+        scope,
+        hasScopeBearerToken(authState, scope)
+      );
+      return result;
+    },
+    {} as Record<AccessScope, AccessScopeState>
+  );
+}
+
+function buildAccessStateRecord(
+  entries: ReadonlyArray<readonly [AccessScope, AccessScopeState]>
+): Record<AccessScope, AccessScopeState> {
+  return entries.reduce(
+    (result, [scope, state]) => {
+      result[scope] = state;
+      return result;
+    },
+    {} as Record<AccessScope, AccessScopeState>
+  );
+}
 
 function sanitizeUploadFileName(value: string): string {
   const sanitized = value
