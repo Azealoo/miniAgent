@@ -28,6 +28,7 @@ import type {
   RagModeResponse,
   RawFileTextResponse,
   RetrievalResult,
+  RetentionPolicy,
   Session,
   SessionCompressionResponse,
   SessionHistoryMessage,
@@ -74,6 +75,11 @@ interface ApiErrorOptions {
   status: number;
 }
 
+interface ApiPayloadErrorOptions {
+  detail: string;
+  path: string;
+}
+
 export class ApiError extends Error {
   readonly bodyText: string;
   readonly path: string;
@@ -87,6 +93,18 @@ export class ApiError extends Error {
     this.path = options.path;
     this.scope = options.scope;
     this.status = options.status;
+  }
+}
+
+export class ApiPayloadError extends Error {
+  readonly detail: string;
+  readonly path: string;
+
+  constructor(message: string, options: ApiPayloadErrorOptions) {
+    super(message);
+    this.name = "ApiPayloadError";
+    this.detail = options.detail;
+    this.path = options.path;
   }
 }
 
@@ -207,6 +225,10 @@ export function isApiError(error: unknown): error is ApiError {
   return error instanceof ApiError;
 }
 
+export function isApiPayloadError(error: unknown): error is ApiPayloadError {
+  return error instanceof ApiPayloadError;
+}
+
 export function getApiErrorBodyText(error: unknown): string {
   if (error instanceof ApiError) {
     return error.bodyText.trim();
@@ -254,7 +276,439 @@ async function req<T>(
     return undefined as T;
   }
 
-  return response.json() as Promise<T>;
+  try {
+    return await response.json() as T;
+  } catch {
+    throw createPayloadError(
+      path,
+      "the requested data",
+      "Expected valid JSON from the backend."
+    );
+  }
+}
+
+type UnknownRecord = Record<string, unknown>;
+
+function createPayloadError(path: string, label: string, detail: string): ApiPayloadError {
+  return new ApiPayloadError(
+    `BioAPEX received an unsupported response while loading ${label}. ${detail}`,
+    {
+      detail,
+      path,
+    }
+  );
+}
+
+function isObjectRecord(value: unknown): value is UnknownRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function expectObject(value: unknown, path: string, label: string): UnknownRecord {
+  if (!isObjectRecord(value)) {
+    throw createPayloadError(
+      path,
+      label,
+      "Expected a JSON object from the backend."
+    );
+  }
+  return value;
+}
+
+function expectArray(value: unknown, path: string, label: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw createPayloadError(
+      path,
+      label,
+      "Expected a JSON array from the backend."
+    );
+  }
+  return value;
+}
+
+function expectArrayField(
+  value: UnknownRecord,
+  field: string,
+  path: string,
+  label: string
+): unknown[] {
+  return expectArray(
+    value[field],
+    path,
+    label,
+  );
+}
+
+function expectObjectField(
+  value: UnknownRecord,
+  field: string,
+  path: string,
+  label: string
+): UnknownRecord {
+  return expectObject(value[field], path, label);
+}
+
+function expectStringField(
+  value: UnknownRecord,
+  field: string,
+  path: string,
+  label: string
+): string {
+  const fieldValue = value[field];
+  if (typeof fieldValue !== "string") {
+    throw createPayloadError(
+      path,
+      label,
+      `Expected "${field}" to be a string.`
+    );
+  }
+  return fieldValue;
+}
+
+function expectNumberField(
+  value: UnknownRecord,
+  field: string,
+  path: string,
+  label: string
+): number {
+  const fieldValue = value[field];
+  if (typeof fieldValue !== "number" || Number.isNaN(fieldValue)) {
+    throw createPayloadError(
+      path,
+      label,
+      `Expected "${field}" to be a number.`
+    );
+  }
+  return fieldValue;
+}
+
+function expectBooleanField(
+  value: UnknownRecord,
+  field: string,
+  path: string,
+  label: string
+): boolean {
+  const fieldValue = value[field];
+  if (typeof fieldValue !== "boolean") {
+    throw createPayloadError(
+      path,
+      label,
+      `Expected "${field}" to be a boolean.`
+    );
+  }
+  return fieldValue;
+}
+
+function validateSessionList(value: unknown, path: string): Session[] {
+  const sessions = expectArray(value, path, "the saved session list");
+  sessions.forEach((session, index) => {
+    const record = expectObject(session, path, "the saved session list");
+    expectStringField(record, "id", path, `session ${index + 1}`);
+    expectStringField(record, "title", path, `session ${index + 1}`);
+    expectNumberField(record, "updated_at", path, `session ${index + 1}`);
+    expectNumberField(record, "message_count", path, `session ${index + 1}`);
+  });
+  return sessions as Session[];
+}
+
+function validateSessionHistory(value: unknown, path: string): SessionHistoryMessage[] {
+  const history = expectArray(value, path, "the session history");
+  history.forEach((message, index) => {
+    const record = expectObject(message, path, "the session history");
+    expectStringField(record, "role", path, `session history item ${index + 1}`);
+    if ("content" in record && typeof record.content !== "string") {
+      throw createPayloadError(
+        path,
+        `session history item ${index + 1}`,
+        'Expected "content" to be a string when present.'
+      );
+    }
+  });
+  return history as SessionHistoryMessage[];
+}
+
+function validateFlowsWorkspaceSummary(
+  value: unknown,
+  path: string
+): FlowsWorkspaceSummaryResponse {
+  const response = expectObject(value, path, "the flows workspace summary");
+  expectArrayField(response, "items", path, "the flows workspace summary");
+  return response as unknown as FlowsWorkspaceSummaryResponse;
+}
+
+function validateFilesWorkspaceSummary(
+  value: unknown,
+  path: string
+): FilesWorkspaceSummaryResponse {
+  const response = expectObject(value, path, "the files workspace summary");
+  expectArrayField(response, "items", path, "the files workspace summary");
+  return response as unknown as FilesWorkspaceSummaryResponse;
+}
+
+function validateFileContentsResponse(value: unknown, path: string): FileContentsResponse {
+  const response = expectObject(value, path, "the file contents response");
+  expectStringField(response, "path", path, "the file contents response");
+  expectStringField(response, "content", path, "the file contents response");
+  return response as unknown as FileContentsResponse;
+}
+
+function validateTokenStats(value: unknown, path: string): TokenStats {
+  const response = expectObject(value, path, "the usage summary");
+  expectStringField(response, "session_id", path, "the usage summary");
+  expectStringField(response, "model_name", path, "the usage summary");
+  return response as unknown as TokenStats;
+}
+
+function validateSkillRegistry(value: unknown, path: string): SkillRegistryEntry[] {
+  return expectArray(value, path, "the skills registry") as SkillRegistryEntry[];
+}
+
+function validateArtifactRegistryRecord(
+  value: unknown,
+  path: string,
+  label: string
+): void {
+  const record = expectObject(value, path, label);
+  expectStringField(record, "artifact_id", path, label);
+  expectStringField(record, "artifact_type", path, label);
+  expectStringField(record, "path", path, label);
+  expectStringField(record, "run_id", path, label);
+  expectStringField(record, "workflow", path, label);
+  expectStringField(record, "date", path, label);
+  expectStringField(record, "indexed_at", path, label);
+  expectStringField(record, "status", path, label);
+}
+
+function validateArtifactRegistryLookup(
+  value: unknown,
+  path: string
+): ArtifactRegistryLookupResult {
+  const response = expectObject(value, path, "the artifact registry");
+  expectStringField(response, "generated_at", path, "the artifact registry");
+  expectNumberField(response, "total_count", path, "the artifact registry");
+  expectNumberField(response, "matched_count", path, "the artifact registry");
+  expectNumberField(response, "valid_count", path, "the artifact registry");
+  expectNumberField(response, "invalid_count", path, "the artifact registry");
+  const records = expectArrayField(response, "records", path, "the artifact registry");
+  records.forEach((record, index) =>
+    validateArtifactRegistryRecord(record, path, `artifact registry record ${index + 1}`)
+  );
+  return response as unknown as ArtifactRegistryLookupResult;
+}
+
+function validateRetentionPolicy(
+  value: unknown,
+  path: string,
+  label: string
+): RetentionPolicy {
+  const policy = expectObject(value, path, label);
+  expectStringField(policy, "rotation_strategy", path, label);
+  expectNumberField(policy, "retention_expectation_days", path, label);
+  expectBooleanField(policy, "automatic_deletion", path, label);
+  return policy as unknown as RetentionPolicy;
+}
+
+function validateAuditEvents(value: unknown, path: string): AuditEventsResponse {
+  const response = expectObject(value, path, "the audit events response");
+  expectArrayField(response, "events", path, "the audit events response");
+  validateRetentionPolicy(response.retention_policy, path, "the audit retention policy");
+  return response as unknown as AuditEventsResponse;
+}
+
+function validateMetricsResponse(
+  value: unknown,
+  path: string
+): ObservabilityMetricsResponse {
+  const response = expectObject(value, path, "the metrics response");
+  expectArrayField(response, "metrics", path, "the metrics response");
+  validateRetentionPolicy(response.retention_policy, path, "the metrics retention policy");
+  return response as unknown as ObservabilityMetricsResponse;
+}
+
+function validateTracesResponse(
+  value: unknown,
+  path: string
+): ObservabilityTracesResponse {
+  const response = expectObject(value, path, "the traces response");
+  expectArrayField(response, "traces", path, "the traces response");
+  validateRetentionPolicy(response.retention_policy, path, "the traces retention policy");
+  return response as unknown as ObservabilityTracesResponse;
+}
+
+function validateRateSummary(value: unknown, path: string, label: string): void {
+  const summary = expectObject(value, path, label);
+  expectNumberField(summary, "count", path, label);
+  if (
+    "average" in summary &&
+    summary.average !== null &&
+    typeof summary.average !== "number"
+  ) {
+    throw createPayloadError(path, label, 'Expected "average" to be a number or null.');
+  }
+}
+
+function validateDurationSummary(value: unknown, path: string, label: string): void {
+  const summary = expectObject(value, path, label);
+  expectNumberField(summary, "count", path, label);
+}
+
+function validateOverviewResponse(value: unknown, path: string): ObservabilityOverview {
+  const response = expectObject(value, path, "the ops overview");
+  expectStringField(response, "generated_at", path, "the ops overview");
+  expectNumberField(response, "window_days", path, "the ops overview");
+  const filters = expectObjectField(response, "filters", path, "the ops overview");
+  if (
+    ("workflow_id" in filters && filters.workflow_id !== null && typeof filters.workflow_id !== "string") ||
+    ("session_id" in filters && filters.session_id !== null && typeof filters.session_id !== "string") ||
+    ("request_id" in filters && filters.request_id !== null && typeof filters.request_id !== "string")
+  ) {
+    throw createPayloadError(
+      path,
+      "the ops overview",
+      "Expected the overview filters to be strings or null values."
+    );
+  }
+  const recordCounts = expectObjectField(response, "record_counts", path, "the ops overview");
+  expectNumberField(recordCounts, "metric_records", path, "the ops overview");
+  expectNumberField(recordCounts, "trace_records", path, "the ops overview");
+  const chatResponsiveness = expectObjectField(
+    response,
+    "chat_responsiveness",
+    path,
+    "the ops overview"
+  );
+  validateDurationSummary(
+    chatResponsiveness.user_visible_latency_seconds,
+    path,
+    "the user-visible latency summary"
+  );
+  validateDurationSummary(
+    chatResponsiveness.backend_execution_latency_seconds,
+    path,
+    "the backend execution latency summary"
+  );
+  const workflowDelivery = expectObjectField(
+    response,
+    "workflow_delivery",
+    path,
+    "the ops overview"
+  );
+  validateDurationSummary(
+    workflowDelivery.workflow_duration_seconds,
+    path,
+    "the workflow duration summary"
+  );
+  validateDurationSummary(
+    workflowDelivery.step_duration_seconds,
+    path,
+    "the workflow step duration summary"
+  );
+  validateRateSummary(
+    workflowDelivery.failure_rate,
+    path,
+    "the workflow failure-rate summary"
+  );
+  validateRateSummary(
+    workflowDelivery.block_rate,
+    path,
+    "the workflow block-rate summary"
+  );
+  const workflowQuality = expectObjectField(
+    response,
+    "workflow_quality",
+    path,
+    "the ops overview"
+  );
+  validateRateSummary(
+    workflowQuality.qc_pass_rate,
+    path,
+    "the QC pass-rate summary"
+  );
+  validateRateSummary(
+    workflowQuality.evidence_coverage_rate,
+    path,
+    "the evidence-coverage summary"
+  );
+  expectArrayField(response, "dashboards", path, "the ops overview");
+  validateRetentionPolicy(response.retention_policy, path, "the overview retention policy");
+  return response as unknown as ObservabilityOverview;
+}
+
+function validateDashboardDefinitions(
+  value: unknown,
+  path: string
+): ObservabilityDashboardDefinitionsResponse {
+  const response = expectObject(value, path, "the dashboard definitions");
+  expectArrayField(response, "dashboards", path, "the dashboard definitions");
+  validateRetentionPolicy(
+    response.retention_policy,
+    path,
+    "the dashboard retention policy"
+  );
+  return response as unknown as ObservabilityDashboardDefinitionsResponse;
+}
+
+function validateConnectorRegistryEntryPayload(
+  value: unknown,
+  path: string,
+  label: string
+): ConnectorRegistryEntry {
+  const response = expectObject(value, path, label);
+  expectStringField(response, "name", path, label);
+  expectStringField(response, "display_name", path, label);
+  expectStringField(response, "description", path, label);
+  expectStringField(response, "system_kind", path, label);
+  expectStringField(response, "external_system", path, label);
+  expectBooleanField(response, "enabled", path, label);
+  const capabilities = expectObjectField(response, "capabilities", path, label);
+  expectArrayField(capabilities, "supported_actions", path, label);
+  expectArrayField(capabilities, "transport_patterns", path, label);
+  expectArrayField(capabilities, "artifact_domains", path, label);
+  const guardrails = expectObjectField(capabilities, "guardrails", path, label);
+  expectBooleanField(guardrails, "requires_compliance_gate", path, label);
+  expectBooleanField(guardrails, "requires_provenance_records", path, label);
+  expectBooleanField(guardrails, "requires_artifact_registration", path, label);
+  expectBooleanField(guardrails, "allow_destructive_sync", path, label);
+  const configSummary = expectObjectField(response, "config_summary", path, label);
+  expectBooleanField(configSummary, "configured", path, label);
+  expectArrayField(configSummary, "configured_fields", path, label);
+  expectArrayField(configSummary, "missing_required_fields", path, label);
+  expectBooleanField(configSummary, "uses_secret_references", path, label);
+  expectArrayField(response, "config_fields", path, label);
+  expectArrayField(response, "notes", path, label);
+  return response as unknown as ConnectorRegistryEntry;
+}
+
+function validateConnectorRegistryList(
+  value: unknown,
+  path: string
+): ConnectorRegistryListResponse {
+  const response = expectObject(value, path, "the connector registry");
+  const connectors = expectArrayField(response, "connectors", path, "the connector registry");
+  connectors.forEach((connector, index) =>
+    validateConnectorRegistryEntryPayload(
+      connector,
+      path,
+      `connector registry entry ${index + 1}`
+    )
+  );
+  return response as unknown as ConnectorRegistryListResponse;
+}
+
+function validateConnectorAdminDetail(
+  value: unknown,
+  path: string
+): ConnectorRegistryAdminDetailResponse {
+  const response = expectObject(value, path, "the connector admin detail");
+  expectStringField(response, "connector_name", path, "the connector admin detail");
+  expectBooleanField(response, "enabled", path, "the connector admin detail");
+  expectObjectField(response, "config", path, "the connector admin detail");
+  expectObjectField(
+    response,
+    "validation_result",
+    path,
+    "the connector admin detail"
+  );
+  return response as unknown as ConnectorRegistryAdminDetailResponse;
 }
 
 const inspectReq = <T>(path: string, options: Omit<ApiRequestOptions, "scope"> = {}) =>
@@ -292,23 +746,36 @@ export const probeAccess = (scope: ProtectedApiAccessScope) =>
 
 // Inspection routes
 
-export const listSessions = () => inspectReq<Session[]>("/api/sessions");
+export const listSessions = async () =>
+  validateSessionList(await inspectReq<unknown>("/api/sessions"), "/api/sessions");
 
-export const getHistory = (id: string) =>
-  inspectReq<SessionHistoryMessage[]>(`/api/sessions/${id}/history`);
+export const getHistory = async (id: string) =>
+  validateSessionHistory(
+    await inspectReq<unknown>(`/api/sessions/${id}/history`),
+    `/api/sessions/${id}/history`
+  );
 
-export const getFlowsWorkspaceSummary = () =>
-  inspectReq<FlowsWorkspaceSummaryResponse>("/api/sessions/workflows/summary");
+export const getFlowsWorkspaceSummary = async () =>
+  validateFlowsWorkspaceSummary(
+    await inspectReq<unknown>("/api/sessions/workflows/summary"),
+    "/api/sessions/workflows/summary"
+  );
 
-export const getFilesWorkspaceSummary = (sessionId: string) =>
-  inspectReq<FilesWorkspaceSummaryResponse>(
+export const getFilesWorkspaceSummary = async (sessionId: string) =>
+  validateFilesWorkspaceSummary(
+    await inspectReq<unknown>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/files/summary`
+    ),
     `/api/sessions/${encodeURIComponent(sessionId)}/files/summary`
   );
 
-export const readFile = (path: string) =>
-  inspectReq<FileContentsResponse>("/api/files", {
-    query: { path },
-  });
+export const readFile = async (path: string) =>
+  validateFileContentsResponse(
+    await inspectReq<unknown>("/api/files", {
+      query: { path },
+    }),
+    "/api/files"
+  );
 
 export const fetchRawFile = (path: string, signal?: AbortSignal) =>
   inspectFetch("/api/files/raw", {
@@ -590,57 +1057,85 @@ export const getRawFileUrl = (path: string) =>
 export const listSkills = () => inspectReq<Skill[]>("/api/skills");
 
 export const listSkillsRegistry = () =>
-  inspectReq<SkillRegistryEntry[]>("/api/skills/registry");
+  inspectReq<unknown>("/api/skills/registry").then((payload) =>
+    validateSkillRegistry(payload, "/api/skills/registry")
+  );
 
-export const getSessionTokens = (id: string) =>
-  inspectReq<TokenStats>(`/api/tokens/session/${id}`);
+export const getSessionTokens = async (id: string) =>
+  validateTokenStats(
+    await inspectReq<unknown>(`/api/tokens/session/${id}`),
+    `/api/tokens/session/${id}`
+  );
 
-export const listArtifactRegistry = (query: ArtifactRegistryQuery = {}) =>
-  inspectReq<ArtifactRegistryLookupResult>("/api/artifacts/registry", {
-    query: { ...query },
-  });
+export const listArtifactRegistry = async (query: ArtifactRegistryQuery = {}) =>
+  validateArtifactRegistryLookup(
+    await inspectReq<unknown>("/api/artifacts/registry", {
+      query: { ...query },
+    }),
+    "/api/artifacts/registry"
+  );
 
-export const listAuditEvents = (query: AuditEventsQuery = {}) =>
-  inspectReq<AuditEventsResponse>("/api/audit/events", {
-    query: { ...query },
-  });
+export const listAuditEvents = async (query: AuditEventsQuery = {}) =>
+  validateAuditEvents(
+    await inspectReq<unknown>("/api/audit/events", {
+      query: { ...query },
+    }),
+    "/api/audit/events"
+  );
 
 export const listObservabilityMetrics = (
   query: ObservabilityMetricsQuery = {}
 ) =>
-  inspectReq<ObservabilityMetricsResponse>("/api/observability/metrics", {
+  inspectReq<unknown>("/api/observability/metrics", {
     query: { ...query },
-  });
+  }).then((payload) =>
+    validateMetricsResponse(payload, "/api/observability/metrics")
+  );
 
 export const listObservabilityTraces = (
   query: ObservabilityTracesQuery = {}
 ) =>
-  inspectReq<ObservabilityTracesResponse>("/api/observability/traces", {
+  inspectReq<unknown>("/api/observability/traces", {
     query: { ...query },
-  });
+  }).then((payload) =>
+    validateTracesResponse(payload, "/api/observability/traces")
+  );
 
 export const getObservabilityOverview = (
   query: ObservabilityOverviewQuery = {}
 ) =>
-  inspectReq<ObservabilityOverview>("/api/observability/overview", {
+  inspectReq<unknown>("/api/observability/overview", {
     query: { ...query },
-  });
+  }).then((payload) =>
+    validateOverviewResponse(payload, "/api/observability/overview")
+  );
 
-export const getObservabilityDashboardDefinitions = () =>
-  inspectReq<ObservabilityDashboardDefinitionsResponse>(
+export const getObservabilityDashboardDefinitions = async () =>
+  validateDashboardDefinitions(
+    await inspectReq<unknown>("/api/observability/dashboard-definitions"),
     "/api/observability/dashboard-definitions"
   );
 
-export const listConnectorRegistry = () =>
-  inspectReq<ConnectorRegistryListResponse>("/api/connectors/registry");
-
-export const getConnectorRegistryDetail = (connectorName: string) =>
-  inspectReq<ConnectorRegistryEntry>(
-    `/api/connectors/registry/${encodeURIComponent(connectorName)}`
+export const listConnectorRegistry = async () =>
+  validateConnectorRegistryList(
+    await inspectReq<unknown>("/api/connectors/registry"),
+    "/api/connectors/registry"
   );
 
-export const getConnectorRegistryAdminDetail = (connectorName: string) =>
-  adminReq<ConnectorRegistryAdminDetailResponse>(
+export const getConnectorRegistryDetail = async (connectorName: string) =>
+  validateConnectorRegistryEntryPayload(
+    await inspectReq<unknown>(
+      `/api/connectors/registry/${encodeURIComponent(connectorName)}`
+    ),
+    `/api/connectors/registry/${encodeURIComponent(connectorName)}`,
+    "the selected connector detail"
+  );
+
+export const getConnectorRegistryAdminDetail = async (connectorName: string) =>
+  validateConnectorAdminDetail(
+    await adminReq<unknown>(
+      `/api/connectors/registry/${encodeURIComponent(connectorName)}/admin-detail`
+    ),
     `/api/connectors/registry/${encodeURIComponent(connectorName)}/admin-detail`
   );
 

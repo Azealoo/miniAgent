@@ -20,6 +20,10 @@ import {
   withScopeBearerToken,
 } from "./access-control";
 import * as api from "./api";
+import {
+  getScopedSurfaceErrorMessage,
+  shouldPromoteScopeError,
+} from "./surface-errors";
 import { getLatestSelectedWorkflow } from "./session-status";
 import { uid } from "./utils";
 import type {
@@ -48,6 +52,10 @@ interface AppContextValue {
   isStreaming: boolean;
   isReferenceUploading: boolean;
   isSessionLoading: boolean;
+  sessionListStatus: "idle" | "loading" | "ready" | "error";
+  sessionListError: string | null;
+  sessionHistoryStatus: "idle" | "loading" | "ready" | "error";
+  sessionHistoryError: string | null;
   ragMode: boolean;
   canManageRagMode: boolean;
   workspaceMode: WorkspaceMode;
@@ -60,6 +68,7 @@ interface AppContextValue {
 
   // Actions
   refreshSessions: () => Promise<void>;
+  reloadCurrentSession: () => Promise<void>;
   refreshAccessState: () => Promise<void>;
   createSession: () => Promise<void>;
   selectSession: (id: string) => Promise<void>;
@@ -110,7 +119,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isReferenceUploading, setIsReferenceUploading] = useState(false);
-  const [isSessionLoading, setIsSessionLoading] = useState(true);
+  const [sessionListStatus, setSessionListStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("loading");
+  const [sessionListError, setSessionListError] = useState<string | null>(null);
+  const [sessionHistoryStatus, setSessionHistoryStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [sessionHistoryError, setSessionHistoryError] = useState<string | null>(null);
   const [ragMode, setRagModeState] = useState(false);
   const [canManageRagMode, setCanManageRagMode] = useState(false);
   const [workspaceMode, setWorkspaceModeState] = useState<WorkspaceMode>("sessions");
@@ -126,12 +142,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // Ref to current streaming message ID (avoids stale closure issues)
   const streamingIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
+  const messagesRef = useRef<Message[]>([]);
+  const selectedWorkflowRef = useRef<string | null>(null);
   const referenceUploadTokenRef = useRef(0);
   const apiAuthStateRef = useRef(apiAuthState);
   const accessRefreshIdRef = useRef(0);
   const hasInspectionAccess = isAccessGranted(accessByScope.inspection);
   const hasExecutionAccess = isAccessGranted(accessByScope.execution);
   const hasAdminAccess = isAccessGranted(accessByScope.admin);
+  const isSessionLoading =
+    sessionHistoryStatus === "loading" ||
+    (sessionListStatus === "loading" &&
+      sessions.length === 0 &&
+      currentSessionId === null);
 
   // ── Bootstrap ────────────────────────────────────────────────
 
@@ -153,6 +176,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    selectedWorkflowRef.current = selectedWorkflow;
+  }, [selectedWorkflow]);
 
   const runAccessProbe = useCallback(async (showChecking: boolean) => {
     const requestId = accessRefreshIdRef.current + 1;
@@ -258,9 +289,74 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setSessions([]);
     setCurrentSessionId(null);
     setMessages([]);
+    setSessionListStatus("idle");
+    setSessionListError(null);
+    setSessionHistoryStatus("idle");
+    setSessionHistoryError(null);
     setSelectedWorkflow(null);
     setInspectorPreviewPath(null);
   }, [accessByScope.inspection.status, hasLoadedApiAuthState]);
+
+  const promoteInspectionScopeError = useCallback((error: unknown) => {
+    if (!shouldPromoteScopeError(error)) {
+      return;
+    }
+
+    setAccessByScope((current) => ({
+      ...current,
+      inspection: classifyAccessError(
+        "inspection",
+        error,
+        hasScopeBearerToken(apiAuthStateRef.current, "inspection")
+      ),
+    }));
+  }, []);
+
+  const getSessionListErrorMessage = useCallback(
+    (error: unknown) =>
+      getScopedSurfaceErrorMessage(
+        "inspection",
+        {
+          scope: accessByScope.inspection.scope,
+          status: accessByScope.inspection.status,
+          authorizationMode: accessByScope.inspection.authorizationMode,
+          hasToken: accessByScope.inspection.hasToken,
+          detail: accessByScope.inspection.detail,
+        },
+        error,
+        "Could not load the saved session list right now."
+      ),
+    [
+      accessByScope.inspection.authorizationMode,
+      accessByScope.inspection.detail,
+      accessByScope.inspection.hasToken,
+      accessByScope.inspection.scope,
+      accessByScope.inspection.status,
+    ]
+  );
+
+  const getSessionHistoryErrorMessage = useCallback(
+    (error: unknown) =>
+      getScopedSurfaceErrorMessage(
+        "inspection",
+        {
+          scope: accessByScope.inspection.scope,
+          status: accessByScope.inspection.status,
+          authorizationMode: accessByScope.inspection.authorizationMode,
+          hasToken: accessByScope.inspection.hasToken,
+          detail: accessByScope.inspection.detail,
+        },
+        error,
+        "Could not load the selected session history right now."
+      ),
+    [
+      accessByScope.inspection.authorizationMode,
+      accessByScope.inspection.detail,
+      accessByScope.inspection.hasToken,
+      accessByScope.inspection.scope,
+      accessByScope.inspection.status,
+    ]
+  );
 
   useEffect(() => {
     if (!hasLoadedApiAuthState) {
@@ -268,19 +364,24 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (accessByScope.inspection.status === "checking") {
-      setIsSessionLoading(true);
+      setSessionListStatus("loading");
+      setSessionListError(null);
       return;
     }
 
     if (!hasInspectionAccess) {
-      setIsSessionLoading(false);
+      setSessionListStatus("idle");
+      setSessionListError(null);
+      setSessionHistoryStatus("idle");
+      setSessionHistoryError(null);
       return;
     }
 
     let cancelled = false;
 
     const loadSessions = async () => {
-      setIsSessionLoading(true);
+      setSessionListStatus("loading");
+      setSessionListError(null);
       try {
         const sessionList = await api.listSessions();
         if (cancelled) {
@@ -288,6 +389,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
 
         setSessions(sessionList);
+        setSessionListStatus("ready");
         const activeId = currentSessionIdRef.current;
         const nextSessionId =
           activeId && sessionList.some((session) => session.id === activeId)
@@ -297,30 +399,41 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         if (!nextSessionId) {
           setCurrentSessionId(null);
           setMessages([]);
+          setSessionHistoryStatus("idle");
+          setSessionHistoryError(null);
           setSelectedWorkflow(null);
           return;
         }
 
-        await _loadSession(
-          nextSessionId,
-          setMessages,
-          setCurrentSessionId,
-          setSelectedWorkflow
-        );
+        try {
+          await _loadSession(
+            nextSessionId,
+            {
+              currentSessionId: currentSessionIdRef.current,
+              messages: messagesRef.current,
+              selectedWorkflow: selectedWorkflowRef.current,
+            },
+            setMessages,
+            setCurrentSessionId,
+            setSelectedWorkflow,
+            setSessionHistoryStatus,
+            setSessionHistoryError,
+            getSessionHistoryErrorMessage
+          );
+        } catch (error) {
+          if (!cancelled) {
+            promoteInspectionScopeError(error);
+          }
+        }
       } catch (error) {
         if (!cancelled) {
-          setAccessByScope((current) => ({
-            ...current,
-            inspection: classifyAccessError(
-              "inspection",
-              error,
-              hasScopeBearerToken(apiAuthStateRef.current, "inspection")
-            ),
-          }));
-        }
-      } finally {
-        if (!cancelled) {
-          setIsSessionLoading(false);
+          setSessionListStatus("error");
+          setSessionListError(getSessionListErrorMessage(error));
+          if (currentSessionIdRef.current === null && messagesRef.current.length === 0) {
+            setSessionHistoryStatus("idle");
+            setSessionHistoryError(null);
+          }
+          promoteInspectionScopeError(error);
         }
       }
     };
@@ -330,7 +443,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [accessByScope.inspection.status, hasInspectionAccess, hasLoadedApiAuthState]);
+  }, [
+    accessByScope.inspection.status,
+    getSessionHistoryErrorMessage,
+    getSessionListErrorMessage,
+    hasInspectionAccess,
+    hasLoadedApiAuthState,
+    promoteInspectionScopeError,
+  ]);
 
   useEffect(() => {
     if (!hasLoadedApiAuthState || accessByScope.admin.status === "checking") {
@@ -380,28 +500,60 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (!isAccessGranted(accessByScope.inspection)) {
       return;
     }
+    setSessionListStatus("loading");
+    setSessionListError(null);
     try {
       const list = await api.listSessions();
       setSessions(list);
+      setSessionListStatus("ready");
     } catch (error) {
-      setAccessByScope((current) => ({
-        ...current,
-        inspection: classifyAccessError(
-          "inspection",
-          error,
-          hasScopeBearerToken(apiAuthStateRef.current, "inspection")
-        ),
-      }));
+      setSessionListStatus("error");
+      setSessionListError(getSessionListErrorMessage(error));
+      promoteInspectionScopeError(error);
     }
-  }, [accessByScope.inspection]);
+  }, [accessByScope.inspection, getSessionListErrorMessage, promoteInspectionScopeError]);
+
+  const reloadCurrentSession = useCallback(async () => {
+    if (!currentSessionId || !hasInspectionAccess) {
+      return;
+    }
+
+    try {
+      await _loadSession(
+        currentSessionId,
+        {
+          currentSessionId,
+          messages: messagesRef.current,
+          selectedWorkflow: selectedWorkflowRef.current,
+        },
+        setMessages,
+        setCurrentSessionId,
+        setSelectedWorkflow,
+        setSessionHistoryStatus,
+        setSessionHistoryError,
+        getSessionHistoryErrorMessage
+      );
+    } catch (error) {
+      promoteInspectionScopeError(error);
+    }
+  }, [
+    currentSessionId,
+    getSessionHistoryErrorMessage,
+    hasInspectionAccess,
+    promoteInspectionScopeError,
+  ]);
 
   const createSession = useCallback(async () => {
     if (isReferenceUploading || !hasExecutionAccess) return;
     const session = await api.createSession();
     setSessions((prev) => [session, ...prev]);
+    setSessionListStatus("ready");
+    setSessionListError(null);
     setCurrentSessionId(session.id);
     setWorkspaceModeState("sessions");
     setMessages([]);
+    setSessionHistoryStatus("ready");
+    setSessionHistoryError(null);
     setSelectedWorkflow(null);
     setAttachedIdentifiers([]);
     setDraftMessage("");
@@ -413,19 +565,37 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const selectSession = useCallback(async (id: string) => {
     if (isReferenceUploading || !hasInspectionAccess) return;
     if (id === currentSessionId) return;
-    setIsSessionLoading(true);
     try {
-      await _loadSession(id, setMessages, setCurrentSessionId, setSelectedWorkflow);
+      await _loadSession(
+        id,
+        {
+          currentSessionId,
+          messages: messagesRef.current,
+          selectedWorkflow: selectedWorkflowRef.current,
+        },
+        setMessages,
+        setCurrentSessionId,
+        setSelectedWorkflow,
+        setSessionHistoryStatus,
+        setSessionHistoryError,
+        getSessionHistoryErrorMessage
+      );
       setWorkspaceModeState("sessions");
       setAttachedIdentifiers([]);
       setDraftMessage("");
       setDraftRevision((prev) => prev + 1);
       setInspectorPreviewPath(null);
       setInspectorTabState("files");
-    } finally {
-      setIsSessionLoading(false);
+    } catch (error) {
+      promoteInspectionScopeError(error);
     }
-  }, [currentSessionId, hasInspectionAccess, isReferenceUploading]);
+  }, [
+    currentSessionId,
+    getSessionHistoryErrorMessage,
+    hasInspectionAccess,
+    isReferenceUploading,
+    promoteInspectionScopeError,
+  ]);
 
   const deleteSession = useCallback(
     async (id: string) => {
@@ -436,6 +606,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setCurrentSessionId(null);
         setWorkspaceModeState("sessions");
         setMessages([]);
+        setSessionHistoryStatus("idle");
+        setSessionHistoryError(null);
         setSelectedWorkflow(null);
         setAttachedIdentifiers([]);
         setDraftMessage("");
@@ -612,8 +784,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (!sessionId) {
         const session = await api.createSession();
         setSessions((prev) => [session, ...prev]);
+        setSessionListStatus("ready");
+        setSessionListError(null);
         setCurrentSessionId(session.id);
         setWorkspaceModeState("sessions");
+        setSessionHistoryStatus("ready");
+        setSessionHistoryError(null);
         sessionId = session.id;
       }
 
@@ -814,6 +990,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         isStreaming,
         isReferenceUploading,
         isSessionLoading,
+        sessionListStatus,
+        sessionListError,
+        sessionHistoryStatus,
+        sessionHistoryError,
         ragMode,
         canManageRagMode,
         workspaceMode,
@@ -824,6 +1004,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         inspectorTab,
         inspectorPreviewPath,
         refreshSessions,
+        reloadCurrentSession,
         refreshAccessState,
         createSession,
         selectSession,
@@ -927,20 +1108,62 @@ function _historyToMessages(raw: SessionHistoryMessage[]): Message[] {
     }));
 }
 
+interface SessionLoadSnapshot {
+  currentSessionId: string | null;
+  messages: Message[];
+  selectedWorkflow: string | null;
+}
+
+function getPreservedSessionLoadErrorMessage(baseMessage: string): string {
+  const trimmed = baseMessage.trim();
+  if (!trimmed) {
+    return "BioAPEX could not open that saved session, so the previous conversation is still in view.";
+  }
+  return `BioAPEX could not open that saved session, so the previous conversation is still in view. ${trimmed}`;
+}
+
 async function _loadSession(
   id: string,
+  snapshot: SessionLoadSnapshot,
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   setCurrentSessionId: React.Dispatch<React.SetStateAction<string | null>>,
-  setSelectedWorkflow: React.Dispatch<React.SetStateAction<string | null>>
+  setSelectedWorkflow: React.Dispatch<React.SetStateAction<string | null>>,
+  setSessionHistoryStatus: React.Dispatch<
+    React.SetStateAction<"idle" | "loading" | "ready" | "error">
+  >,
+  setSessionHistoryError: React.Dispatch<React.SetStateAction<string | null>>,
+  getErrorMessage: (error: unknown) => string
 ) {
-  setCurrentSessionId(id);
+  const hadPriorContext =
+    snapshot.currentSessionId !== null || snapshot.messages.length > 0;
+
+  setSessionHistoryStatus("loading");
+  setSessionHistoryError(null);
   try {
     const history = await api.getHistory(id);
     const messages = _historyToMessages(history);
+    setCurrentSessionId(id);
     setMessages(messages);
     setSelectedWorkflow(getLatestSelectedWorkflow(messages));
-  } catch {
-    setMessages([]);
-    setSelectedWorkflow(null);
+    setSessionHistoryStatus("ready");
+    setSessionHistoryError(null);
+  } catch (error) {
+    const nextErrorMessage =
+      hadPriorContext && snapshot.currentSessionId !== id
+        ? getPreservedSessionLoadErrorMessage(getErrorMessage(error))
+        : getErrorMessage(error);
+
+    if (hadPriorContext) {
+      setCurrentSessionId(snapshot.currentSessionId);
+      setMessages(snapshot.messages);
+      setSelectedWorkflow(snapshot.selectedWorkflow);
+    } else {
+      setCurrentSessionId(id);
+      setMessages([]);
+      setSelectedWorkflow(null);
+    }
+    setSessionHistoryStatus("error");
+    setSessionHistoryError(nextErrorMessage);
+    throw error;
   }
 }

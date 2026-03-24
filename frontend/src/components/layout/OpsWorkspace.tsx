@@ -37,6 +37,7 @@ import {
   validateConnectorRegistryEntry,
 } from "@/lib/api";
 import { classifyAccessError } from "@/lib/access-control";
+import { getScopedSurfaceErrorMessage } from "@/lib/surface-errors";
 import { useApp } from "@/lib/store";
 import type {
   AccessScope,
@@ -454,15 +455,13 @@ function getScopedAccessErrorMessage(
   error: unknown,
   fallbackMessage: string
 ): string {
-  const scopedState = classifyAccessError(scope, error, accessState.hasToken);
-  if (scopedState.status !== "unavailable") {
-    return scopedState.detail;
-  }
-
-  const rawMessage =
-    error instanceof Error ? error.message.trim() : fallbackMessage;
-  const compactMessage = compactText(rawMessage, 160);
-  return compactMessage || fallbackMessage;
+  return getScopedSurfaceErrorMessage(
+    scope,
+    accessState,
+    error,
+    fallbackMessage,
+    160
+  );
 }
 
 function getConnectorMutationErrorMessage(
@@ -1327,12 +1326,14 @@ function MetricRecordNavigator({
   status,
   metrics,
   error,
+  hasActiveFilters,
   selectedRecordId,
   onSelect,
 }: {
   status: OpsWorkspaceStatus;
   metrics: ObservabilityMetricRecord[];
   error: string | null;
+  hasActiveFilters: boolean;
   selectedRecordId: string | null;
   onSelect: (record: ObservabilityMetricRecord) => void;
 }) {
@@ -1349,7 +1350,11 @@ function MetricRecordNavigator({
             {error ?? "Could not load metric records right now."}
           </OpsStateCard>
         ) : metrics.length === 0 ? (
-          <OpsStateCard>No metric records matched the current filters.</OpsStateCard>
+          <OpsStateCard>
+            {hasActiveFilters
+              ? "No metric records match the active filters."
+              : "No metric records are available yet."}
+          </OpsStateCard>
         ) : (
           metrics.map((record) => {
             const active = record.record_id === selectedRecordId;
@@ -1491,12 +1496,14 @@ function TraceRecordNavigator({
   status,
   traces,
   error,
+  hasActiveFilters,
   selectedTraceKey,
   onSelect,
 }: {
   status: OpsWorkspaceStatus;
   traces: ObservabilityTraceRecord[];
   error: string | null;
+  hasActiveFilters: boolean;
   selectedTraceKey: string | null;
   onSelect: (record: ObservabilityTraceRecord) => void;
 }) {
@@ -1513,7 +1520,11 @@ function TraceRecordNavigator({
             {error ?? "Could not load trace records right now."}
           </OpsStateCard>
         ) : traces.length === 0 ? (
-          <OpsStateCard>No trace records matched the current filters.</OpsStateCard>
+          <OpsStateCard>
+            {hasActiveFilters
+              ? "No trace records match the active filters."
+              : "No trace records are available yet."}
+          </OpsStateCard>
         ) : (
           traces.map((record) => {
             const traceKey = `${record.trace_id}:${record.span_id}`;
@@ -1656,6 +1667,7 @@ function AuditEventNavigator({
   status,
   events,
   error,
+  hasActiveFilters,
   retentionPolicy,
   selectedEventId,
   onSelect,
@@ -1666,6 +1678,7 @@ function AuditEventNavigator({
   status: OpsWorkspaceStatus;
   events: AuditEventRecord[];
   error: string | null;
+  hasActiveFilters: boolean;
   retentionPolicy: RetentionPolicy | null;
   selectedEventId: string | null;
   onSelect: (record: AuditEventRecord) => void;
@@ -1722,7 +1735,11 @@ function AuditEventNavigator({
               {error ?? "Could not load audit events right now."}
             </OpsStateCard>
           ) : events.length === 0 ? (
-            <OpsStateCard>No audit events matched the current filters.</OpsStateCard>
+            <OpsStateCard>
+              {hasActiveFilters
+                ? "No audit events match the active filters."
+                : "No audit events are available yet."}
+            </OpsStateCard>
           ) : (
             events.map((record) => {
               const active = record.event_id === selectedEventId;
@@ -1958,6 +1975,7 @@ function AuditView({
   events,
   error,
   retentionPolicy,
+  hasActiveFilters,
   ignoredFilters,
   selectedEventId,
   onSelect,
@@ -1969,6 +1987,7 @@ function AuditView({
   events: AuditEventRecord[];
   error: string | null;
   retentionPolicy: RetentionPolicy | null;
+  hasActiveFilters: boolean;
   ignoredFilters: FilterChip[];
   selectedEventId: string | null;
   onSelect: (record: AuditEventRecord) => void;
@@ -2038,6 +2057,7 @@ function AuditView({
           status={status}
           events={events}
           error={error}
+          hasActiveFilters={hasActiveFilters}
           retentionPolicy={retentionPolicy}
           selectedEventId={selectedEventId}
           onSelect={onSelect}
@@ -2059,12 +2079,14 @@ function ConnectorRegistryNavigator({
   status,
   connectors,
   error,
+  hasNameFilter,
   selectedConnectorName,
   onSelect,
 }: {
   status: OpsWorkspaceStatus;
   connectors: ConnectorRegistryEntry[];
   error: string | null;
+  hasNameFilter: boolean;
   selectedConnectorName: string | null;
   onSelect: (connector: ConnectorRegistryEntry) => void;
 }) {
@@ -2081,7 +2103,11 @@ function ConnectorRegistryNavigator({
             {error ?? "Could not load the connector registry right now."}
           </OpsStateCard>
         ) : connectors.length === 0 ? (
-          <OpsStateCard>No connectors matched the current filters.</OpsStateCard>
+          <OpsStateCard>
+            {hasNameFilter
+              ? "No connectors match the active connector filter."
+              : "No connectors are registered yet."}
+          </OpsStateCard>
         ) : (
           connectors.map((connector) => {
             const active = connector.name === selectedConnectorName;
@@ -2840,6 +2866,7 @@ function ConnectorsView({
   listStatus,
   connectors,
   listError,
+  hasNameFilter,
   detailStatus,
   connector,
   detailError,
@@ -2869,6 +2896,7 @@ function ConnectorsView({
   listStatus: OpsWorkspaceStatus;
   connectors: ConnectorRegistryEntry[];
   listError: string | null;
+  hasNameFilter: boolean;
   detailStatus: OpsWorkspaceStatus;
   connector: ConnectorRegistryEntry | null;
   detailError: string | null;
@@ -2953,6 +2981,7 @@ function ConnectorsView({
           status={listStatus}
           connectors={connectors}
           error={listError}
+          hasNameFilter={hasNameFilter}
           selectedConnectorName={selectedConnectorName}
           onSelect={onSelect}
         />
@@ -4295,6 +4324,7 @@ export default function OpsWorkspace() {
             status={metricsStatus}
             metrics={metrics}
             error={metricsError}
+            hasActiveFilters={appliedFilterChips.length > 0}
             selectedRecordId={selectedMetricRecordId}
             onSelect={(record) => setSelectedMetricRecordId(record.record_id)}
           />
@@ -4312,6 +4342,7 @@ export default function OpsWorkspace() {
             status={tracesStatus}
             traces={traces}
             error={tracesError}
+            hasActiveFilters={appliedFilterChips.length > 0}
             selectedTraceKey={selectedTraceKey}
             onSelect={(record) => setSelectedTraceKey(`${record.trace_id}:${record.span_id}`)}
           />
@@ -4329,6 +4360,7 @@ export default function OpsWorkspace() {
           events={auditEvents}
           error={auditError}
           retentionPolicy={auditRetentionPolicy}
+          hasActiveFilters={appliedFilterChips.length > 0}
           ignoredFilters={ignoredFilterChips}
           selectedEventId={selectedAuditEventId}
           onSelect={(record) => setSelectedAuditEventId(record.event_id)}
@@ -4349,6 +4381,7 @@ export default function OpsWorkspace() {
           listStatus={connectorsStatus}
           connectors={filteredConnectors}
           listError={connectorsError}
+          hasNameFilter={appliedFilters.connectorName.trim().length > 0}
           detailStatus={connectorDetailStatus}
           connector={selectedConnector}
           detailError={connectorDetailError}

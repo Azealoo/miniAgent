@@ -3,12 +3,16 @@
 import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import {
   Check,
+  Clock3,
   Edit2,
   Plus,
+  RefreshCw,
   Search,
+  SearchX,
   Trash2,
   X,
 } from "lucide-react";
+import SurfaceState from "@/components/layout/SurfaceState";
 import { getOverallAccessSummary } from "@/lib/access-control";
 import { isWorkflowSelectionPending } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
@@ -113,12 +117,15 @@ export default function Sidebar() {
     sessions,
     currentSessionId,
     messages,
+    refreshSessions,
     createSession,
     selectSession,
     deleteSession,
     renameSession,
     isStreaming,
     isReferenceUploading,
+    sessionListStatus,
+    sessionListError,
     ragMode,
     canManageRagMode,
     workspaceMode,
@@ -394,19 +401,27 @@ export default function Sidebar() {
               </span>
             </div>
 
-            <div className="mt-2">
-              {focusItems.length === 0 ? (
-                <EmptyRailState>
-                  {workspaceMode === "flows"
-                    ? "No selected or recent workflow runs yet."
-                    : workspaceMode === "docs"
-                      ? "No working docs match this search."
-                      : workspaceMode === "files"
-                        ? "No generated files are visible in this session yet."
-                        : "No inspection views match this search."}
-                </EmptyRailState>
-              ) : (
-                focusItems.map((item) => {
+          <div className="mt-2">
+            {focusItems.length === 0 ? (
+              <EmptyRailState>
+                {workspaceMode === "flows"
+                  ? trimmedQuery
+                    ? `No workflow entries match "${trimmedQuery}".`
+                    : "No selected or recent workflow runs are available yet."
+                  : workspaceMode === "docs"
+                    ? trimmedQuery
+                      ? `No working docs match "${trimmedQuery}".`
+                      : "No working docs are loaded for this workspace yet."
+                    : workspaceMode === "files"
+                      ? trimmedQuery
+                        ? `No generated files match "${trimmedQuery}".`
+                        : "No generated files are visible in this session yet."
+                      : trimmedQuery
+                        ? `No inspection views match "${trimmedQuery}".`
+                        : "Choose an Ops view to inspect runtime health, traces, or connectors."}
+              </EmptyRailState>
+            ) : (
+              focusItems.map((item) => {
                   const previewPath = item.path;
 
                   return (
@@ -448,117 +463,171 @@ export default function Sidebar() {
           ) : null}
 
           <div className="mt-2">
-            {filteredSessions.length === 0 ? (
+            {accessByScope.inspection.status === "checking" ||
+            (sessionListStatus === "loading" && sessions.length === 0) ? (
+              <SurfaceState
+                compact
+                tone="accent"
+                eyebrow="Session Sync"
+                title="Loading saved sessions"
+                description="BioAPEX is checking inspection access and syncing the recent session rail."
+                icon={Clock3}
+              />
+            ) : sessionListStatus === "error" && filteredSessions.length === 0 ? (
+              <SurfaceState
+                compact
+                tone="error"
+                eyebrow="Session Rail"
+                title="Saved sessions are unavailable"
+                description={
+                  sessionListError ??
+                  "The sidebar could not load the saved session list right now."
+                }
+                actions={
+                  <RailActionButton onClick={() => void refreshSessions()}>
+                    <RefreshCw size={12} />
+                    Retry
+                  </RailActionButton>
+                }
+              />
+            ) : filteredSessions.length === 0 ? (
               <EmptyRailState>{sessionEmptyMessage}</EmptyRailState>
             ) : (
-              filteredSessions.map((session) => (
-                <div
-                  key={session.id}
-                  className={cn(
-                    "group border-b border-[rgba(211,219,210,0.8)] border-l-2 px-1 py-3 transition-colors last:border-b-0",
-                    session.id === currentSessionId
-                      ? "border-l-[var(--apex-accent)] bg-transparent"
-                      : "border-l-transparent bg-transparent hover:bg-white/35"
-                  )}
-                >
-                  {editingId === session.id ? (
-                    <div
-                      className="flex items-center gap-2"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <input
-                        autoFocus
-                        className="min-w-0 flex-1 rounded-[10px] border border-[var(--shell-border)] bg-white px-3 py-1.5 text-xs text-slate-700 outline-none focus:border-[var(--apex-accent)]"
-                        value={editTitle}
-                        onChange={(e) => setEditTitle(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") confirmEdit(session.id);
-                          if (e.key === "Escape") setEditingId(null);
-                        }}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => confirmEdit(session.id)}
-                        disabled={sessionMutationLocked}
-                        className="rounded-full p-1.5 text-[var(--apex-accent)] hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+              <div className="space-y-2">
+                {sessionListStatus === "loading" ? (
+                  <div className="rounded-[12px] border border-[rgba(211,219,210,0.88)] bg-white/78 px-3 py-2 text-[11px] leading-5 text-slate-500">
+                    Refreshing the recent session rail in the background.
+                  </div>
+                ) : null}
+
+                {sessionListStatus === "error" ? (
+                  <SurfaceState
+                    compact
+                    tone="error"
+                    eyebrow="Session Sync"
+                    title="Recent sessions may be stale"
+                    description={
+                      sessionListError ??
+                      "The latest session refresh failed, so the rail is showing the last successful snapshot."
+                    }
+                    actions={
+                      <RailActionButton onClick={() => void refreshSessions()}>
+                        <RefreshCw size={12} />
+                        Retry
+                      </RailActionButton>
+                    }
+                  />
+                ) : null}
+
+                {filteredSessions.map((session) => (
+                  <div
+                    key={session.id}
+                    className={cn(
+                      "group border-b border-[rgba(211,219,210,0.8)] border-l-2 px-1 py-3 transition-colors last:border-b-0",
+                      session.id === currentSessionId
+                        ? "border-l-[var(--apex-accent)] bg-transparent"
+                        : "border-l-transparent bg-transparent hover:bg-white/35"
+                    )}
+                  >
+                    {editingId === session.id ? (
+                      <div
+                        className="flex items-center gap-2"
+                        onClick={(e) => e.stopPropagation()}
                       >
-                        <Check size={12} />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditingId(null)}
-                        disabled={sessionMutationLocked}
-                        className="rounded-full p-1.5 text-slate-400 hover:text-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        <X size={12} />
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="flex items-start gap-2.5">
-                      <button
-                        type="button"
-                        onClick={() => handleSelect(session.id)}
-                        disabled={sessionSelectionLocked}
-                        className="min-w-0 flex flex-1 items-start gap-2.5 text-left disabled:cursor-not-allowed disabled:opacity-60"
-                        title={
-                          sessionSelectionLocked
-                            ? sessionSelectionLockTitle
-                            : undefined
-                        }
-                      >
-                        <div
-                          className={cn(
-                            "mt-1 h-2.5 w-2.5 flex-shrink-0 rounded-full",
-                            session.id === currentSessionId
-                              ? "bg-[var(--apex-accent)]"
-                              : "bg-slate-300"
-                          )}
+                        <input
+                          autoFocus
+                          className="min-w-0 flex-1 rounded-[10px] border border-[var(--shell-border)] bg-white px-3 py-1.5 text-xs text-slate-700 outline-none focus:border-[var(--apex-accent)]"
+                          value={editTitle}
+                          onChange={(e) => setEditTitle(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") confirmEdit(session.id);
+                            if (e.key === "Escape") setEditingId(null);
+                          }}
                         />
-
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-start justify-between gap-2">
-                            <p className="truncate text-sm font-medium text-slate-700">
-                              {session.title}
-                            </p>
-                            <span className="mt-0.5 flex-shrink-0 text-[10px] text-slate-400">
-                              {formatRelativeTime(session.updated_at)}
-                            </span>
-                          </div>
-                        </div>
-                      </button>
-
-                      <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
                         <button
                           type="button"
-                          onClick={(e) => startEdit(session.id, session.title, e)}
+                          onClick={() => confirmEdit(session.id)}
                           disabled={sessionMutationLocked}
-                          className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
-                          title={
-                            sessionMutationLocked
-                              ? sessionMutationLockTitle
-                              : "Rename session"
-                          }
+                          className="rounded-full p-1.5 text-[var(--apex-accent)] hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
                         >
-                          <Edit2 size={11} />
+                          <Check size={12} />
                         </button>
                         <button
                           type="button"
-                          onClick={(e) => handleDelete(session.id, e)}
+                          onClick={() => setEditingId(null)}
                           disabled={sessionMutationLocked}
-                          className="rounded-full p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-50"
-                          title={
-                            sessionMutationLocked
-                              ? sessionMutationLockTitle
-                              : "Delete session"
-                          }
+                          className="rounded-full p-1.5 text-slate-400 hover:text-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
                         >
-                          <Trash2 size={11} />
+                          <X size={12} />
                         </button>
                       </div>
-                    </div>
-                  )}
-                </div>
-              ))
+                    ) : (
+                      <div className="flex items-start gap-2.5">
+                        <button
+                          type="button"
+                          onClick={() => handleSelect(session.id)}
+                          disabled={sessionSelectionLocked}
+                          className="min-w-0 flex flex-1 items-start gap-2.5 text-left disabled:cursor-not-allowed disabled:opacity-60"
+                          title={
+                            sessionSelectionLocked
+                              ? sessionSelectionLockTitle
+                              : undefined
+                          }
+                        >
+                          <div
+                            className={cn(
+                              "mt-1 h-2.5 w-2.5 flex-shrink-0 rounded-full",
+                              session.id === currentSessionId
+                                ? "bg-[var(--apex-accent)]"
+                                : "bg-slate-300"
+                            )}
+                          />
+
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-start justify-between gap-2">
+                              <p className="truncate text-sm font-medium text-slate-700">
+                                {session.title}
+                              </p>
+                              <span className="mt-0.5 flex-shrink-0 text-[10px] text-slate-400">
+                                {formatRelativeTime(session.updated_at)}
+                              </span>
+                            </div>
+                          </div>
+                        </button>
+
+                        <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                          <button
+                            type="button"
+                            onClick={(e) => startEdit(session.id, session.title, e)}
+                            disabled={sessionMutationLocked}
+                            className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
+                            title={
+                              sessionMutationLocked
+                                ? sessionMutationLockTitle
+                                : "Rename session"
+                            }
+                          >
+                            <Edit2 size={11} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => handleDelete(session.id, e)}
+                            disabled={sessionMutationLocked}
+                            className="rounded-full p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-50"
+                            title={
+                              sessionMutationLocked
+                                ? sessionMutationLockTitle
+                                : "Delete session"
+                            }
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         </div>
@@ -582,6 +651,24 @@ export default function Sidebar() {
         </div>
       </div>
     </aside>
+  );
+}
+
+function RailActionButton({
+  children,
+  onClick,
+}: {
+  children: ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex items-center gap-2 rounded-full border border-[var(--shell-border)] bg-white/92 px-3 py-1.5 text-[11px] font-medium text-slate-600 transition-colors hover:bg-[var(--panel-soft)] hover:text-slate-800"
+    >
+      {children}
+    </button>
   );
 }
 
