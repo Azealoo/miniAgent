@@ -9,6 +9,7 @@ import {
   Gauge,
   LayoutDashboard,
   MessageSquare,
+  Microscope,
   Package,
   Route,
   ShieldCheck,
@@ -82,8 +83,28 @@ export const primaryNavItems: WorkspaceNavItem[] = [
   { id: "flows", label: "Flows", icon: FlaskConical },
   { id: "docs", label: "Docs", icon: BookOpen },
   { id: "files", label: "Files", icon: Files },
+  { id: "studies", label: "Studies", icon: Microscope },
   { id: "ops", label: "Ops", icon: Activity },
   { id: "artifacts", label: "Artifacts", icon: Package },
+];
+
+export const studiesWorkspaceSections: SurfaceItem[] = [
+  {
+    id: "studies-summaries",
+    label: "Study Summaries",
+    description:
+      "Browse derived study status, assay type, organism, privacy class, and artifact rollups.",
+    meta: "Derived list",
+    icon: Microscope,
+  },
+  {
+    id: "studies-preview",
+    label: "Selected Study",
+    description:
+      "Inspect the selected study summary shell and follow drill-through touchpoints from registry records.",
+    meta: "Preview shell",
+    icon: FileText,
+  },
 ];
 
 export const opsWorkspaceSections: SurfaceItem[] = [

@@ -9,13 +9,13 @@ export default defineConfig({
   reporter: "list",
   outputDir: "/tmp/bioapex-playwright-results",
   use: {
-    baseURL: "http://127.0.0.1:3000",
+    baseURL: "http://127.0.0.1:3100",
     headless: true,
     trace: "retain-on-failure",
   },
   webServer: {
-    command: `${condaBin}/npm run start -- --hostname 127.0.0.1 --port 3000`,
-    url: "http://127.0.0.1:3000",
+    command: `${condaBin}/npm run start:e2e -- --hostname 127.0.0.1 --port 3100`,
+    url: "http://127.0.0.1:3100",
     timeout: 120_000,
     reuseExistingServer: false,
     env: {

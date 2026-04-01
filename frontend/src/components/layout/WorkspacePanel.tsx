@@ -14,9 +14,11 @@ import {
   FlaskConical,
   FolderOpen,
   MessageSquare,
+  Microscope,
   Package,
   Plus,
   Sparkles,
+  SearchX,
   type LucideIcon,
 } from "lucide-react";
 import ChatPanel from "@/components/chat/ChatPanel";
@@ -51,6 +53,7 @@ import { useApp } from "@/lib/store";
 import {
   getFilesWorkspaceSummary,
   getFlowsWorkspaceSummary,
+  getStudiesWorkspaceSummary,
   listArtifactRegistry,
   openRawFileInNewTab,
   readFile,
@@ -61,6 +64,8 @@ import type {
   FilesWorkspaceItem,
   FlowsWorkspaceStatus,
   FlowsWorkspaceSummaryItem,
+  StudiesWorkspaceResponse,
+  StudySummary,
 } from "@/lib/types";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import {
@@ -71,6 +76,7 @@ import {
   parseWorkspaceDocument,
   type ParsedWorkspaceDocument,
   summarizeFlowsWorkspaceStatus,
+  matchesQuery,
   workspaceDocs,
   type WorkspaceDocument,
 } from "./workspace-data";
@@ -78,8 +84,8 @@ import {
 type DocsWorkspaceStatus = "loading" | "ready" | "error";
 type FilesWorkspaceStatus = "idle" | "loading" | "ready" | "error";
 type ArtifactRegistryWorkspaceStatus = "loading" | "ready" | "error";
-
-const EMPTY_ARTIFACT_REGISTRY_RECORDS: ArtifactRegistryRecord[] = [];
+type StudiesWorkspaceStatus = "loading" | "ready" | "error";
+type StudySortKey = "latest_activity" | "title" | "run_count";
 
 interface LoadedWorkspaceDocument extends WorkspaceDocument {
   parsed: ParsedWorkspaceDocument;
@@ -92,6 +98,9 @@ interface WorkspaceDocumentFailure extends WorkspaceDocument {
 type DocsNavigatorEntry =
   | { kind: "loaded"; document: LoadedWorkspaceDocument }
   | { kind: "failed"; document: WorkspaceDocumentFailure };
+
+const EMPTY_ARTIFACT_REGISTRY_RECORDS: ArtifactRegistryRecord[] = [];
+const EMPTY_STUDY_SUMMARIES: StudySummary[] = [];
 
 function humanizeToken(value?: string | null): string | null {
   if (!value) return null;
@@ -191,6 +200,77 @@ function shortRunLabel(runId?: string | null): string {
   return `${runId.slice(0, 18)}…${runId.slice(-5)}`;
 }
 
+function parseStudyTimestamp(value?: string | null): number {
+  if (!value) {
+    return 0;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function formatStudyTimestampLabel(value?: string | null): string {
+  if (!value) {
+    return "No activity yet";
+  }
+
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) {
+    return value;
+  }
+
+  return formatRelativeTime(parsed / 1000);
+}
+
+function sortStudies(
+  items: StudySummary[],
+  sortKey: StudySortKey
+): StudySummary[] {
+  const sorted = [...items];
+
+  sorted.sort((left, right) => {
+    if (sortKey === "title") {
+      return left.title.localeCompare(right.title) || left.study_id.localeCompare(right.study_id);
+    }
+
+    if (sortKey === "run_count") {
+      return (
+        right.run_count - left.run_count ||
+        left.title.localeCompare(right.title) ||
+        left.study_id.localeCompare(right.study_id)
+      );
+    }
+
+    const leftTimestamp = parseStudyTimestamp(left.latest_activity_at);
+    const rightTimestamp = parseStudyTimestamp(right.latest_activity_at);
+    return (
+      rightTimestamp - leftTimestamp ||
+      left.title.localeCompare(right.title) ||
+      left.study_id.localeCompare(right.study_id)
+    );
+  });
+
+  return sorted;
+}
+
+function studyMatchesQuery(study: StudySummary, query: string): boolean {
+  return matchesQuery(
+    query,
+    study.study_id,
+    study.title,
+    study.assay_type,
+    study.organism,
+    study.privacy_classification,
+    study.active_run_state,
+    study.evidence_state,
+    study.compliance_state,
+    study.qa_state,
+    study.export_available ? "export available" : "no export",
+    String(study.run_count),
+    formatStudyTimestampLabel(study.latest_activity_at)
+  );
+}
+
 function WorkspaceBadge({
   icon: Icon,
   children,
@@ -236,7 +316,7 @@ function WorkspaceShell({
   mode,
 }: {
   children: ReactNode;
-  mode: "flows" | "docs" | "files" | "artifacts";
+  mode: "flows" | "docs" | "files" | "studies" | "artifacts";
 }) {
   const backgroundClass =
     mode === "flows"
@@ -245,6 +325,8 @@ function WorkspaceShell({
         ? "bg-[linear-gradient(180deg,rgba(250,251,248,0.98)_0%,rgba(246,248,243,0.94)_100%)]"
         : mode === "files"
           ? "bg-[linear-gradient(180deg,rgba(248,250,247,0.98)_0%,rgba(243,246,242,0.94)_100%)]"
+          : mode === "studies"
+            ? "bg-[linear-gradient(180deg,rgba(248,250,247,0.98)_0%,rgba(243,246,242,0.94)_100%)]"
           : "bg-[linear-gradient(180deg,rgba(250,249,245,0.98)_0%,rgba(245,244,238,0.95)_100%)]";
 
   return (
@@ -2363,7 +2445,321 @@ function ArtifactRegistryDetailPane({
   );
 }
 
-function ArtifactsWorkspace() {
+function StudySummaryRow({
+  study,
+  active,
+  onSelect,
+}: {
+  study: StudySummary;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  const containerClass = cn(
+    "group w-full border-b border-[rgba(211,219,210,0.8)] border-l-2 px-1 py-3 text-left transition-colors last:border-b-0",
+    active
+      ? "border-l-[var(--apex-accent)] bg-transparent"
+      : "border-l-transparent bg-transparent hover:bg-white/35"
+  );
+
+  return (
+    <button
+      type="button"
+      aria-label={`Select study ${study.title}`}
+      aria-pressed={active}
+      onClick={onSelect}
+      className={containerClass}
+    >
+      <div className="flex items-start gap-2.5">
+        <div
+          className={cn(
+            "mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-[8px]",
+            active
+              ? "bg-[var(--apex-accent-soft)] text-[var(--apex-accent-strong)]"
+              : "bg-transparent text-slate-400"
+          )}
+        >
+          <Microscope size={14} />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <p
+                className={cn(
+                  "truncate text-sm font-medium",
+                  active ? "text-slate-800" : "text-slate-700"
+                )}
+              >
+                {study.title}
+              </p>
+              <p className="mt-0.5 truncate text-[10px] text-slate-400">
+                {study.study_id}
+              </p>
+            </div>
+            <span className="text-[10px] uppercase tracking-[0.14em] text-slate-400">
+              {active ? "Selected" : "Open"}
+            </span>
+          </div>
+
+          <p className="mt-1 text-[11px] leading-5 text-slate-500">
+            {study.assay_type} · {study.organism}
+          </p>
+          <p className="mt-1 text-[11px] leading-5 text-slate-500">
+            Privacy: {study.privacy_classification}
+          </p>
+          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-400">
+            <span>Runs: {study.run_count}</span>
+            <span>Updated: {formatStudyTimestampLabel(study.latest_activity_at)}</span>
+            <span>Export: {study.export_available ? "Available" : "Unavailable"}</span>
+          </div>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function StudySummaryNavigatorCard({
+  status,
+  studies,
+  selectedStudyId,
+  onSelect,
+  error,
+}: {
+  status: StudiesWorkspaceStatus;
+  studies: StudySummary[];
+  selectedStudyId: string | null;
+  onSelect: (study: StudySummary) => void;
+  error: string | null;
+}) {
+  return (
+    <div className="rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/92 p-3 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
+      <div className="border-b border-[rgba(211,219,210,0.72)] px-1 pb-3">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+          Study Browser
+        </p>
+        <p className="mt-1 text-sm leading-6 text-slate-500">
+          Study summaries are derived directly from the backend response so the list can be
+          scanned without depending on chat history.
+        </p>
+      </div>
+
+      <div className="mt-3 space-y-2">
+        {status === "loading" ? (
+          <WorkspaceStateCard>Loading study summaries…</WorkspaceStateCard>
+        ) : status === "error" ? (
+          <WorkspaceStateCard tone="error">
+            {error ?? "Unable to load study summaries right now."}
+          </WorkspaceStateCard>
+        ) : studies.length === 0 ? (
+          <WorkspaceStateCard>
+            No study summaries match the current search or sort filters.
+          </WorkspaceStateCard>
+        ) : (
+          studies.map((study) => (
+            <StudySummaryRow
+              key={study.study_id}
+              study={study}
+              active={study.study_id === selectedStudyId}
+              onSelect={() => onSelect(study)}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StudySummaryDetailPane({
+  status,
+  study,
+  error,
+}: {
+  status: StudiesWorkspaceStatus;
+  study: StudySummary | null;
+  error: string | null;
+}) {
+  return (
+    <div className="flex min-h-[32rem] flex-col rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/94 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
+      <div className="border-b border-[rgba(211,219,210,0.72)] px-5 py-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-3xl">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Selected Study
+            </p>
+            <h3 className="mt-2 text-[1.4rem] font-semibold tracking-[-0.03em] text-slate-900">
+              {study ? study.title : "Select a study"}
+            </h3>
+            <p className="mt-2 text-sm leading-6 text-slate-500">
+              {study
+                ? "This preview shell is backed by the summary contract only. It surfaces the derived states, counts, and identifiers already available in this slice."
+                : "Choose a study from the summary list or jump in from an artifact registry record with a dataset_id to inspect the preview shell."}
+            </p>
+            {study?.study_id ? (
+              <p className="mt-2 break-all text-[11px] text-slate-400">{study.study_id}</p>
+            ) : null}
+          </div>
+        </div>
+
+        {study ? (
+          <div className="mt-4 flex flex-wrap gap-2">
+            <WorkspaceBadge icon={Microscope}>{study.study_id}</WorkspaceBadge>
+            <WorkspaceBadge icon={FlaskConical}>{humanizeToken(study.active_run_state) ?? "Run"}</WorkspaceBadge>
+            <WorkspaceBadge icon={BookOpen}>{humanizeToken(study.evidence_state) ?? "Evidence"}</WorkspaceBadge>
+            <WorkspaceBadge icon={Files}>{study.export_available ? "Export ready" : "No export"}</WorkspaceBadge>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+        {status === "loading" ? (
+          <WorkspaceStateCard>Loading study summary data…</WorkspaceStateCard>
+        ) : status === "error" ? (
+          <WorkspaceStateCard tone="error">
+            {error ?? "Unable to load this study summary right now."}
+          </WorkspaceStateCard>
+        ) : !study ? (
+          <WorkspaceStateCard>
+            Select a study from the list to inspect the backend-derived dossier shell and artifact counts.
+          </WorkspaceStateCard>
+        ) : (
+          <div className="space-y-4">
+            <section className="rounded-[20px] border border-[rgba(211,219,210,0.88)] bg-[linear-gradient(180deg,rgba(250,251,248,0.97),rgba(255,255,255,0.98))] p-4 shadow-[0_8px_20px_rgba(29,42,33,0.03)]">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Study Fields
+              </p>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Assay Type
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-slate-900">{study.assay_type}</p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Organism
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-slate-900">{study.organism}</p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Privacy
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-slate-900">
+                    {study.privacy_classification}
+                  </p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Latest Activity
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-slate-900">
+                    {formatStudyTimestampLabel(study.latest_activity_at)}
+                  </p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Run Count
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-slate-900">{study.run_count}</p>
+                </div>
+                <div className="rounded-[16px] border border-[rgba(214,221,212,0.86)] bg-white/92 px-4 py-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Export
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-slate-900">
+                    {study.export_available ? "Available" : "Unavailable"}
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            <section className="rounded-[20px] border border-[rgba(211,219,210,0.88)] bg-[linear-gradient(180deg,rgba(250,251,248,0.97),rgba(255,255,255,0.98))] p-4 shadow-[0_8px_20px_rgba(29,42,33,0.03)]">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Backend-Derived States
+              </p>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <SummaryCard
+                  label="Active Run"
+                  value={humanizeToken(study.active_run_state) ?? "Not started"}
+                  detail="Derived from the newest workflow_run lifecycle status."
+                />
+                <SummaryCard
+                  label="Evidence"
+                  value={humanizeToken(study.evidence_state) ?? "Not started"}
+                  detail="Derived from the newest evidence_review review status."
+                />
+                <SummaryCard
+                  label="Compliance"
+                  value={humanizeToken(study.compliance_state) ?? "Not started"}
+                  detail="Derived from the newest compliance_report runtime state."
+                />
+                <SummaryCard
+                  label="QA"
+                  value={humanizeToken(study.qa_state) ?? "Not started"}
+                  detail="Derived from the newest QA or checklist result."
+                />
+              </div>
+            </section>
+
+            <section className="rounded-[20px] border border-[rgba(211,219,210,0.88)] bg-[linear-gradient(180deg,rgba(250,251,248,0.97),rgba(255,255,255,0.98))] p-4 shadow-[0_8px_20px_rgba(29,42,33,0.03)]">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                Artifact Counts
+              </p>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <SummaryCard
+                  label="Dataset Manifests"
+                  value={String(study.artifact_counts.dataset_manifests)}
+                  detail="Canonical study manifest records."
+                />
+                <SummaryCard
+                  label="Workflow Runs"
+                  value={String(study.artifact_counts.workflow_runs)}
+                  detail="Workflow executions tied to this study."
+                />
+                <SummaryCard
+                  label="Evidence Reviews"
+                  value={String(study.artifact_counts.evidence_reviews)}
+                  detail="Evidence synthesis artifacts in the study set."
+                />
+                <SummaryCard
+                  label="Claim Graphs"
+                  value={String(study.artifact_counts.claim_graphs)}
+                  detail="Claim-graph outputs linked to this study."
+                />
+                <SummaryCard
+                  label="Compliance Reports"
+                  value={String(study.artifact_counts.compliance_reports)}
+                  detail="Compliance review artifacts for this study."
+                />
+                <SummaryCard
+                  label="QA Reports"
+                  value={String(study.artifact_counts.qa_reports)}
+                  detail="Quality-assurance artifacts and reports."
+                />
+                <SummaryCard
+                  label="Checklist Results"
+                  value={String(study.artifact_counts.checklist_results)}
+                  detail="Checklist outputs mapped to the study."
+                />
+                <SummaryCard
+                  label="Exports"
+                  value={String(study.artifact_counts.exports)}
+                  detail="Generated exports and archives."
+                />
+              </div>
+            </section>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ArtifactsWorkspace({
+  onOpenStudy,
+}: {
+  onOpenStudy: (studyId: string) => void;
+}) {
   const {
     workspaceMode,
     inspectorPreviewPath,
@@ -2466,6 +2862,10 @@ function ArtifactsWorkspace() {
     registryRecords.find((record) => record.path === selectedArtifactPath) ??
     registryRecords[0] ??
     null;
+  const drillThroughStudyId =
+    selectedRecord?.dataset_id ??
+    registryRecords.find((record) => record.dataset_id)?.dataset_id ??
+    null;
   const hasActiveFilters = artifactRegistryHasActiveFilters(filters);
   const generatedAtLabel = formatArtifactRegistryGeneratedAt(
     lookup?.generated_at ?? null
@@ -2494,6 +2894,12 @@ function ArtifactsWorkspace() {
         }
         actions={
           <>
+            {drillThroughStudyId ? (
+              <WorkspaceAction onClick={() => onOpenStudy(drillThroughStudyId)} tone="accent">
+                <Microscope size={12} />
+                Open Related Study
+              </WorkspaceAction>
+            ) : null}
             {selectedRecord?.path ? (
               <WorkspaceAction
                 onClick={() => openInspectorPath(selectedRecord.path)}
@@ -2613,8 +3019,228 @@ function ArtifactsWorkspace() {
   );
 }
 
+function StudiesWorkspace({
+  selectedStudyId,
+  onSelectStudy,
+}: {
+  selectedStudyId: string | null;
+  onSelectStudy: (studyId: string | null) => void;
+}) {
+  const { setWorkspaceMode } = useApp();
+  const [query, setQuery] = useState("");
+  const [sortKey, setSortKey] = useState<StudySortKey>("latest_activity");
+  const [workspaceStatus, setWorkspaceStatus] =
+    useState<StudiesWorkspaceStatus>("loading");
+  const [workspaceResponse, setWorkspaceResponse] =
+    useState<StudiesWorkspaceResponse | null>(null);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setWorkspaceStatus("loading");
+    setWorkspaceError(null);
+
+    void getStudiesWorkspaceSummary()
+      .then((response) => {
+        if (!active) return;
+
+        setWorkspaceResponse(response);
+        setWorkspaceStatus("ready");
+      })
+      .catch((studyError) => {
+        if (!active) return;
+
+        setWorkspaceResponse(null);
+        setWorkspaceStatus("error");
+        setWorkspaceError(
+          studyError instanceof Error
+            ? studyError.message
+            : "Unable to load study summaries right now."
+        );
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const studies = workspaceResponse?.items ?? EMPTY_STUDY_SUMMARIES;
+  const visibleStudies = sortStudies(
+    studies.filter((study) => studyMatchesQuery(study, query)),
+    sortKey
+  );
+  const selectedStudy =
+    studies.find((study) => study.study_id === selectedStudyId) ?? null;
+  const exportReadyCount = studies.filter((study) => study.export_available).length;
+
+  useEffect(() => {
+    if (workspaceStatus !== "ready") {
+      return;
+    }
+
+    if (selectedStudyId || studies.length === 0) {
+      return;
+    }
+
+    onSelectStudy(studies[0].study_id);
+  }, [onSelectStudy, selectedStudyId, studies, workspaceStatus]);
+
+  const sortLabel =
+    sortKey === "latest_activity"
+      ? "Latest activity"
+      : sortKey === "title"
+        ? "Title"
+        : "Run count";
+
+  const handleSelectStudy = (study: StudySummary) => {
+    onSelectStudy(study.study_id);
+  };
+
+  return (
+    <WorkspaceShell mode="studies">
+      <WorkspaceHero
+        icon={Microscope}
+        title="Studies"
+        description="Browse the additive /api/studies summary response and inspect derived study states, counts, and drill-through touchpoints without inferring anything from chat history."
+        badges={
+          <>
+            <WorkspaceBadge icon={Microscope}>
+              {workspaceStatus === "loading"
+                ? "Loading"
+                : `${visibleStudies.length} visible`}
+            </WorkspaceBadge>
+            <WorkspaceBadge icon={Sparkles}>{sortLabel}</WorkspaceBadge>
+            <WorkspaceBadge icon={Files}>
+              {selectedStudy ? selectedStudy.title : "No selection"}
+            </WorkspaceBadge>
+          </>
+        }
+        actions={
+          <WorkspaceAction onClick={() => setWorkspaceMode("sessions")}>
+            <MessageSquare size={12} />
+            Return To Session
+          </WorkspaceAction>
+        }
+      />
+
+      <section className="rounded-[22px] border border-[rgba(211,219,210,0.9)] bg-white/92 p-4 shadow-[0_8px_24px_rgba(29,42,33,0.04)]">
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_18rem]">
+          <label className="block">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Search studies
+            </span>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by study, assay, organism, privacy, or state"
+              className="mt-2 w-full rounded-[14px] border border-[var(--shell-border)] bg-white px-4 py-2 text-sm text-slate-700 outline-none placeholder:text-slate-400 focus:border-[var(--apex-accent)]"
+            />
+          </label>
+
+          <label className="block">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Sort studies
+            </span>
+            <select
+              value={sortKey}
+              onChange={(e) => setSortKey(e.target.value as StudySortKey)}
+              className="mt-2 w-full rounded-[14px] border border-[var(--shell-border)] bg-white px-4 py-2 text-sm text-slate-700 outline-none focus:border-[var(--apex-accent)]"
+            >
+              <option value="latest_activity">Latest activity</option>
+              <option value="title">Title</option>
+              <option value="run_count">Run count</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        <SummaryCard
+          label="Visible Studies"
+          value={
+            workspaceStatus === "loading"
+              ? "Loading"
+              : workspaceStatus === "error"
+                ? "Issue"
+                : `${visibleStudies.length}`
+          }
+          detail="Client-side search and sort stay local to the workspace shell."
+        />
+        <SummaryCard
+          label="Selected Study"
+          value={selectedStudy ? selectedStudy.title : "None"}
+          detail="Selection is local to this workspace and can be drilled into from artifact registry records."
+        />
+        <SummaryCard
+          label="Export Ready"
+          value={
+            workspaceStatus === "loading"
+              ? "Loading"
+              : workspaceStatus === "error"
+                ? "Issue"
+                : `${exportReadyCount}`
+          }
+          detail="This count is derived from the backend summary payload, not a frontend inference."
+        />
+      </div>
+
+      {workspaceStatus === "loading" ? (
+        <WorkspaceStateCard>Loading study summaries…</WorkspaceStateCard>
+      ) : workspaceStatus === "error" ? (
+        <WorkspaceStateCard tone="error">
+          {workspaceError ?? "Unable to load study summaries right now."}
+        </WorkspaceStateCard>
+      ) : studies.length === 0 ? (
+        <EmptyWorkspaceState
+          title="No study summaries are available"
+          description="The /api/studies response returned no items yet. Once the backend starts returning dataset-backed summaries, they will appear here."
+          action={
+            <WorkspaceAction onClick={() => setWorkspaceMode("sessions")} tone="accent">
+              <MessageSquare size={12} />
+              Return To Session
+            </WorkspaceAction>
+          }
+        />
+      ) : visibleStudies.length === 0 ? (
+        <EmptyWorkspaceState
+          title="No studies match the current search"
+          description="Clear the query to restore the full study summary list or use a broader term."
+          action={
+            <WorkspaceAction onClick={() => setQuery("")} tone="accent">
+              <SearchX size={12} />
+              Clear Search
+            </WorkspaceAction>
+          }
+        />
+      ) : (
+        <div className="grid min-h-0 gap-4 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
+          <StudySummaryNavigatorCard
+            status={workspaceStatus}
+            studies={visibleStudies}
+            selectedStudyId={selectedStudyId}
+            onSelect={handleSelectStudy}
+            error={workspaceError}
+          />
+
+          <StudySummaryDetailPane
+            status={workspaceStatus}
+            study={selectedStudy}
+            error={workspaceError}
+          />
+        </div>
+      )}
+    </WorkspaceShell>
+  );
+}
+
 export default function WorkspacePanel() {
-  const { workspaceMode } = useApp();
+  const { workspaceMode, setWorkspaceMode } = useApp();
+  const [selectedStudyId, setSelectedStudyId] = useState<string | null>(null);
+
+  const handleOpenStudy = (studyId: string) => {
+    setSelectedStudyId(studyId);
+    setWorkspaceMode("studies");
+  };
 
   return (
     <div className="relative h-full">
@@ -2628,8 +3254,16 @@ export default function WorkspacePanel() {
       {workspaceMode === "flows" ? <FlowsWorkspace /> : null}
       {workspaceMode === "docs" ? <DocsWorkspace /> : null}
       {workspaceMode === "files" ? <FilesWorkspace /> : null}
+      {workspaceMode === "studies" ? (
+        <StudiesWorkspace
+          selectedStudyId={selectedStudyId}
+          onSelectStudy={setSelectedStudyId}
+        />
+      ) : null}
       {workspaceMode === "ops" ? <OpsWorkspace /> : null}
-      {workspaceMode === "artifacts" ? <ArtifactsWorkspace /> : null}
+      {workspaceMode === "artifacts" ? (
+        <ArtifactsWorkspace onOpenStudy={handleOpenStudy} />
+      ) : null}
     </div>
   );
 }

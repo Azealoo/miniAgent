@@ -33,10 +33,13 @@ import type {
   SessionCompressionResponse,
   SessionHistoryMessage,
   SessionTitleResponse,
+  StudiesWorkspaceResponse,
   Skill,
   SkillRegistryEntry,
   SkillRegistryUpdateRequest,
   SkillRegistryUpdateResponse,
+  StudyArtifactCounts,
+  StudySummary,
   TokenStats,
   ToolResultEnvelope,
   WorkflowStreamEvent,
@@ -453,6 +456,90 @@ function validateFlowsWorkspaceSummary(
   return response as unknown as FlowsWorkspaceSummaryResponse;
 }
 
+function validateStudyArtifactCounts(
+  value: unknown,
+  path: string,
+  label: string
+): StudyArtifactCounts {
+  const counts = expectObject(value, path, label);
+  expectNumberField(counts, "dataset_manifests", path, label);
+  expectNumberField(counts, "workflow_runs", path, label);
+  expectNumberField(counts, "evidence_reviews", path, label);
+  expectNumberField(counts, "claim_graphs", path, label);
+  expectNumberField(counts, "compliance_reports", path, label);
+  expectNumberField(counts, "qa_reports", path, label);
+  expectNumberField(counts, "checklist_results", path, label);
+  expectNumberField(counts, "exports", path, label);
+  return counts as unknown as StudyArtifactCounts;
+}
+
+function validateStudySummary(value: unknown, path: string, label: string): StudySummary {
+  const summary = expectObject(value, path, label);
+  expectStringField(summary, "study_id", path, label);
+  expectStringField(summary, "title", path, label);
+  expectStringField(summary, "assay_type", path, label);
+  expectStringField(summary, "organism", path, label);
+  expectStringField(summary, "privacy_classification", path, label);
+  if (
+    "latest_activity_at" in summary &&
+    summary.latest_activity_at !== null &&
+    typeof summary.latest_activity_at !== "string"
+  ) {
+    throw createPayloadError(path, label, 'Expected "latest_activity_at" to be a string or null.');
+  }
+  expectNumberField(summary, "run_count", path, label);
+  expectStringLiteralField(
+    summary,
+    "active_run_state",
+    path,
+    label,
+    ["not_started", "active", "blocked", "failed", "completed"] as const
+  );
+  expectStringLiteralField(
+    summary,
+    "evidence_state",
+    path,
+    label,
+    ["not_started", "supported", "mixed", "insufficient_evidence"] as const
+  );
+  expectStringLiteralField(
+    summary,
+    "compliance_state",
+    path,
+    label,
+    [
+      "not_started",
+      "allowed",
+      "warning_issued",
+      "approval_required",
+      "approved_override",
+      "blocked",
+    ] as const
+  );
+  expectStringLiteralField(
+    summary,
+    "qa_state",
+    path,
+    label,
+    ["not_started", "passed", "warning", "failed", "blocked"] as const
+  );
+  expectBooleanField(summary, "export_available", path, label);
+  validateStudyArtifactCounts(summary.artifact_counts, path, `${label} artifact counts`);
+  return summary as unknown as StudySummary;
+}
+
+function validateStudiesWorkspaceResponse(
+  value: unknown,
+  path: string
+): StudiesWorkspaceResponse {
+  const response = expectObject(value, path, "the studies workspace");
+  const items = expectArrayField(response, "items", path, "the studies workspace");
+  items.forEach((item, index) =>
+    validateStudySummary(item, path, `study summary ${index + 1}`)
+  );
+  return response as unknown as StudiesWorkspaceResponse;
+}
+
 function validateFilesWorkspaceSummary(
   value: unknown,
   path: string
@@ -799,6 +886,12 @@ export const getFilesWorkspaceSummary = async (sessionId: string) =>
       `/api/sessions/${encodeURIComponent(sessionId)}/files/summary`
     ),
     `/api/sessions/${encodeURIComponent(sessionId)}/files/summary`
+  );
+
+export const getStudiesWorkspaceSummary = async () =>
+  validateStudiesWorkspaceResponse(
+    await inspectReq<unknown>("/api/studies"),
+    "/api/studies"
   );
 
 export const readFile = async (path: string) =>

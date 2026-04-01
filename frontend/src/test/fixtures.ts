@@ -6,7 +6,9 @@ import type {
   JsonValue,
   Session,
   SessionHistoryMessage,
+  StudyArtifactCounts,
   SkillRegistryEntry,
+  StudySummary,
   TokenStats,
   ToolResultEnvelope,
   WorkflowArtifactEvent,
@@ -280,6 +282,38 @@ export function makeArtifactRegistryRecord(
     status: "valid",
     error: null,
     indexed_at: "2026-03-24T18:06:00Z",
+    ...overrides,
+  };
+}
+
+export function makeStudySummary(
+  overrides: Partial<StudySummary> = {}
+): StudySummary {
+  const artifactCounts: StudyArtifactCounts = {
+    dataset_manifests: 1,
+    workflow_runs: 2,
+    evidence_reviews: 1,
+    claim_graphs: 1,
+    compliance_reports: 1,
+    qa_reports: 1,
+    checklist_results: 0,
+    exports: 1,
+  };
+
+  return {
+    study_id: "dataset-alpha",
+    title: "Alpha Cohort",
+    assay_type: "RNA-seq",
+    organism: "Homo sapiens",
+    privacy_classification: "restricted",
+    latest_activity_at: "2026-03-24T19:20:00Z",
+    run_count: 2,
+    active_run_state: "completed",
+    evidence_state: "supported",
+    compliance_state: "allowed",
+    qa_state: "passed",
+    export_available: true,
+    artifact_counts: artifactCounts,
     ...overrides,
   };
 }

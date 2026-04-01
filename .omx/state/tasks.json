@@ -1,0 +1,136 @@
+[
+  {
+    "id": "task_f7ba8d62-7cd",
+    "title": "Backend slice: implement GET /api/studies study aggregation read model route registration and backend tests only.",
+    "kind": "team",
+    "phase": "default",
+    "status": "review",
+    "priority": "high",
+    "verify": [],
+    "notes": [
+      "Implemented additive GET /api/studies derived read-model route registration and backend tests in backend/api/studies.py backend/graph/studies_workspace.py backend/app.py and backend/tests/test_studies_api.py. Verified: pytest tests/test_studies_api.py -q (4 passed); pytest tests/test_api_health.py -q -k 'health_returns_ok or app_import_does_not_require_tiktoken' (2 passed, 68 deselected); frontend npm run typecheck passed; frontend npm test -- src/test/app-shell.contract.test.tsx (6 passed)."
+    ],
+    "metadata": {},
+    "dependencies": [],
+    "blockers": [],
+    "reviewStatus": "pending",
+    "history": [
+      {
+        "status": "pending",
+        "at": "2026-04-01T19:10:59.264Z",
+        "note": "task created"
+      },
+      {
+        "status": "queued",
+        "at": "2026-04-01T19:10:59.266Z"
+      },
+      {
+        "status": "in_progress",
+        "at": "2026-04-01T19:11:06.163Z",
+        "by": "executor"
+      },
+      {
+        "status": "review",
+        "at": "2026-04-01T19:46:44.283Z",
+        "by": "executor",
+        "note": "Implemented additive GET /api/studies derived read-model route registration and backend tests in backend/api/studies.py backend/graph/studies_workspace.py backend/app.py and backend/tests/test_studies_api.py. Verified: pytest tests/test_studies_api.py -q (4 passed); pytest tests/test_api_health.py -q -k 'health_returns_ok or app_import_does_not_require_tiktoken' (2 passed, 68 deselected); frontend npm run typecheck passed; frontend npm test -- src/test/app-shell.contract.test.tsx (6 passed)."
+      }
+    ],
+    "createdAt": "2026-04-01T19:10:59.264Z",
+    "updatedAt": "2026-04-01T19:46:44.283Z",
+    "owner": "executor",
+    "claimedAt": "2026-04-01T19:11:06.162Z",
+    "result": "Implemented additive GET /api/studies derived read-model route registration and backend tests in backend/api/studies.py backend/graph/studies_workspace.py backend/app.py and backend/tests/test_studies_api.py. Verified: pytest tests/test_studies_api.py -q (4 passed); pytest tests/test_api_health.py -q -k 'health_returns_ok or app_import_does_not_require_tiktoken' (2 passed, 68 deselected); frontend npm run typecheck passed; frontend npm test -- src/test/app-shell.contract.test.tsx (6 passed)."
+  },
+  {
+    "id": "task_624e6095-197",
+    "title": "Frontend slice: implement Studies workspace types API wiring selected-study shell and artifact-registry drill-through touchpoints only.",
+    "kind": "team",
+    "phase": "default",
+    "status": "review",
+    "priority": "high",
+    "verify": [],
+    "notes": [
+      "Fixed frontend/src/test/app-shell.contract.test.tsx so the streamed-session studies drill-through flow now mocks api artifacts registry and api studies, waits for artifact data, and clicks Open Related Study without the duplicated qc-summary button query. Verified full slice plan: backend studies api 4 passed; backend health 2 passed 68 deselected; frontend typecheck passed; frontend app shell contract 6 passed."
+    ],
+    "metadata": {},
+    "dependencies": [],
+    "blockers": [],
+    "reviewStatus": "pending",
+    "history": [
+      {
+        "status": "pending",
+        "at": "2026-04-01T19:10:59.275Z",
+        "note": "task created"
+      },
+      {
+        "status": "queued",
+        "at": "2026-04-01T19:10:59.277Z"
+      },
+      {
+        "status": "in_progress",
+        "at": "2026-04-01T19:11:06.165Z",
+        "by": "architect"
+      },
+      {
+        "status": "review",
+        "at": "2026-04-01T19:46:44.281Z",
+        "by": "architect",
+        "note": "Fixed frontend/src/test/app-shell.contract.test.tsx so the streamed-session studies drill-through flow now mocks api artifacts registry and api studies, waits for artifact data, and clicks Open Related Study without the duplicated qc-summary button query. Verified full slice plan: backend studies api 4 passed; backend health 2 passed 68 deselected; frontend typecheck passed; frontend app shell contract 6 passed."
+      }
+    ],
+    "createdAt": "2026-04-01T19:10:59.275Z",
+    "updatedAt": "2026-04-01T19:46:44.281Z",
+    "owner": "architect",
+    "claimedAt": "2026-04-01T19:11:06.164Z",
+    "result": "Fixed frontend/src/test/app-shell.contract.test.tsx so the streamed-session studies drill-through flow now mocks api artifacts registry and api studies, waits for artifact data, and clicks Open Related Study without the duplicated qc-summary button query. Verified full slice plan: backend studies api 4 passed; backend health 2 passed 68 deselected; frontend typecheck passed; frontend app shell contract 6 passed."
+  },
+  {
+    "id": "task_319fa2ae-937",
+    "title": "Review slice: verify additive compatibility derived read-model behavior and test coverage for the Study Dossier slice.",
+    "kind": "team",
+    "phase": "default",
+    "status": "completed",
+    "priority": "high",
+    "verify": [],
+    "notes": [],
+    "metadata": {},
+    "dependencies": [],
+    "blockers": [
+      "frontend contract test still fails on the new Open Related Study drill-through path; OMX task state also remains in_progress with no completed handoff or prior review record",
+      "reviews.json is corrupted after the ledger cleanup, so the durable review runtime is not trustworthy even though the Open Related Study contract path now passes its planned verification"
+    ],
+    "reviewStatus": "approved",
+    "history": [
+      {
+        "status": "pending",
+        "at": "2026-04-01T19:10:59.278Z",
+        "note": "task created"
+      },
+      {
+        "status": "queued",
+        "at": "2026-04-01T19:10:59.279Z"
+      },
+      {
+        "status": "in_progress",
+        "at": "2026-04-01T19:11:06.168Z",
+        "by": "reviewer"
+      },
+      {
+        "status": "blocked",
+        "at": "2026-04-01T19:36:58.714Z",
+        "by": "reviewer"
+      },
+      {
+        "status": "completed",
+        "at": "2026-04-01T19:51:26.448Z",
+        "by": "reviewer"
+      }
+    ],
+    "createdAt": "2026-04-01T19:10:59.278Z",
+    "updatedAt": "2026-04-01T19:51:26.448Z",
+    "owner": "reviewer",
+    "claimedAt": "2026-04-01T19:11:06.168Z",
+    "completedAt": "2026-04-01T19:51:26.445Z"
+  }
+]

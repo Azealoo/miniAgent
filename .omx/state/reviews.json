@@ -1,0 +1,26 @@
+[
+  {
+    "id": "review_ead84a78-322",
+    "status": "changes_requested",
+    "notes": [
+      "reviews.json is corrupted after the ledger cleanup, so the durable review runtime is not trustworthy even though the Open Related Study contract path now passes its planned verification"
+    ],
+    "createdAt": "2026-04-01T19:50:47.433Z",
+    "updatedAt": "2026-04-01T19:50:47.434Z",
+    "taskId": "task_319fa2ae-937",
+    "reviewer": "reviewer",
+    "summary": "reviews.json is corrupted after the ledger cleanup, so the durable review runtime is not trustworthy even though the Open Related Study contract path now passes its planned verification"
+  },
+  {
+    "id": "review_c32914ed-0b5",
+    "status": "approved",
+    "notes": [
+      "Open Related Study contract path now passes all planned verification, and the backend/frontend task entries are in review with concrete verification notes. Residual team.json stale worker assignment and stray --help inbox noise remain non-blocking runtime cleanup."
+    ],
+    "createdAt": "2026-04-01T19:51:26.444Z",
+    "updatedAt": "2026-04-01T19:51:26.445Z",
+    "taskId": "task_319fa2ae-937",
+    "reviewer": "reviewer",
+    "summary": "Open Related Study contract path now passes all planned verification, and the backend/frontend task entries are in review with concrete verification notes. Residual team.json stale worker assignment and stray --help inbox noise remain non-blocking runtime cleanup."
+  }
+]

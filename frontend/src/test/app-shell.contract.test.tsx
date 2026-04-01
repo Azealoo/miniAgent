@@ -10,6 +10,7 @@ import {
   makeFilesWorkspaceItem,
   makeHistoryMessage,
   makeSession,
+  makeStudySummary,
   makeSkillRegistryEntry,
   makeTokenStats,
   makeToolResultEnvelope,
@@ -72,6 +73,38 @@ describe("AppShell frontend contract coverage", () => {
       run_id: "run-rnaseq-1",
     });
     const warningReport = makeComplianceReport();
+    const qaArtifact = makeArtifactRegistryRecord({
+      path: fileItem.path,
+      run_id: "run-rnaseq-1",
+      workflow: "rnaseq_qc_de",
+      source_workflow: "rnaseq_qc_de",
+      dataset_id: "dataset-alpha",
+    });
+    const studies = [
+      makeStudySummary({
+        study_id: "dataset-alpha",
+        title: "Alpha Cohort",
+        latest_activity_at: "2026-03-24T19:20:00Z",
+        run_count: 2,
+      }),
+      makeStudySummary({
+        study_id: "dataset-beta",
+        title: "Beta Cohort",
+        latest_activity_at: "2026-03-24T20:20:00Z",
+        run_count: 5,
+        export_available: false,
+        active_run_state: "active",
+        compliance_state: "warning_issued",
+      }),
+      makeStudySummary({
+        study_id: "dataset-gamma",
+        title: "Gamma Cohort",
+        latest_activity_at: "2026-03-23T20:20:00Z",
+        run_count: 1,
+        evidence_state: "mixed",
+        qa_state: "warning",
+      }),
+    ];
     const fetchMock = installMockFetch([
       buildAccessRoute({
         inspection: "granted",
@@ -148,6 +181,19 @@ describe("AppShell frontend contract coverage", () => {
         `/api/sessions/${createdSession.id}/files/summary`,
         () => jsonResponse({ items: [fileItem] })
       ),
+      route("GET", "/api/studies", () => jsonResponse({ items: studies })),
+      route("GET", "/api/artifacts/registry", () =>
+        jsonResponse({
+          artifact_root: "artifacts",
+          generated_at: "2026-03-24T18:40:00Z",
+          invalid_count: 0,
+          matched_count: 1,
+          records: [qaArtifact],
+          registry_path: "artifacts/registry.json",
+          total_count: 1,
+          valid_count: 1,
+        })
+      ),
       route("GET", "/api/files/raw", (_request, url) => {
         const path = url.searchParams.get("path");
         if (path === fileItem.path) {
@@ -187,6 +233,30 @@ describe("AppShell frontend contract coverage", () => {
     expect((await screen.findAllByText("Output Files")).length).toBeGreaterThan(0);
     expect((await screen.findAllByText("qc-summary.md")).length).toBeGreaterThan(0);
     expect(await screen.findByText("QC Summary")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Open Artifacts workspace" }));
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Artifact Registry" })
+    ).toBeTruthy();
+    expect((await screen.findAllByText("qc-summary.md")).length).toBeGreaterThan(0);
+    await user.click(await screen.findByRole("button", { name: "Open Related Study" }));
+
+    expect(await screen.findByRole("heading", { name: "Alpha Cohort" })).toBeTruthy();
+
+    const searchInput = screen.getByPlaceholderText(
+      "Search by study, assay, organism, privacy, or state"
+    );
+    await user.type(searchInput, "gamma");
+
+    expect(screen.getAllByRole("button", { name: /Select study/i })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Select study Gamma Cohort" })).toBeTruthy();
+
+    await user.clear(searchInput);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Sort studies" }), "title");
+
+    const studyButtons = screen.getAllByRole("button", { name: /Select study/i });
+    expect(studyButtons[0].textContent).toContain("Alpha Cohort");
+    expect(studyButtons[1].textContent).toContain("Beta Cohort");
 
     fetchMock.restore();
   });
@@ -233,6 +303,31 @@ describe("AppShell frontend contract coverage", () => {
       workflow: "protocol_executor",
       source_workflow: "protocol_executor",
     });
+    const studies = [
+      makeStudySummary({
+        study_id: "dataset-alpha",
+        title: "Alpha Cohort",
+        latest_activity_at: "2026-03-24T19:20:00Z",
+        run_count: 2,
+      }),
+      makeStudySummary({
+        study_id: "dataset-beta",
+        title: "Beta Cohort",
+        latest_activity_at: "2026-03-24T20:20:00Z",
+        run_count: 5,
+        export_available: false,
+        active_run_state: "active",
+        compliance_state: "warning_issued",
+      }),
+      makeStudySummary({
+        study_id: "dataset-gamma",
+        title: "Gamma Cohort",
+        latest_activity_at: "2026-03-23T20:20:00Z",
+        run_count: 1,
+        evidence_state: "mixed",
+        qa_state: "warning",
+      }),
+    ];
     const fetchMock = installMockFetch([
       buildAccessRoute({
         inspection: "granted",
@@ -285,6 +380,7 @@ describe("AppShell frontend contract coverage", () => {
             })
           )
       ),
+      route("GET", "/api/studies", () => jsonResponse({ items: studies })),
       route("GET", "/api/files", (_request, url) => {
         const path = url.searchParams.get("path");
 

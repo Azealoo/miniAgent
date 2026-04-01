@@ -5,12 +5,14 @@
   "scripts": {
     "dev": "NEXT_DIST_DIR=.next-dev next dev",
     "build": "NEXT_DIST_DIR=.next-build next build",
+    "build:e2e": "NEXT_DIST_DIR=.next-e2e-build next build",
     "start": "NEXT_DIST_DIR=.next-build next start",
+    "start:e2e": "NEXT_DIST_DIR=.next-e2e-build next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "PLAYWRIGHT_BROWSERS_PATH=0 npm run build && PLAYWRIGHT_BROWSERS_PATH=0 playwright test"
+    "test:e2e": "PLAYWRIGHT_BROWSERS_PATH=0 npm run build:e2e && PLAYWRIGHT_BROWSERS_PATH=0 playwright test"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",

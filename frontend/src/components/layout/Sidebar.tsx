@@ -25,6 +25,7 @@ import {
   type QuickStartItem,
   quickStartItems,
   recentFiles,
+  studiesWorkspaceSections,
   type SurfaceItem,
   workspaceDocs,
 } from "./workspace-data";
@@ -262,6 +263,8 @@ export default function Sidebar() {
         ? "Working Docs"
         : workspaceMode === "files"
           ? "Generated"
+          : workspaceMode === "studies"
+            ? "Studies"
           : workspaceMode === "ops"
             ? "Inspection"
           : null;
@@ -272,6 +275,10 @@ export default function Sidebar() {
         ? filteredDocs
         : workspaceMode === "files"
           ? filteredFileItems
+          : workspaceMode === "studies"
+            ? studiesWorkspaceSections.filter((item) =>
+                matchesQuery(query, item.label, item.description, item.meta)
+              )
           : workspaceMode === "ops"
             ? filteredOpsItems
           : [];
@@ -301,14 +308,14 @@ export default function Sidebar() {
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search sessions and work"
+            placeholder="Search sessions, work, and studies"
             className="w-full rounded-[11px] border border-[var(--shell-border)] bg-white px-8 py-1.5 text-[13px] text-slate-700 outline-none placeholder:text-slate-400 focus:border-[var(--apex-accent)]"
           />
         </div>
       </div>
 
       <div className="border-b border-[var(--shell-border)] px-1.5 py-1.5">
-        <div className="grid grid-cols-6 gap-0.5">
+        <div className="grid grid-cols-7 gap-0.5">
           {primaryNavItems.map((item) => {
             const Icon = item.icon;
             const active = workspaceMode === item.id;
@@ -402,27 +409,31 @@ export default function Sidebar() {
               </span>
             </div>
 
-          <div className="mt-2">
-            {focusItems.length === 0 ? (
-              <EmptyRailState>
-                {workspaceMode === "flows"
-                  ? trimmedQuery
-                    ? `No workflow entries match "${trimmedQuery}".`
-                    : "No selected or recent workflow runs are available yet."
-                  : workspaceMode === "docs"
+            <div className="mt-2">
+              {focusItems.length === 0 ? (
+                <EmptyRailState>
+                  {workspaceMode === "flows"
                     ? trimmedQuery
-                      ? `No working docs match "${trimmedQuery}".`
-                      : "No working docs are loaded for this workspace yet."
-                    : workspaceMode === "files"
+                      ? `No workflow entries match "${trimmedQuery}".`
+                      : "No selected or recent workflow runs are available yet."
+                    : workspaceMode === "docs"
                       ? trimmedQuery
-                        ? `No generated files match "${trimmedQuery}".`
-                        : "No generated files are visible in this session yet."
-                      : trimmedQuery
-                        ? `No inspection views match "${trimmedQuery}".`
-                        : "Choose an Ops view to inspect runtime health, traces, or connectors."}
-              </EmptyRailState>
-            ) : (
-              focusItems.map((item) => {
+                        ? `No working docs match "${trimmedQuery}".`
+                        : "No working docs are loaded for this workspace yet."
+                      : workspaceMode === "files"
+                        ? trimmedQuery
+                          ? `No generated files match "${trimmedQuery}".`
+                          : "No generated files are visible in this session yet."
+                        : workspaceMode === "studies"
+                          ? trimmedQuery
+                            ? `No study sections match "${trimmedQuery}".`
+                            : "Study summaries are available in the workspace panel."
+                          : trimmedQuery
+                            ? `No inspection views match "${trimmedQuery}".`
+                            : "Choose an Ops view to inspect runtime health, traces, or connectors."}
+                </EmptyRailState>
+              ) : (
+                focusItems.map((item) => {
                   const previewPath = item.path;
 
                   return (

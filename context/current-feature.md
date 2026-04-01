@@ -2,44 +2,89 @@
 
 ## Status
 <!-- Use only one of these values: Not Started, In Progress, Completed -->
-Completed
+In Progress
 
 ## Goals
 <!-- Add implementation-oriented goals for the next feature here. -->
-- Land the final P0 slice by replacing remaining human-facing `miniOpenClaw` / `Claw` naming in the README and assistant identity prompt with `BioAPEX`.
-- Keep the slice additive and compatibility-safe by leaving machine-facing health payloads, package names, and fetch-tool headers unchanged.
-- Verify both the human-facing cleanup and the preserved compatibility boundaries explicitly.
+- Add the first P1 `Study Dossier v1` slice by shipping a derived, read-only `GET /api/studies` summary contract plus a minimal `Studies` workspace that lets scientists scan study status without reading chat history.
+- Keep the slice additive and file-first by grouping studies from existing artifact registry records and source artifacts keyed by `dataset_manifest.id`, without creating a new persisted study artifact or landing the detail route yet.
+- Verify backend aggregation and access behavior plus frontend contract and workspace rendering explicitly before any follow-on dossier detail work.
 
 
 ## Notes
 <!-- Add feature-specific implementation notes, constraints, and file references here. -->
-- Source roadmap: `context/bioapex-scientist-ux-roadmap.md` -> `P0 Stabilize Trust`.
-- This was the final unfinished P0 slice.
-- This slice is complete; P0 Stabilize Trust is now complete.
-- Keep the slice small and serial by touching only the obvious human-facing naming surfaces:
-- `README.md`
-- `backend/workspace/IDENTITY.md`
-- Protected compatibility surfaces in this slice:
-- `backend/app.py` must keep `health()` returning `{"status": "ok", "service": "miniOpenClaw"}` and must not change FastAPI app metadata.
-- `frontend/package.json` and `frontend/package-lock.json` must keep `mini-openclaw-frontend` unchanged.
-- `backend/tools/fetch_url_tool.py` must keep the existing `miniOpenClaw/1.0` user-agent unchanged.
-- `backend/tests/test_api_health.py` and `backend/tests/test_tools.py` remain the compatibility guardrails.
+- Source roadmap: `context/bioapex-scientist-ux-roadmap.md` -> `P1 Study Dossier v1`.
+- First unfinished P1 slice: `Study Summaries Workspace`.
+- Scope this slice to one additive route:
+- `GET /api/studies`
+- Explicitly defer these follow-ons:
+- `GET /api/studies/{study_id}`
+- `StudyDetail`
+- dossier detail sections (`Overview`, `Runs`, `Evidence & Claims`, `Compliance & QA`, `Outputs & Exports`, `Timeline`)
+- Exact backend ownership for this slice:
+- `backend/api/studies.py`
+- `backend/graph/studies_workspace.py`
+- `backend/app.py`
+- `backend/tests/test_studies_api.py`
+- Exact frontend ownership for this slice:
+- `frontend/src/lib/types.ts`
+- `frontend/src/lib/api.ts`
+- `frontend/src/components/layout/workspace-data.ts`
+- `frontend/src/components/layout/Sidebar.tsx`
+- `frontend/src/components/layout/WorkspacePanel.tsx`
+- `frontend/src/test/fixtures.ts`
+- `frontend/src/test/app-shell.contract.test.tsx`
+- Reviewer ownership for this slice:
+- read-only verification only; no product-file edits
+- Exact response types in scope:
+- `StudySummary`
+- `StudyArtifactCounts`
+- `StudiesWorkspaceResponse`
+- Exact `StudySummary` fields required in this slice:
+- `study_id`
+- `title`
+- `assay_type`
+- `organism`
+- `privacy_classification`
+- `latest_activity_at`
+- `run_count`
+- `active_run_state`
+- `evidence_state`
+- `compliance_state`
+- `qa_state`
+- `export_available`
+- `artifact_counts`
+- Derive summaries from existing artifact registry records plus canonical source artifact reads:
+- group only by valid `dataset_manifest.id`
+- title from the newest valid `dataset_manifest.design.study_name`
+- `latest_activity_at` from the newest artifact `created_at`, falling back to `indexed_at` only when needed
+- `run_count` from distinct valid `run_id` values in the study
+- `active_run_state` from the newest `workflow_run.lifecycle_status`
+- `evidence_state` from the newest `evidence_review.review_status`, else `not_started`
+- `compliance_state` from the newest `compliance_report.runtime_state`, else `not_started`
+- `qa_state` from the newest `qa_report.overall_status`, falling back to the newest `checklist_results.overall_status`
+- `export_available` when any valid `provenance`, `biocompute`, `eln_export`, or `eln_export_archive` record exists
+- Keep this slice strictly read-only:
+- no new persisted `study` or `study_dossier` artifact under `backend/artifacts/` or `backend/storage/`
+- no new frontend write flow for studies
+- keep search and sort client-side only inside the Studies workspace
 - Exact verification for this slice:
-- `cd /gpfs/projects/hrbomics/miniAgent && rg -n 'miniOpenClaw|\bClaw\b' README.md backend/workspace/IDENTITY.md`
-- `cd /gpfs/projects/hrbomics/miniAgent/backend && /gpfs/home/yininz6/.conda/envs/miniAgent/bin/python -m pytest tests/test_api_health.py -q -k 'health_returns_ok'`
-- `cd /gpfs/projects/hrbomics/miniAgent/backend && /gpfs/home/yininz6/.conda/envs/miniAgent/bin/python -m pytest tests/test_tools.py -q -k 'test_fetch_json_endpoint'`
-- `cd /gpfs/projects/hrbomics/miniAgent && rg -n 'miniOpenClaw|mini-openclaw' backend/app.py backend/tools/fetch_url_tool.py frontend/package.json frontend/package-lock.json backend/tests/test_api_health.py backend/tests/test_tools.py`
+- `cd /gpfs/projects/hrbomics/miniAgent/backend && /gpfs/home/yininz6/.conda/envs/miniAgent/bin/python -m pytest tests/test_studies_api.py -q`
+- `cd /gpfs/projects/hrbomics/miniAgent/backend && /gpfs/home/yininz6/.conda/envs/miniAgent/bin/python -m pytest tests/test_api_health.py -q -k 'health_returns_ok or app_import_does_not_require_tiktoken'`
+- `cd /gpfs/projects/hrbomics/miniAgent/frontend && PATH=/gpfs/home/yininz6/.conda/envs/miniAgent/bin:$PATH /gpfs/home/yininz6/.conda/envs/miniAgent/bin/npm run typecheck`
+- `cd /gpfs/projects/hrbomics/miniAgent/frontend && PATH=/gpfs/home/yininz6/.conda/envs/miniAgent/bin:$PATH /gpfs/home/yininz6/.conda/envs/miniAgent/bin/npm test -- src/test/app-shell.contract.test.tsx`
 - Exit criteria:
-- the touched docs/prompt no longer contain `miniOpenClaw` or `Claw`
-- health compatibility remains `miniOpenClaw`
-- fetch-tool user-agent compatibility remains `miniOpenClaw/1.0`
-- package names remain unchanged
-- no unplanned machine-facing contract edits land in the slice
+- `GET /api/studies` returns derived summaries keyed by `dataset_manifest.id`
+- the `Studies` workspace renders truthful loading, empty, error, and ready states from that contract
+- backend and frontend write sets stay disjoint
+- no persistent study artifact or detail route lands in this first slice
 
 
 ## History
 <!-- Use this section to list completed work related to this feature. -->
 <!-- Keep it short and concrete: implemented pieces, verified behavior, follow-up changes, or fixes. -->
+- 2026-04-01: Fixed the first `Study Summaries Workspace` review blocker by completing the missing artifact-registry and studies mocks in `frontend/src/test/app-shell.contract.test.tsx` for the streamed-session contract flow, then tightening the step to use the rendered `Open Related Study` action without relying on an ambiguous duplicated `qc-summary.md` button label. Re-verified the full slice plan with `backend/tests/test_studies_api.py` (`4 passed`), `backend/tests/test_api_health.py -k 'health_returns_ok or app_import_does_not_require_tiktoken'` (`2 passed, 68 deselected`), `frontend npm run typecheck`, and `frontend npm test -- src/test/app-shell.contract.test.tsx` (`6 passed`).
+- 2026-04-01: Loaded `P1 Study Dossier v1` slice 1 into the current feature contract as a read-only `Study Summaries Workspace` centered on additive `GET /api/studies`, shared `StudySummary` / `StudyArtifactCounts` / `StudiesWorkspaceResponse` contracts, clean backend/frontend/reviewer ownership with no overlapping file edits, and explicit backend aggregation plus frontend contract verification. The detail route, multi-section dossier detail payloads, and any persistent study artifact remain out of scope for this first slice.
 - 2026-04-01: Completed P0 Stabilize Trust slice 4 by updating the remaining human-facing `miniOpenClaw` / `Claw` naming in `README.md` and `backend/workspace/IDENTITY.md` to `BioAPEX`, while intentionally leaving the machine-facing health payload, package names, FastAPI metadata, and fetch-tool user-agent unchanged. Verified with `cd /gpfs/projects/hrbomics/miniAgent && rg -n 'miniOpenClaw|\bClaw\b' README.md backend/workspace/IDENTITY.md` (no matches), `cd /gpfs/projects/hrbomics/miniAgent/backend && /gpfs/home/yininz6/.conda/envs/miniAgent/bin/python -m pytest tests/test_api_health.py -q -k 'health_returns_ok'` (`1 passed, 69 deselected`), `cd /gpfs/projects/hrbomics/miniAgent/backend && /gpfs/home/yininz6/.conda/envs/miniAgent/bin/python -m pytest tests/test_tools.py -q -k 'test_fetch_json_endpoint'` (`1 passed, 97 deselected`), and `cd /gpfs/projects/hrbomics/miniAgent && rg -n 'miniOpenClaw|mini-openclaw' backend/app.py backend/tools/fetch_url_tool.py frontend/package.json frontend/package-lock.json backend/tests/test_api_health.py backend/tests/test_tools.py` (matches remained only in the protected compatibility files).
 - 2026-04-01: Loaded the final P0 Stabilize Trust slice into the current feature contract with implementation-oriented goals covering human-facing BioAPEX naming cleanup in the README plus assistant identity prompt, while explicitly protecting machine-facing health payloads, package names, fetch-tool headers, and their focused compatibility tests.
 - 2026-04-01: Completed P0 Stabilize Trust slice 3 by updating `.gitignore` so the required Playwright build directory `frontend/.next-e2e-build/` is ignored at the repo root without changing the existing E2E build/start contract or widening into naming cleanup. Verified with `cd /gpfs/projects/hrbomics/miniAgent/frontend && PATH=/gpfs/home/yininz6/.conda/envs/miniAgent/bin:$PATH /gpfs/home/yininz6/.conda/envs/miniAgent/bin/npm run test:e2e -- e2e/app-shell.e2e.spec.ts` (`4 passed`) and `cd /gpfs/projects/hrbomics/miniAgent && git status --short --ignored -- frontend/.next-e2e-build` (`!! frontend/.next-e2e-build/`).

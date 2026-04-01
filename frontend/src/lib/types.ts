@@ -435,8 +435,68 @@ export type WorkspaceMode =
   | "flows"
   | "docs"
   | "files"
+  | "studies"
   | "ops"
   | "artifacts";
+
+export type StudyActiveRunState =
+  | "not_started"
+  | "active"
+  | "blocked"
+  | "failed"
+  | "completed";
+
+export type StudyEvidenceState =
+  | "not_started"
+  | "supported"
+  | "mixed"
+  | "insufficient_evidence";
+
+export type StudyComplianceState =
+  | "not_started"
+  | "allowed"
+  | "warning_issued"
+  | "approval_required"
+  | "approved_override"
+  | "blocked";
+
+export type StudyQaState =
+  | "not_started"
+  | "passed"
+  | "warning"
+  | "failed"
+  | "blocked";
+
+export interface StudyArtifactCounts {
+  dataset_manifests: number;
+  workflow_runs: number;
+  evidence_reviews: number;
+  claim_graphs: number;
+  compliance_reports: number;
+  qa_reports: number;
+  checklist_results: number;
+  exports: number;
+}
+
+export interface StudySummary {
+  study_id: string;
+  title: string;
+  assay_type: string;
+  organism: string;
+  privacy_classification: string;
+  latest_activity_at: string | null;
+  run_count: number;
+  active_run_state: StudyActiveRunState;
+  evidence_state: StudyEvidenceState;
+  compliance_state: StudyComplianceState;
+  qa_state: StudyQaState;
+  export_available: boolean;
+  artifact_counts: StudyArtifactCounts;
+}
+
+export interface StudiesWorkspaceResponse {
+  items: StudySummary[];
+}
 
 export interface Session {
   id: string;
