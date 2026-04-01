@@ -28,6 +28,7 @@ backend/SKILLS_SNAPSHOT.md
 node_modules/
 frontend/.next/
 frontend/.next-build/
+frontend/.next-e2e-build/
 frontend/.next-dev/
 frontend/out/
 

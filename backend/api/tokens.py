@@ -1,13 +1,17 @@
 """
-Token counting endpoints using tiktoken (cl100k_base, GPT-4 compatible).
+Token counting endpoints with lazy exact tokenizer resolution and deterministic fallback.
 
-GET  /api/tokens/session/{id}   — count tokens for a session
-POST /api/tokens/files          — batch token count for file paths (whitelisted only)
+GET  /api/tokens/session/{id}   - count tokens for a session
+POST /api/tokens/files          - batch token count for file paths (whitelisted only)
 """
+import importlib
+import math
 import os
+from collections.abc import Callable
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
-import tiktoken
 from fastapi import APIRouter, HTTPException, Request
 from access_control import require_inspection_access
 from hardening import is_secret_like_path
@@ -15,7 +19,10 @@ from pydantic import BaseModel
 
 router = APIRouter()
 
-_ENCODING = tiktoken.get_encoding("cl100k_base")
+_TOKENIZER_BACKEND_EXACT = "tiktoken_cl100k_base"
+_TOKENIZER_BACKEND_FALLBACK = "deterministic_fallback"
+_TOKENIZER_ACCURACY_EXACT = "model_aligned"
+_TOKENIZER_ACCURACY_FALLBACK = "approximate"
 
 # Only these prefixes (relative to base_dir) may have their tokens counted.
 # Mirrors the whitelist used by api/files.py to prevent reading arbitrary files.
@@ -24,8 +31,49 @@ _ALLOWED_ROOT_FILES = {"SKILLS_SNAPSHOT.md"}
 _MAX_PATHS = 50
 
 
+@dataclass(frozen=True)
+class _TokenizerRuntime:
+    backend: str
+    accuracy: str
+    count_text: Callable[[str], int]
+
+
+def _count_with_deterministic_fallback(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, math.ceil(len(text.encode("utf-8")) / 4))
+
+
+@lru_cache(maxsize=1)
+def _get_tokenizer_runtime() -> _TokenizerRuntime:
+    try:
+        tiktoken = importlib.import_module("tiktoken")
+        encoding = tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        return _TokenizerRuntime(
+            backend=_TOKENIZER_BACKEND_FALLBACK,
+            accuracy=_TOKENIZER_ACCURACY_FALLBACK,
+            count_text=_count_with_deterministic_fallback,
+        )
+
+    def _count_with_exact_tokenizer(text: str) -> int:
+        return len(encoding.encode(text))
+
+    return _TokenizerRuntime(
+        backend=_TOKENIZER_BACKEND_EXACT,
+        accuracy=_TOKENIZER_ACCURACY_EXACT,
+        count_text=_count_with_exact_tokenizer,
+    )
+
+
 def _count(text: str) -> int:
-    return len(_ENCODING.encode(text))
+    runtime = _get_tokenizer_runtime()
+    return runtime.count_text(text)
+
+
+def _get_tokenizer_metadata() -> tuple[str, str]:
+    runtime = _get_tokenizer_runtime()
+    return runtime.backend, runtime.accuracy
 
 
 def _count_optional_text(value: object) -> int:
@@ -79,18 +127,15 @@ def _validate_token_path(rel_path: str, base: Path) -> Path | None:
     clean = rel_path.strip().lstrip("/").removeprefix("./")
     if not clean:
         return None
-    # Block traversal components
     if ".." in clean.split("/"):
         return None
-    # Whitelist check
-    allowed = any(clean.startswith(p) for p in _ALLOWED_PREFIXES) or (
+    allowed = any(clean.startswith(prefix) for prefix in _ALLOWED_PREFIXES) or (
         clean in _ALLOWED_ROOT_FILES
     )
     if not allowed:
         return None
     if is_secret_like_path(clean):
         return None
-    # Resolve and confirm it stays inside base_dir
     target = (base / clean).resolve()
     try:
         target.relative_to(base.resolve())
@@ -113,6 +158,7 @@ def session_tokens(session_id: str, request: Request = None):
     from graph.prompt_builder import build_system_prompt
     from config import get_rag_mode
 
+    tokenizer_backend, tokenizer_accuracy = _get_tokenizer_metadata()
     system_prompt = build_system_prompt(agent_manager.base_dir, get_rag_mode())  # type: ignore[arg-type]
     system_tokens = _count(system_prompt)
 
@@ -158,6 +204,8 @@ def session_tokens(session_id: str, request: Request = None):
         "context_window_tokens": context_window_tokens,
         "context_window_remaining_tokens": context_window_remaining_tokens,
         "model_name": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        "tokenizer_backend": tokenizer_backend,
+        "tokenizer_accuracy": tokenizer_accuracy,
     }
 
 

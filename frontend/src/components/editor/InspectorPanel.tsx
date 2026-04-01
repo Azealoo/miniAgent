@@ -2611,6 +2611,18 @@ export default function InspectorPanel() {
     ? `${formatCompactTokenValue(promptContextTokens)} / ${formatCompactTokenValue(sessionUsage.context_window_tokens)}`
     : null;
   const usageModeLabel = ragMode ? "Grounded" : "Chat";
+  const usageAccuracyLabel =
+    sessionUsage?.tokenizer_accuracy === "approximate" ? "Approximate" : "Model-aligned";
+  const usageAccuracyTone =
+    sessionUsage?.tokenizer_accuracy === "approximate" ? "warning" : "success";
+  const usageBackendLabel =
+    sessionUsage?.tokenizer_backend === "deterministic_fallback"
+      ? "Local fallback"
+      : "cl100k_base";
+  const usageHonestyDetail =
+    sessionUsage?.tokenizer_accuracy === "approximate"
+      ? "Counts use a deterministic local fallback and may differ from model-side totals."
+      : "Counts use the model-aligned cl100k_base tokenizer.";
   const showStreamingUsageNotice = Boolean(sessionUsage && isStreaming);
   const selectedRegistryRecord =
     artifactRegistryRecords.find((record) => record.path === inspectorPreviewPath) ?? null;
@@ -4416,6 +4428,18 @@ export default function InspectorPanel() {
               </p>
             ) : null}
 
+            <div className="space-y-2 rounded-[14px] border border-[rgba(211,219,210,0.8)] bg-[rgba(251,252,248,0.9)] px-3 py-2.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <MetaBadge tone={usageAccuracyTone}>{usageAccuracyLabel}</MetaBadge>
+                <MetaBadge tone={
+                  sessionUsage.tokenizer_backend === "deterministic_fallback"
+                    ? "warning"
+                    : "neutral"
+                }>{usageBackendLabel}</MetaBadge>
+              </div>
+              <p className="text-[10px] leading-4 text-slate-500">{usageHonestyDetail}</p>
+            </div>
+
             <div className="pt-1 text-center">
               <p className="text-[40px] font-semibold tracking-[-0.06em] text-slate-800">
                 {trackedTotalTokens.toLocaleString()}
@@ -4476,6 +4500,8 @@ export default function InspectorPanel() {
                   value={sessionUsage.model_name}
                   monospace
                 />
+                <UsageMetadataRow label="Accuracy" value={usageAccuracyLabel} />
+                <UsageMetadataRow label="Backend" value={usageBackendLabel} />
               </div>
             </div>
           </div>

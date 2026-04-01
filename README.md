@@ -1,4 +1,4 @@
-# miniOpenClaw
+# BioAPEX
 
 A lightweight, fully transparent AI Agent system. Built around file-first design (Markdown/JSON instead of vector databases), instruction-driven skills (plain Markdown instead of Python functions), and full visibility into every agent operation.
 
@@ -39,7 +39,7 @@ A lightweight, fully transparent AI Agent system. Built around file-first design
 ## Project Structure
 
 ```
-miniOpenClaw/
+BioAPEX/
 ├── backend/
 │   ├── app.py                    # FastAPI entry point, route registration, startup init
 │   ├── config.py                 # RAG mode config (config.json persistence)

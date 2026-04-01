@@ -4,6 +4,8 @@ Tests for API endpoint logic that does NOT require a live LLM or embeddings.
 These tests exercise the route handlers directly instead of going through an
 in-process ASGI client, which currently hangs in this environment.
 """
+import builtins
+import importlib
 import json
 import os
 import sys
@@ -113,6 +115,21 @@ class TestHealthEndpoint:
         resp = app.health()
         assert resp["status"] == "ok"
         assert resp["service"] == "miniOpenClaw"
+
+    def test_app_import_does_not_require_tiktoken(self):
+        sys.modules.pop("app", None)
+        sys.modules.pop("api.tokens", None)
+        real_import = builtins.__import__
+
+        def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "tiktoken":
+                raise AssertionError("tiktoken should not be imported during app import")
+            return real_import(name, globals, locals, fromlist, level)
+
+        with patch("builtins.__import__", side_effect=guarded_import):
+            app_module = importlib.import_module("app")
+
+        assert app_module.health()["status"] == "ok"
 
     def test_app_cors_defaults_to_local_origins(self):
         import app
@@ -1549,6 +1566,8 @@ class TestTokenEndpoints:
         assert result["context_window_tokens"] == 4096
         assert result["context_window_remaining_tokens"] == 4096 - result["total_tokens"]
         assert result["model_name"] == "deepseek-chat"
+        assert result["tokenizer_backend"] == "tiktoken_cl100k_base"
+        assert result["tokenizer_accuracy"] == "model_aligned"
 
     def test_session_tokens_include_compressed_context_in_prompt_budget(
         self, isolated_api_state
@@ -1593,6 +1612,50 @@ class TestTokenEndpoints:
         assert result["tool_tokens"] == 0
         assert result["total_tokens"] == result["system_tokens"] + result["message_tokens"]
         assert result["context_window_remaining_tokens"] == 4096 - result["total_tokens"]
+        assert result["tokenizer_backend"] == "tiktoken_cl100k_base"
+        assert result["tokenizer_accuracy"] == "model_aligned"
+
+    def test_session_tokens_fall_back_when_exact_tokenizer_is_unavailable(self, isolated_api_state):
+        import api.tokens as tokens_api
+        from graph.agent import agent_manager
+
+        session_id = agent_manager.session_manager.create_session()
+        agent_manager.session_manager.save_message(session_id, "user", "Plan a CRISPR screen")
+        agent_manager.session_manager.save_message(
+            session_id,
+            "assistant",
+            "I found the latest workflow artifacts.",
+            tool_calls=[
+                {
+                    "tool": "read_file",
+                    "input": "artifacts/rnaseq-qc/run.json",
+                    "output": "{\"status\":\"completed\"}",
+                }
+            ],
+        )
+
+        tokens_api._get_tokenizer_runtime.cache_clear()
+        try:
+            with patch("api.tokens.importlib.import_module", side_effect=RuntimeError("offline")):
+                result = tokens_api.session_tokens(session_id)
+                expected_user_tokens = tokens_api._count("Plan a CRISPR screen")
+                expected_assistant_tokens = tokens_api._count("I found the latest workflow artifacts.")
+                expected_tool_tokens = (
+                    tokens_api._count("artifacts/rnaseq-qc/run.json")
+                    + tokens_api._count("{\"status\":\"completed\"}")
+                )
+        finally:
+            tokens_api._get_tokenizer_runtime.cache_clear()
+
+        assert result["message_tokens"] == expected_user_tokens + expected_assistant_tokens
+        assert result["input_tokens"] == result["system_tokens"] + expected_user_tokens
+        assert result["output_tokens"] == expected_assistant_tokens
+        assert result["tool_tokens"] == expected_tool_tokens
+        assert result["tracked_total_tokens"] == (
+            result["input_tokens"] + result["output_tokens"] + result["tool_tokens"]
+        )
+        assert result["tokenizer_backend"] == "deterministic_fallback"
+        assert result["tokenizer_accuracy"] == "approximate"
 
     def test_files_tokens_counts_allowed_file(self, isolated_api_state):
         from api.tokens import FilesTokenRequest, files_tokens
@@ -1601,6 +1664,22 @@ class TestTokenEndpoints:
 
         assert result[0]["path"] == "memory/MEMORY.md"
         assert result[0]["tokens"] > 0
+
+    def test_files_tokens_use_deterministic_fallback_when_exact_tokenizer_is_unavailable(self, isolated_api_state):
+        import api.tokens as tokens_api
+        from api.tokens import FilesTokenRequest
+
+        file_text = (isolated_api_state / "memory" / "MEMORY.md").read_text(encoding="utf-8")
+
+        tokens_api._get_tokenizer_runtime.cache_clear()
+        try:
+            with patch("api.tokens.importlib.import_module", side_effect=RuntimeError("offline")):
+                result = tokens_api.files_tokens(FilesTokenRequest(paths=["memory/MEMORY.md"]))
+                expected_tokens = tokens_api._count(file_text)
+        finally:
+            tokens_api._get_tokenizer_runtime.cache_clear()
+
+        assert result == [{"path": "memory/MEMORY.md", "tokens": expected_tokens}]
 
     def test_files_tokens_blocks_secret_like_files(self, isolated_api_state):
         from api.tokens import FilesTokenRequest, files_tokens

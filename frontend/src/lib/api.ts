@@ -364,6 +364,24 @@ function expectStringField(
   return fieldValue;
 }
 
+function expectStringLiteralField<T extends string>(
+  value: UnknownRecord,
+  field: string,
+  path: string,
+  label: string,
+  allowed: readonly T[]
+): T {
+  const fieldValue = expectStringField(value, field, path, label);
+  if (!(allowed as readonly string[]).includes(fieldValue)) {
+    throw createPayloadError(
+      path,
+      label,
+      `Expected "${field}" to be one of: ${allowed.join(", ")}.`
+    );
+  }
+  return fieldValue as T;
+}
+
 function expectNumberField(
   value: UnknownRecord,
   field: string,
@@ -455,6 +473,20 @@ function validateTokenStats(value: unknown, path: string): TokenStats {
   const response = expectObject(value, path, "the usage summary");
   expectStringField(response, "session_id", path, "the usage summary");
   expectStringField(response, "model_name", path, "the usage summary");
+  expectStringLiteralField(
+    response,
+    "tokenizer_backend",
+    path,
+    "the usage summary",
+    ["tiktoken_cl100k_base", "deterministic_fallback"] as const
+  );
+  expectStringLiteralField(
+    response,
+    "tokenizer_accuracy",
+    path,
+    "the usage summary",
+    ["model_aligned", "approximate"] as const
+  );
   return response as unknown as TokenStats;
 }
 

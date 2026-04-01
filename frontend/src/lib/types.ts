@@ -475,6 +475,12 @@ export interface FilesWorkspaceSummaryResponse {
   items: FilesWorkspaceItem[];
 }
 
+export type TokenizerBackend =
+  | "tiktoken_cl100k_base"
+  | "deterministic_fallback";
+
+export type TokenizerAccuracy = "model_aligned" | "approximate";
+
 export interface TokenStats {
   session_id: string;
   system_tokens: number;
@@ -487,6 +493,8 @@ export interface TokenStats {
   context_window_tokens: number | null;
   context_window_remaining_tokens: number | null;
   model_name: string;
+  tokenizer_backend: TokenizerBackend;
+  tokenizer_accuracy: TokenizerAccuracy;
 }
 
 export interface Skill {

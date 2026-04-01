@@ -399,6 +399,11 @@ describe("AppShell frontend contract coverage", () => {
 
     await user.click(screen.getByRole("button", { name: "Inspector Usage" }));
     expect(await screen.findByText("gpt-5.4")).toBeTruthy();
+    expect((await screen.findAllByText("Model-aligned")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("cl100k_base")).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText("Counts use the model-aligned cl100k_base tokenizer.")
+    ).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Open Artifacts workspace" }));
     expect(await screen.findByText("Artifact Registry")).toBeTruthy();
@@ -413,6 +418,65 @@ describe("AppShell frontend contract coverage", () => {
       expect(screen.queryByText("compliance-report.json")).toBeNull();
     });
     expect(screen.getAllByText("qc-summary.md").length).toBeGreaterThan(0);
+
+    fetchMock.restore();
+  });
+
+  it("labels approximate usage counts honestly when the fallback tokenizer is active", async () => {
+    const session = makeSession({
+      id: "session-fallback",
+      title: "Fallback usage review",
+      updated_at: Date.parse("2026-04-01T16:20:00Z"),
+      message_count: 2,
+    });
+    const fetchMock = installMockFetch([
+      buildAccessRoute({
+        inspection: "granted",
+        execution: "granted",
+        admin: "granted",
+      }),
+      route("GET", "/api/sessions", () => jsonResponse([session]), { once: true }),
+      route("GET", "/api/config/rag-mode", () => jsonResponse({ rag_mode: false })),
+      route(
+        "GET",
+        `/api/sessions/${session.id}/history`,
+        () =>
+          jsonResponse([
+            { role: "user", content: "Show the offline-safe usage path." },
+            makeHistoryMessage({
+              content: "Fallback counts are active for this session.",
+            }),
+          ])
+      ),
+      route(
+        "GET",
+        `/api/tokens/session/${session.id}`,
+        () =>
+          jsonResponse(
+            makeTokenStats({
+              model_name: "gpt-5.4",
+              session_id: session.id,
+              tokenizer_backend: "deterministic_fallback",
+              tokenizer_accuracy: "approximate",
+            })
+          )
+      ),
+    ]);
+
+    const user = userEvent.setup();
+    render(React.createElement(AppShell));
+
+    expect(await screen.findByText("Fallback counts are active for this session.")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Inspector Usage" }));
+
+    expect((await screen.findAllByText("Approximate")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Local fallback")).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(
+        "Counts use a deterministic local fallback and may differ from model-side totals."
+      )
+    ).toBeTruthy();
 
     fetchMock.restore();
   });

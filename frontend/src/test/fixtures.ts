@@ -324,6 +324,8 @@ export function makeTokenStats(
     context_window_tokens: 8000,
     context_window_remaining_tokens: 6880,
     model_name: "gpt-5.4",
+    tokenizer_backend: "tiktoken_cl100k_base",
+    tokenizer_accuracy: "model_aligned",
     ...overrides,
   };
 }
