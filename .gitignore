@@ -23,6 +23,7 @@ backend/sessions/
 backend/storage/
 backend/config.json
 backend/SKILLS_SNAPSHOT.md
+backend/artifacts/__pycache__/
 
 # ── Node ──────────────────────────────────────────────
 node_modules/
@@ -46,6 +47,15 @@ frontend/out/
 # ── Project planning / AI assistant files ─────────────
 CLAUDE.md
 Plan.md
+
+# ── OMX local runtime state ───────────────────────────
+.omx/hud-config.json
+.omx/logs/
+.omx/sessions/
+.omx/state/inbox.json
+.omx/state/reviews.json
+.omx/state/tasks.json
+.omx/team/
 
 # ── Misc ──────────────────────────────────────────────
 *.log

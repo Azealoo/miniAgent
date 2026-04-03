@@ -2,6 +2,14 @@
 
 This directory defines the canonical layout for durable BioAPEX artifacts.
 
+## Repo Hygiene
+
+- Commit schema code, examples, and reference fixtures from this directory.
+- Treat live workflow and tool runs under `artifacts/<workflow>/...` as local runtime output.
+- Generated run directories such as `compliance-preflight/`, `literature-retrieval/`,
+  `evidence-review/`, `entity-grounding/`, and `rnaseq-qc-de/` are intentionally ignored so
+  day-to-day execution does not flood `git status`.
+
 ## Canonical Run ID
 
 - Format: `run-YYYYMMDDTHHMMSSZ-xxxxxxxx`
