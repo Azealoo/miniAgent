@@ -10,7 +10,10 @@ import {
   ShieldAlert,
   Terminal,
 } from "lucide-react";
-import { deriveMessageBlocks } from "@/lib/message-blocks";
+import {
+  deriveMessageBlocks,
+  normalizeMessageContent,
+} from "@/lib/message-blocks";
 import { cn } from "@/lib/utils";
 import type {
   Message,
@@ -183,10 +186,9 @@ function summarizePlanBlock(
 ): BlockRowDescriptor {
   const steps = Array.isArray(block.plan.steps) ? block.plan.steps.length : null;
   const detail =
-    compactText(block.summary, 120) ??
-    (typeof steps === "number"
+    typeof steps === "number"
       ? `${steps} planning step${steps === 1 ? "" : "s"} captured for this turn.`
-      : "Planning process captured for this turn.");
+      : "Planning process captured for this turn.";
 
   return {
     title: "Planning",
@@ -200,13 +202,17 @@ function summarizePlanBlock(
 function summarizeVerificationBlock(
   block: Extract<SessionContentBlock, { type: "verification" }>
 ): BlockRowDescriptor {
+  const checks = Array.isArray(block.verification.checks)
+    ? block.verification.checks.length
+    : null;
   const detail =
-    compactText(block.summary, 120) ??
-    (block.verdict === "pass"
-      ? "Verification passed."
-      : block.verdict === "repair_required"
-        ? "Verification requested repairs."
-        : "Verification failed.");
+    typeof checks === "number"
+      ? `${checks} verification check${checks === 1 ? "" : "s"} captured for this turn.`
+      : block.verdict === "pass"
+        ? "Verification passed for this turn."
+        : block.verdict === "repair_required"
+          ? "Verification requested revisions for this turn."
+          : "Verification failed for this turn.";
 
   return {
     title: "Verification result",
@@ -338,6 +344,11 @@ export default function TurnDetailsPanel({ messages }: TurnDetailsPanelProps) {
     <div className="space-y-2.5">
       {messages.map((message, index) => {
         const blocks = deriveMessageBlocks(message);
+        const normalizedAssistantContent =
+          message.role === "assistant"
+            ? normalizeMessageContent(message).content.trim()
+            : null;
+        let renderedAssistantResponse = false;
         const detailCount = blocks.length + (message.pendingTool ? 1 : 0);
         const requestLabel = shortIdentifier(message.request_id);
 
@@ -376,7 +387,22 @@ export default function TurnDetailsPanel({ messages }: TurnDetailsPanelProps) {
 
             <div className="mt-2.5 space-y-2">
               {blocks.map((block, blockIndex) => {
-                const row = renderBlockRow(message, block);
+                if (block.type === "text" && message.role === "assistant") {
+                  if (renderedAssistantResponse || !normalizedAssistantContent) {
+                    return null;
+                  }
+                  renderedAssistantResponse = true;
+                }
+
+                const row =
+                  block.type === "text" && message.role === "assistant"
+                    ? {
+                        title: "Response",
+                        detail: normalizedAssistantContent ?? "",
+                        icon: FileText,
+                        tone: "default" as const,
+                      }
+                    : renderBlockRow(message, block);
                 if (!row) {
                   return null;
                 }

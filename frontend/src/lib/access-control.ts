@@ -39,7 +39,7 @@ export function scopeRequirement(scope: AccessScope): string {
     return "Required for session history, files, Ops reads, and registry inspection.";
   }
   if (scope === "execution") {
-    return "Required for chat, session mutations, file writes, and reference uploads.";
+    return "Required for chat, session mutations, and file writes.";
   }
   return "Required for config changes, RAG control, and admin-only mutations.";
 }

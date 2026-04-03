@@ -190,11 +190,14 @@ class TestConfig:
         with patch("config._CONFIG_FILE", cfg_file):
             import config
 
+            agent_runtime = config.get_agent_runtime_settings()
             prompt_context = config.get_prompt_context_settings()
             tool_policy = config.get_tool_policy_settings()
             access_defaults = config.get_access_defaults()
             execution_backends = config.get_execution_backend_settings()
 
+        assert agent_runtime["executor_recursion_limit"] == 1000
+        assert agent_runtime["helper_agent_recursion_limit"] == 1000
         assert prompt_context["include_git_context"] is False
         assert tool_policy["enabled"] is True
         assert access_defaults["allow_loopback_without_auth"] is True
@@ -202,3 +205,44 @@ class TestConfig:
         assert execution_backends["llm"]["roles"]["executor"]["provider"] == "deepseek"
         assert execution_backends["llm"]["roles"]["planner"]["provider"] == "openai"
         assert execution_backends["llm"]["roles"]["verifier"]["provider"] == "openai"
+
+    def test_project_config_can_override_agent_runtime_limits(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(
+            json.dumps(
+                {
+                    "agent_runtime": {
+                        "executor_recursion_limit": 320,
+                        "helper_agent_recursion_limit": 180,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+
+            agent_runtime = config.get_agent_runtime_settings()
+
+        assert agent_runtime["executor_recursion_limit"] == 320
+        assert agent_runtime["helper_agent_recursion_limit"] == 180
+
+    def test_invalid_agent_runtime_limit_falls_back_to_default(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(
+            json.dumps(
+                {
+                    "agent_runtime": {
+                        "executor_recursion_limit": "many",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+
+            assert config.get_agent_runtime_limit("executor_recursion_limit", 1000) == 1000
+            assert config.get_agent_runtime_limit("helper_agent_recursion_limit", 1000) == 1000

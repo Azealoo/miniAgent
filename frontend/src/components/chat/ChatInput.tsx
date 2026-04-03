@@ -1,28 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  ArrowUp,
-  Paperclip,
-  Square,
-  X,
-} from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import { quickStartItems } from "@/components/layout/workspace-data";
 import type { InspectorTab } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 interface ChatInputProps {
   onSend: (text: string) => void;
+  onStop: () => void;
   isStreaming: boolean;
-  isReferenceUploading: boolean;
   disabled?: boolean;
   disabledReason?: string;
-  attachedIdentifiers: string[];
   onOpenInspectorTab: (tab: InspectorTab) => void;
   onPrimeDraftMessage: (text: string) => void;
-  onUploadReferenceFile: (file: File) => Promise<void>;
-  onRemoveAttachedIdentifier: (identifier: string) => void;
-  onClearAttachedIdentifiers: () => void;
   prefillText?: string;
   prefillRevision?: number;
   clearPrefill?: () => void;
@@ -80,74 +71,25 @@ const COMPOSER_QUICK_ACTIONS: ComposerQuickAction[] = [
   },
 ];
 
-function shortenIdentifier(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) return value;
-
-  const parts = trimmed.split("/").filter(Boolean);
-  if (parts.length <= 2) return trimmed;
-  return parts.slice(-2).join("/");
-}
-
-function ControlButton({
-  active,
-  disabled,
-  title,
-  onClick,
-  children,
-}: {
-  active?: boolean;
-  disabled?: boolean;
-  title: string;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      aria-label={title}
-      onClick={onClick}
-      disabled={disabled}
-      className={cn(
-        "inline-flex h-7 w-7 items-center justify-center rounded-[10px] border transition-colors",
-        disabled
-          ? "cursor-not-allowed border-[var(--shell-border)] bg-[rgba(248,250,247,0.92)] text-slate-400"
-          : active
-            ? "border-[rgba(35,130,83,0.2)] bg-[rgba(35,130,83,0.08)] text-[var(--apex-accent-strong)]"
-            : "border-[rgba(211,219,210,0.92)] bg-white/78 text-slate-500 hover:border-[rgba(35,130,83,0.18)] hover:text-[var(--apex-accent-strong)]"
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
 export default function ChatInput({
   onSend,
+  onStop,
   isStreaming,
-  isReferenceUploading,
   disabled,
   disabledReason,
-  attachedIdentifiers,
   onOpenInspectorTab,
   onPrimeDraftMessage,
-  onUploadReferenceFile,
-  onRemoveAttachedIdentifier,
-  onClearAttachedIdentifiers,
   prefillText = "",
   prefillRevision = 0,
   clearPrefill,
 }: ChatInputProps) {
   const [text, setText] = useState("");
-  const [uploadError, setUploadError] = useState<string | null>(null);
   const [activeSlashActionIndex, setActiveSlashActionIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const hasContextChips = attachedIdentifiers.length > 0;
-  const requestLocked = disabled || isStreaming || isReferenceUploading;
+  const composerDisabled = Boolean(disabled);
   const normalizedText = text.trim().toLowerCase();
-  const showSlashCommands = !requestLocked && text.trimStart().startsWith("/");
+  const showSlashCommands =
+    !composerDisabled && !isStreaming && text.trimStart().startsWith("/");
   const matchingSlashActions = showSlashCommands
     ? COMPOSER_QUICK_ACTIONS.filter((action) =>
         action.command.startsWith(normalizedText)
@@ -185,7 +127,7 @@ export default function ChatInput({
 
   const handleSend = useCallback(() => {
     const trimmed = text.trim();
-    if (!trimmed || requestLocked) return;
+    if (!trimmed || composerDisabled || isStreaming) return;
 
     onSend(trimmed);
     setText("");
@@ -195,11 +137,10 @@ export default function ChatInput({
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [clearPrefill, onSend, requestLocked, text]);
+  }, [clearPrefill, composerDisabled, isStreaming, onSend, text]);
 
   const runComposerAction = useCallback(
     (action: ComposerQuickAction) => {
-      setUploadError(null);
       setActiveSlashActionIndex(0);
 
       if (action.kind === "prompt" && action.draftMessage) {
@@ -259,40 +200,7 @@ export default function ChatInput({
       handleSend();
     }
   };
-
-  const openFilePicker = () => {
-    if (requestLocked) return;
-    setUploadError(null);
-    fileInputRef.current?.click();
-  };
-
-  const handleFileSelected = useCallback(
-    async (event: React.ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
-      event.target.value = "";
-      if (!file || disabled || isStreaming || isReferenceUploading) return;
-
-      setUploadError(null);
-
-      try {
-        await onUploadReferenceFile(file);
-      } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Unable to upload that reference file right now.";
-        setUploadError(message);
-      }
-    },
-    [disabled, isReferenceUploading, isStreaming, onUploadReferenceFile]
-  );
-
-  const helperText =
-    disabled
-      ? disabledReason ?? "Loading workspace"
-      : isReferenceUploading
-        ? "Uploading reference..."
-        : uploadError;
+  const helperText = disabled ? disabledReason ?? "Loading workspace" : null;
 
   return (
     <div
@@ -352,51 +260,6 @@ export default function ChatInput({
         </div>
       ) : null}
 
-      {hasContextChips ? (
-        <div className="mb-2 flex flex-wrap gap-1.5">
-          {attachedIdentifiers.map((identifier) => (
-            <span
-              key={identifier}
-              className="inline-flex max-w-full items-center gap-1.5 rounded-[10px] border border-[rgba(35,130,83,0.14)] bg-[rgba(35,130,83,0.06)] px-2 py-1 text-[10px] font-medium text-[var(--apex-accent-strong)]"
-              title={identifier}
-            >
-              <span className="font-mono uppercase tracking-[0.12em] text-slate-400">file</span>
-              <Paperclip size={11} />
-              <span className="max-w-[11rem] truncate">{shortenIdentifier(identifier)}</span>
-              <button
-                type="button"
-                onClick={() => onRemoveAttachedIdentifier(identifier)}
-                disabled={requestLocked}
-                className={cn(
-                  "inline-flex h-3.5 w-3.5 items-center justify-center rounded-full",
-                  requestLocked
-                    ? "cursor-not-allowed text-slate-400"
-                    : "hover:bg-[rgba(35,130,83,0.12)]"
-                )}
-              >
-                <X size={10} />
-              </button>
-            </span>
-          ))}
-
-          {attachedIdentifiers.length > 1 ? (
-            <button
-              type="button"
-              onClick={onClearAttachedIdentifiers}
-              disabled={requestLocked}
-              className={cn(
-                "inline-flex items-center rounded-[10px] border px-2 py-1 text-[10px] font-medium transition-colors",
-                requestLocked
-                  ? "cursor-not-allowed border-[var(--shell-border)] bg-[rgba(248,250,247,0.92)] text-slate-400"
-                  : "border-[rgba(211,219,210,0.92)] bg-white/72 text-slate-500 hover:bg-[var(--panel-soft)] hover:text-slate-700"
-              )}
-            >
-              Clear
-            </button>
-          ) : null}
-        </div>
-      ) : null}
-
       <textarea
         ref={textareaRef}
         rows={1}
@@ -413,50 +276,26 @@ export default function ChatInput({
         className="min-h-[36px] max-h-[72px] w-full resize-none overflow-y-auto bg-transparent py-0.5 font-mono text-[14px] leading-[1.45] text-slate-800 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed"
       />
 
-      <div className="mt-1 flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <ControlButton
-            title="Upload reference file"
-            onClick={openFilePicker}
-            active={isReferenceUploading || attachedIdentifiers.length > 0}
-            disabled={requestLocked}
-          >
-            <Paperclip size={13} />
-          </ControlButton>
-
-          {helperText ? (
-            <span
-              className={cn(
-                "max-w-[12rem] truncate font-mono text-[10px] sm:max-w-[16rem]",
-                uploadError ? "text-rose-500" : "text-slate-400"
-              )}
-            >
-              {helperText}
-            </span>
-          ) : null}
-        </div>
-
+      <div
+        className={cn(
+          "mt-1 flex items-center gap-2",
+          helperText ? "justify-between" : "justify-end"
+        )}
+      >
+        {helperText ? (
+          <span className="min-w-0 truncate font-mono text-[10px] text-slate-400">
+            {helperText}
+          </span>
+        ) : null}
         <button
           type="button"
-          title={
-            isReferenceUploading
-              ? "Waiting for reference upload"
-              : isStreaming
-                ? "Streaming"
-                : "Send message"
-          }
-          aria-label={
-            isReferenceUploading
-              ? "Waiting for reference upload"
-              : isStreaming
-                ? "Streaming"
-                : "Send message"
-          }
-          onClick={handleSend}
-          disabled={!text.trim() || requestLocked}
+          title={isStreaming ? "Stop response" : "Send message"}
+          aria-label={isStreaming ? "Stop response" : "Send message"}
+          onClick={isStreaming ? onStop : handleSend}
+          disabled={isStreaming ? composerDisabled : !text.trim() || composerDisabled}
           className={cn(
             "inline-flex h-8 w-8 items-center justify-center rounded-full border transition-colors",
-            !text.trim() || requestLocked
+            (isStreaming ? composerDisabled : !text.trim() || composerDisabled)
               ? "cursor-not-allowed border-[rgba(211,219,210,0.92)] bg-[rgba(243,245,242,0.9)] text-slate-400"
               : "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.06)] text-[var(--apex-accent-strong)] hover:bg-[rgba(35,130,83,0.1)]"
           )}
@@ -468,17 +307,6 @@ export default function ChatInput({
           )}
         </button>
       </div>
-
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="text/*,.csv,.tsv,.json,.yaml,.yml,.md,.fa,.fasta,.fq,.fastq,.bed,.gtf,.gff,.sam,.vcf"
-        onChange={(event) => {
-          void handleFileSelected(event);
-        }}
-        className="hidden"
-        tabIndex={-1}
-      />
     </div>
   );
 }

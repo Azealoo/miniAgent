@@ -6,16 +6,12 @@ import ChatInput from "./ChatInput";
 function renderChatInput() {
   const props = {
     onSend: vi.fn(),
+    onStop: vi.fn(),
     isStreaming: false,
-    isReferenceUploading: false,
     disabled: false,
     disabledReason: undefined,
-    attachedIdentifiers: [],
     onOpenInspectorTab: vi.fn(),
     onPrimeDraftMessage: vi.fn(),
-    onUploadReferenceFile: vi.fn(async () => undefined),
-    onRemoveAttachedIdentifier: vi.fn(),
-    onClearAttachedIdentifiers: vi.fn(),
     prefillText: "",
     prefillRevision: 0,
     clearPrefill: vi.fn(),
@@ -35,6 +31,7 @@ describe("ChatInput", () => {
     expect(textbox).toBeTruthy();
     expect(textbox.getAttribute("rows")).toBe("1");
     expect(screen.queryByText("BioAPEX can make mistakes.")).toBeNull();
+    expect(screen.queryByRole("button", { name: /upload reference file/i })).toBeNull();
   });
 
   it("shows slash-command suggestions and completes them with Tab", async () => {
@@ -84,5 +81,35 @@ describe("ChatInput", () => {
     fireEvent.keyDown(textbox, { key: "Enter" });
 
     expect(props.onOpenInspectorTab).toHaveBeenCalledWith("files");
+  });
+
+  it("turns the submit button into an active stop control while streaming", async () => {
+    const user = userEvent.setup();
+    const props = {
+      onSend: vi.fn(),
+      onStop: vi.fn(),
+      isStreaming: true,
+      disabled: false,
+      disabledReason: undefined,
+      onOpenInspectorTab: vi.fn(),
+      onPrimeDraftMessage: vi.fn(),
+      prefillText: "",
+      prefillRevision: 0,
+      clearPrefill: vi.fn(),
+    };
+
+    render(
+      <ChatInput
+        {...props}
+      />
+    );
+
+    const stopButton = screen.getByRole("button", { name: /stop response/i });
+    expect(stopButton.hasAttribute("disabled")).toBe(false);
+
+    await user.click(stopButton);
+
+    expect(props.onStop).toHaveBeenCalledTimes(1);
+    expect(props.onSend).not.toHaveBeenCalled();
   });
 });

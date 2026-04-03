@@ -20,6 +20,10 @@ interface ParsedChatStreamChunk {
   events: ChatStreamEvent[];
 }
 
+interface ParseChatStreamChunkOptions {
+  flush?: boolean;
+}
+
 type UnknownRecord = Record<string, unknown>;
 
 function isObjectRecord(value: unknown): value is UnknownRecord {
@@ -328,14 +332,20 @@ export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent |
 
 export function parseChatStreamChunk(
   previousBuffer: string,
-  decodedChunk: string
+  decodedChunk: string,
+  options: ParseChatStreamChunkOptions = {}
 ): ParsedChatStreamChunk {
   const rawBuffer = previousBuffer + decodedChunk;
   const rawEvents = rawBuffer.split("\n\n");
   const bufferedRemainder = rawEvents.pop() ?? "";
   const events: ChatStreamEvent[] = [];
 
-  for (const rawEvent of rawEvents) {
+  const eventsToParse =
+    options.flush && bufferedRemainder.trim().length > 0
+      ? [...rawEvents, bufferedRemainder]
+      : rawEvents;
+
+  for (const rawEvent of eventsToParse) {
     for (const line of rawEvent.split("\n")) {
       if (!line.startsWith("data: ")) {
         continue;
@@ -354,7 +364,10 @@ export function parseChatStreamChunk(
   }
 
   return {
-    bufferedRemainder,
+    bufferedRemainder:
+      options.flush && bufferedRemainder.trim().length > 0
+        ? ""
+        : bufferedRemainder,
     events,
   };
 }

@@ -16,6 +16,7 @@ import {
   Copy,
   Download,
   FileText,
+  Hash,
   Info,
   Package,
   Plus,
@@ -33,6 +34,7 @@ import {
 } from "@/components/preview/FilePreviewSurface";
 import TurnDetailsPanel from "@/components/editor/TurnDetailsPanel";
 import {
+  getSessionTokens,
   listSkillsRegistry,
   openRawFileInNewTab,
   readFile,
@@ -45,6 +47,10 @@ import {
 import {
   getLatestRequestMessages,
 } from "@/lib/session-status";
+import {
+  summarizeSessionUsage,
+  type UsageSummaryOrigin,
+} from "@/lib/token-usage";
 import {
   getEvidenceRetrievalPayload,
   parseEvidenceArtifactMetadata,
@@ -61,6 +67,7 @@ import type {
   SourcesInspectorCitationTone,
   SourcesInspectorChecklistItem,
   SourcesInspectorSummary,
+  TokenStats,
   ToolResultEnvelope,
 } from "@/lib/types";
 
@@ -79,6 +86,7 @@ const INSPECTOR_TABS = [
   { id: "sources", label: "Sources", icon: Search },
   { id: "memory", label: "Memory", icon: Brain },
   { id: "skills", label: "Skills", icon: Sparkles },
+  { id: "usage", label: "Usage", icon: Hash },
   { id: "turns", label: "Turns", icon: Clock3 },
 ] as const;
 
@@ -238,6 +246,18 @@ function exportFilename(title: string): string {
     title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
     "bioapex-session"
   );
+}
+
+function formatCompactTokenValue(value: number): string {
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(value >= 100_000_000 ? 0 : 1)}M`;
+  }
+
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}K`;
+  }
+
+  return value.toString();
 }
 
 function normalizeMarkdownInline(value: string): string {
@@ -1637,6 +1657,21 @@ function MiniStat({
   );
 }
 
+function UsageMetricRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 text-[12px] leading-5">
+      <span className="text-slate-400">{label}</span>
+      <span className="font-semibold text-slate-700">{value}</span>
+    </div>
+  );
+}
+
 function SkillDetailField({
   label,
   value,
@@ -1955,6 +1990,10 @@ export default function InspectorPanel() {
   } = useApp();
 
   const [skills, setSkills] = useState<SkillRegistryEntry[]>([]);
+  const [tokens, setTokens] = useState<TokenStats | null>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [usageLoadError, setUsageLoadError] = useState("");
+  const [usageBaselineMessageCount, setUsageBaselineMessageCount] = useState(0);
   const [memoryContent, setMemoryContent] = useState("");
   const [savedMemoryContent, setSavedMemoryContent] = useState("");
   const [memoryLoadError, setMemoryLoadError] = useState("");
@@ -2017,6 +2056,30 @@ export default function InspectorPanel() {
     skills.find((skill) => skill.location === selectedSkillPath) ?? null;
   const activeSkills = skills.filter((skill) => skill.enabled);
   const availableSkills = skills.filter((skill) => !skill.enabled);
+  const usageSummary = summarizeSessionUsage({
+    sessionId: currentSessionId,
+    messages,
+    exactTokens: currentSessionId && tokens?.session_id === currentSessionId ? tokens : null,
+    exactMessageCount: usageBaselineMessageCount,
+  });
+  const sessionUsage = usageSummary?.stats ?? null;
+  const usageOrigin: UsageSummaryOrigin | null = usageSummary?.origin ?? null;
+  const trackedTotalTokens =
+    sessionUsage?.tracked_total_tokens ?? sessionUsage?.total_tokens ?? 0;
+  const promptContextTokens = sessionUsage?.total_tokens ?? 0;
+  const contextWindowRatio =
+    sessionUsage?.context_window_tokens && sessionUsage.context_window_tokens > 0
+      ? Math.min(promptContextTokens / sessionUsage.context_window_tokens, 1)
+      : null;
+  const contextWindowLabel = sessionUsage?.context_window_tokens
+    ? `${formatCompactTokenValue(promptContextTokens)} / ${formatCompactTokenValue(sessionUsage.context_window_tokens)}`
+    : null;
+  const usageStatusLabel =
+    usageOrigin === "tracked_live"
+      ? "Live"
+      : usageOrigin === "tracked"
+        ? "Tracked"
+        : "Estimated";
   const selectedArtifactItem =
     artifactItems.find((item) => item.path === inspectorPreviewPath) ?? null;
   const inspectorPreviewTarget: FilePreviewTarget | null = inspectorPreviewPath
@@ -2037,6 +2100,68 @@ export default function InspectorPanel() {
   useEffect(() => {
     setPreviewActionError("");
   }, [inspectorPreviewPath]);
+
+  useEffect(() => {
+    if (!currentSessionId) {
+      setTokens(null);
+      setUsageLoading(false);
+      setUsageLoadError("");
+      setUsageBaselineMessageCount(0);
+      return;
+    }
+
+    if (!hasInspectionAccess) {
+      setUsageLoading(false);
+      return;
+    }
+
+    if (isStreaming) {
+      setUsageLoading(false);
+      setTokens((current) =>
+        current?.session_id === currentSessionId ? current : null
+      );
+      setUsageBaselineMessageCount((current) =>
+        current > messages.length ? 0 : current
+      );
+      setUsageLoadError("");
+      return;
+    }
+
+    let cancelled = false;
+    setUsageLoading(true);
+    setUsageLoadError("");
+
+    void getSessionTokens(currentSessionId)
+      .then((nextTokens) => {
+        if (cancelled) {
+          return;
+        }
+
+        setTokens(nextTokens);
+        setUsageBaselineMessageCount(messages.length);
+        setUsageLoadError("");
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+
+        setTokens(null);
+        setUsageBaselineMessageCount(0);
+        setUsageLoadError(
+          "Could not load tracked token usage. Showing a live estimate instead."
+        );
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setUsageLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSessionId, hasInspectionAccess, isStreaming, messages.length]);
 
   useEffect(() => {
     if (
@@ -2122,6 +2247,10 @@ export default function InspectorPanel() {
       return;
     }
 
+    setTokens(null);
+    setUsageLoading(false);
+    setUsageLoadError(accessByScope.inspection.detail);
+    setUsageBaselineMessageCount(0);
     setMemoryContent("");
     setSavedMemoryContent("");
     setMemoryItemDraft(null);
@@ -3426,6 +3555,77 @@ export default function InspectorPanel() {
     </div>
   );
 
+  const renderUsageTab = () => (
+    <div className="space-y-2">
+      <InspectorCard
+        title="Usage"
+        controls={
+          <MetaBadge tone={usageOrigin === "tracked_live" ? "accent" : "neutral"}>
+            {usageStatusLabel}
+          </MetaBadge>
+        }
+      >
+        {!currentSessionId ? (
+          <EmptyState>Select a session to inspect token usage.</EmptyState>
+        ) : usageLoading && !sessionUsage ? (
+          <LoadingState label="Loading usage..." />
+        ) : sessionUsage && (trackedTotalTokens > 0 || messages.length > 0) ? (
+          <div className="space-y-4">
+            <div className="pt-1 text-center">
+              <p className="text-[40px] font-semibold tracking-[-0.06em] text-slate-800">
+                {trackedTotalTokens.toLocaleString()}
+              </p>
+              <p className="mt-1 text-[11px] text-slate-400">Total tokens</p>
+            </div>
+
+            <div className="space-y-1.5">
+              <UsageMetricRow
+                label="Input"
+                value={sessionUsage.input_tokens.toLocaleString()}
+              />
+              <UsageMetricRow
+                label="Output"
+                value={sessionUsage.output_tokens.toLocaleString()}
+              />
+              <UsageMetricRow
+                label="Tools"
+                value={sessionUsage.tool_tokens.toLocaleString()}
+              />
+            </div>
+
+            <div className="space-y-1.5 pt-0.5">
+              <div className="flex items-center justify-between gap-3 text-[12px] leading-5">
+                <span>Context</span>
+                <span className="font-semibold text-slate-700">
+                  {contextWindowLabel ?? "Unavailable"}
+                </span>
+              </div>
+              <div className="h-[2px] overflow-hidden rounded-full bg-[rgba(211,219,210,0.76)]">
+                {contextWindowRatio !== null ? (
+                  <div
+                    className="h-full rounded-full bg-[var(--apex-accent)]"
+                    style={{ width: `${contextWindowRatio * 100}%` }}
+                  />
+                ) : null}
+              </div>
+              {contextWindowLabel ? null : (
+                <p className="text-[10px] leading-4 text-slate-500">
+                  Context-window budget is not configured for this model.
+                </p>
+              )}
+            </div>
+          </div>
+        ) : usageLoading ? (
+          <LoadingState label="Loading usage..." />
+        ) : (
+          <EmptyState>
+            Send a message in this session to populate token usage here.
+          </EmptyState>
+        )}
+      </InspectorCard>
+    </div>
+  );
+
   const renderTurnsTab = () => (
     <div className="space-y-2">
       <InspectorCard
@@ -3474,6 +3674,7 @@ export default function InspectorPanel() {
         {inspectorTab === "sources" && renderSourcesTab()}
         {inspectorTab === "memory" && renderMemoryTab()}
         {inspectorTab === "skills" && renderSkillsTab()}
+        {inspectorTab === "usage" && renderUsageTab()}
         {inspectorTab === "turns" && renderTurnsTab()}
       </div>
 

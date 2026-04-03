@@ -34,6 +34,12 @@ def _check_session_id(session_id: str) -> None:
         raise HTTPException(status_code=400, detail="Invalid session_id")
 
 
+def _normalize_session_title(title: str) -> str:
+    if len(title) > 200:
+        raise ValueError("title too long (max 200 characters)")
+    return title.strip() or "New Chat"
+
+
 # ------------------------------------------------------------------ #
 # Collection                                                           #
 # ------------------------------------------------------------------ #
@@ -80,9 +86,7 @@ class RenameRequest(BaseModel):
     @field_validator("title")
     @classmethod
     def _check_title_length(cls, v: str) -> str:
-        if len(v) > 200:
-            raise ValueError("title too long (max 200 characters)")
-        return v.strip() or "New Chat"
+        return _normalize_session_title(v)
 
 
 @router.put("/sessions/{session_id}")
@@ -160,7 +164,9 @@ async def generate_title(session_id: str, request: Request = None):
         raise HTTPException(400, "No user messages found")
 
     try:
-        title = await generate_chat_title(agent_manager, first_user)
+        title = _normalize_session_title(
+            await generate_chat_title(agent_manager, first_user)
+        )
     except Exception as exc:
         raise HTTPException(500, str(exc))
 

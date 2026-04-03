@@ -443,6 +443,7 @@ export type InspectorTab =
   | "sources"
   | "memory"
   | "skills"
+  | "usage"
   | "turns";
 
 export interface Session {

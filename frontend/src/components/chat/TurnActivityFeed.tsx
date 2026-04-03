@@ -75,6 +75,41 @@ function compactInline(value?: string | null, maxLength = 88): string | null {
   return `${normalized.slice(0, maxLength - 1)}…`;
 }
 
+function looksStructuredInline(value?: string | null): boolean {
+  if (!value) {
+    return false;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return (
+    (trimmed.startsWith("{") && /":\s*/.test(trimmed)) ||
+    (trimmed.startsWith("[") && /[\]"}]/.test(trimmed)) ||
+    trimmed.includes('{"') ||
+    trimmed.includes('["') ||
+    trimmed.includes('":')
+  );
+}
+
+function compactUserFacingInline(
+  value?: string | null,
+  maxLength = 88
+): string | null {
+  const compacted = compactInline(value, maxLength);
+  if (!compacted || looksStructuredInline(compacted)) {
+    return null;
+  }
+
+  return compacted;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function displaySourceLabel(source: string): string | null {
   const trimmed = source.trim();
   if (!trimmed) {
@@ -184,337 +219,281 @@ function summarizeRetrievalBlock(results: RetrievalResult[]): FeedLineDescriptor
   };
 }
 
-function normalizePlanningKeyword(value: string, maxLength = 38): string | null {
-  const normalized = value.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return null;
-  }
-
-  const compacted = compactInline(normalized, maxLength);
-  return compacted ? sentenceCase(compacted) : null;
-}
-
-const PLANNING_STEP_MAX_LENGTH = 72;
-
-function asPlanningStep(value: string): string {
-  return value.replace(/[.!?]+$/, "").trim();
-}
-
-function abstractPlanningStepId(value: string): string | null {
-  const normalized = value
-    .replace(/^step[_\s-]*\d+[_\s-]*/i, "")
-    .replace(/^step[_\s-]*/i, "")
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!normalized) {
-    return null;
-  }
-
-  if (!/[a-z]/i.test(normalized)) {
-    return null;
-  }
-
-  return normalizePlanningKeyword(normalized, PLANNING_STEP_MAX_LENGTH);
-}
-
-function summarizePlanningPhrase(value: string): string | null {
-  let normalized = value.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return null;
-  }
-
-  const originalLower = normalized.toLowerCase();
-  if (originalLower.startsWith("establish the review scope")) {
-    return "Establish review scope";
-  }
-  if (originalLower.startsWith("inspect core files")) {
-    return "Inspect core files";
-  }
-  if (originalLower.startsWith("check for compliance and safety")) {
-    return "Review risks and safety";
-  }
-  if (originalLower.startsWith("summarize likely analysis stages")) {
-    return "Outline analysis stages";
-  }
-  if (originalLower.includes("pipeline stages")) {
-    return "Outline pipeline stages";
-  }
-  if (originalLower.startsWith("inspect external biological references")) {
-    return "Inspect biological references";
-  }
-  if (originalLower.startsWith("synthesize findings")) {
-    return "Decide readiness";
-  }
-
-  normalized = normalized.replace(/^if\b[^,]*,\s*/i, "");
-  normalized = normalized.replace(/\bincluding\b.*$/i, "");
-  normalized = normalized.replace(/\bwith\b.*$/i, "");
-  normalized = normalized.replace(/\busing\b.*$/i, "");
-
-  const punctuationIndex = normalized.search(/[,:;]/);
-  if (punctuationIndex > 0) {
-    normalized = normalized.slice(0, punctuationIndex).trim();
-  }
-
-  const words = normalized.split(/\s+/);
-  if (words.length > 12 && /\sand\s/i.test(normalized)) {
-    normalized = normalized.replace(/\sand\s.*$/i, "").trim();
-  }
-
-  return normalizePlanningKeyword(normalized, PLANNING_STEP_MAX_LENGTH);
-}
-
-function isConcisePlanningPhrase(value: string): boolean {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return false;
-  }
-
-  const words = normalized.split(/\s+/);
-  return normalized.length <= 34 && words.length <= 6;
-}
-
-function extractPlanKeywords(
-  block: Extract<SessionContentBlock, { type: "plan" }>
-): string[] {
-  const keywords: string[] = [];
-
-  const pushKeyword = (raw: unknown, maxLength = 38) => {
-    if (typeof raw !== "string") {
-      return;
-    }
-
-    const normalized = normalizePlanningKeyword(raw, maxLength);
-    if (!normalized || keywords.includes(normalized)) {
-      return;
-    }
-
-    keywords.push(normalized);
-  };
-
-  const steps = Array.isArray(block.plan.steps) ? block.plan.steps : [];
-  steps.forEach((step) => {
-    if (keywords.length >= 3) {
-      return;
-    }
-
-    if (typeof step === "string") {
-      pushKeyword(step);
-      return;
-    }
-
-    if (!step || typeof step !== "object" || Array.isArray(step)) {
-      return;
-    }
-
-    const record = step as Record<string, unknown>;
-    const conciseCandidates = [
-      record.intent,
-      record.title,
-      record.label,
-      record.action,
-    ];
-
-    for (const candidate of conciseCandidates) {
-      if (typeof candidate === "string" && isConcisePlanningPhrase(candidate)) {
-        const before = keywords.length;
-        pushKeyword(candidate, PLANNING_STEP_MAX_LENGTH);
-        if (keywords.length > before) {
-          return;
-        }
-      }
-    }
-
-    if (typeof record.step_id === "string") {
-      const stepIdSummary = abstractPlanningStepId(record.step_id);
-      if (stepIdSummary) {
-        const before = keywords.length;
-        pushKeyword(stepIdSummary, PLANNING_STEP_MAX_LENGTH);
-        if (keywords.length > before) {
-          return;
-        }
-      }
-    }
-
-    const summaryCandidates = [
-      record.intent,
-      record.title,
-      record.label,
-      record.description,
-      record.action,
-      record.tool,
-    ];
-
-    for (const candidate of summaryCandidates) {
-      if (typeof candidate === "string") {
-        const summarized = summarizePlanningPhrase(candidate);
-        const before = keywords.length;
-        pushKeyword(summarized, PLANNING_STEP_MAX_LENGTH);
-        if (keywords.length > before) {
-          break;
-        }
-      }
-    }
-  });
-
-  if (keywords.length === 0 && Array.isArray(block.tool_trace)) {
-    block.tool_trace.forEach((item) => {
-      if (keywords.length >= 3) {
-        return;
-      }
-
-      if (!item || typeof item !== "object" || Array.isArray(item)) {
-        return;
-      }
-
-      const record = item as Record<string, unknown>;
-      const candidates = [record.summary, record.tool];
-
-      for (const candidate of candidates) {
-        if (typeof candidate === "string") {
-          const summarized = summarizePlanningPhrase(candidate);
-          const before = keywords.length;
-          pushKeyword(summarized, PLANNING_STEP_MAX_LENGTH);
-          if (keywords.length > before) {
-            break;
-          }
-        }
-      }
-    });
-  }
-
-  return keywords;
-}
-
 function summarizePlanBlock(
   block: Extract<SessionContentBlock, { type: "plan" }>
 ): FeedPlanningDescriptor {
-  const steps = extractPlanKeywords(block)
-    .map(asPlanningStep)
-    .filter((step) => step.length > 0);
-  const fallback = block.event === "updated" ? "Refine next steps" : "Plan next steps";
+  const stepCount = Array.isArray(block.plan.steps) ? block.plan.steps.length : null;
+  const fallback =
+    block.event === "updated" ? "Updated the plan." : "Prepared a plan.";
+  const summary =
+    typeof stepCount === "number" && stepCount > 0
+      ? block.event === "updated"
+        ? `Updated the ${stepCount}-step plan.`
+        : `Prepared a ${stepCount}-step plan.`
+      : fallback;
+  const stepSummaries = summarizePlanSteps(block.plan.steps);
 
   return {
     kind: "planning",
-    steps: steps.length > 0 ? steps : [fallback],
+    steps: [summary, ...stepSummaries],
     tone: "active",
   };
 }
 
-function summarizeVerificationBlock(
-  block: Extract<SessionContentBlock, { type: "verification" }>
-): FeedBlockDescriptor {
-  const verificationRecord =
-    block.verification && typeof block.verification === "object"
-      ? (block.verification as Record<string, unknown>)
-      : null;
-  const repairInstructions = Array.isArray(verificationRecord?.repair_instructions)
-    ? verificationRecord?.repair_instructions
-    : [];
-  const issues = Array.isArray(verificationRecord?.issues)
-    ? verificationRecord?.issues
-    : [];
-  const checks = Array.isArray(verificationRecord?.checks)
-    ? verificationRecord?.checks
-    : [];
-  const firstFailingCheck = checks.find((check) => {
-    if (!check || typeof check !== "object" || Array.isArray(check)) {
-      return false;
-    }
-    const status = (check as Record<string, unknown>).status;
-    return status === "fail" || status === "repair_required";
-  }) as Record<string, unknown> | undefined;
-  const candidateDetails = [
-    typeof block.verification?.summary === "string"
-      ? block.verification.summary
-      : null,
-    typeof repairInstructions[0] === "string" ? repairInstructions[0] : null,
-    typeof issues[0] === "string" ? issues[0] : null,
-    typeof firstFailingCheck?.note === "string" ? firstFailingCheck.note : null,
-    block.summary,
-  ];
-  let conciseDetail: string | null = null;
-
-  for (const candidate of candidateDetails) {
-    if (!candidate) {
-      continue;
-    }
-
-    const normalized = candidate.replace(/\s+/g, " ").trim();
-    if (!normalized) {
-      continue;
-    }
-
-    const withoutVerdict = normalized.replace(
-      /^verifier verdict:\s*[a-z_]+\.\s*/i,
-      ""
-    );
-    const firstSentence = withoutVerdict
-      .split(/(?<=[.!?])\s+/)
-      .find((sentence) => sentence.trim().length > 0)
-      ?.trim();
-    const lowerSentence = firstSentence?.toLowerCase() ?? "";
-
-    if (
-      block.verdict === "repair_required" &&
-      (
-        lowerSentence.startsWith("the draft is") ||
-        lowerSentence.startsWith("the answer is") ||
-        lowerSentence.startsWith("it is") ||
-        lowerSentence.startsWith("it gives") ||
-        lowerSentence.startsWith("however")
-      )
-    ) {
-      continue;
-    }
-
-    if (
-      firstSentence &&
-      firstSentence.length <= 96 &&
-      firstSentence.split(/\s+/).length <= 16
-    ) {
-      conciseDetail = firstSentence;
-      break;
-    }
-
-    const firstClause = withoutVerdict.split(/[,:;]/)[0]?.trim();
-    if (
-      firstClause &&
-      firstClause.length <= 96 &&
-      firstClause.split(/\s+/).length <= 16
-    ) {
-      conciseDetail = firstClause;
-      break;
-    }
-
-    const compacted = compactInline(withoutVerdict, 96);
-    if (compacted) {
-      conciseDetail = compacted;
-      break;
-    }
+function summarizeToolTraceLines(toolTrace: unknown): FeedLineDescriptor[] {
+  if (!Array.isArray(toolTrace)) {
+    return [];
   }
 
-  const fallback =
-    block.verdict === "pass"
-      ? "Looks good."
-      : block.verdict === "repair_required"
-        ? "Needs revision."
-        : "Check failed.";
+  return toolTrace.flatMap((entry) => {
+    if (!isObjectRecord(entry)) {
+      return [];
+    }
 
-  return {
-    kind: "block",
-    title: "Verification result",
-    detail: conciseDetail ?? fallback,
-    badge: humanizeValue(block.verdict),
-    tone:
-      block.verdict === "pass"
-        ? "success"
-        : block.verdict === "repair_required"
-          ? "warning"
-          : "error",
-  };
+    const tool = typeof entry.tool === "string" ? entry.tool : null;
+    if (!tool || tool === "plan_agent" || tool === "verification_agent") {
+      return [];
+    }
+
+    const input = typeof entry.input === "string" ? entry.input : "";
+    const output =
+      typeof entry.output === "string"
+        ? entry.output
+        : "";
+    const line = completedToolLine(tool, input, output);
+    return line ? [line] : [];
+  });
+}
+
+function readablePlanStepId(stepId?: string | null): string | null {
+  if (!stepId) {
+    return null;
+  }
+
+  const normalized = stepId
+    .replace(/^step[_-]?\d+[_-]?/i, "")
+    .replace(/^s\d+$/i, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized || !/[a-z]/i.test(normalized)) {
+    return null;
+  }
+
+  const compacted = compactInline(normalized, 40);
+  if (!compacted) {
+    return null;
+  }
+
+  const terminal = compacted.endsWith("…") ? compacted : `${compacted}.`;
+  return sentenceCase(terminal);
+}
+
+function readablePlanStepText(value?: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const withoutTerminal = normalized.replace(/[.!?]+$/, "");
+  const terminal = withoutTerminal.endsWith("…")
+    ? withoutTerminal
+    : `${withoutTerminal}.`;
+  return sentenceCase(terminal);
+}
+
+function summarizePlanSteps(stepsValue: unknown): string[] {
+  if (!Array.isArray(stepsValue)) {
+    return [];
+  }
+
+  return stepsValue
+    .flatMap((step, index) => {
+      if (typeof step === "string") {
+        const summary = readablePlanStepText(step);
+        return summary ? [`${index + 1}. ${summary}`] : [];
+      }
+
+      if (!step || typeof step !== "object" || Array.isArray(step)) {
+        return [`${index + 1}. Step ${index + 1}.`];
+      }
+
+      const stepRecord = step as Record<string, unknown>;
+      const primaryTextCandidate =
+        typeof stepRecord.intent === "string"
+          ? stepRecord.intent
+          : typeof stepRecord.title === "string"
+            ? stepRecord.title
+            : typeof stepRecord.label === "string"
+              ? stepRecord.label
+              : typeof stepRecord.description === "string"
+                ? stepRecord.description
+                : typeof stepRecord.action === "string"
+                  ? stepRecord.action
+                  : typeof stepRecord.exit_criteria === "string"
+                    ? stepRecord.exit_criteria
+                    : null;
+      const intentSummary = readablePlanStepText(primaryTextCandidate);
+      const stepIdSummary = readablePlanStepId(
+        typeof stepRecord.step_id === "string" ? stepRecord.step_id : null
+      );
+      const summary = intentSummary ?? stepIdSummary ?? `Step ${index + 1}.`;
+
+      return summary ? [`${index + 1}. ${summary}`] : [];
+    });
+}
+
+function verificationTone(
+  verdict: Extract<SessionContentBlock, { type: "verification" }>["verdict"]
+): FeedTone {
+  return verdict === "pass"
+    ? "success"
+    : verdict === "repair_required"
+      ? "warning"
+      : "error";
+}
+
+function verificationOutcomeLine(
+  verdict: Extract<SessionContentBlock, { type: "verification" }>["verdict"]
+): string {
+  if (verdict === "pass") {
+    return "Passed verification.";
+  }
+  if (verdict === "repair_required") {
+    return "Needs revision before delivery.";
+  }
+  return "Verification failed.";
+}
+
+function verificationDetailTone(
+  verdict: Extract<SessionContentBlock, { type: "verification" }>["verdict"],
+  status?: string | null
+): FeedTone {
+  if (status === "pass") {
+    return "success";
+  }
+  if (status === "fail") {
+    return verdict === "fail" ? "error" : "warning";
+  }
+  if (status === "not_run") {
+    return "default";
+  }
+  if (verdict === "pass") {
+    return "success";
+  }
+  if (verdict === "fail") {
+    return "error";
+  }
+  return "warning";
+}
+
+function sentenceWithDetail(prefix: string, detail?: string | null): string {
+  const normalizedPrefix = prefix.replace(/[.!?]+$/, "").trim();
+  const normalizedDetail = detail?.replace(/\s+/g, " ").trim();
+
+  if (!normalizedDetail) {
+    return `${normalizedPrefix}.`;
+  }
+
+  return `${normalizedPrefix}: ${normalizedDetail}`;
+}
+
+function summarizeVerificationChecks(
+  verdict: Extract<SessionContentBlock, { type: "verification" }>["verdict"],
+  verification: Record<string, unknown> | null
+): FeedLineDescriptor[] {
+  const checks = Array.isArray(verification?.checks) ? verification.checks : [];
+
+  return checks.flatMap((check) => {
+    if (!isObjectRecord(check)) {
+      return [];
+    }
+
+    const status =
+      check.status === "pass" || check.status === "fail" || check.status === "not_run"
+        ? check.status
+        : null;
+    const name = compactInline(
+      typeof check.name === "string" ? humanizeValue(check.name) : null,
+      42
+    );
+    const note = compactUserFacingInline(
+      typeof check.note === "string" ? check.note : null,
+      104
+    );
+
+    const prefix =
+      status === "pass"
+        ? `${sentenceCase(name ?? "Check")} check passed`
+        : status === "fail"
+          ? `${sentenceCase(name ?? "Check")} check failed`
+          : `${sentenceCase(name ?? "Check")} check not run`;
+
+    return [
+      {
+        kind: "line",
+        text: sentenceWithDetail(prefix, note),
+        tone: verificationDetailTone(verdict, status),
+      },
+    ];
+  });
+}
+
+function summarizeVerificationActions(
+  verdict: Extract<SessionContentBlock, { type: "verification" }>["verdict"],
+  verification: Record<string, unknown> | null
+): FeedLineDescriptor[] {
+  const actionValues = Array.isArray(verification?.repair_instructions)
+    ? verification?.repair_instructions
+    : Array.isArray(verification?.issues)
+      ? verification?.issues
+      : [];
+  const seen = new Set<string>();
+
+  return actionValues.flatMap((value) => {
+    if (typeof value !== "string") {
+      return [];
+    }
+
+    const text = readablePlanStepText(value);
+    if (!text || seen.has(text)) {
+      return [];
+    }
+
+    seen.add(text);
+    return [
+      {
+        kind: "line",
+        text,
+        tone: verificationDetailTone(verdict),
+      },
+    ];
+  });
+}
+
+function summarizeVerificationBlock(
+  block: Extract<SessionContentBlock, { type: "verification" }>
+): FeedLineDescriptor[] {
+  const tone = verificationTone(block.verdict);
+  const verification = isObjectRecord(block.verification) ? block.verification : null;
+  const detailLines = [
+    ...summarizeToolTraceLines(block.tool_trace),
+    ...summarizeVerificationChecks(block.verdict, verification),
+    ...summarizeVerificationActions(block.verdict, verification),
+  ];
+
+  return [
+    {
+      kind: "line",
+      text: verificationOutcomeLine(block.verdict),
+      tone,
+    },
+    ...detailLines,
+  ];
 }
 
 function toolPhrase(tool: string): string {
@@ -582,7 +561,9 @@ function startedToolLine(
   input: string,
   isPending: boolean
 ): FeedLineDescriptor {
-  const target = shouldShowToolTarget(tool) ? compactInline(input) : null;
+  const target = shouldShowToolTarget(tool)
+    ? compactUserFacingInline(input)
+    : null;
   return {
     kind: "line",
     text: sentenceCase(
@@ -600,12 +581,23 @@ function completedToolLine(
   output: string,
   result?: ToolResultEnvelope
 ): FeedLineDescriptor | null {
-  const target = shouldShowToolTarget(tool) ? compactInline(input) : null;
+  const target = shouldShowToolTarget(tool)
+    ? compactUserFacingInline(input)
+    : null;
+  const detail = compactUserFacingInline(output, 72);
 
   if (tool === "evidence_review") {
     return {
       kind: "line",
       text: "Ran evidence review.",
+      tone: outcomeTone(result),
+    };
+  }
+
+  if (tool === "verification_agent") {
+    return {
+      kind: "line",
+      text: "Ran verification.",
       tone: outcomeTone(result),
     };
   }
@@ -630,8 +622,8 @@ function completedToolLine(
     kind: "line",
     text: target
       ? `Ran ${toolPhrase(tool)} on ${target}.`
-      : compactInline(output)
-        ? `Ran ${toolPhrase(tool)}: ${compactInline(output, 72)}`
+      : detail
+        ? `Ran ${toolPhrase(tool)}: ${detail}`
         : `Ran ${toolPhrase(tool)}.`,
     tone: outcomeTone(result),
   };
@@ -659,15 +651,19 @@ function sectionKeyForTool(tool: string): FeedSectionKey {
   return "thinking";
 }
 
-function shouldSuppressSectionToolLine(tool: string): boolean {
-  return isPlannerTool(tool);
+function shouldSuppressSectionToolLine(
+  tool: string,
+  hasVerificationResult: boolean
+): boolean {
+  return isPlannerTool(tool) || (hasVerificationResult && isVerificationTool(tool));
 }
 
 function maybePushSectionPlaceholder(
   sections: Record<FeedSectionKey, FeedEntryDescriptor[]>,
-  key: FeedSectionKey
+  key: FeedSectionKey,
+  allowPlaceholder: boolean
 ): void {
-  if (key !== "planning") {
+  if (key !== "planning" || !allowPlaceholder) {
     return;
   }
 
@@ -677,7 +673,7 @@ function maybePushSectionPlaceholder(
   if (!hasPlanningEntry) {
     sections.planning.push({
       kind: "planning",
-      steps: ["Plan next steps"],
+      steps: ["Planning next steps."],
       tone: "active",
     });
   }
@@ -709,6 +705,7 @@ function summarizeFallback(message: Message): FeedLineDescriptor {
 
 function buildFeedSections(message: Message, live: boolean): FeedSectionDescriptor[] {
   const blocks = deriveMessageBlocks(message);
+  const hasVerificationBlock = blocks.some((block) => block.type === "verification");
   const sections = makeEmptySections();
   const pendingUses = new Map<string, Array<{ input: string; runId?: string }>>();
   let renderedPendingTool = false;
@@ -725,10 +722,11 @@ function buildFeedSections(message: Message, live: boolean): FeedSectionDescript
         break;
       }
       case "plan":
-        sections.planning.push(summarizePlanBlock(block));
+        sections.thinking.push(...summarizeToolTraceLines(block.tool_trace));
+        sections.planning = [summarizePlanBlock(block)];
         break;
       case "verification":
-        sections.verification.push(summarizeVerificationBlock(block));
+        sections.verification.push(...summarizeVerificationBlock(block));
         break;
       case "tool_use": {
         const key = toolBlockKey(block.tool, block.run_id);
@@ -741,8 +739,12 @@ function buildFeedSections(message: Message, live: boolean): FeedSectionDescript
           renderedPendingTool = true;
         }
         const sectionKey = sectionKeyForTool(block.tool);
-        if (shouldSuppressSectionToolLine(block.tool)) {
-          maybePushSectionPlaceholder(sections, sectionKey);
+        if (sectionKey === "planning") {
+          maybePushSectionPlaceholder(sections, sectionKey, true);
+          break;
+        }
+        if (shouldSuppressSectionToolLine(block.tool, hasVerificationBlock)) {
+          maybePushSectionPlaceholder(sections, sectionKey, false);
         } else {
           sections[sectionKey].push(startedToolLine(block.tool, block.input, isPending));
         }
@@ -766,8 +768,11 @@ function buildFeedSections(message: Message, live: boolean): FeedSectionDescript
         );
         if (line) {
           const sectionKey = sectionKeyForTool(block.tool);
-          if (shouldSuppressSectionToolLine(block.tool)) {
-            maybePushSectionPlaceholder(sections, sectionKey);
+          if (sectionKey === "planning") {
+            break;
+          }
+          if (shouldSuppressSectionToolLine(block.tool, hasVerificationBlock)) {
+            maybePushSectionPlaceholder(sections, sectionKey, false);
           } else {
             sections[sectionKey].push(line);
           }
@@ -781,8 +786,11 @@ function buildFeedSections(message: Message, live: boolean): FeedSectionDescript
 
   if (message.pendingTool && !renderedPendingTool) {
     const sectionKey = sectionKeyForTool(message.pendingTool.tool);
-    if (shouldSuppressSectionToolLine(message.pendingTool.tool)) {
-      maybePushSectionPlaceholder(sections, sectionKey);
+    if (sectionKey === "planning") {
+      maybePushSectionPlaceholder(sections, sectionKey, true);
+      renderedPendingTool = true;
+    } else if (shouldSuppressSectionToolLine(message.pendingTool.tool, hasVerificationBlock)) {
+      maybePushSectionPlaceholder(sections, sectionKey, false);
     } else {
       sections[sectionKey].push(
         startedToolLine(message.pendingTool.tool, message.pendingTool.input, true)
@@ -793,7 +801,6 @@ function buildFeedSections(message: Message, live: boolean): FeedSectionDescript
   if (
     live &&
     sections.thinking.length === 0 &&
-    sections.planning.length === 0 &&
     sections.verification.length === 0
   ) {
     sections.thinking.push(summarizeFallback(message));
@@ -818,7 +825,7 @@ function FeedLine({ text, tone = "default" }: Omit<FeedLineDescriptor, "kind">) 
   return (
     <p
       className={cn(
-        "font-mono text-[11px] italic leading-5",
+        "whitespace-pre-wrap break-words font-mono text-[11px] italic leading-5",
         lineToneClass(tone)
       )}
     >
@@ -877,7 +884,9 @@ function FeedSection({
   title: string;
   entries: FeedEntryDescriptor[];
 }) {
-  const animated = live && (title === "Thinking" || title === "Planning");
+  const animated =
+    live &&
+    (title === "Thinking" || title === "Planning" || title === "Verification");
 
   return (
     <div className="space-y-1.5">

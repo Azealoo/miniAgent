@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any, AsyncGenerator
 
+from config import get_verification_settings
 from runtime.turn_ledger import TurnLedger
 
 
@@ -136,7 +137,13 @@ class QueryEngine:
     def _verification_requires_repair(event: dict[str, Any] | None) -> bool:
         if not isinstance(event, dict):
             return False
-        return event.get("verdict") in {"repair_required", "fail"}
+        verdict = event.get("verdict")
+        if verdict == "fail":
+            return True
+        if verdict != "repair_required":
+            return False
+        verification_settings = get_verification_settings()
+        return bool(verification_settings.get("retry_on_repair_required", True))
 
     @staticmethod
     def _build_repair_history(

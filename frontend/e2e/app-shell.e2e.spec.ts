@@ -51,11 +51,12 @@ function buildAccessRoute(config: {
 test("renders the chat-only shell and streams a response", async ({ page }) => {
   const createdSession = makeSession({
     id: "session-chat-only",
-    title: "Chat-only checklist pass",
+    title: "New Chat",
     updated_at: Date.parse("2026-04-02T18:00:00Z"),
-    message_count: 2,
+    message_count: 0,
   });
   let sessions: Array<ReturnType<typeof makeSession>> = [];
+  const generatedTitle = "Chat-only checklist pass";
 
   await page.route("http://127.0.0.1:8002/", async (route) => {
     await fulfillJson(route, { service: "miniOpenClaw", status: "ok" });
@@ -81,15 +82,20 @@ test("renders the chat-only shell and streams a response", async ({ page }) => {
       sessions = [createdSession];
       return fulfillJson(route, createdSession);
     }),
+    route("POST", `/api/sessions/${createdSession.id}/generate-title`, (route) => {
+      sessions = [{ ...createdSession, title: generatedTitle, message_count: 2 }];
+      return fulfillJson(route, {
+        session_id: createdSession.id,
+        title: generatedTitle,
+      });
+    }),
     route("POST", "/api/chat", async (route) => {
       const body = JSON.parse(route.request().postData() ?? "{}") as {
         message: string;
       };
       expect(body).toMatchObject({
-        attached_identifiers: [],
         message: "Check this request for readiness.",
         session_id: createdSession.id,
-        stream: true,
       });
 
       await fulfillSse(route, [
@@ -134,6 +140,23 @@ test("renders the chat-only shell and streams a response", async ({ page }) => {
           }),
         },
         {
+          type: "verification_result",
+          summary: "Verifier verdict: pass. Looks good.",
+          verdict: "pass",
+          verification: {
+            verdict: "pass",
+            summary: "Looks good.",
+            checks: [
+              {
+                name: "readiness",
+                status: "pass",
+                note: "Core readiness items are covered.",
+              },
+            ],
+          },
+          request_id: "request-chat-only-1",
+        },
+        {
           type: "done",
           content: "BioAPEX reviewed the request.",
           request_id: "request-chat-only-1",
@@ -156,8 +179,11 @@ test("renders the chat-only shell and streams a response", async ({ page }) => {
   await page.getByRole("button", { name: "Send message" }).click();
 
   await expect(page.getByText("BioAPEX reviewed the request.")).toBeVisible();
+  await expect(page.getByText("Verification")).toBeVisible();
+  await expect(page.getByText("Checked readiness.")).toBeVisible();
+  await expect(page.getByText("Looks good.")).toBeVisible();
   await expect(
     page.getByRole("button", { name: /readiness-checklist\.md/i })
   ).toBeVisible();
-  await expect(page.getByRole("banner").getByText("Chat-only checklist pass")).toBeVisible();
+  await expect(page.getByRole("banner").getByText(generatedTitle)).toBeVisible();
 });

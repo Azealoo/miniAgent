@@ -20,7 +20,7 @@ SSE event types emitted:
 from access_control import require_execution_access
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from graph.session_manager import _validate_session_id
 from runtime.chat_runtime import ChatRuntime, ChatStreamInput
@@ -31,10 +31,10 @@ _MAX_MESSAGE_LEN = 32_000  # ~8 k tokens; prevents context blowout and large ses
 
 
 class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     message: str
     session_id: str
-    stream: bool = True
-    attached_identifiers: list[str] = Field(default_factory=list)
 
     @field_validator("message")
     @classmethod

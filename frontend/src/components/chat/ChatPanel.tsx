@@ -15,19 +15,15 @@ export default function ChatPanel() {
     currentSessionId,
     messages,
     isStreaming,
-    isReferenceUploading,
     isSessionLoading,
     sessionListStatus,
     sessionHistoryStatus,
     sessionHistoryError,
     sessionContinuitySummaries,
     sendMessage,
+    stopStreaming,
     reloadCurrentSession,
-    attachedIdentifiers,
     setInspectorTab,
-    uploadAttachedReference,
-    removeAttachedIdentifier,
-    clearAttachedIdentifiers,
     draftMessage,
     draftRevision,
     primeDraftMessage,
@@ -185,16 +181,12 @@ export default function ChatPanel() {
           <div className="mx-auto w-full max-w-[56rem]">
             <ChatInput
               onSend={handleSend}
+              onStop={stopStreaming}
               isStreaming={isStreaming}
-              isReferenceUploading={isReferenceUploading}
               disabled={chatDisabled}
               disabledReason={chatDisabledReason}
-              attachedIdentifiers={attachedIdentifiers}
               onOpenInspectorTab={setInspectorTab}
               onPrimeDraftMessage={primeDraftMessage}
-              onUploadReferenceFile={uploadAttachedReference}
-              onRemoveAttachedIdentifier={removeAttachedIdentifier}
-              onClearAttachedIdentifiers={clearAttachedIdentifiers}
               prefillText={draftMessage}
               prefillRevision={draftRevision}
               clearPrefill={clearDraftMessage}

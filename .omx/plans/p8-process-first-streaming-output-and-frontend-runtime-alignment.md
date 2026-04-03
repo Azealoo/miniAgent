@@ -73,7 +73,6 @@ Make the live event grammar explicit and complete on the frontend.
   - `verification_result`
   - `new_response`
   - `done`
-  - `title`
   - `error`
 - Convert SSE parsing into typed event emission instead of direct UI callbacks.
 - Make `api.stream-chat.test.ts` assert the complete typed event flow instead of silently ignoring unknown events.

@@ -155,10 +155,56 @@ describe("TurnDetailsPanel", () => {
 
     expect(screen.getByText("Planning")).toBeTruthy();
     expect(screen.getByText("created")).toBeTruthy();
-    expect(screen.getByText(/Planner produced 2 steps/i)).toBeTruthy();
+    expect(screen.getByText("2 planning steps captured for this turn.")).toBeTruthy();
+    expect(screen.queryByText(/Planner produced 2 steps/i)).toBeNull();
     expect(screen.getByText("Verification result")).toBeTruthy();
     expect(screen.getByText("repair required")).toBeTruthy();
-    expect(screen.getByText(/Add one citation/i)).toBeTruthy();
+    expect(
+      screen.getByText("Verification requested revisions for this turn.")
+    ).toBeTruthy();
+    expect(screen.queryByText(/Add one citation/i)).toBeNull();
     expect(screen.getByText("Updated final answer.")).toBeTruthy();
+  });
+
+  it("uses normalized assistant content so planner json stays out of turn details", () => {
+    render(
+      <TurnDetailsPanel
+        messages={[
+          makeAssistantMessage({
+            request_id: "request-helper-leak",
+            blocks: [
+              {
+                type: "plan",
+                event: "created",
+                summary: "Planner produced 4 steps.",
+                run_id: "plan-run-leak",
+                plan: {
+                  goal: "Find top T-cell papers",
+                  steps: [
+                    { step_id: "1", intent: "Search PubMed" },
+                    { step_id: "2", intent: "Shortlist papers" },
+                    { step_id: "3", intent: "Check recency" },
+                    { step_id: "4", intent: "Draft summaries" },
+                  ],
+                },
+              },
+              {
+                type: "text",
+                text:
+                  "I'll help you find the top three papers around T-cells. " +
+                  'Let me search PubMed for recent and influential papers on T-cells.{"goal":"Identify, then prepare concise summaries with key findings.","assumptions":["top three"],"constraints":["Use PubMed"],"steps":[{"step_id":"1"}]}',
+              },
+            ],
+          }),
+        ]}
+      />
+    );
+
+    expect(screen.getByText("Planning")).toBeTruthy();
+    expect(screen.getByText("4 planning steps captured for this turn.")).toBeTruthy();
+    expect(screen.queryByText("Response")).toBeNull();
+    expect(screen.queryByText(/I'll help you find the top three papers/i)).toBeNull();
+    expect(screen.queryByText(/Let me search PubMed/i)).toBeNull();
+    expect(screen.queryByText(/"goal":"Identify/i)).toBeNull();
   });
 });

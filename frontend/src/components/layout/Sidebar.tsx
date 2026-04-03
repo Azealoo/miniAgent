@@ -59,7 +59,6 @@ export default function Sidebar() {
     deleteSession,
     renameSession,
     isStreaming,
-    isReferenceUploading,
     sessionListStatus,
     sessionListError,
   } = useApp();
@@ -68,9 +67,8 @@ export default function Sidebar() {
   const [editTitle, setEditTitle] = useState("");
   const [query, setQuery] = useState("");
   const trimmedQuery = query.trim();
-  const sessionMutationLocked =
-    isStreaming || isReferenceUploading || !hasExecutionAccess;
-  const sessionSelectionLocked = isReferenceUploading || !hasInspectionAccess;
+  const sessionMutationLocked = isStreaming || !hasExecutionAccess;
+  const sessionSelectionLocked = !hasInspectionAccess;
 
   const filteredSessions = sessions.filter((session) =>
     matchesQuery(query, session.title)
@@ -168,7 +166,7 @@ export default function Sidebar() {
                 ? accessByScope.inspection.detail
                 : !hasExecutionAccess
                   ? accessByScope.execution.detail
-                  : "Session switching is locked while the current response or reference upload is in progress."}
+                  : "Session switching is locked while the current response is in progress."}
             </div>
           ) : null}
 

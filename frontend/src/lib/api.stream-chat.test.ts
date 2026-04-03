@@ -129,9 +129,6 @@ describe("streamChat", () => {
         onError: (error) => {
           throw new Error(`unexpected stream error: ${error}`);
         },
-      },
-      {
-        attachedIdentifiers: ["artifacts/input/dataset.csv"],
       }
     );
 
@@ -164,10 +161,8 @@ describe("streamChat", () => {
     expect(init).toBeTruthy();
     const parsedBody = JSON.parse(String(init?.body));
     expect(parsedBody).toMatchObject({
-      attached_identifiers: ["artifacts/input/dataset.csv"],
       message: "Review the RNA-seq dataset.",
       session_id: "session-1",
-      stream: true,
     });
   });
 
@@ -234,6 +229,55 @@ describe("streamChat", () => {
 
     const init = fetchSpy.mock.calls[0]?.[1];
     expect(init).toBeTruthy();
+  });
+
+  it("flushes the final buffered event when the stream ends without a trailing blank line", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      sseResponse(
+        [
+          {
+            type: "token",
+            content: "Final answer in progress.",
+            request_id: "request-eof-1",
+            event_index: 1,
+          },
+          `data: ${JSON.stringify({
+            type: "done",
+            content: "Final answer in progress.",
+            request_id: "request-eof-1",
+            event_index: 2,
+          })}`,
+        ],
+        { chunkSize: 19 }
+      )
+    );
+
+    const eventTypes: string[] = [];
+    const surfacedErrors: string[] = [];
+    let finalContent = "";
+    let finalRequestId = "";
+
+    await streamChat(
+      "Finish the answer cleanly.",
+      "session-eof",
+      {
+        onEvent: (event) => {
+          eventTypes.push(event.type);
+        },
+        onDone: (content, requestId) => {
+          finalContent = content;
+          finalRequestId = requestId ?? "";
+        },
+        onError: (error) => {
+          surfacedErrors.push(error);
+        },
+      }
+    );
+
+    expect(eventTypes).toEqual(["token", "done"]);
+    expect(finalContent).toBe("Final answer in progress.");
+    expect(finalRequestId).toBe("request-eof-1");
+    expect(surfacedErrors).toEqual([]);
   });
 
   it("surfaces a synthetic error when the stream closes before a terminal event", async () => {

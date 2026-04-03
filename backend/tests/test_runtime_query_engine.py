@@ -474,6 +474,59 @@ async def test_query_engine_run_harness_turn_stops_after_one_repair_retry():
 
 
 @pytest.mark.asyncio
+async def test_query_engine_can_treat_repair_required_as_advisory():
+    class _RepairSuggestedAgentManager(_FakeAgentManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def astream(self, message: str, history: list[dict]) -> AsyncGenerator[dict, None]:
+            self.calls += 1
+            assert message == "hello"
+            assert history == [{"role": "system", "content": "ctx"}]
+            yield {"type": "token", "content": "Good-enough draft."}
+            yield {
+                "type": "tool_end",
+                "tool": "verification_agent",
+                "output": "verifier summary",
+                "run_id": "verify-run-1",
+                "result": {
+                    "status": "success",
+                    "summary": "Verifier verdict: repair_required. Optional improvement only.",
+                    "structured_payload": {
+                        "agent_type": "verification",
+                        "verification": {
+                            "verdict": "repair_required",
+                            "summary": "Optional improvement only.",
+                            "checks": [{"name": "polish", "status": "fail", "note": "Could be tighter."}],
+                            "issues": ["Optional cleanup."],
+                            "repair_instructions": ["Tighten the prose if desired."],
+                        },
+                        "tool_trace": [],
+                    },
+                },
+            }
+            yield {"type": "done"}
+
+    manager = _RepairSuggestedAgentManager()
+    engine = QueryEngine(manager)
+    turn = QueryTurnInput(
+        message="hello",
+        history=[{"role": "system", "content": "ctx"}],
+    )
+
+    with patch(
+        "runtime.query_engine.get_verification_settings",
+        return_value={"retry_on_repair_required": False},
+    ):
+        events = [event async for event in engine.run_harness_turn(turn)]
+
+    assert manager.calls == 1
+    assert [event["type"] for event in events].count("new_response") == 0
+    assert events[-1] == {"type": "done", "turn_status": "ok"}
+
+
+@pytest.mark.asyncio
 async def test_query_engine_run_harness_turn_uses_agent_path_when_not_protocol_or_workflow():
     engine = QueryEngine(_FakeAgentManager())
     turn = QueryTurnInput(

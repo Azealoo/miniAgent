@@ -147,4 +147,70 @@ describe("applyStreamEvent", () => {
     expect(repairedAssistant.isStreaming).toBe(false);
     expect(repairedAssistant.endedAtMs).toBe(180);
   });
+
+  it("merges post-plan token chunks into one text block for a live updated-plan segment", () => {
+    let state: StreamReducerState = {
+      messages: [createOptimisticAssistantMessage("assistant-1", 100)],
+      streamingMessageId: "assistant-1",
+    };
+
+    state = reduceEvent(
+      state,
+      {
+        type: "plan_updated",
+        summary: "Planner updated the repair path.",
+        plan: {
+          goal: "Repair the answer",
+          steps: [
+            { step_id: "recheck", intent: "Re-check citations" },
+            { step_id: "repair", intent: "Repair answer" },
+          ],
+        },
+        request_id: "request-2",
+      },
+      110
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "token",
+        content: "Based on what I found, I'll update the plan. ",
+        request_id: "request-2",
+      },
+      120
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "token",
+        content: "1. Re-check citations\n2. Repair answer\n\nUpdated final answer.",
+        request_id: "request-2",
+      },
+      130
+    );
+
+    const assistant = state.messages[0];
+    expect(assistant.blocks).toEqual([
+      {
+        type: "plan",
+        event: "updated",
+        summary: "Planner updated the repair path.",
+        plan: {
+          goal: "Repair the answer",
+          steps: [
+            { step_id: "recheck", intent: "Re-check citations" },
+            { step_id: "repair", intent: "Repair answer" },
+          ],
+        },
+        run_id: undefined,
+        tool_trace: undefined,
+      },
+      {
+        type: "text",
+        text:
+          "Based on what I found, I'll update the plan. " +
+          "1. Re-check citations\n2. Repair answer\n\nUpdated final answer.",
+      },
+    ]);
+  });
 });

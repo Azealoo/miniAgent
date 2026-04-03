@@ -14,6 +14,7 @@ import type {
   SessionContinuitySummary,
   SessionHistoryMessage,
   SkillRegistryEntry,
+  TokenStats,
   ToolResultEnvelope,
 } from "./types";
 import { parseChatStreamChunk } from "./chat-stream-events";
@@ -217,6 +218,13 @@ export function getApiErrorBodyText(error: unknown): string {
 
 export function getApiErrorStatus(error: unknown): number | null {
   return error instanceof ApiError ? error.status : null;
+}
+
+export function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError")
+  );
 }
 
 async function throwForFailedResponse(
@@ -657,6 +665,27 @@ function validateFileContentsResponse(value: unknown, path: string): FileContent
   return response as unknown as FileContentsResponse;
 }
 
+function validateTokenStats(value: unknown, path: string): TokenStats {
+  const response = expectObject(value, path, "the usage summary");
+  expectStringField(response, "session_id", path, "the usage summary");
+  expectStringField(response, "model_name", path, "the usage summary");
+  expectStringLiteralField(
+    response,
+    "tokenizer_backend",
+    path,
+    "the usage summary",
+    ["tiktoken_cl100k_base", "deterministic_fallback"] as const
+  );
+  expectStringLiteralField(
+    response,
+    "tokenizer_accuracy",
+    path,
+    "the usage summary",
+    ["model_aligned", "approximate"] as const
+  );
+  return response as unknown as TokenStats;
+}
+
 function validateSkillRegistry(value: unknown, path: string): SkillRegistryEntry[] {
   return expectArray(value, path, "the skills registry") as SkillRegistryEntry[];
 }
@@ -720,6 +749,12 @@ export const readFile = async (path: string) =>
       query: { path },
     }),
     "/api/files"
+  );
+
+export const getSessionTokens = async (id: string) =>
+  validateTokenStats(
+    await inspectReq<unknown>(`/api/tokens/session/${id}`),
+    `/api/tokens/session/${id}`
   );
 
 export const fetchRawFile = (path: string, signal?: AbortSignal) =>
@@ -1015,6 +1050,12 @@ export const renameSession = (id: string, title: string) =>
     method: "PUT",
   });
 
+export const generateSessionTitle = (id: string) =>
+  executeReq<{ session_id: string; title: string }>(
+    `/api/sessions/${id}/generate-title`,
+    { method: "POST" }
+  );
+
 export const deleteSession = (id: string) =>
   executeReq<void>(`/api/sessions/${id}`, { method: "DELETE" });
 
@@ -1027,6 +1068,7 @@ export const saveFile = (path: string, content: string) =>
 // Chat streaming (custom SSE parser — POST-based)
 
 export interface StreamCallbacks {
+  signal?: AbortSignal;
   onEvent?: (event: ChatStreamEvent) => void;
   onRetrieval?: (query: string, results: RetrievalResult[]) => void;
   onToken?: (content: string) => void;
@@ -1051,24 +1093,18 @@ export interface StreamCallbacks {
   onError?: (error: string, requestId?: string) => void;
 }
 
-export interface ChatRequestContext {
-  attachedIdentifiers?: string[];
-}
-
 export async function streamChat(
   message: string,
   sessionId: string,
-  callbacks: StreamCallbacks,
-  context?: ChatRequestContext
+  callbacks: StreamCallbacks
 ): Promise<void> {
   const response = await executeFetch("/api/chat", {
     jsonBody: {
-      attached_identifiers: context?.attachedIdentifiers ?? [],
       message,
       session_id: sessionId,
-      stream: true,
     },
     method: "POST",
+    signal: callbacks.signal,
   });
 
   if (!response.ok || !response.body) {
@@ -1158,7 +1194,9 @@ export async function streamChat(
       }
     }
 
-    const finalParsed = parseChatStreamChunk(buffer, decoder.decode());
+    const finalParsed = parseChatStreamChunk(buffer, decoder.decode(), {
+      flush: true,
+    });
     buffer = finalParsed.bufferedRemainder;
     for (const event of finalParsed.events) {
       dispatchEvent(event);

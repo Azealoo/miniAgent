@@ -9,6 +9,7 @@ from typing import AsyncGenerator, Optional
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from config import get_agent_runtime_limit
 from runtime.model_factory import build_chat_model
 from .memory_indexer import MemoryIndexer
 from .prompt_builder import build_retrieved_memory_block, build_system_prompt
@@ -21,8 +22,9 @@ _HARNESS_GUIDANCE = """
 For non-trivial tasks, use the helper-agent tools deliberately:
 - Call `plan_agent` before broad multi-step tool use when you need to decide the order of work.
 - Use the returned plan to guide tool choice and sequencing.
-- After a draft answer or significant execution, call `verification_agent` to challenge the result before responding.
-- If verification reports `repair_required` or `fail`, fix the issues before finalizing your answer.
+- After a draft answer for non-trivial, tool-backed, or higher-risk work, call `verification_agent` to challenge the result before responding.
+- Skip verification for small conversational turns or obviously complete low-risk answers where a repair pass would add little user value.
+- If verification reports `repair_required` or `fail`, fix the material issues before finalizing your answer.
 """.strip()
 
 
@@ -154,8 +156,13 @@ class AgentManager:
         after_tool = False
 
         # Biology requests with retrieval and multi-step reasoning often need
-        # many tool calls; default recursion_limit=25 can be hit. Raise to 75.
-        run_config = {"recursion_limit": 75}
+        # far more graph turns than LangGraph's small default budget.
+        run_config = {
+            "recursion_limit": get_agent_runtime_limit(
+                "executor_recursion_limit",
+                1000,
+            )
+        }
         try:
             async for event in agent.astream_events(
                 {"messages": lc_messages},

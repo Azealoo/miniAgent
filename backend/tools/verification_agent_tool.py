@@ -5,6 +5,7 @@ from typing import Literal, Type
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field, ValidationError
 
+from config import get_verification_settings
 from runtime.helper_agent_runner import (
     build_tool_catalog,
     extract_json_object,
@@ -70,6 +71,10 @@ class VerificationAgentTool(BaseTool):
             llm = agent_manager.verifier_llm
             tools = filter_tools_by_exposure(agent_manager.tools, "verifier")
             tool_catalog = build_tool_catalog(tools)
+            verification_settings = get_verification_settings()
+            retry_on_repair_required = bool(
+                verification_settings.get("retry_on_repair_required", True)
+            )
             user_prompt = (
                 "Verify whether the draft answer satisfies the task and whether anything important is missing.\n\n"
                 f"Task:\n{task.strip()}\n\n"
@@ -84,14 +89,24 @@ class VerificationAgentTool(BaseTool):
                 '"issues": string[],'
                 '"repair_instructions": string[]'
                 '}\n'
+                "Verdict rubric:\n"
+                '- Use "pass" when the draft is good enough to send as-is. Minor polish, optional extra citations, '
+                "or small stylistic improvements should still pass.\n"
+                '- Use "repair_required" only when the draft is mostly usable but needs a material fix before it '
+                "should be sent to the user.\n"
+                '- Use "fail" when the draft is fundamentally incorrect, unsafe, or does not satisfy the task.\n'
+                "Do not use repair_required for optional improvements that would not materially change the user's "
+                "outcome.\n"
             )
             if plan and plan.strip():
                 user_prompt += f"\nPlan or execution context:\n{plan.strip()}\n"
 
             system_prompt = (
-                "You are BioAPEX's verification specialist. Your job is to challenge the draft answer, "
-                "not to wave it through. Use the tool catalog you were given, stay concise, "
-                "and return only JSON."
+                "You are BioAPEX's verification specialist. Be skeptical, but calibrated: challenge the draft "
+                "answer for material correctness, completeness, evidence, and safety issues without nitpicking "
+                "trivial polish. If the answer is genuinely good enough for the task, return pass. "
+                f"{'Repair-required verdicts trigger an automatic retry, so reserve them for substantive fixes. ' if retry_on_repair_required else ''}"
+                "Use the tool catalog you were given, stay concise, and return only JSON."
             )
 
             run = await run_scoped_agent(

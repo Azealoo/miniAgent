@@ -10,6 +10,13 @@ _DEFAULT: dict = {
     "prompt_context": {
         "include_git_context": False,
     },
+    "agent_runtime": {
+        "executor_recursion_limit": 1000,
+        "helper_agent_recursion_limit": 1000,
+    },
+    "verification": {
+        "retry_on_repair_required": True,
+    },
     "tool_policy": {
         "enabled": True,
         "allow_without_context": True,
@@ -66,6 +73,26 @@ def _load_runtime() -> dict:
 def get_prompt_context_settings() -> dict[str, Any]:
     prompt_context = _load_runtime().get("prompt_context", {})
     return dict(prompt_context) if isinstance(prompt_context, dict) else {}
+
+
+def get_agent_runtime_settings() -> dict[str, Any]:
+    agent_runtime = _load_runtime().get("agent_runtime", {})
+    return dict(agent_runtime) if isinstance(agent_runtime, dict) else {}
+
+
+def get_agent_runtime_limit(limit_name: str, default: int) -> int:
+    agent_runtime = get_agent_runtime_settings()
+    raw_limit = agent_runtime.get(limit_name, default)
+    try:
+        resolved_limit = int(raw_limit)
+    except (TypeError, ValueError):
+        resolved_limit = default
+    return max(25, resolved_limit)
+
+
+def get_verification_settings() -> dict[str, Any]:
+    verification = _load_runtime().get("verification", {})
+    return dict(verification) if isinstance(verification, dict) else {}
 
 
 def get_tool_policy_settings() -> dict[str, Any]:

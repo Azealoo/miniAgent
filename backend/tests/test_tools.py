@@ -917,22 +917,23 @@ class TestHelperAgentTools:
 
         try:
             tool = VerificationAgentTool()
+            run_agent = AsyncMock(
+                return_value=ScopedAgentRunResult(
+                    response_text=(
+                        '{"verdict":"repair_required","summary":"The answer lacks evidence grounding.",'
+                        '"checks":[{"name":"evidence-grounding","status":"fail","note":"No cited evidence review found."}],'
+                        '"issues":["The answer overstates certainty without evidence."],'
+                        '"repair_instructions":["Run evidence review before finalizing the answer."]}'
+                    ),
+                    tool_trace=(),
+                )
+            )
             with patch(
                 "tools.verification_agent_tool.role_model_is_configured",
                 return_value=True,
             ), patch(
                 "tools.verification_agent_tool.run_scoped_agent",
-                new=AsyncMock(
-                    return_value=ScopedAgentRunResult(
-                        response_text=(
-                            '{"verdict":"repair_required","summary":"The answer lacks evidence grounding.",'
-                            '"checks":[{"name":"evidence-grounding","status":"fail","note":"No cited evidence review found."}],'
-                            '"issues":["The answer overstates certainty without evidence."],'
-                            '"repair_instructions":["Run evidence review before finalizing the answer."]}'
-                        ),
-                        tool_trace=(),
-                    )
-                ),
+                new=run_agent,
             ):
                 summary, contract = await tool._arun(
                     "Summarize BRCA1 evidence",
@@ -946,6 +947,9 @@ class TestHelperAgentTools:
         assert contract["tool_name"] == "verification_agent"
         assert contract["structured_payload"]["verification"]["verdict"] == "repair_required"
         assert contract["metadata"]["verdict"] == "repair_required"
+        prompt = run_agent.await_args.kwargs["user_prompt"]
+        assert 'Use "pass" when the draft is good enough to send as-is.' in prompt
+        assert "Do not use repair_required for optional improvements" in prompt
 
 
 # ──────────────────────────────────────────────────────────────────────────────

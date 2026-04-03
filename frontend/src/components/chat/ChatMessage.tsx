@@ -6,7 +6,6 @@ import rehypeHighlight from "rehype-highlight";
 import {
   messageHasProcessTrail,
   normalizeMessageContent,
-  shouldSuppressHelperNarrationText,
 } from "@/lib/message-blocks";
 import { completedElapsedLabel } from "@/lib/message-duration";
 import { splitStreamingMarkdown } from "@/lib/streaming-markdown";
@@ -130,33 +129,27 @@ function StreamingMarkdownContent({
   );
 }
 
-function hasBlockType(message: Message, type: "plan" | "verification"): boolean {
-  return (message.blocks ?? []).some((block) => block.type === type);
-}
-
-function shouldSuppressHelperNarration(message: Message, content: string): boolean {
-  const hasPlan = hasBlockType(message, "plan");
-  const hasVerification = hasBlockType(message, "verification");
-  return shouldSuppressHelperNarrationText(content, {
-    hasPlan,
-    hasVerification,
-  });
-}
-
 export default function ChatMessage({
   message,
 }: ChatMessageProps) {
   const isUser = message.role === "user";
   const normalizedContent = normalizeMessageContent(message);
-  const displayContent = shouldSuppressHelperNarration(
-    message,
-    normalizedContent.content
-  )
-    ? ""
-    : normalizedContent.content;
+  const displayContent = normalizedContent.content;
   const hasContent = Boolean(displayContent);
+  const hasPlanningBlock = normalizedContent.blocks.some(
+    (block) => block.type === "plan"
+  );
+  const hasVerificationBlock = normalizedContent.blocks.some(
+    (block) => block.type === "verification"
+  );
+  const hasVerificationActivity = normalizedContent.blocks.some(
+    (block) =>
+      (block.type === "tool_use" || block.type === "tool_result") &&
+      block.tool === "verification_agent"
+  );
   const hasProcessTrail = messageHasProcessTrail(message);
-  const showTurnActivityBeforeContent = message.isStreaming || hasProcessTrail;
+  const showTurnActivityBeforeContent =
+    message.isStreaming || hasProcessTrail || hasPlanningBlock;
   const showTurnActivityAfterContent = false;
   const showStreamingContent = hasContent;
   const completedDuration = !message.isStreaming ? completedElapsedLabel(message) : null;
@@ -176,6 +169,16 @@ export default function ChatMessage({
   if (
     !hasContent &&
     !showTurnActivityBeforeContent
+  ) {
+    return null;
+  }
+
+  if (
+    !message.isStreaming &&
+    !hasContent &&
+    !hasVerificationBlock &&
+    !hasPlanningBlock &&
+    !hasVerificationActivity
   ) {
     return null;
   }

@@ -6,6 +6,7 @@ from typing import Any, Iterable, Literal
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 
+from config import get_agent_runtime_limit
 from tools.contracts import normalize_tool_output
 
 
@@ -113,17 +114,22 @@ async def run_scoped_agent(
     tools: list[Any],
     system_prompt: str,
     user_prompt: str,
-    recursion_limit: int = 40,
+    recursion_limit: int | None = None,
 ) -> ScopedAgentRunResult:
     agent = create_agent(llm, tools, system_prompt=system_prompt)
     response_chunks: list[str] = []
     tool_trace: list[dict[str, Any]] = []
     pending: dict[str, int] = {}
+    resolved_recursion_limit = (
+        max(25, recursion_limit)
+        if recursion_limit is not None
+        else get_agent_runtime_limit("helper_agent_recursion_limit", 1000)
+    )
 
     async for event in agent.astream_events(
         {"messages": [HumanMessage(content=user_prompt)]},
         version="v2",
-        config={"recursion_limit": recursion_limit},
+        config={"recursion_limit": resolved_recursion_limit},
     ):
         kind = event["event"]
         if kind == "on_chat_model_stream":

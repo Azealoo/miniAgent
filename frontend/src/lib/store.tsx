@@ -24,7 +24,10 @@ import {
   applyStreamEvent,
   createOptimisticAssistantMessage,
 } from "./chat-stream-reducer";
-import { normalizeMessageContent } from "./message-blocks";
+import {
+  normalizeMessageContent,
+  normalizeTurnMessages,
+} from "./message-blocks";
 import {
   getScopedSurfaceErrorMessage,
   shouldPromoteScopeError,
@@ -40,6 +43,8 @@ import type {
   SessionHistoryMessage,
 } from "./types";
 
+const DEFAULT_SESSION_TITLE = "New Chat";
+
 // ────────────────────────────────────────────────────────────────
 // Context shape
 // ────────────────────────────────────────────────────────────────
@@ -54,14 +59,12 @@ interface AppContextValue {
   currentSessionId: string | null;
   messages: Message[];
   isStreaming: boolean;
-  isReferenceUploading: boolean;
   isSessionLoading: boolean;
   sessionListStatus: "idle" | "loading" | "ready" | "error";
   sessionListError: string | null;
   sessionHistoryStatus: "idle" | "loading" | "ready" | "error";
   sessionHistoryError: string | null;
   sessionContinuitySummaries: SessionContinuitySummary[];
-  attachedIdentifiers: string[];
   draftMessage: string;
   draftRevision: number;
   inspectorTab: InspectorTab;
@@ -75,11 +78,8 @@ interface AppContextValue {
   selectSession: (id: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
-  sendMessage: (content: string, context?: api.ChatRequestContext) => Promise<void>;
-  uploadAttachedReference: (file: File) => Promise<void>;
-  addAttachedIdentifier: (identifier: string) => void;
-  removeAttachedIdentifier: (identifier: string) => void;
-  clearAttachedIdentifiers: () => void;
+  sendMessage: (content: string) => Promise<void>;
+  stopStreaming: () => void;
   primeDraftMessage: (text: string) => void;
   clearDraftMessage: () => void;
   setAccessToken: (scope: AccessScope, token: string) => void;
@@ -113,7 +113,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [isReferenceUploading, setIsReferenceUploading] = useState(false);
   const [sessionListStatus, setSessionListStatus] = useState<
     "idle" | "loading" | "ready" | "error"
   >("loading");
@@ -125,7 +124,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [sessionContinuitySummaries, setSessionContinuitySummaries] = useState<
     SessionContinuitySummary[]
   >([]);
-  const [attachedIdentifiers, setAttachedIdentifiers] = useState<string[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
   const [draftRevision, setDraftRevision] = useState(0);
   const [inspectorTab, setInspectorTabState] = useState<InspectorTab>("files");
@@ -133,10 +131,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // Ref to current streaming message ID (avoids stale closure issues)
   const streamingIdRef = useRef<string | null>(null);
+  const streamAbortControllerRef = useRef<AbortController | null>(null);
+  const userStoppedStreamRef = useRef(false);
   const currentSessionIdRef = useRef<string | null>(null);
   const messagesRef = useRef<Message[]>([]);
   const sessionContinuitySummariesRef = useRef<SessionContinuitySummary[]>([]);
-  const referenceUploadTokenRef = useRef(0);
   const apiAuthStateRef = useRef(apiAuthState);
   const accessRefreshIdRef = useRef(0);
   const hasInspectionAccess = isAccessGranted(accessByScope.inspection);
@@ -496,7 +495,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   ]);
 
   const createSession = useCallback(async () => {
-    if (isReferenceUploading || !hasExecutionAccess) return;
+    if (!hasExecutionAccess) return;
     const session = await api.createSession();
     setSessions((prev) => [session, ...prev]);
     setSessionListStatus("ready");
@@ -506,15 +505,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setSessionHistoryStatus("ready");
     setSessionHistoryError(null);
     setSessionContinuitySummaries([]);
-    setAttachedIdentifiers([]);
     setDraftMessage("");
     setDraftRevision((prev) => prev + 1);
     setInspectorPreviewPath(null);
     setInspectorTabState("files");
-  }, [hasExecutionAccess, isReferenceUploading]);
+  }, [hasExecutionAccess]);
 
   const selectSession = useCallback(async (id: string) => {
-    if (isReferenceUploading || !hasInspectionAccess) return;
+    if (!hasInspectionAccess) return;
     if (id === currentSessionId) return;
     try {
       await _loadSession(
@@ -531,7 +529,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setSessionContinuitySummaries,
         getSessionHistoryErrorMessage
       );
-      setAttachedIdentifiers([]);
       setDraftMessage("");
       setDraftRevision((prev) => prev + 1);
       setInspectorPreviewPath(null);
@@ -543,13 +540,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     currentSessionId,
     getSessionHistoryErrorMessage,
     hasInspectionAccess,
-    isReferenceUploading,
     promoteInspectionScopeError,
   ]);
 
   const deleteSession = useCallback(
     async (id: string) => {
-      if (isReferenceUploading || !hasExecutionAccess) return;
+      if (!hasExecutionAccess) return;
       await api.deleteSession(id);
       setSessions((prev) => prev.filter((s) => s.id !== id));
       if (id === currentSessionId) {
@@ -558,81 +554,82 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setSessionHistoryStatus("idle");
         setSessionHistoryError(null);
         setSessionContinuitySummaries([]);
-        setAttachedIdentifiers([]);
         setDraftMessage("");
         setDraftRevision((prev) => prev + 1);
         setInspectorPreviewPath(null);
         setInspectorTabState("files");
       }
     },
-    [currentSessionId, hasExecutionAccess, isReferenceUploading]
+    [currentSessionId, hasExecutionAccess]
   );
+
+  const applySessionTitle = useCallback((id: string, title: string) => {
+    setSessions((prev) =>
+      prev.map((session) =>
+        session.id === id ? { ...session, title } : session
+      )
+    );
+  }, []);
 
   const renameSession = useCallback(async (id: string, title: string) => {
     if (!hasExecutionAccess) {
       return;
     }
     await api.renameSession(id, title);
-    setSessions((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, title } : s))
-    );
-  }, [hasExecutionAccess]);
+    applySessionTitle(id, title);
+  }, [applySessionTitle, hasExecutionAccess]);
 
-  const uploadAttachedReference = useCallback(async (file: File) => {
-    if (!hasExecutionAccess) {
-      throw new Error(accessByScope.execution.detail);
-    }
-
-    if (file.size > MAX_REFERENCE_UPLOAD_BYTES) {
-      throw new Error("Reference files must be 500 KB or smaller.");
-    }
-
-    if (isReferenceUploading) {
-      throw new Error("A reference upload is already in progress.");
-    }
-
-    const uploadToken = referenceUploadTokenRef.current + 1;
-    referenceUploadTokenRef.current = uploadToken;
-    const targetSessionId = currentSessionIdRef.current;
-    setIsReferenceUploading(true);
-
-    try {
-      const content = await readReferenceUpload(file);
-      const uploadPath = buildReferenceUploadPath(file.name);
-      await api.saveFile(uploadPath, content);
-
-      if (currentSessionIdRef.current !== targetSessionId) {
-        throw new Error(
-          "Reference upload was canceled because the active session changed. Upload it again in this session."
-        );
+  const syncCompletedSessionHistory = useCallback(
+    async (sessionId: string, expectedMessageCount: number) => {
+      if (!hasInspectionAccess) {
+        return;
       }
 
-      setAttachedIdentifiers((prev) =>
-        prev.includes(uploadPath) ? prev : [...prev, uploadPath]
-      );
-    } finally {
-      if (referenceUploadTokenRef.current === uploadToken) {
-        setIsReferenceUploading(false);
+      try {
+        const history = await api.getHistory(sessionId);
+
+        if (
+          currentSessionIdRef.current !== sessionId ||
+          streamingIdRef.current !== null ||
+          messagesRef.current.length !== expectedMessageCount
+        ) {
+          return;
+        }
+
+        const syncedMessages = _historyToMessages(history);
+        messagesRef.current = syncedMessages;
+        setMessages(syncedMessages);
+        setSessionHistoryStatus("ready");
+        setSessionHistoryError(null);
+      } catch {
+        // Keep the finished local transcript visible if background reconciliation fails.
       }
-    }
-  }, [accessByScope.execution.detail, hasExecutionAccess, isReferenceUploading]);
+    },
+    [hasInspectionAccess]
+  );
 
-  const addAttachedIdentifier = useCallback((identifier: string) => {
-    const trimmed = identifier.trim();
-    if (!trimmed) return;
+  const finalizeCompletedSession = useCallback(
+    async (
+      sessionId: string,
+      shouldAutoGenerateTitle: boolean,
+      expectedMessageCount: number
+    ) => {
+      if (shouldAutoGenerateTitle) {
+        try {
+          const generated = await api.generateSessionTitle(sessionId);
+          applySessionTitle(sessionId, generated.title);
+        } catch {
+          // Keep the completed turn visible even if background title generation fails.
+        }
+      }
 
-    setAttachedIdentifiers((prev) =>
-      prev.includes(trimmed) ? prev : [...prev, trimmed]
-    );
-  }, []);
-
-  const removeAttachedIdentifier = useCallback((identifier: string) => {
-    setAttachedIdentifiers((prev) => prev.filter((item) => item !== identifier));
-  }, []);
-
-  const clearAttachedIdentifiers = useCallback(() => {
-    setAttachedIdentifiers([]);
-  }, []);
+      await Promise.all([
+        refreshSessions(),
+        syncCompletedSessionHistory(sessionId, expectedMessageCount),
+      ]);
+    },
+    [applySessionTitle, refreshSessions, syncCompletedSessionHistory]
+  );
 
   const primeDraftMessage = useCallback((text: string) => {
     setDraftMessage(text);
@@ -665,18 +662,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setInspectorPreviewPath(null);
   }, []);
 
+  const stopStreaming = useCallback(() => {
+    if (!streamAbortControllerRef.current || !streamingIdRef.current) {
+      return;
+    }
+
+    userStoppedStreamRef.current = true;
+    streamAbortControllerRef.current.abort();
+  }, []);
+
   // ── Send message ─────────────────────────────────────────────
 
   const sendMessage = useCallback(
-    async (content: string, context?: api.ChatRequestContext) => {
-      if (isStreaming || isReferenceUploading || !hasExecutionAccess) return;
-      const requestedAttachments =
-        context && "attachedIdentifiers" in context
-          ? context.attachedIdentifiers ?? []
-          : attachedIdentifiers;
+    async (content: string) => {
+      if (isStreaming || !hasExecutionAccess) return;
 
       // Auto-create session if none is selected
       let sessionId = currentSessionId;
+      const hadNoMessages = messagesRef.current.length === 0;
+      let shouldAutoGenerateTitle = false;
       if (!sessionId) {
         const session = await api.createSession();
         setSessions((prev) => [session, ...prev]);
@@ -686,6 +690,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setSessionHistoryStatus("ready");
         setSessionHistoryError(null);
         sessionId = session.id;
+        shouldAutoGenerateTitle = session.title === DEFAULT_SESSION_TITLE;
+      } else {
+        const activeSession =
+          sessions.find((session) => session.id === sessionId) ?? null;
+        shouldAutoGenerateTitle =
+          hadNoMessages &&
+          (activeSession?.title ?? DEFAULT_SESSION_TITLE) ===
+            DEFAULT_SESSION_TITLE;
       }
 
       // Add user message + streaming placeholder
@@ -702,9 +714,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       messagesRef.current = nextMessages;
       setMessages(nextMessages);
       setIsStreaming(true);
-      setAttachedIdentifiers([]);
       setDraftMessage("");
       setDraftRevision((prev) => prev + 1);
+      const abortController = new AbortController();
+      streamAbortControllerRef.current = abortController;
+      userStoppedStreamRef.current = false;
 
       const applyAndCommitEvent = (event: Parameters<typeof applyStreamEvent>[1]) => {
         const reduced = applyStreamEvent(
@@ -726,36 +740,48 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         if (reduced.finished) {
           setIsStreaming(false);
           if (event.type === "done") {
-            void refreshSessions();
+            void finalizeCompletedSession(
+              sessionId,
+              hadNoMessages && shouldAutoGenerateTitle,
+              reduced.messages.length
+            );
           }
         }
       };
 
       try {
         await api.streamChat(content, sessionId, {
+          signal: abortController.signal,
           onEvent: (event) => {
             applyAndCommitEvent(event);
           },
-        }, {
-          attachedIdentifiers: requestedAttachments,
         });
       } catch (error) {
-        applyAndCommitEvent({
-          type: "error",
-          error:
-            error instanceof Error
-              ? error.message
-              : "The response stream failed before completion.",
-        });
+        if (api.isAbortError(error) && userStoppedStreamRef.current) {
+          applyAndCommitEvent({
+            type: "done",
+            content: "Response stopped.",
+          });
+        } else {
+          applyAndCommitEvent({
+            type: "error",
+            error:
+              error instanceof Error
+                ? error.message
+                : "The response stream failed before completion.",
+          });
+        }
+      } finally {
+        streamAbortControllerRef.current = null;
+        userStoppedStreamRef.current = false;
       }
     },
     [
-      attachedIdentifiers,
       currentSessionId,
+      finalizeCompletedSession,
       hasExecutionAccess,
-      isReferenceUploading,
       isStreaming,
-      refreshSessions,
+      sessions,
     ]
   );
 
@@ -771,14 +797,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         currentSessionId,
         messages,
         isStreaming,
-        isReferenceUploading,
         isSessionLoading,
         sessionListStatus,
         sessionListError,
         sessionHistoryStatus,
         sessionHistoryError,
         sessionContinuitySummaries,
-        attachedIdentifiers,
         draftMessage,
         draftRevision,
         inspectorTab,
@@ -791,10 +815,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         deleteSession,
         renameSession,
         sendMessage,
-        uploadAttachedReference,
-        addAttachedIdentifier,
-        removeAttachedIdentifier,
-        clearAttachedIdentifiers,
+        stopStreaming,
         primeDraftMessage,
         clearDraftMessage,
         setAccessToken,
@@ -808,8 +829,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     </AppContext.Provider>
   );
 }
-
-const MAX_REFERENCE_UPLOAD_BYTES = 500_000;
 
 function buildCheckingAccessStates(
   authState: api.ApiAuthState
@@ -838,41 +857,47 @@ function buildAccessStateRecord(
   );
 }
 
-function sanitizeUploadFileName(value: string): string {
-  const sanitized = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^[-.]+|[-.]+$/g, "");
-
-  return sanitized || "reference.txt";
-}
-
-function buildReferenceUploadPath(fileName: string): string {
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return `workspace/uploads/${stamp}__${sanitizeUploadFileName(fileName)}`;
-}
-
-async function readReferenceUpload(file: File): Promise<string> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-
-  for (const byte of bytes) {
-    if (byte === 0) {
-      throw new Error("Reference uploads must be UTF-8 text files.");
-    }
-  }
-
-  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-}
-
 // ────────────────────────────────────────────────────────────────
 // Internal helpers
 // ────────────────────────────────────────────────────────────────
 
+function groupHistoryMessagesIntoTurns<T extends { role: string }>(
+  messages: T[]
+): T[][] {
+  const turns: T[][] = [];
+  let currentTurn: T[] = [];
+
+  for (const message of messages) {
+    if (message.role === "user") {
+      if (currentTurn.length > 0) {
+        turns.push(currentTurn);
+      }
+      currentTurn = [message];
+      continue;
+    }
+
+    if (currentTurn.length === 0) {
+      currentTurn = [message];
+      continue;
+    }
+
+    currentTurn.push(message);
+  }
+
+  if (currentTurn.length > 0) {
+    turns.push(currentTurn);
+  }
+
+  return turns;
+}
+
 function _historyToMessages(raw: SessionHistoryMessage[]): Message[] {
-  return raw
-    .filter((m) => m.role === "user" || m.role === "assistant")
+  const filtered = raw.filter((m) => m.role === "user" || m.role === "assistant");
+  const normalizedHistory = groupHistoryMessagesIntoTurns(filtered).flatMap((turn) =>
+    normalizeTurnMessages(turn)
+  );
+
+  return normalizedHistory
     .map((m) => {
       const normalized = normalizeMessageContent(m);
       return {

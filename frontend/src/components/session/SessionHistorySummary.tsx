@@ -11,7 +11,10 @@ import {
 } from "lucide-react";
 import ChatMessage from "@/components/chat/ChatMessage";
 import * as api from "@/lib/api";
-import { normalizeMessageContent } from "@/lib/message-blocks";
+import {
+  normalizeMessageContent,
+  normalizeTurnMessages,
+} from "@/lib/message-blocks";
 import { cn } from "@/lib/utils";
 import type {
   Message,
@@ -110,12 +113,16 @@ function artifactCountForTurn(messages: Message[]): number {
 
 function summarizeTurn(messages: Message[]): HistoryTurnSummary {
   const assistants = assistantMessagesForTurn(messages);
+  const normalizedAssistants = assistants.map((message) => ({
+    message,
+    normalized: normalizeMessageContent(message),
+  }));
   const firstUserMessage = messages.find((message) => message.role === "user");
-  const firstAssistantText = assistants
-    .map((message) => compactText(message.content, 180))
+  const firstAssistantText = normalizedAssistants
+    .map(({ normalized }) => compactText(normalized.content, 180))
     .find((value): value is string => Boolean(value));
-  const firstRetrievalQuery = assistants
-    .flatMap((message) => message.retrievals ?? [])
+  const firstRetrievalQuery = normalizedAssistants
+    .flatMap(({ normalized }) => normalized.retrievals)
     .map((result) => compactText(result.text, 120))
     .find((value): value is string => Boolean(value));
 
@@ -229,16 +236,23 @@ export default function SessionHistorySummary({
   }, [currentSessionId]);
 
   const turnGroups = useMemo(() => groupMessagesIntoTurns(messages), [messages]);
+  const normalizedTurnGroups = useMemo(
+    () => turnGroups.map((turn) => normalizeTurnMessages(turn)),
+    [turnGroups]
+  );
   const olderTurns = useMemo(() => {
-    const older = turnGroups.slice(0, Math.max(0, turnGroups.length - RECENT_TURN_COUNT));
+    const older = normalizedTurnGroups.slice(
+      0,
+      Math.max(0, normalizedTurnGroups.length - RECENT_TURN_COUNT)
+    );
     return older.map((turn) => summarizeTurn(turn));
-  }, [turnGroups]);
+  }, [normalizedTurnGroups]);
   const recentMessages = useMemo(
     () =>
-      turnGroups.length > RECENT_TURN_COUNT
-        ? turnGroups.slice(-RECENT_TURN_COUNT).flat()
-        : messages,
-    [messages, turnGroups]
+      normalizedTurnGroups.length > RECENT_TURN_COUNT
+        ? normalizedTurnGroups.slice(-RECENT_TURN_COUNT).flat()
+        : normalizedTurnGroups.flat(),
+    [normalizedTurnGroups]
   );
 
   const toggleOlderTurn = (turnId: string) => {
@@ -290,22 +304,26 @@ export default function SessionHistorySummary({
 
     try {
       const history = await api.getSessionArchive(currentSessionId, archiveId);
+      const archiveMessages = history
+        .filter((message) => message.role === "user" || message.role === "assistant")
+        .map((message, index) => ({
+          id: `archive-${archiveId}-${index}`,
+          role: message.role as "user" | "assistant",
+          content: message.content ?? "",
+          request_id: message.request_id,
+          tool_calls: message.tool_calls ?? [],
+          retrievals: message.retrievals ?? [],
+          blocks: message.blocks,
+        }));
+      const normalizedArchiveMessages = groupMessagesIntoTurns(archiveMessages).flatMap(
+        (turn) => normalizeTurnMessages(turn)
+      );
+
       setArchiveStates((current) => ({
         ...current,
         [archiveId]: {
           error: null,
-          messages: history.map((message, index) => {
-            const normalized = normalizeMessageContent(message);
-            return {
-              id: `archive-${archiveId}-${index}`,
-              role: message.role as "user" | "assistant",
-              content: normalized.content,
-              request_id: message.request_id,
-              tool_calls: normalized.toolCalls,
-              retrievals: normalized.retrievals,
-              blocks: normalized.blocks,
-            };
-          }),
+          messages: normalizedArchiveMessages,
           status: "ready",
         },
       }));

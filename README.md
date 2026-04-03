@@ -5,11 +5,13 @@ BioAPEX is a transparent, file-first biologist-assistant system for scientific w
 This repository is no longer just a lightweight chat-agent prototype. The current codebase includes:
 
 - a typed SSE chat runtime with plan and verification helper-agent events
+- process-first turn rendering that stays consistent across live chat, reopened history, and turn inspection
 - policy-wrapped execution and inspection tools
 - multi-file memory with on-disk indexing
 - durable artifact schemas, registry, provenance, and audit layers
 - authored workflow specs and workflow runners
-- a three-panel Next.js workspace for chat, files, sources, memory, skills, and turn inspection
+- session token accounting plus a live usage inspector with tracked and in-flight estimates
+- a three-panel Next.js workspace for chat, files, sources, memory, skills, usage, and turn inspection
 - OMX v2 durable planning and execution state under `.omx/`
 
 ## Table of Contents
@@ -141,7 +143,7 @@ This is why artifact references inside session history and tool payloads look ba
 
 ### Notable backend directories
 
-- `backend/api/`: HTTP routes for chat, access probing, sessions, files, and skill registry access
+- `backend/api/`: HTTP routes for chat, access probing, sessions, files, token usage, and skill registry access
 - `backend/graph/`: agent manager, prompt building, session management, skill routing, memory indexing
 - `backend/runtime/`: query engine, turn ledger, model factory, session continuity and runtime helpers
 - `backend/tools/`: policy-wrapped tool implementations and tool registry metadata
@@ -198,7 +200,7 @@ It is responsible for:
 
 - persisting the user message at the start of the turn
 - turning raw helper-tool completions into typed `plan_created`, `plan_updated`, and `verification_result` events
-- performing a single runtime-managed repair retry when verification asks for repair
+- performing a single runtime-managed repair retry when verification asks for repair and config allows it
 - producing a finalized turn ledger for persistence
 
 #### `backend/runtime/chat_runtime.py`
@@ -298,10 +300,13 @@ Current session behavior:
 
 - raw history is persisted with additive typed content blocks
 - consecutive assistant messages are merged before prompt assembly
+- saved history is normalized with the same process-first helper-text cleanup used for live turns
+- verification-retry assistant clusters collapse into one visible final response while preserving process artifacts
 - older history is auto-compressed when the session reaches 40 messages
 - compressed history is summarized into a structured scientific continuity block
 - archived raw message batches are stored under `backend/sessions/archive/`
 - archived summaries can be reopened later through the UI and session APIs
+- the first completed turn in a default-titled session can trigger background title generation
 
 This replaces the older README story about a manual `/compress` endpoint. The current app uses auto-compression plus continuity and archive inspection endpoints.
 
@@ -328,7 +333,7 @@ The frontend is a Next.js 14 App Router application with React Context for runti
 
 - left sidebar: sessions and workspace navigation
 - center workspace: live chat and session history
-- right inspector: files, sources, memory, skills, and turn details
+- right inspector: files, sources, memory, skills, usage, and turn details
 
 The sidebar and inspector widths are draggable.
 
@@ -346,21 +351,24 @@ Current responsibilities include:
 
 - access-scope bootstrapping and bearer-token handling
 - session list, session history, and continuity-summary loading
-- custom POST-based SSE parsing for `/api/chat`
+- abortable custom POST-based SSE parsing for `/api/chat`
 - optimistic live assistant messages
 - typed stream-event reduction into process-first UI state
+- live session-usage summary fetching and tracked-plus-estimated aggregation
 - file preview and inspector path state
 
 ### Chat UX
 
 The current chat surface is process-first rather than terminal-log style.
 
+The composer can stop an in-flight response, and saved or retried assistant turns are normalized so planning and verification activity stays visible without duplicating final answers.
+
 Important surfaces:
 
-- `ChatMessage.tsx`: markdown answer rendering plus process rail handling
-- `TurnActivityFeed.tsx`: live tool, retrieval, plan, and verification activity
-- `SessionHistorySummary.tsx`: compacted older turns plus reopenable archived summaries
-- `TurnDetailsPanel.tsx`: request-scoped deep inspection
+- `ChatMessage.tsx`: markdown answer rendering plus normalized process rail handling
+- `TurnActivityFeed.tsx`: live tool, retrieval, plan, verification, and helper-trace activity
+- `SessionHistorySummary.tsx`: compacted older turns plus reopenable archived summaries with the same process-first normalization as live chat
+- `TurnDetailsPanel.tsx`: request-scoped deep inspection with a single normalized response view per assistant turn
 
 ### Inspector UX
 
@@ -370,6 +378,7 @@ Important surfaces:
 - Sources
 - Memory
 - Skills
+- Usage
 - Turns
 
 This panel handles:
@@ -379,6 +388,7 @@ This panel handles:
 - source and compliance inspection
 - memory editing
 - skill registry inspection
+- live token totals, input/output/tool breakdowns, context-window pressure, and tokenizer provenance
 - transcript export
 
 ## Workflows Artifacts And Specs
@@ -482,6 +492,13 @@ Current emitted SSE event types:
 | `POST` | `/api/files` | Save allowed files under workspace, memory, skills, or knowledge |
 | `GET` | `/api/skills` | Active runtime-selected skill summary |
 | `GET` | `/api/skills/registry` | Full runtime skill registry with metadata |
+
+### Tokens
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/tokens/session/{session_id}` | Session-level token stats with system, input, output, tool, context-window, and tokenizer metadata |
+| `POST` | `/api/tokens/files` | Batch token counts for whitelisted repo-relative workspace, memory, skill, or knowledge paths |
 
 ## Verification
 

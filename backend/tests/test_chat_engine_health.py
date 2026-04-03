@@ -9,9 +9,11 @@ from __future__ import annotations
 import builtins
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 import pytest
@@ -82,7 +84,6 @@ def test_app_import_keeps_chat_engine_surface_lightweight():
             "api.observability",
             "api.skills_registry",
             "api.studies",
-            "api.tokens",
         }
         if name in banned:
             raise AssertionError(f"{name} should not be imported by the chat-engine app")
@@ -136,6 +137,59 @@ def test_sessions_create_and_list_round_trip(isolated_api_state):
     assert created["title"] == "New Chat"
 
 
+@pytest.mark.asyncio
+async def test_generate_title_renames_session_from_first_user_message(isolated_api_state):
+    from api.sessions import generate_title
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+    agent_manager.session_manager.save_message(session_id, "user", "Plan a CRISPR screen")
+
+    original_title_llm = agent_manager.title_llm
+    try:
+        agent_manager.title_llm = SimpleNamespace(
+            ainvoke=AsyncMock(
+                return_value=SimpleNamespace(content="CRISPR Screen Plan")
+            )
+        )
+        result = await generate_title(session_id)
+    finally:
+        agent_manager.title_llm = original_title_llm
+
+    assert result == {
+        "session_id": session_id,
+        "title": "CRISPR Screen Plan",
+    }
+    assert (
+        agent_manager.session_manager.get_session_meta(session_id)["title"]
+        == "CRISPR Screen Plan"
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_title_normalizes_blank_model_output(isolated_api_state):
+    from api.sessions import generate_title
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+    agent_manager.session_manager.save_message(session_id, "user", "Plan a CRISPR screen")
+
+    original_title_llm = agent_manager.title_llm
+    try:
+        agent_manager.title_llm = SimpleNamespace(
+            ainvoke=AsyncMock(return_value=SimpleNamespace(content="   "))
+        )
+        result = await generate_title(session_id)
+    finally:
+        agent_manager.title_llm = original_title_llm
+
+    assert result == {
+        "session_id": session_id,
+        "title": "New Chat",
+    }
+    assert agent_manager.session_manager.get_session_meta(session_id)["title"] == "New Chat"
+
+
 def test_files_read_file_blocks_missing_path(isolated_api_state):
     from api.files import read_file
 
@@ -143,6 +197,112 @@ def test_files_read_file_blocks_missing_path(isolated_api_state):
         read_file("../../outside.txt")
 
     assert exc_info.value.status_code == 403
+
+
+def test_session_tokens_includes_usage_breakdown(isolated_api_state):
+    from api.tokens import _count, session_tokens
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+    agent_manager.session_manager.save_message(session_id, "user", "Plan a CRISPR screen")
+    agent_manager.session_manager.save_message(
+        session_id,
+        "assistant",
+        "I found the latest workflow artifacts.",
+        tool_calls=[
+            {
+                "tool": "read_file",
+                "input": "artifacts/rnaseq-qc/run.json",
+                "output": "{\"status\":\"completed\"}",
+            }
+        ],
+    )
+
+    with patch.dict(
+        os.environ,
+        {
+            "DEEPSEEK_MODEL": "deepseek-chat",
+            "MODEL_CONTEXT_WINDOW_TOKENS": "4096",
+        },
+        clear=False,
+    ):
+        result = session_tokens(session_id)
+
+    expected_user_tokens = _count("Plan a CRISPR screen")
+    expected_assistant_tokens = _count("I found the latest workflow artifacts.")
+    expected_tool_tokens = (
+        _count("artifacts/rnaseq-qc/run.json") + _count("{\"status\":\"completed\"}")
+    )
+
+    assert result["session_id"] == session_id
+    assert result["system_tokens"] > 0
+    assert result["message_tokens"] == expected_user_tokens + expected_assistant_tokens
+    assert result["total_tokens"] == result["system_tokens"] + result["message_tokens"]
+    assert result["input_tokens"] == result["system_tokens"] + expected_user_tokens
+    assert result["output_tokens"] == expected_assistant_tokens
+    assert result["tool_tokens"] == expected_tool_tokens
+    assert result["tracked_total_tokens"] == (
+        result["input_tokens"] + result["output_tokens"] + result["tool_tokens"]
+    )
+    assert result["context_window_tokens"] == 4096
+    assert result["context_window_remaining_tokens"] == 4096 - result["total_tokens"]
+    assert result["model_name"] == "deepseek-chat"
+    assert result["tokenizer_backend"] == "tiktoken_cl100k_base"
+    assert result["tokenizer_accuracy"] == "model_aligned"
+
+
+def test_session_tokens_fall_back_when_exact_tokenizer_is_unavailable(isolated_api_state):
+    import api.tokens as tokens_api
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+    agent_manager.session_manager.save_message(session_id, "user", "Plan a CRISPR screen")
+    agent_manager.session_manager.save_message(
+        session_id,
+        "assistant",
+        "I found the latest workflow artifacts.",
+        tool_calls=[
+            {
+                "tool": "read_file",
+                "input": "artifacts/rnaseq-qc/run.json",
+                "output": "{\"status\":\"completed\"}",
+            }
+        ],
+    )
+
+    tokens_api._get_tokenizer_runtime.cache_clear()
+    try:
+        with patch("api.tokens.importlib.import_module", side_effect=RuntimeError("offline")):
+            result = tokens_api.session_tokens(session_id)
+            expected_user_tokens = tokens_api._count("Plan a CRISPR screen")
+            expected_assistant_tokens = tokens_api._count(
+                "I found the latest workflow artifacts."
+            )
+            expected_tool_tokens = (
+                tokens_api._count("artifacts/rnaseq-qc/run.json")
+                + tokens_api._count("{\"status\":\"completed\"}")
+            )
+    finally:
+        tokens_api._get_tokenizer_runtime.cache_clear()
+
+    assert result["message_tokens"] == expected_user_tokens + expected_assistant_tokens
+    assert result["input_tokens"] == result["system_tokens"] + expected_user_tokens
+    assert result["output_tokens"] == expected_assistant_tokens
+    assert result["tool_tokens"] == expected_tool_tokens
+    assert result["tracked_total_tokens"] == (
+        result["input_tokens"] + result["output_tokens"] + result["tool_tokens"]
+    )
+    assert result["tokenizer_backend"] == "deterministic_fallback"
+    assert result["tokenizer_accuracy"] == "approximate"
+
+
+def test_files_tokens_counts_allowed_file(isolated_api_state):
+    from api.tokens import FilesTokenRequest, files_tokens
+
+    result = files_tokens(FilesTokenRequest(paths=["memory/MEMORY.md"]))
+
+    assert result[0]["path"] == "memory/MEMORY.md"
+    assert result[0]["tokens"] > 0
 
 
 def test_skills_list_uses_runtime_registry_instead_of_snapshot(isolated_api_state):
