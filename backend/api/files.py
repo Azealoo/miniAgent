@@ -4,7 +4,16 @@ File read/write endpoints with path whitelist protection.
 GET  /api/files?path=<relative>   — read file content, including artifacts/
 GET  /api/files/raw?path=<relative> — read raw file content for whitelisted files
 POST /api/files                   — save file (Monaco editor)
-GET  /api/skills                  — list available skills
+GET  /api/skills                  — list active skills selected from the runtime registry
+GET  /api/skills/registry         — list the full runtime skill registry with metadata
+
+Compatibility notes:
+- `/api/skills` stays a compact active-skill summary; richer metadata such as
+  `paths`, `effort`, and selection state live on `/api/skills/registry`.
+- `SKILLS_SNAPSHOT.md` remains a readable derived artifact, not the source of truth.
+- Writes anywhere under `memory/` rebuild the memory index, not only `memory/MEMORY.md`.
+- New markdown files under `memory/project/`, `memory/user/`, and `memory/agent/`
+  may use typed frontmatter (`type`, `name`, `description`) while legacy files stay readable.
 """
 import json
 import mimetypes
@@ -16,6 +25,7 @@ from audit.store import append_file_written_event
 from artifacts.public_urls import public_raw_file_url
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
+from graph.memory_types import validate_memory_write
 from hardening import is_secret_like_path
 from pydantic import BaseModel
 
@@ -198,6 +208,19 @@ def save_file(body: SaveRequest, request: Request = None):
         )
         raise
 
+    memory_validation_errors = validate_memory_write(clean, body.content)
+    if memory_validation_errors:
+        reason = " ".join(memory_validation_errors)
+        append_file_written_event(
+            base_dir,
+            path=clean,
+            source="api.files",
+            outcome="invalid_input",
+            byte_count=byte_count,
+            reason=reason,
+        )
+        raise HTTPException(400, reason)
+
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body.content, encoding="utf-8")
@@ -212,9 +235,8 @@ def save_file(body: SaveRequest, request: Request = None):
         )
         raise
 
-    # Rebuild memory index if MEMORY.md was updated.
-    # Compare against the *normalized* path to handle ./memory/MEMORY.md, etc.
-    if clean == "memory/MEMORY.md":
+    # Rebuild memory index after any memory/ write so multi-file memory stays fresh.
+    if clean.startswith("memory/"):
         try:
             from graph.agent import agent_manager
 
@@ -240,12 +262,15 @@ def save_file(body: SaveRequest, request: Request = None):
 
 @router.get("/skills")
 def list_skills(request: Request = None):
+    """Return the active runtime-selected skill summary used by compatibility clients."""
     require_inspection_access(request)
     base = _base_dir()
     from tools.skills_scanner import collect_skill_entries
 
     skills = []
-    for entry in collect_skill_entries(base, respect_enabled=False):
+    for entry in collect_skill_entries(base, respect_enabled=True):
+        # Keep the compatibility surface intentionally narrow; richer routing
+        # and selection metadata belongs on /api/skills/registry.
         skills.append(
             {
                 "name": entry["name"],
@@ -255,3 +280,21 @@ def list_skills(request: Request = None):
             }
         )
     return skills
+
+
+@router.get("/skills/registry")
+def list_skills_registry(request: Request = None):
+    """Return the full runtime registry, including disabled entries and optional hint metadata."""
+    require_inspection_access(request)
+    base = _base_dir()
+    from tools.skills_scanner import describe_skill_registry
+
+    registry = []
+    for entry in describe_skill_registry(base):
+        registry.append(
+            {
+                **entry,
+                "location": entry["location"].removeprefix("./"),
+            }
+        )
+    return registry

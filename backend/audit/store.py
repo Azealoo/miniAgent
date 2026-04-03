@@ -27,10 +27,7 @@ logger = logging.getLogger(__name__)
 AuditEventType = Literal[
     "chat_request_received",
     "compliance_decision",
-    "workflow_started",
-    "workflow_finished",
     "tool_invoked",
-    "connector_action",
     "file_written",
     "job_submitted",
     "export_generated",
@@ -52,7 +49,6 @@ class AuditEventRecord(BaseModel):
     job_id: str | None = None
     workflow_id: str | None = None
     tool_name: str | None = None
-    connector_name: str | None = None
     actor: str = "system"
     artifact_paths: list[str] = Field(default_factory=list)
     external_systems: list[str] = Field(default_factory=list)
@@ -87,7 +83,6 @@ def request_summary(
     *,
     message: str,
     attached_identifiers: list[str],
-    selected_workflow: str | None,
 ) -> dict[str, Any]:
     normalized_attachments = [item.strip() for item in attached_identifiers if item.strip()]
     return {
@@ -95,7 +90,6 @@ def request_summary(
         "message_chars": len(message),
         "attached_identifier_count": len(normalized_attachments),
         "attached_identifier_sha256": [hash_text(item) for item in normalized_attachments],
-        "selected_workflow": _clean_optional_text(selected_workflow),
     }
 
 
@@ -111,7 +105,6 @@ def append_audit_event(
     job_id: str | None = None,
     workflow_id: str | None = None,
     tool_name: str | None = None,
-    connector_name: str | None = None,
     actor: str = "system",
     artifact_paths: list[str] | None = None,
     external_systems: list[str] | None = None,
@@ -132,7 +125,6 @@ def append_audit_event(
             job_id=_clean_optional_text(job_id),
             workflow_id=_clean_optional_text(workflow_id),
             tool_name=_clean_optional_text(tool_name),
-            connector_name=_clean_optional_text(connector_name),
             actor=_clean_optional_text(actor) or "system",
             artifact_paths=_normalize_path_list(base_path, artifact_paths or []),
             external_systems=_normalize_string_list(external_systems or []),
@@ -145,7 +137,7 @@ def append_audit_event(
     except Exception:
         logger.warning(
             "Non-fatal audit append failure for event_type=%s outcome=%s session_id=%s run_id=%s "
-            "step_id=%s job_id=%s workflow_id=%s tool_name=%s connector_name=%s",
+            "step_id=%s job_id=%s workflow_id=%s tool_name=%s",
             event_type,
             _clean_optional_text(outcome),
             _clean_optional_text(session_id),
@@ -154,7 +146,6 @@ def append_audit_event(
             _clean_optional_text(job_id),
             _clean_optional_text(workflow_id),
             _clean_optional_text(tool_name),
-            _clean_optional_text(connector_name),
             exc_info=True,
         )
         return None
@@ -188,7 +179,6 @@ def query_audit_events(
     job_id: str | None = None,
     workflow_id: str | None = None,
     tool_name: str | None = None,
-    connector_name: str | None = None,
     outcome: str | None = None,
     limit: int = 100,
 ) -> list[AuditEventRecord]:
@@ -208,7 +198,6 @@ def query_audit_events(
         "job_id": _clean_optional_text(job_id),
         "workflow_id": _clean_optional_text(workflow_id),
         "tool_name": _clean_optional_text(tool_name),
-        "connector_name": _clean_optional_text(connector_name),
         "outcome": _clean_optional_text(outcome),
     }
 
@@ -241,7 +230,6 @@ def append_chat_request_event(
     session_id: str,
     message: str,
     attached_identifiers: list[str],
-    selected_workflow: str | None,
 ) -> Path:
     return append_audit_event(
         base_dir,
@@ -249,12 +237,10 @@ def append_chat_request_event(
         summary=f"Received chat request for session {session_id}.",
         outcome="received",
         session_id=session_id,
-        workflow_id=selected_workflow,
         details={
             "request_summary": request_summary(
                 message=message,
                 attached_identifiers=attached_identifiers,
-                selected_workflow=selected_workflow,
             )
         },
     )
@@ -264,7 +250,6 @@ def append_tool_invocation_event(
     base_dir: Path | str,
     *,
     session_id: str | None,
-    workflow_id: str | None,
     tool_name: str,
     tool_run_id: str | None,
     tool_input: str | None,
@@ -287,7 +272,6 @@ def append_tool_invocation_event(
         summary=f"Tool {tool_name} completed with outcome {resolved_outcome or 'completed'}.",
         outcome=resolved_outcome,
         session_id=session_id,
-        workflow_id=workflow_id,
         tool_name=tool_name,
         artifact_paths=artifact_paths,
         external_systems=_external_systems_for_tool(tool_name),
@@ -303,124 +287,6 @@ def append_tool_invocation_event(
             "metadata": normalized_metadata,
         },
     )
-
-
-def append_connector_action_event(
-    base_dir: Path | str,
-    *,
-    connector_name: str,
-    action: str,
-    outcome: str,
-    status: str,
-    failure_mode: str | None,
-    session_id: str | None = None,
-    run_id: str | None = None,
-    workflow_id: str | None = None,
-    artifact_paths: list[str] | None = None,
-    external_systems: list[str] | None = None,
-    details: Mapping[str, Any] | None = None,
-) -> Path | None:
-    resolved_failure_mode = _clean_optional_text(failure_mode)
-    summary = (
-        f"Connector {connector_name} {action} completed successfully."
-        if outcome == "success"
-        else f"Connector {connector_name} {action} ended with outcome {outcome}."
-    )
-    merged_details = {
-        "action": _clean_optional_text(action),
-        "status": _clean_optional_text(status),
-        "failure_mode": resolved_failure_mode,
-    }
-    if details:
-        merged_details.update(details)
-    return append_audit_event(
-        base_dir,
-        event_type="connector_action",
-        summary=summary,
-        outcome=outcome,
-        session_id=session_id,
-        run_id=run_id,
-        workflow_id=workflow_id,
-        connector_name=connector_name,
-        artifact_paths=artifact_paths or [],
-        external_systems=external_systems or [],
-        details=merged_details,
-    )
-
-
-def append_workflow_started_event(
-    base_dir: Path | str,
-    *,
-    run_id: str,
-    workflow_id: str,
-    workflow_name: str,
-    run_record_path: str,
-    lifecycle_status: str,
-    resumed: bool,
-    session_id: str | None = None,
-) -> Path:
-    return append_audit_event(
-        base_dir,
-        event_type="workflow_started",
-        summary=f"Workflow {workflow_id} started.",
-        outcome="started",
-        session_id=session_id,
-        run_id=run_id,
-        workflow_id=workflow_id,
-        artifact_paths=[run_record_path],
-        details={
-            "workflow_name": workflow_name,
-            "run_record_path": run_record_path,
-            "lifecycle_status": lifecycle_status,
-            "resumed": resumed,
-        },
-    )
-
-
-def append_workflow_finished_event(
-    base_dir: Path | str,
-    *,
-    run_id: str,
-    workflow_id: str,
-    workflow_name: str,
-    run_record_path: str,
-    lifecycle_status: str,
-    completed_steps: int,
-    total_steps: int,
-    warning_count: int,
-    output_artifact_paths: list[str] | None = None,
-    provenance_exports: list[str] | None = None,
-    biocompute_exports: list[str] | None = None,
-    session_id: str | None = None,
-) -> Path:
-    artifact_paths = [
-        run_record_path,
-        *(output_artifact_paths or []),
-        *(provenance_exports or []),
-        *(biocompute_exports or []),
-    ]
-    return append_audit_event(
-        base_dir,
-        event_type="workflow_finished",
-        summary=f"Workflow {workflow_id} finished with status {lifecycle_status}.",
-        outcome=lifecycle_status,
-        session_id=session_id,
-        run_id=run_id,
-        workflow_id=workflow_id,
-        artifact_paths=artifact_paths,
-        details={
-            "workflow_name": workflow_name,
-            "run_record_path": run_record_path,
-            "completed_steps": completed_steps,
-            "total_steps": total_steps,
-            "warning_count": warning_count,
-            "output_artifact_paths": output_artifact_paths or [],
-            "provenance_exports": provenance_exports or [],
-            "biocompute_exports": biocompute_exports or [],
-        },
-    )
-
-
 def append_file_written_event(
     base_dir: Path | str,
     *,
@@ -662,13 +528,10 @@ __all__ = [
     "AuditEventType",
     "append_audit_event",
     "append_chat_request_event",
-    "append_connector_action_event",
     "append_export_generated_event",
     "append_file_written_event",
     "append_job_submitted_event",
     "append_tool_invocation_event",
-    "append_workflow_finished_event",
-    "append_workflow_started_event",
     "audit_log_path",
     "audit_retention_policy",
     "hash_text",

@@ -1,0 +1,241 @@
+"""
+Minimal backend surface checks for the chat-engine-only backend.
+
+These tests intentionally cover only the routes and modules we still expose:
+chat bootstrap, access probing, session management, and workspace file access.
+"""
+from __future__ import annotations
+
+import builtins
+import importlib
+import json
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+from fastapi import HTTPException
+import pytest
+from starlette.requests import Request
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
+def _request(
+    path: str,
+    *,
+    method: str = "GET",
+    host: str = "127.0.0.1",
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": method,
+            "path": path,
+            "headers": headers or [],
+            "client": (host, 12345),
+        }
+    )
+
+
+@pytest.fixture
+def isolated_api_state(tmp_path):
+    from graph.agent import agent_manager
+    from graph.session_manager import SessionManager
+
+    original_base_dir = agent_manager.base_dir
+    original_session_manager = agent_manager.session_manager
+
+    agent_manager.base_dir = tmp_path
+    agent_manager.session_manager = SessionManager(base_dir=tmp_path)
+
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    (tmp_path / "memory").mkdir(exist_ok=True)
+    (tmp_path / "memory" / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+
+    try:
+        yield tmp_path
+    finally:
+        agent_manager.base_dir = original_base_dir
+        agent_manager.session_manager = original_session_manager
+
+
+def test_health_returns_ok():
+    import app
+
+    resp = app.health()
+    assert resp["status"] == "ok"
+    assert resp["service"] == "BioAPEX"
+
+
+def test_app_import_keeps_chat_engine_surface_lightweight():
+    sys.modules.pop("app", None)
+    real_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        banned = {
+            "api.artifact_registry",
+            "api.audit",
+            "api.compress",
+            "api.config_api",
+            "api.connectors",
+            "api.observability",
+            "api.skills_registry",
+            "api.studies",
+            "api.tokens",
+        }
+        if name in banned:
+            raise AssertionError(f"{name} should not be imported by the chat-engine app")
+        return real_import(name, globals, locals, fromlist, level)
+
+    with patch("builtins.__import__", side_effect=guarded_import):
+        app_module = importlib.import_module("app")
+
+    assert app_module.health()["status"] == "ok"
+
+
+def test_runtime_tool_catalog_excludes_legacy_workflow_tools():
+    from tools import get_all_tools
+
+    tool_names = {tool.name for tool in get_all_tools(Path(__file__).parent.parent)}
+
+    assert "claim_graph" not in tool_names
+    assert "slurm_tool" not in tool_names
+
+
+def test_access_probe_reports_loopback_grant_mode(isolated_api_state):
+    from api.access import probe_route_access
+
+    response = probe_route_access("inspection", _request("/api/access/probe?scope=inspection"))
+
+    assert response == {
+        "scope": "inspection",
+        "authorization_mode": "loopback",
+    }
+
+
+def test_access_probe_blocks_non_local_clients_without_token(isolated_api_state):
+    from api.access import probe_route_access
+
+    with pytest.raises(HTTPException) as exc_info:
+        probe_route_access(
+            "execution",
+            _request("/api/access/probe?scope=execution", host="10.0.0.8"),
+        )
+
+    assert exc_info.value.status_code == 403
+
+
+def test_sessions_create_and_list_round_trip(isolated_api_state):
+    from api.sessions import create_session, list_sessions
+
+    created = create_session()
+    listed_ids = {session["id"] for session in list_sessions()}
+
+    assert created["id"] in listed_ids
+    assert created["title"] == "New Chat"
+
+
+def test_files_read_file_blocks_missing_path(isolated_api_state):
+    from api.files import read_file
+
+    with pytest.raises(HTTPException) as exc_info:
+        read_file("../../outside.txt")
+
+    assert exc_info.value.status_code == 403
+
+
+def test_skills_list_uses_runtime_registry_instead_of_snapshot(isolated_api_state):
+    from api.files import list_skills
+
+    skill_dir = isolated_api_state / "skills" / "demo_skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        (
+            "---\n"
+            "name: demo_skill\n"
+            "description: demo\n"
+            "category: bio/literature\n"
+            "requires_tools: [read_file]\n"
+            "requires_network: false\n"
+            "user_invocable: true\n"
+            "species: any\n"
+            "modality: literature\n"
+            "stage: analysis\n"
+            "stability: experimental\n"
+            "safety_level: low\n"
+            "---\n"
+            "# Body\n"
+        ),
+        encoding="utf-8",
+    )
+    (isolated_api_state / "SKILLS_SNAPSHOT.md").write_text(
+        "<available_skills><skill><name>stale_skill</name></skill></available_skills>",
+        encoding="utf-8",
+    )
+
+    skills = list_skills(_request("/api/skills"))
+
+    assert [skill["name"] for skill in skills] == ["demo_skill"]
+
+
+def test_skills_registry_keeps_full_runtime_state_while_skills_list_stays_active_only(
+    isolated_api_state,
+):
+    from api.files import list_skills, list_skills_registry
+
+    def _write_skill(name: str, *, include_hints: bool = False) -> None:
+        skill_dir = isolated_api_state / "skills" / name
+        skill_dir.mkdir(parents=True)
+        hint_block = ""
+        if include_hints:
+            hint_block = "paths:\n  - backend/runtime/**\n  - memory/project/**\neffort: medium\n"
+        (skill_dir / "SKILL.md").write_text(
+            (
+                f"---\nname: {name}\ndescription: demo\ncategory: bio/literature\n"
+                f"{hint_block}"
+                "requires_tools: [read_file]\n"
+                "requires_network: false\n"
+                "user_invocable: true\n"
+                "species: any\n"
+                "modality: literature\n"
+                "stage: analysis\n"
+                "stability: experimental\n"
+                "safety_level: low\n"
+                "---\n# Body\n"
+            ),
+            encoding="utf-8",
+        )
+
+    _write_skill("active_skill", include_hints=True)
+    _write_skill("disabled_skill")
+    cfg_file = isolated_api_state / "backend-config.json"
+    cfg_file.write_text(
+        json.dumps({"skills": {"entries": {"disabled_skill": {"enabled": False}}}}),
+        encoding="utf-8",
+    )
+
+    with patch("config._CONFIG_FILE", cfg_file):
+        active_skills = list_skills(_request("/api/skills"))
+        registry = list_skills_registry(_request("/api/skills/registry"))
+
+    assert active_skills == [
+        {
+            "name": "active_skill",
+            "path": "skills/active_skill/SKILL.md",
+            "category": "bio/literature",
+            "stage": "analysis",
+        }
+    ]
+
+    active_entry = next(entry for entry in registry if entry["name"] == "active_skill")
+    disabled_entry = next(entry for entry in registry if entry["name"] == "disabled_skill")
+
+    assert active_entry["selected"] is True
+    assert active_entry["selection_reason"] == "selected"
+    assert active_entry["location"] == "skills/active_skill/SKILL.md"
+    assert active_entry["paths"] == ["backend/runtime/**", "memory/project/**"]
+    assert active_entry["effort"] == "medium"
+    assert disabled_entry["enabled"] is False
+    assert disabled_entry["selected"] is False
+    assert disabled_entry["selection_reason"] == "disabled_by_config"

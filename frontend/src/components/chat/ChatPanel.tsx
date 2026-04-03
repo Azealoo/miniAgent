@@ -1,16 +1,11 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import {
-  ArrowRight,
-  MessageSquarePlus,
-  RefreshCw,
-  ShieldAlert,
-} from "lucide-react";
+import { useCallback, useEffect, useRef } from "react";
+import { ArrowRight, MessageSquarePlus, RefreshCw, ShieldAlert } from "lucide-react";
 import SurfaceState from "@/components/layout/SurfaceState";
 import { useApp } from "@/lib/store";
 import ChatInput from "./ChatInput";
-import ChatMessage from "./ChatMessage";
+import SessionHistorySummary from "@/components/session/SessionHistorySummary";
 
 export default function ChatPanel() {
   const {
@@ -25,37 +20,82 @@ export default function ChatPanel() {
     sessionListStatus,
     sessionHistoryStatus,
     sessionHistoryError,
+    sessionContinuitySummaries,
     sendMessage,
     reloadCurrentSession,
-    selectedWorkflow,
     attachedIdentifiers,
-    selectWorkflow,
+    setInspectorTab,
     uploadAttachedReference,
     removeAttachedIdentifier,
     clearAttachedIdentifiers,
     draftMessage,
     draftRevision,
+    primeDraftMessage,
     clearDraftMessage,
   } = useApp();
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
+  const autoScrollRef = useRef(true);
+  const userPausedAutoScrollRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
+
+  const syncScrollState = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const threshold = 80;
+    const nearBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+
+    isNearBottomRef.current = nearBottom;
+    if (nearBottom && !userPausedAutoScrollRef.current) {
+      autoScrollRef.current = true;
+    }
+  }, []);
 
   const handleScroll = () => {
     const el = containerRef.current;
     if (!el) return;
 
-    const threshold = 80;
-    isNearBottomRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+    const scrollingUp = el.scrollTop < lastScrollTopRef.current;
+    lastScrollTopRef.current = el.scrollTop;
+
+    syncScrollState();
+    if (scrollingUp && !isNearBottomRef.current) {
+      autoScrollRef.current = false;
+      userPausedAutoScrollRef.current = true;
+    }
+
+    if (!scrollingUp && isNearBottomRef.current) {
+      userPausedAutoScrollRef.current = false;
+      autoScrollRef.current = true;
+    }
   };
 
   useEffect(() => {
-    if (isNearBottomRef.current) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (messages.length === 0) {
+      autoScrollRef.current = true;
+      userPausedAutoScrollRef.current = false;
+      lastScrollTopRef.current = 0;
+      return;
     }
-  }, [messages]);
+
+    if (autoScrollRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: isStreaming ? "auto" : "smooth" });
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      syncScrollState();
+      const el = containerRef.current;
+      if (el) {
+        lastScrollTopRef.current = el.scrollTop;
+      }
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [isStreaming, messages, syncScrollState]);
 
   const handleSend = async (text: string) => {
     await sendMessage(text);
@@ -82,6 +122,12 @@ export default function ChatPanel() {
         <div
           ref={containerRef}
           onScroll={handleScroll}
+          onWheelCapture={(event) => {
+            if (event.deltaY < 0) {
+              userPausedAutoScrollRef.current = true;
+              autoScrollRef.current = false;
+            }
+          }}
           className="flex-1 overflow-y-auto px-4 pt-4 sm:px-6 sm:pt-5 lg:px-8 lg:pt-7"
         >
           <div className="mx-auto flex min-h-full w-full max-w-[54rem] flex-col">
@@ -123,19 +169,19 @@ export default function ChatPanel() {
                 onRetryHistory={() => void reloadCurrentSession()}
               />
             ) : (
-              <div className="flex flex-col gap-5 pb-[11.75rem] sm:gap-6 sm:pb-[13rem]">
-                {messages.map((message) => (
-                  <ChatMessage key={message.id} message={message} />
-                ))}
-              </div>
+              <SessionHistorySummary
+                currentSessionId={currentSessionId}
+                messages={messages}
+                continuitySummaries={sessionContinuitySummaries}
+              />
             )}
             <div ref={bottomRef} className="h-px" />
           </div>
         </div>
 
-        <div className="pointer-events-none h-8 bg-gradient-to-t from-[rgba(244,246,242,0.96)] via-[rgba(244,246,242,0.76)] to-transparent" />
+        <div className="pointer-events-none h-5 bg-gradient-to-t from-[rgba(244,246,242,0.96)] via-[rgba(244,246,242,0.76)] to-transparent" />
 
-        <div className="sticky bottom-0 z-10 px-3 pb-3 sm:px-5 sm:pb-4 lg:px-6 lg:pb-5">
+        <div className="sticky bottom-0 z-10 px-3 pb-2 sm:px-5 sm:pb-3 lg:px-6 lg:pb-3">
           <div className="mx-auto w-full max-w-[56rem]">
             <ChatInput
               onSend={handleSend}
@@ -143,9 +189,9 @@ export default function ChatPanel() {
               isReferenceUploading={isReferenceUploading}
               disabled={chatDisabled}
               disabledReason={chatDisabledReason}
-              selectedWorkflow={selectedWorkflow}
-              onSelectWorkflow={selectWorkflow}
               attachedIdentifiers={attachedIdentifiers}
+              onOpenInspectorTab={setInspectorTab}
+              onPrimeDraftMessage={primeDraftMessage}
               onUploadReferenceFile={uploadAttachedReference}
               onRemoveAttachedIdentifier={removeAttachedIdentifier}
               onClearAttachedIdentifiers={clearAttachedIdentifiers}
@@ -317,8 +363,8 @@ function EmptyState({
       </h2>
       <p className="mt-2 max-w-lg text-sm leading-6 text-slate-500">
         {currentSessionId
-          ? "Ask about a workflow, a dataset, or the next step in a scientific task. New requests in this session will appear here as the conversation grows."
-          : "Ask about a workflow, a dataset, or the next step in a scientific task. The center workspace is ready for the active conversation."}
+          ? "Ask a biology question, inspect a dataset, review evidence, or start a structured analysis when you need one. New requests in this session will appear here as the conversation grows."
+          : "Ask a biology question, inspect a dataset, review evidence, or start a structured analysis when you need one. The center workspace is ready for the active conversation."}
       </p>
     </div>
   );

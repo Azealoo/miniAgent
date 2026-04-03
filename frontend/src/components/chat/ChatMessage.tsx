@@ -3,41 +3,29 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import ComplianceSummaryCard from "@/components/compliance/ComplianceSummaryCard";
 import {
-  getAuditLogPath,
-  getComplianceReport,
-  getLatestComplianceToolCall,
-  reportAppliesToWorkflow,
-} from "@/lib/compliance";
+  messageHasProcessTrail,
+  normalizeMessageContent,
+  shouldSuppressHelperNarrationText,
+} from "@/lib/message-blocks";
+import { completedElapsedLabel } from "@/lib/message-duration";
+import { splitStreamingMarkdown } from "@/lib/streaming-markdown";
 import { cn } from "@/lib/utils";
-import ThoughtChain from "./ThoughtChain";
-import RetrievalCard from "./RetrievalCard";
-import WorkflowProgressCard from "./WorkflowProgressCard";
+import TurnActivityFeed from "./TurnActivityFeed";
 import type { Message } from "@/lib/types";
 
 interface ChatMessageProps {
   message: Message;
 }
 
-function MessageAvatar({
-  label,
-  tone,
-}: {
-  label: string;
-  tone: "user" | "assistant";
-}) {
+function MessageMarker() {
   return (
-    <div
-      className={cn(
-        "mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-[10px] font-semibold uppercase tracking-[0.16em]",
-        tone === "assistant"
-          ? "bg-[rgba(35,130,83,0.14)] text-[var(--apex-accent-strong)]"
-          : "bg-[rgba(23,97,61,0.92)] text-white"
-      )}
+    <span
+      aria-hidden="true"
+      className="mt-[0.45rem] flex h-4 w-4 flex-shrink-0 items-center justify-center"
     >
-      {label}
-    </div>
+      <span className="h-1.5 w-1.5 rounded-full bg-[var(--apex-accent-strong)] shadow-[0_0_0_1px_rgba(23,97,61,0.1)]" />
+    </span>
   );
 }
 
@@ -108,47 +96,76 @@ function MarkdownContent({
   );
 }
 
-export default function ChatMessage({ message }: ChatMessageProps) {
-  const isUser = message.role === "user";
-  const complianceToolCall = getLatestComplianceToolCall(message.tool_calls ?? []);
-  const complianceReport = complianceToolCall
-    ? getComplianceReport(complianceToolCall.result)
-    : null;
-  const complianceAuditLogPath = complianceToolCall
-    ? getAuditLogPath(complianceToolCall.result)
-    : null;
-  const hasRetrievals = Boolean(message.retrievals && message.retrievals.length > 0);
-  const hasWorkflowProgress = Boolean(
-    message.workflow_events && message.workflow_events.length > 0
+function StreamingMarkdownContent({
+  content,
+  isStreaming,
+}: {
+  content: string;
+  isStreaming?: boolean;
+}) {
+  if (!isStreaming) {
+    return <MarkdownContent content={content} />;
+  }
+
+  const { committed, pending } = splitStreamingMarkdown(content);
+  const hasCommitted = committed.trim().length > 0;
+  const hasPending = pending.trim().length > 0;
+
+  if (!hasCommitted && !hasPending) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-2">
+      {hasCommitted ? (
+        <MarkdownContent content={committed} isStreaming={!hasPending} />
+      ) : null}
+
+      {hasPending ? (
+        <div className="apex-streaming-draft streaming-cursor whitespace-pre-wrap rounded-[14px] border px-3 py-2">
+          {pending}
+        </div>
+      ) : null}
+    </div>
   );
-  const workflowComplianceReport =
-    hasWorkflowProgress &&
-    complianceReport &&
-    reportAppliesToWorkflow(
-      complianceReport,
-      message.workflow_events?.at(-1)?.workflow_id ?? null
-    )
-      ? complianceReport
-      : null;
-  const workflowComplianceAuditLogPath = workflowComplianceReport
-    ? complianceAuditLogPath
-    : null;
-  const hasCompliance = Boolean(complianceReport);
-  const showStandaloneCompliance =
-    complianceReport !== null &&
-    (!workflowComplianceReport || workflowComplianceReport.id !== complianceReport.id);
-  const hasToolTrace =
-    Boolean(message.tool_calls && message.tool_calls.length > 0) ||
-    Boolean(message.pendingTool);
-  const hasSupport = hasCompliance || hasRetrievals || hasWorkflowProgress || hasToolTrace;
-  const hasContent = Boolean(message.content);
+}
+
+function hasBlockType(message: Message, type: "plan" | "verification"): boolean {
+  return (message.blocks ?? []).some((block) => block.type === type);
+}
+
+function shouldSuppressHelperNarration(message: Message, content: string): boolean {
+  const hasPlan = hasBlockType(message, "plan");
+  const hasVerification = hasBlockType(message, "verification");
+  return shouldSuppressHelperNarrationText(content, {
+    hasPlan,
+    hasVerification,
+  });
+}
+
+export default function ChatMessage({
+  message,
+}: ChatMessageProps) {
+  const isUser = message.role === "user";
+  const normalizedContent = normalizeMessageContent(message);
+  const displayContent = shouldSuppressHelperNarration(
+    message,
+    normalizedContent.content
+  )
+    ? ""
+    : normalizedContent.content;
+  const hasContent = Boolean(displayContent);
+  const hasProcessTrail = messageHasProcessTrail(message);
+  const showTurnActivityBeforeContent = message.isStreaming || hasProcessTrail;
+  const showTurnActivityAfterContent = false;
+  const showStreamingContent = hasContent;
+  const completedDuration = !message.isStreaming ? completedElapsedLabel(message) : null;
 
   if (isUser) {
     return (
-      <article className="grid grid-cols-[auto,minmax(0,1fr)] gap-3 sm:gap-4">
-        <MessageAvatar label="U" tone="user" />
-        <div className="min-w-0 pt-0.5">
-          <p className="whitespace-pre-wrap text-[1rem] leading-[1.72] text-slate-800">
+      <article aria-label="User prompt" className="flex justify-end">
+        <div className="max-w-[min(42rem,88%)] rounded-[22px] border border-[rgba(208,216,209,0.92)] bg-[rgba(248,250,246,0.96)] px-4 py-3 shadow-[0_10px_24px_rgba(29,42,33,0.04)]">
+          <p className="whitespace-pre-wrap text-[0.92rem] leading-[1.72] text-slate-700">
             {message.content}
           </p>
         </div>
@@ -156,47 +173,37 @@ export default function ChatMessage({ message }: ChatMessageProps) {
     );
   }
 
+  if (
+    !hasContent &&
+    !showTurnActivityBeforeContent
+  ) {
+    return null;
+  }
+
   return (
-    <article className="grid grid-cols-[auto,minmax(0,1fr)] gap-3 sm:gap-4">
-      <MessageAvatar label="B" tone="assistant" />
+    <article
+      aria-label="Assistant response"
+      className="apex-transcript-enter grid grid-cols-[1rem,minmax(0,1fr)] gap-3 sm:gap-4"
+    >
+      <MessageMarker />
 
       <div className="min-w-0 pt-0.5">
-        {hasContent ? (
-          <MarkdownContent content={message.content} isStreaming={message.isStreaming} />
-        ) : message.isStreaming ? (
-          <div className="flex min-h-[1.5rem] items-center">
-            <span className="inline-block h-4 w-0.5 animate-blink bg-[var(--apex-accent)]" />
-          </div>
-        ) : hasSupport ? (
-          <p className="text-sm leading-6 text-slate-500">
-            Structured results are available below.
+        {showTurnActivityBeforeContent ? <TurnActivityFeed message={message} /> : null}
+
+        {hasContent && completedDuration ? (
+          <p className="mb-2 pl-[1px] font-mono text-[10px] italic leading-5 text-slate-400">
+            {completedDuration}
           </p>
         ) : null}
 
-        {hasSupport && (
-          <div className="mt-3 space-y-2.5">
-            {showStandaloneCompliance && (
-              <ComplianceSummaryCard
-                report={complianceReport}
-                auditLogPath={complianceAuditLogPath}
-              />
-            )}
-            {hasRetrievals && <RetrievalCard results={message.retrievals ?? []} />}
-            {hasWorkflowProgress && (
-              <WorkflowProgressCard
-                events={message.workflow_events ?? []}
-                complianceReport={workflowComplianceReport}
-                auditLogPath={workflowComplianceAuditLogPath}
-              />
-            )}
-            {hasToolTrace && (
-              <ThoughtChain
-                toolCalls={message.tool_calls ?? []}
-                pendingTool={message.pendingTool}
-              />
-            )}
-          </div>
-        )}
+        {showStreamingContent ? (
+          <StreamingMarkdownContent
+            content={displayContent}
+            isStreaming={message.isStreaming}
+          />
+        ) : null}
+
+        {showTurnActivityAfterContent ? <TurnActivityFeed message={message} /> : null}
       </div>
     </article>
   );

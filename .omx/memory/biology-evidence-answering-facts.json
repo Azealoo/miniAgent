@@ -1,0 +1,22 @@
+{
+  "updated_at": "2026-04-01T00:00:00Z",
+  "topic": "biology_evidence_answering_and_private_lab_architecture",
+  "facts": [
+    "BioAPEX already has deterministic evidence-review and compliance-preflight layers, so the right modernization path is to improve composition and UX rather than bypassing policy.",
+    "For private-lab internal use, the safest simplification is severity-based disclosure: keep low-risk allow states quiet in main chat while preserving warnings, approvals, blocks, and durable artifacts.",
+    "The best balance is to make low-risk safe passes feel invisible in the answer surface while keeping deterministic policy and full inspectable truth underneath.",
+    "Recent example biology papers verified on 2026-04-01 included March 2026 Nature papers on Lipid-CLEM, SuperFi-Cas9 spacer extension, and KEY1 control of pyrenoid condensates.",
+    "Current claw-code main on 2026-04-01 still points at commit 7030d26e7a9ca7fef5c74f463eede01a59403847, and its useful lesson is clean output surface plus explicit runtime permissions/hooks, not weakened policy.",
+    "The most reusable modern-agent architecture ideas for BioAPEX remain prompt context budgeting, typed session blocks, manifest-driven tool permissions, policy middleware, and layered config.",
+    "The main risk of relaxing safety for a private lab is not external attackers first; it is unsupported biology output, reduced provenance, and weaker auditability."
+  ],
+  "sources": [
+    "backend/evidence/review_gate.py",
+    "backend/compliance/preflight.py",
+    ".omx/research/frontend-compliance-ux-2026-04-01.md",
+    ".omx/research/claw-code-bioapex-architecture-map-2026-04-01.md",
+    "https://www.nature.com/articles/s41556-026-01915-x",
+    "https://www.nature.com/articles/s41594-026-01753-3",
+    "https://www.nature.com/articles/s41556-026-01908-w"
+  ]
+}

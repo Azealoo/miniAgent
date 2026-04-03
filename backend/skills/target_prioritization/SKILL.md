@@ -1,11 +1,16 @@
 ---
 name: target_prioritization
 description: Rank perturbation targets by drugability, pathway relevance, and safety given constraints.
-category: bio/perturbation
+category: bio/perturb_seq
 version: 1.0
 requires_tools: [fetch_url, search_knowledge_base, python_repl]
 requires_network: true
 user_invocable: true
+species: any
+modality: perturb_seq
+stage: prioritization
+stability: experimental
+safety_level: medium
 ---
 
 # Target Prioritization

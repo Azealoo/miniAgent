@@ -1,11 +1,16 @@
 ---
 name: molarity_mass_volume
 description: Convert between molarity, mass, and volume using molecular weight.
-category: bio/calculations
+category: bio/molecular_lab
 version: 1.0
 requires_tools: [python_repl]
 requires_network: false
 user_invocable: true
+species: any
+modality: wet_lab
+stage: utilities
+stability: experimental
+safety_level: low
 ---
 
 # Molarity, Mass, and Volume

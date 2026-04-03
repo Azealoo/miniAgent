@@ -1,0 +1,20 @@
+{
+  "updated_at": "2026-04-02T22:15:00Z",
+  "topic": "frontend_structure_cleanup",
+  "facts": [
+    "The current frontend's biggest structure risk is responsibility concentration in WorkspacePanel, InspectorPanel, OpsWorkspace, and store.tsx rather than one isolated bug.",
+    "BioAPEX should mimic ponponon/claude_code_src at the domain-boundary level using clearer screen or surface splits, not by copying its large entrypoint files.",
+    "ThoughtChain, StreamingActivityPill, RetrievalCard, and WorkflowProgressCard were unreferenced in the active frontend and were safely removed after strict TypeScript checks, focused tests, and a production build stayed green.",
+    "ChatInput no longer needs selectedWorkflow or onSelectWorkflow props in the current flow; quick starts now operate as draft-message and navigation actions instead of implicit workflow selection."
+  ],
+  "sources": [
+    "frontend/src/components/layout/WorkspacePanel.tsx",
+    "frontend/src/components/editor/InspectorPanel.tsx",
+    "frontend/src/components/layout/OpsWorkspace.tsx",
+    "frontend/src/lib/store.tsx",
+    "frontend/src/components/chat/ChatInput.tsx",
+    "frontend/src/components/chat/ChatPanel.tsx",
+    ".omx/research/frontend-structure-cleanup-2026-04-02.md",
+    "https://github.com/ponponon/claude_code_src"
+  ]
+}

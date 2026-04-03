@@ -3,23 +3,35 @@ AgentManager — singleton that owns the LLM, tools, session manager,
 and memory indexer. Rebuilds the agent on every request via create_agent
 so that live workspace edits are always reflected in the system prompt.
 """
-import os
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_deepseek import ChatDeepSeek
 
+from runtime.model_factory import build_chat_model
 from .memory_indexer import MemoryIndexer
-from .prompt_builder import build_system_prompt
+from .prompt_builder import build_retrieved_memory_block, build_system_prompt
 from .session_manager import SessionManager
+from .skill_router import select_skill_entries_for_query
 from tools.contracts import normalize_tool_output
+
+_HARNESS_GUIDANCE = """
+<!-- Runtime Harness Guidance -->
+For non-trivial tasks, use the helper-agent tools deliberately:
+- Call `plan_agent` before broad multi-step tool use when you need to decide the order of work.
+- Use the returned plan to guide tool choice and sequencing.
+- After a draft answer or significant execution, call `verification_agent` to challenge the result before responding.
+- If verification reports `repair_required` or `fail`, fix the issues before finalizing your answer.
+""".strip()
 
 
 class AgentManager:
     def __init__(self) -> None:
-        self.llm: Optional[ChatDeepSeek] = None
+        self.llm = None
+        self.planner_llm = None
+        self.verifier_llm = None
+        self.title_llm = None
         self.tools: list = []
         self.session_manager: Optional[SessionManager] = None
         self.memory_indexer: Optional[MemoryIndexer] = None
@@ -32,17 +44,14 @@ class AgentManager:
     def initialize(self, base_dir: Path) -> None:
         self.base_dir = base_dir
 
-        self.llm = ChatDeepSeek(
-            model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-            api_key=os.getenv("DEEPSEEK_API_KEY", ""),
-            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-            temperature=0.7,
-            streaming=True,
-        )
+        self.llm = build_chat_model("executor", streaming=True)
+        self.planner_llm = build_chat_model("planner", streaming=True)
+        self.verifier_llm = build_chat_model("verifier", streaming=True)
+        self.title_llm = build_chat_model("title", streaming=False)
 
-        from tools import get_all_tools
+        from tools import get_runtime_tools
 
-        self.tools = get_all_tools(base_dir)
+        self.tools = get_runtime_tools(base_dir)
         self.session_manager = SessionManager(base_dir)
         self.memory_indexer = MemoryIndexer(base_dir)
 
@@ -65,14 +74,29 @@ class AgentManager:
                 messages.append(SystemMessage(content=content))
         return messages
 
-    def _build_agent(self, rag_mode: bool = False):
+    def _build_agent(
+        self,
+        rag_mode: bool = False,
+        *,
+        skill_entries: list[dict] | None = None,
+    ):
         """
         Rebuild the agent from scratch, ensuring the latest workspace edits
         and RAG configuration are reflected in the system prompt.
         """
         assert self.base_dir is not None, "AgentManager not initialised"
-        system_prompt = build_system_prompt(self.base_dir, rag_mode)
+        system_prompt = (
+            f"{build_system_prompt(self.base_dir, rag_mode, skill_entries=skill_entries)}"
+            f"\n\n{_HARNESS_GUIDANCE}"
+        )
         return create_agent(self.llm, self.tools, system_prompt=system_prompt)
+
+    def clear_session_runtime(self, session_id: str) -> None:
+        for tool in self.tools:
+            runtime_tool = getattr(tool, "wrapped_tool", tool)
+            clear_session_state = getattr(runtime_tool, "clear_session_state", None)
+            if callable(clear_session_state):
+                clear_session_state(session_id)
 
     # ------------------------------------------------------------------ #
     # Streaming                                                            #
@@ -101,14 +125,14 @@ class AgentManager:
         # ── RAG injection ──────────────────────────────────────────────
         if rag_mode and self.memory_indexer:
             try:
-                results = self.memory_indexer.retrieve(message)
+                results = self.memory_indexer.retrieve(message, top_k=3)
                 if results:
                     yield {"type": "retrieval", "query": message, "results": results}
-                    context_lines = "\n".join(f"- {r['text']}" for r in results)
-                    rag_block = f"[Retrieved Memory — use as background context only]\n{context_lines}"
+                    rag_block = build_retrieved_memory_block(results)
                     # Injected as a system message so the model treats this as
                     # provided context, not as something it previously said.
-                    history = history + [{"role": "system", "content": rag_block}]
+                    if rag_block:
+                        history = history + [{"role": "system", "content": rag_block}]
             except Exception:
                 pass  # RAG failure is non-fatal
 
@@ -119,12 +143,17 @@ class AgentManager:
         )
 
         # ── Build agent (rebuilt every request) ───────────────────────
-        agent = self._build_agent(rag_mode)
+        selected_skill_entries = select_skill_entries_for_query(
+            self.base_dir,
+            message,
+            history=history,
+        )
+        agent = self._build_agent(rag_mode, skill_entries=selected_skill_entries)
 
         # ── Stream events ──────────────────────────────────────────────
         after_tool = False
 
-        # Biology workflows (PubMed, UniProt, multi-step reasoning) often need
+        # Biology requests with retrieval and multi-step reasoning often need
         # many tool calls; default recursion_limit=25 can be hit. Raise to 75.
         run_config = {"recursion_limit": 75}
         try:
@@ -166,13 +195,17 @@ class AgentManager:
                     raw_output = event["data"].get("output", "")
                     result = normalize_tool_output(event["name"], raw_output)
 
-                    yield {
+                    payload = {
                         "type": "tool_end",
                         "tool": event["name"],
                         "output": result.summary,
                         "result": result.model_dump(mode="json"),
                         "run_id": run_id,
                     }
+                    policy = result.metadata.get("policy")
+                    if isinstance(policy, dict):
+                        payload["policy"] = policy
+                    yield payload
                     after_tool = True
 
         except Exception as exc:

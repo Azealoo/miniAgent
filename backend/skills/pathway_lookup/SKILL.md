@@ -6,6 +6,11 @@ version: 1.0
 requires_tools: [fetch_url, search_knowledge_base]
 requires_network: true
 user_invocable: true
+species: any
+modality: literature
+stage: utilities
+stability: experimental
+safety_level: low
 ---
 
 # Pathway Lookup

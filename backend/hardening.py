@@ -41,9 +41,8 @@ class ApiHardeningPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     files_write_enabled: bool = True
-    connectors_configuration_enabled: bool = True
-    connectors_runtime_actions_enabled: bool = True
     allow_loopback_without_auth: bool = True
+    trust_forwarded_loopback_headers: bool = False
     inspection_bearer_token_env_var: str | None = None
     execution_bearer_token_env_var: str | None = None
     admin_bearer_token_env_var: str | None = None
@@ -53,9 +52,8 @@ class ApiHardeningPolicy(BaseModel):
     def fail_closed(cls) -> "ApiHardeningPolicy":
         return cls(
             files_write_enabled=False,
-            connectors_configuration_enabled=False,
-            connectors_runtime_actions_enabled=False,
             allow_loopback_without_auth=False,
+            trust_forwarded_loopback_headers=False,
             cors_allowed_origins=[],
         )
 

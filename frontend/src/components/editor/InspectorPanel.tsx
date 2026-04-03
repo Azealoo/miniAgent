@@ -16,7 +16,6 @@ import {
   Copy,
   Download,
   FileText,
-  Hash,
   Info,
   Package,
   Plus,
@@ -28,45 +27,23 @@ import {
   Trash2,
 } from "lucide-react";
 import {
-  getAuditLogPath,
-  getComplianceReport,
-  getLatestComplianceToolCallForWorkflow,
-  getLatestComplianceToolCallFromMessages,
-} from "@/lib/compliance";
-import {
   FilePreviewSurface,
   useFilePreview,
   type FilePreviewTarget,
 } from "@/components/preview/FilePreviewSurface";
-import ComplianceSummaryCard from "@/components/compliance/ComplianceSummaryCard";
+import TurnDetailsPanel from "@/components/editor/TurnDetailsPanel";
 import {
-  getArtifactRegistryDescription,
-  getArtifactRegistryDisplayName,
-  getArtifactRegistryMetadataSummary,
-  getArtifactRegistryRunRecordPath,
-  getArtifactRegistryTimestamp,
-  humanizeArtifactToken,
-  shortenArtifactPath,
-  sortArtifactRegistryRecords,
-} from "@/lib/artifact-registry";
-import {
-  getApiErrorBodyText,
-  getSessionTokens,
-  listArtifactRegistry,
   listSkillsRegistry,
   openRawFileInNewTab,
   readFile,
   saveFile,
-  updateSkillRegistryEntry,
 } from "@/lib/api";
-import { classifyAccessError } from "@/lib/access-control";
 import {
   getPreviewableFileLabel,
   inferPreviewableFileKind,
 } from "@/lib/file-preview";
 import {
   getLatestRequestMessages,
-  getWorkflowSummary,
 } from "@/lib/session-status";
 import {
   getEvidenceRetrievalPayload,
@@ -77,9 +54,6 @@ import {
 import { useApp } from "@/lib/store";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import type {
-  AccessScopeState,
-  ArtifactRegistryRecord,
-  ComplianceReportArtifact,
   ConfidenceLevel,
   Message,
   SkillRegistryEntry,
@@ -87,11 +61,7 @@ import type {
   SourcesInspectorCitationTone,
   SourcesInspectorChecklistItem,
   SourcesInspectorSummary,
-  TokenStats,
-  ToolCall,
   ToolResultEnvelope,
-  WorkflowArtifactScope,
-  WorkflowStreamEvent,
 } from "@/lib/types";
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
@@ -109,16 +79,14 @@ const INSPECTOR_TABS = [
   { id: "sources", label: "Sources", icon: Search },
   { id: "memory", label: "Memory", icon: Brain },
   { id: "skills", label: "Skills", icon: Sparkles },
-  { id: "usage", label: "Usage", icon: Hash },
+  { id: "turns", label: "Turns", icon: Clock3 },
 ] as const;
 
 type GeneratedArtifactItem = {
   path: string;
   label: string;
   artifactType: string | null;
-  scope: WorkflowArtifactScope | null;
-  outputName: string | null;
-  stepLabel: string | null;
+  sourceTool: string | null;
   lastSeenOrder: number;
 };
 
@@ -231,23 +199,6 @@ function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
-function formatWorkflowEvent(event: WorkflowStreamEvent) {
-  switch (event.type) {
-    case "workflow_start":
-      return `${event.workflow_name} started`;
-    case "workflow_done":
-      return `${event.workflow_id} ${event.lifecycle_status}`;
-    case "workflow_blocked":
-      return `${event.workflow_id} blocked: ${event.reason}`;
-    case "workflow_step_start":
-      return `${event.step_label} running`;
-    case "workflow_step_end":
-      return `${event.step_label} ${event.status}`;
-    case "workflow_artifact":
-      return `${event.scope}: ${event.artifact.path}`;
-  }
-}
-
 function buildExportMarkdown(title: string, messages: Message[]) {
   const lines: string[] = [
     `# ${title}`,
@@ -265,14 +216,6 @@ function buildExportMarkdown(title: string, messages: Message[]) {
       lines.push("Retrieved sources:");
       message.retrievals.forEach((result) => {
         lines.push(`- ${result.source} (score ${result.score.toFixed(3)})`);
-      });
-    }
-
-    if (message.workflow_events?.length) {
-      lines.push("");
-      lines.push("Workflow events:");
-      message.workflow_events.forEach((event) => {
-        lines.push(`- ${formatWorkflowEvent(event)}`);
       });
     }
 
@@ -295,26 +238,6 @@ function exportFilename(title: string): string {
     title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
     "bioapex-session"
   );
-}
-
-function formatCompactTokenValue(value: number): string {
-  if (value >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
-  }
-
-  if (value >= 1_000) {
-    return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`;
-  }
-
-  return value.toString();
-}
-
-function shortIdentifier(value: string, prefixLength = 8, suffixLength = 4): string {
-  if (value.length <= prefixLength + suffixLength + 1) {
-    return value;
-  }
-
-  return `${value.slice(0, prefixLength)}…${value.slice(-suffixLength)}`;
 }
 
 function normalizeMarkdownInline(value: string): string {
@@ -658,33 +581,6 @@ function removeMemoryDocumentItem(
   };
 }
 
-function groupMemoryItemsByNamespace(items: MemoryInspectorItem[]) {
-  const groups = new Map<string, MemoryInspectorItem[]>();
-
-  items.forEach((item) => {
-    const namespace = item.namespace.trim() || "General";
-    const existing = groups.get(namespace);
-    if (existing) {
-      existing.push(item);
-    } else {
-      groups.set(namespace, [item]);
-    }
-  });
-
-  return Array.from(groups.entries()).map(([namespace, sectionItems]) => ({
-    namespace,
-    items: sectionItems,
-  }));
-}
-
-function getMemoryItemSummary(item: MemoryInspectorItem): string {
-  if (item.value) {
-    return compactText(item.value, 120) ?? item.value;
-  }
-
-  return compactText(item.key, 120) ?? item.key;
-}
-
 function getSkillVersionLabel(skill: SkillRegistryEntry): string {
   const version = skill.version.trim();
 
@@ -720,81 +616,40 @@ function getSkillRegistryBadges(skill: SkillRegistryEntry): string[] {
   ]);
 }
 
-function getSkillRegistryMutationErrorMessage(
-  error: unknown,
-  adminAccessState: AccessScopeState
-): string {
-  const scopedState = classifyAccessError(
-    "admin",
-    error,
-    adminAccessState.hasToken
-  );
-  if (scopedState.status !== "unavailable") {
-    return scopedState.detail;
-  }
-
-  const rawMessage =
-    getApiErrorBodyText(error) ||
-    (error instanceof Error ? error.message.trim() : "Could not update this skill.");
-  const compactMessage = compactText(rawMessage, 140);
-  return compactMessage
-    ? `Could not update the registry entry. ${compactMessage}`
-    : "Could not update this skill registry entry.";
-}
-
-function getUsageShare(value: number, total: number): string {
-  if (total <= 0) {
-    return "0%";
-  }
-
-  return `${Math.round((value / total) * 100)}%`;
-}
-
 function shouldShowGeneratedArtifact(item: {
   path: string;
   artifactType: string | null;
-  scope: WorkflowArtifactScope | null;
 }): boolean {
   if (!item.path) {
     return false;
   }
 
-  if (item.scope === "run_record") {
-    return false;
-  }
-
-  if (item.artifactType === "workflow_run") {
+  if (item.artifactType?.endsWith("_run")) {
     return false;
   }
 
   return true;
 }
 
-function collectArtifacts(events: WorkflowStreamEvent[]) {
+function collectArtifacts(messages: Message[]) {
   const items = new Map<string, GeneratedArtifactItem>();
   let order = 0;
 
   const upsertArtifact = ({
     path,
     artifactType,
-    scope,
-    outputName,
-    stepLabel,
+    sourceTool,
   }: {
     path: string;
     artifactType?: string | null;
-    scope?: WorkflowArtifactScope | null;
-    outputName?: string | null;
-    stepLabel?: string | null;
+    sourceTool?: string | null;
   }) => {
     const existing = items.get(path);
     const nextItem: GeneratedArtifactItem = {
       path,
       label: path.split("/").pop() ?? path,
       artifactType: artifactType ?? existing?.artifactType ?? null,
-      scope: scope ?? existing?.scope ?? null,
-      outputName: outputName ?? existing?.outputName ?? null,
-      stepLabel: stepLabel ?? existing?.stepLabel ?? null,
+      sourceTool: sourceTool ?? existing?.sourceTool ?? null,
       lastSeenOrder: order,
     };
     order += 1;
@@ -806,27 +661,20 @@ function collectArtifacts(events: WorkflowStreamEvent[]) {
     items.set(path, nextItem);
   };
 
-  events.forEach((event) => {
-    if (event.type === "workflow_artifact") {
-      upsertArtifact({
-        path: event.artifact.path,
-        artifactType: event.artifact.artifact_type,
-        scope: event.scope,
-        outputName: event.output_name,
-        stepLabel: event.step_label,
-      });
-    }
+  messages.forEach((message) => {
+    (message.tool_calls ?? []).forEach((call) => {
+      call.result?.artifact_refs?.forEach((artifact) => {
+        if (!artifact.path) {
+          return;
+        }
 
-    if (event.type === "workflow_step_end") {
-      event.artifact_refs.forEach((artifact) => {
         upsertArtifact({
           path: artifact.path,
-          artifactType: artifact.artifact_type,
-          outputName: null,
-          stepLabel: event.step_label,
+          artifactType: artifact.artifact_type ?? null,
+          sourceTool: call.tool,
         });
       });
-    }
+    });
   });
 
   return Array.from(items.values())
@@ -838,7 +686,6 @@ function inferGeneratedArtifactKind(item: GeneratedArtifactItem): GeneratedArtif
   return inferPreviewableFileKind({
     path: item.path,
     artifactType: item.artifactType,
-    outputName: item.outputName,
     label: item.label,
   });
 }
@@ -850,7 +697,6 @@ function getGeneratedArtifactCue(item: GeneratedArtifactItem) {
     label: getPreviewableFileLabel({
       path: item.path,
       artifactType: item.artifactType,
-      outputName: item.outputName,
       label: item.label,
     }),
   };
@@ -917,11 +763,9 @@ function getGeneratedArtifactTone(kind: GeneratedArtifactKind) {
 }
 
 function getGeneratedArtifactDetail(item: GeneratedArtifactItem): string {
-  const values = [
-    humanizeToken(item.outputName),
-    humanizeToken(item.artifactType),
-    humanizeToken(item.stepLabel),
-  ].filter((value): value is string => Boolean(value));
+  const values = [humanizeToken(item.artifactType), humanizeLabel(item.sourceTool)].filter(
+    (value): value is string => Boolean(value)
+  );
 
   const uniqueValues = values.filter(
     (value, index) => values.indexOf(value) === index
@@ -931,7 +775,7 @@ function getGeneratedArtifactDetail(item: GeneratedArtifactItem): string {
 }
 
 function getGeneratedArtifactScopeLabel(item: GeneratedArtifactItem): string | null {
-  return humanizeToken(item.scope);
+  return humanizeLabel(item.sourceTool);
 }
 
 function getConfidenceTone(
@@ -1009,58 +853,9 @@ function extractSourceIdentifier(source: string): string | null {
   return null;
 }
 
-function getSourceScopeMessages(
-  messages: Message[],
-  workflowSummary: ReturnType<typeof getWorkflowSummary>
-) {
+function getSourceScopeMessages(messages: Message[]) {
   const latestMessages = getLatestRequestMessages(messages);
-  const latestRunId = workflowSummary.events.at(-1)?.run_id ?? null;
-
-  if (!latestRunId) {
-    return latestMessages;
-  }
-
-  const scopedIds = new Set<string>(latestMessages.map((message) => message.id));
-  messages.forEach((message) => {
-    if ((message.workflow_events ?? []).some((event) => event.run_id === latestRunId)) {
-      scopedIds.add(message.id);
-    }
-  });
-
-  return messages.filter((message) => scopedIds.has(message.id));
-}
-
-function getWorkflowRequestId(
-  messages: Message[],
-  workflowRunId: string | null
-): string | null {
-  if (!workflowRunId) {
-    return null;
-  }
-
-  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
-    const message = messages[messageIndex];
-    if (!message?.request_id) {
-      continue;
-    }
-
-    if ((message.workflow_events ?? []).some((event) => event.run_id === workflowRunId)) {
-      return message.request_id;
-    }
-  }
-
-  return null;
-}
-
-function filterMessagesByRequestId(
-  messages: Message[],
-  requestId: string | null
-): Message[] {
-  if (!requestId) {
-    return [];
-  }
-
-  return messages.filter((message) => message.request_id === requestId);
+  return latestMessages.length > 0 ? latestMessages : messages;
 }
 
 function mergeSourceItemWithMetadata(
@@ -1158,79 +953,8 @@ function getSupportPercentFromRetrievalScore(score: number): number | null {
   return clampPercent(score);
 }
 
-function getComplianceChecklistState(
-  report: ComplianceReportArtifact | null
-): SourcesInspectorChecklistItem["state"] {
-  if (!report) {
-    return "pending";
-  }
-
-  if (
-    report.runtime_state === "blocked" ||
-    report.final_disposition === "block" ||
-    report.preflight_disposition === "block"
-  ) {
-    return "blocked";
-  }
-
-  if (
-    report.runtime_state === "approval_required" ||
-    report.runtime_state === "warning_issued" ||
-    report.final_disposition === "require_approval" ||
-    report.final_disposition === "allow_with_warning"
-  ) {
-    return "warning";
-  }
-
-  if (report.runtime_state === "preflight_pending") {
-    return "pending";
-  }
-
-  return "complete";
-}
-
-function getComplianceSummaryLabel(
-  report: ComplianceReportArtifact | null
-): string | null {
-  if (!report) {
-    return null;
-  }
-
-  if (report.runtime_state === "approved_override") {
-    return "Approved";
-  }
-
-  return (
-    humanizeLabel(report.runtime_state) ??
-    humanizeLabel(report.final_disposition) ??
-    null
-  );
-}
-
-function getComplianceSummaryDetail(
-  report: ComplianceReportArtifact | null,
-  scopedMessageCount: number
-): string | null {
-  if (!report) {
-    return scopedMessageCount > 0
-      ? "No compliance report is attached to the current source scope yet."
-      : "Compliance preflight results will appear here once the current turn or workflow run produces them.";
-  }
-
-  if (report.approval?.rationale) {
-    return report.approval.rationale;
-  }
-
-  if (report.triggered_rules.length > 0) {
-    return `${pluralize(report.triggered_rules.length, "rule")} triggered during the latest compliance review.`;
-  }
-
-  return `Latest compliance state: ${humanizeLabel(report.runtime_state) ?? "Recorded"}.`;
-}
-
 function buildSourcesInspectorSummary(args: {
   scopedMessages: Message[];
-  complianceToolCall: ToolCall | null;
   reviewedItems: SourceInspectorItem[];
   retrievedItems: RetrievedSourceSummary[];
 }): SourcesInspectorSummary {
@@ -1297,21 +1021,6 @@ function buildSourcesInspectorSummary(args: {
 
   citations.sort((left, right) => right.last_seen_order - left.last_seen_order);
 
-  const complianceReport = args.complianceToolCall
-    ? getComplianceReport(args.complianceToolCall.result)
-    : null;
-  const auditLogPath = args.complianceToolCall
-    ? getAuditLogPath(args.complianceToolCall.result)
-    : null;
-  const complianceState = getComplianceChecklistState(complianceReport);
-  const hasLoggedParams = complianceReport
-    ? Boolean(
-        complianceReport.request_context.user_message.trim() ||
-          complianceReport.request_context.attached_identifiers.length > 0 ||
-          complianceReport.request_context.selected_workflow ||
-          complianceReport.request_context.session_id
-      )
-    : false;
   const provenanceBackedCount = citations.filter((citation) => citation.path).length;
   const provenanceState: SourcesInspectorChecklistItem["state"] =
     citations.length === 0
@@ -1319,21 +1028,47 @@ function buildSourcesInspectorSummary(args: {
       : provenanceBackedCount === citations.length
         ? "complete"
         : "warning";
+  const reviewedEvidenceCount = args.reviewedItems.filter(
+    (item) => item.kind === "evidence"
+  ).length;
+  const evidenceState: SourcesInspectorChecklistItem["state"] =
+    reviewedEvidenceCount > 0
+      ? "complete"
+      : args.retrievedItems.length > 0
+        ? "warning"
+        : "pending";
+  const scopeState: SourcesInspectorChecklistItem["state"] =
+    args.scopedMessages.length > 0 ? "complete" : "pending";
+  const checklistState: SourcesInspectorChecklistItem["state"] =
+    citations.length === 0
+      ? args.scopedMessages.length > 0
+        ? "pending"
+        : "pending"
+      : provenanceState === "complete" && evidenceState === "complete"
+        ? "complete"
+        : "warning";
+  const checklistLabel =
+    checklistState === "complete"
+      ? "Grounded"
+      : checklistState === "warning"
+        ? "Attention"
+        : "Pending";
+  const checklistDetail =
+    args.scopedMessages.length === 0
+      ? "Send a message to populate source evidence for this session."
+      : citations.length === 0
+        ? "No reviewed evidence or retrieved context is linked to the current source scope yet."
+        : provenanceBackedCount === citations.length
+          ? "Visible citations are backed by inspectable files or artifacts."
+          : "Some visible citations are not yet backed by inspectable files or artifacts.";
 
   return {
     scoped_message_count: args.scopedMessages.length,
     citations: citations.slice(0, 8),
-    compliance: {
-      summary_label:
-        getComplianceSummaryLabel(complianceReport) ??
-        (citations.length > 0 ? "Awaiting report" : null),
-      detail: getComplianceSummaryDetail(
-        complianceReport,
-        args.scopedMessages.length
-      ),
-      state: complianceState,
-      report: complianceReport,
-      audit_log_path: auditLogPath,
+    checklist: {
+      summary_label: checklistLabel,
+      detail: checklistDetail,
+      state: checklistState,
       items: [
         {
           id: "provenance-verified",
@@ -1347,33 +1082,32 @@ function buildSourcesInspectorSummary(args: {
                 : "Some visible citations are not yet backed by inspectable source artifacts.",
         },
         {
-          id: "params-logged",
-          label: "Params logged",
-          state: hasLoggedParams ? "complete" : "pending",
-          detail: hasLoggedParams
-            ? "Request parameters were captured for the latest scope."
-            : "No structured compliance request context is attached yet.",
+          id: "evidence-surfaced",
+          label: "Evidence surfaced",
+          state: evidenceState,
+          detail:
+            reviewedEvidenceCount > 0
+              ? `${pluralize(reviewedEvidenceCount, "reviewed source")} is linked to this scope.`
+              : args.retrievedItems.length > 0
+                ? "Retrieved context is present, but reviewed evidence has not been materialized yet."
+                : "No reviewed evidence or retrieved context is attached yet.",
         },
         {
-          id: "audit-complete",
-          label: "Audit complete",
-          state: complianceState,
+          id: "scope-captured",
+          label: "Turn scope captured",
+          state: scopeState,
           detail:
-            complianceReport != null
-              ? humanizeLabel(complianceReport.runtime_state) ??
-                humanizeLabel(complianceReport.final_disposition)
-              : "Compliance review has not run for this scope yet.",
+            args.scopedMessages.length > 0
+              ? `${pluralize(args.scopedMessages.length, "message")} is grouped into the current source scope.`
+              : "No scoped messages are available yet.",
         },
       ],
     },
   };
 }
 
-function collectSourceInspectorData(
-  messages: Message[],
-  workflowSummary: ReturnType<typeof getWorkflowSummary>
-) {
-  const scopedMessages = getSourceScopeMessages(messages, workflowSummary);
+function collectSourceInspectorData(messages: Message[]) {
+  const scopedMessages = getSourceScopeMessages(messages);
   const reviewedItems = new Map<string, SourceInspectorItem>();
   const retrievedSources = new Map<string, RetrievedSourceSummary>();
   let order = 0;
@@ -1596,138 +1330,6 @@ function shortenPath(path: string, maxSegments = 2) {
   return `.../${segments.slice(-maxSegments).join("/")}`;
 }
 
-function getRunStatusLabel(summary: ReturnType<typeof getWorkflowSummary>) {
-  if (summary.status === "not_started") {
-    return "Not started";
-  }
-
-  if (summary.status === "running") {
-    return "In progress";
-  }
-
-  if (summary.status === "blocked") {
-    return "Blocked";
-  }
-
-  if (summary.status === "failed") {
-    return "Failed";
-  }
-
-  if (summary.status === "completed") {
-    return "Completed";
-  }
-
-  return "Idle";
-}
-
-function getRunStatusClass(summary: ReturnType<typeof getWorkflowSummary>) {
-  if (summary.status === "completed") {
-    return "border-emerald-200 bg-emerald-50 text-emerald-700";
-  }
-
-  if (summary.status === "blocked" || summary.status === "failed") {
-    return "border-rose-200 bg-rose-50 text-rose-700";
-  }
-
-  if (summary.status === "not_started") {
-    return "border-slate-200 bg-slate-50 text-slate-600";
-  }
-
-  return "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.1)] text-[var(--apex-accent-strong)]";
-}
-
-function getRunSurfaceClass(summary: ReturnType<typeof getWorkflowSummary>) {
-  if (summary.status === "completed") {
-    return "border-emerald-100 bg-[linear-gradient(180deg,rgba(244,251,247,0.98),rgba(237,249,241,0.98))]";
-  }
-
-  if (summary.status === "blocked" || summary.status === "failed") {
-    return "border-rose-100 bg-[linear-gradient(180deg,rgba(255,247,247,0.98),rgba(254,241,241,0.98))]";
-  }
-
-  if (summary.status === "not_started") {
-    return "border-slate-200 bg-[linear-gradient(180deg,rgba(249,250,251,0.98),rgba(245,247,249,0.98))]";
-  }
-
-  return "border-[rgba(35,130,83,0.14)] bg-[linear-gradient(180deg,rgba(242,250,245,0.98),rgba(234,247,239,0.98))]";
-}
-
-function getStepCountLabel(summary: ReturnType<typeof getWorkflowSummary>) {
-  if (summary.totalSteps !== null) {
-    return `${summary.completedSteps}/${summary.totalSteps}`;
-  }
-
-  if (summary.observedSteps > 0) {
-    return `${summary.completedSteps}/${summary.observedSteps}`;
-  }
-
-  return "0";
-}
-
-function getProgressLabel(summary: ReturnType<typeof getWorkflowSummary>) {
-  if (summary.currentStep) {
-    return summary.currentStep;
-  }
-
-  if (summary.status === "not_started") {
-    return summary.lifecycleStatus === "preflight_checked"
-      ? "Preflight checked"
-      : "Waiting for first step";
-  }
-
-  if (summary.status === "running") {
-    return summary.observedSteps > 0 ? "Awaiting next step" : "Starting workflow";
-  }
-
-  if (summary.status === "blocked") {
-    return "Action required";
-  }
-
-  if (summary.status === "failed") {
-    return "Run halted";
-  }
-
-  if (summary.status === "completed") {
-    return "All steps finished";
-  }
-
-  return null;
-}
-
-function getRunDetail(summary: ReturnType<typeof getWorkflowSummary>) {
-  if (summary.currentStep) {
-    return `Current: ${summary.currentStep}`;
-  }
-
-  if (summary.blockedReason) {
-    return summary.blockedReason;
-  }
-
-  if (summary.failureReason) {
-    return summary.failureReason;
-  }
-
-  if (summary.status === "not_started") {
-    return summary.totalSteps !== null
-      ? `Run is staged with ${summary.totalSteps} step${summary.totalSteps === 1 ? "" : "s"} and waiting to begin.`
-      : "Run is staged and waiting for the first workflow step.";
-  }
-
-  if (summary.status === "completed") {
-    return "Run finished.";
-  }
-
-  if (summary.status === "running") {
-    return "Waiting for the next step update.";
-  }
-
-  if (summary.status === "failed") {
-    return "The latest workflow run failed.";
-  }
-
-  return "No active workflow step yet.";
-}
-
 function TabButton({
   active,
   icon: Icon,
@@ -1747,14 +1349,16 @@ function TabButton({
       onClick={onClick}
       aria-label={ariaLabel}
       className={cn(
-        "flex min-h-[42px] flex-col items-center justify-center gap-0.5 rounded-[10px] border px-1 py-1 text-center transition-colors",
+        "flex min-h-[44px] flex-col items-center justify-center gap-0.5 rounded-[10px] border px-1 py-1 text-center transition-colors",
         active
           ? "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.1)] text-[var(--apex-accent-strong)]"
           : "border-transparent text-slate-500 hover:border-[var(--shell-border)] hover:bg-white/80 hover:text-slate-700"
       )}
     >
-      <Icon size={12} strokeWidth={1.75} />
-      <span className="text-[9px] font-medium leading-tight">{label}</span>
+      <Icon size={12} strokeWidth={1.8} />
+      <span className="text-[9px] font-medium leading-tight">
+        {label}
+      </span>
     </button>
   );
 }
@@ -1771,14 +1375,14 @@ function InspectorCard({
   children: ReactNode;
 }) {
   return (
-    <section className="rounded-[14px] border border-[rgba(211,219,210,0.86)] bg-[rgba(255,255,255,0.88)] px-2.5 py-2.5 shadow-[0_1px_2px_rgba(32,43,35,0.03)] backdrop-blur-sm">
-      <div className="mb-2 flex items-start justify-between gap-2">
+    <section className="rounded-[14px] border border-[rgba(211,219,210,0.86)] bg-[rgba(255,255,255,0.88)] px-3 py-3 shadow-[0_1px_2px_rgba(32,43,35,0.03)] backdrop-blur-sm">
+      <div className="mb-3 flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <h3 className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+          <h3 className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
             {title}
           </h3>
           {meta ? (
-            <p className="mt-0.5 truncate text-[10px] leading-4 text-slate-500">
+            <p className="mt-1 truncate text-[10px] leading-4 text-slate-500">
               {meta}
             </p>
           ) : null}
@@ -1811,35 +1415,6 @@ function ActionButton({
         disabled
           ? "cursor-not-allowed border-[var(--shell-border)] bg-[rgba(247,249,245,0.92)] text-slate-400"
           : "border-[var(--shell-border)] bg-white/85 text-slate-500 hover:bg-[var(--panel-soft)] hover:text-slate-700"
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-function IconActionButton({
-  onClick,
-  disabled,
-  title,
-  children,
-}: {
-  onClick: () => void;
-  disabled?: boolean;
-  title: string;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      className={cn(
-        "inline-flex h-8 w-8 items-center justify-center rounded-[10px] border transition-colors",
-        disabled
-          ? "cursor-not-allowed border-[var(--shell-border)] bg-[rgba(247,249,245,0.92)] text-slate-400"
-          : "border-[var(--shell-border)] bg-white/85 text-slate-600 hover:bg-[var(--panel-soft)] hover:text-slate-800"
       )}
     >
       {children}
@@ -2003,7 +1578,7 @@ function MetaBadge({
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em]",
+        "inline-flex items-center rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em]",
         tone === "accent" &&
           "border-[rgba(35,130,83,0.16)] bg-[rgba(35,130,83,0.08)] text-[var(--apex-accent-strong)]",
         tone === "success" &&
@@ -2062,45 +1637,6 @@ function MiniStat({
   );
 }
 
-function UsageMetricRow({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-3 text-[12px] leading-5">
-      <span className="text-slate-400">{label}</span>
-      <span className="font-semibold text-slate-700">{value}</span>
-    </div>
-  );
-}
-
-function UsageMetadataRow({
-  label,
-  value,
-  monospace = false,
-}: {
-  label: string;
-  value: string;
-  monospace?: boolean;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-3 text-[12px] leading-5">
-      <span className="text-slate-400">{label}</span>
-      <span
-        className={cn(
-          "min-w-0 max-w-[60%] truncate text-right font-semibold text-slate-700",
-          monospace && "font-mono text-[11px]"
-        )}
-      >
-        {value}
-      </span>
-    </div>
-  );
-}
-
 function SkillDetailField({
   label,
   value,
@@ -2112,13 +1648,13 @@ function SkillDetailField({
 }) {
   return (
     <div className="space-y-1 rounded-[10px] border border-[rgba(211,219,210,0.72)] bg-[rgba(251,252,248,0.84)] px-2.5 py-2">
-      <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+      <p className="text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-400">
         {label}
       </p>
       <p
         className={cn(
           "break-all text-[11px] leading-5 text-slate-700",
-          monospace && "font-mono text-[10px]"
+          monospace && "font-mono text-[11px]"
         )}
       >
         {value}
@@ -2129,76 +1665,9 @@ function SkillDetailField({
 
 function EmptyState({ children }: { children: ReactNode }) {
   return (
-    <div className="rounded-[12px] border border-dashed border-[rgba(211,219,210,0.92)] bg-[rgba(251,252,248,0.78)] px-2.5 py-3 text-[11px] leading-5 text-slate-500">
+    <div className="rounded-[12px] border border-dashed border-[rgba(211,219,210,0.92)] bg-[rgba(251,252,248,0.78)] px-3 py-3 text-[11px] leading-5 text-slate-500">
       {children}
     </div>
-  );
-}
-
-function formatArtifactRegistryInspectorTime(record: ArtifactRegistryRecord): string {
-  const timestamp = getArtifactRegistryTimestamp(record);
-  return timestamp ? formatRelativeTime(timestamp) : "Unknown time";
-}
-
-function ArtifactRegistryInspectorRow({
-  record,
-  active,
-  onClick,
-}: {
-  record: ArtifactRegistryRecord;
-  active: boolean;
-  onClick: () => void;
-}) {
-  const Icon = record.status === "invalid" ? AlertTriangle : Package;
-
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={record.path}
-      className={cn(
-        "flex w-full items-start gap-2 rounded-[12px] border px-2.5 py-2 text-left transition-colors",
-        active
-          ? record.status === "invalid"
-            ? "border-rose-200 bg-rose-50"
-            : "border-[rgba(35,130,83,0.16)] bg-[rgba(35,130,83,0.08)]"
-          : "border-transparent hover:border-[rgba(211,219,210,0.9)] hover:bg-white"
-      )}
-    >
-      <span
-        className={cn(
-          "mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[9px]",
-          record.status === "invalid"
-            ? "bg-rose-100 text-rose-600"
-            : active
-              ? "bg-white text-[var(--apex-accent-strong)]"
-              : "bg-[rgba(211,219,210,0.42)] text-slate-500"
-        )}
-      >
-        <Icon size={12} />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex items-start justify-between gap-2">
-          <span className="min-w-0 truncate text-[12px] font-semibold text-slate-700">
-            {getArtifactRegistryDisplayName(record)}
-          </span>
-          <MetaBadge tone={record.status === "invalid" ? "warning" : "accent"}>
-            {record.status}
-          </MetaBadge>
-        </span>
-        <span className="mt-1 block truncate text-[10px] font-medium text-slate-500">
-          {getArtifactRegistryDescription(record)}
-        </span>
-        <span className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[9px] uppercase tracking-[0.08em] text-slate-400">
-          <span>{humanizeArtifactToken(record.artifact_type) ?? "Artifact"}</span>
-          <span>{formatArtifactRegistryInspectorTime(record)}</span>
-          <span>{record.run_id}</span>
-        </span>
-        <span className="mt-1 block truncate font-mono text-[9px] text-slate-400">
-          {shortenArtifactPath(record.path, 4)}
-        </span>
-      </span>
-    </button>
   );
 }
 
@@ -2292,7 +1761,7 @@ function getCitationPercentClass(tone: SourcesInspectorCitationTone) {
   return "text-slate-500";
 }
 
-function getComplianceCardClass(
+function getChecklistCardClass(
   state: SourcesInspectorChecklistItem["state"]
 ) {
   if (state === "blocked") {
@@ -2310,7 +1779,7 @@ function getComplianceCardClass(
   return "border-[rgba(211,219,210,0.86)] bg-[linear-gradient(180deg,rgba(252,252,251,0.98),rgba(247,249,246,0.98))]";
 }
 
-function getComplianceBadgeClass(
+function getChecklistBadgeClass(
   state: SourcesInspectorChecklistItem["state"]
 ) {
   if (state === "blocked") {
@@ -2328,7 +1797,7 @@ function getComplianceBadgeClass(
   return "border-[rgba(211,219,210,0.86)] bg-white/80 text-slate-500";
 }
 
-function getComplianceItemPresentation(
+function getChecklistItemPresentation(
   state: SourcesInspectorChecklistItem["state"]
 ) {
   if (state === "blocked") {
@@ -2419,12 +1888,12 @@ function SourceCitationRow({
   );
 }
 
-function ComplianceChecklistRow({
+function ChecklistRow({
   item,
 }: {
   item: SourcesInspectorChecklistItem;
 }) {
-  const presentation = getComplianceItemPresentation(item.state);
+  const presentation = getChecklistItemPresentation(item.state);
   const Icon = presentation.icon;
 
   return (
@@ -2472,26 +1941,20 @@ function LoadingState({ label }: { label: string }) {
 export default function InspectorPanel() {
   const {
     accessByScope,
-    hasAdminAccess,
     hasInspectionAccess,
     currentSessionId,
     sessions,
     messages,
     isStreaming,
-    ragMode,
     inspectorTab,
     inspectorPreviewPath,
     setInspectorTab,
-    setWorkspaceMode,
     openInspectorPath,
     clearInspectorPath,
     primeDraftMessage,
   } = useApp();
 
   const [skills, setSkills] = useState<SkillRegistryEntry[]>([]);
-  const [tokens, setTokens] = useState<TokenStats | null>(null);
-  const [usageLoading, setUsageLoading] = useState(false);
-  const [usageLoadError, setUsageLoadError] = useState("");
   const [memoryContent, setMemoryContent] = useState("");
   const [savedMemoryContent, setSavedMemoryContent] = useState("");
   const [memoryLoadError, setMemoryLoadError] = useState("");
@@ -2508,22 +1971,12 @@ export default function InspectorPanel() {
   const [skillFileLoadError, setSkillFileLoadError] = useState("");
   const [selectedSkillPath, setSelectedSkillPath] = useState<string | null>(null);
   const [skillsRegistryLoading, setSkillsRegistryLoading] = useState(false);
-  const [skillRegistryUpdatePendingName, setSkillRegistryUpdatePendingName] = useState<
-    string | null
-  >(null);
-  const [skillRegistryUpdateMsg, setSkillRegistryUpdateMsg] = useState("");
-  const [skillRegistryUpdateError, setSkillRegistryUpdateError] = useState("");
   const [skillFileLoading, setSkillFileLoading] = useState(false);
   const [skillSaving, setSkillSaving] = useState(false);
   const [skillSaveMsg, setSkillSaveMsg] = useState("");
   const [skillActionMsg, setSkillActionMsg] = useState("");
   const [skillEditorOpen, setSkillEditorOpen] = useState(false);
   const [previewActionError, setPreviewActionError] = useState("");
-  const [artifactRegistryRecords, setArtifactRegistryRecords] = useState<
-    ArtifactRegistryRecord[]
-  >([]);
-  const [artifactRegistryLoading, setArtifactRegistryLoading] = useState(false);
-  const [artifactRegistryError, setArtifactRegistryError] = useState("");
   const [sourceArtifactMetadata, setSourceArtifactMetadata] = useState<
     Record<string, EvidenceArtifactMetadata | null>
   >({});
@@ -2546,31 +1999,10 @@ export default function InspectorPanel() {
     ...memoryItems.map((item) => item.namespace),
     memoryItemDraft?.namespace ?? null,
   ]);
-  const workflowSummary = getWorkflowSummary(messages);
-  const hasActiveRun = workflowSummary.events.length > 0;
-  const artifactItems = collectArtifacts(workflowSummary.events);
-  const latestWorkflowEvent = workflowSummary.events.at(-1);
   const latestRequestMessages = getLatestRequestMessages(messages);
-  const workflowRequestId = getWorkflowRequestId(
-    messages,
-    latestWorkflowEvent?.run_id ?? null
-  );
-  const workflowRequestMessages = filterMessagesByRequestId(messages, workflowRequestId);
-  const runComplianceToolCall =
-    workflowRequestMessages.length > 0
-      ? getLatestComplianceToolCallFromMessages(workflowRequestMessages)
-      : getLatestComplianceToolCallForWorkflow(
-          messages,
-          latestWorkflowEvent?.workflow_id ?? null
-        ) ??
-        getLatestComplianceToolCallFromMessages(latestRequestMessages);
-  const runComplianceReport = runComplianceToolCall
-    ? getComplianceReport(runComplianceToolCall.result)
-    : null;
-  const runComplianceAuditLogPath = runComplianceToolCall
-    ? getAuditLogPath(runComplianceToolCall.result)
-    : null;
-  const sourceInspectorData = collectSourceInspectorData(messages, workflowSummary);
+  const scopedMessages = latestRequestMessages.length > 0 ? latestRequestMessages : messages;
+  const artifactItems = collectArtifacts(scopedMessages);
+  const sourceInspectorData = collectSourceInspectorData(messages);
   const reviewedSourceItems = sourceInspectorData.reviewedItems.map((item) =>
     item.path
       ? mergeSourceItemWithMetadata(item, sourceArtifactMetadata[item.path])
@@ -2578,93 +2010,26 @@ export default function InspectorPanel() {
   );
   const sourcesSummary = buildSourcesInspectorSummary({
     scopedMessages: sourceInspectorData.scopedMessages,
-    complianceToolCall: runComplianceToolCall,
     reviewedItems: reviewedSourceItems,
     retrievedItems: sourceInspectorData.retrievedItems,
   });
-  const artifactRegistryRefreshKey =
-    `${currentSessionId ?? "none"}:` +
-    `${latestWorkflowEvent?.run_id ?? "none"}:` +
-    `${latestWorkflowEvent?.type ?? "none"}:` +
-    `${workflowSummary.events.length}:` +
-    `${artifactItems.length}`;
-  const runStatusLabel = getRunStatusLabel(workflowSummary);
-  const stepCountLabel = getStepCountLabel(workflowSummary);
-  const progressLabel = getProgressLabel(workflowSummary);
-  const runDetail = getRunDetail(workflowSummary);
   const selectedSkill =
     skills.find((skill) => skill.location === selectedSkillPath) ?? null;
   const activeSkills = skills.filter((skill) => skill.enabled);
   const availableSkills = skills.filter((skill) => !skill.enabled);
-  const selectedSkillUpdatePending =
-    selectedSkill !== null && skillRegistryUpdatePendingName === selectedSkill.name;
-  const sessionUsage =
-    currentSessionId && tokens?.session_id === currentSessionId ? tokens : null;
-  const trackedTotalTokens =
-    sessionUsage?.tracked_total_tokens ?? sessionUsage?.total_tokens ?? 0;
-  const promptContextTokens = sessionUsage?.total_tokens ?? 0;
-  const contextWindowRatio =
-    sessionUsage?.context_window_tokens && sessionUsage.context_window_tokens > 0
-      ? Math.min(promptContextTokens / sessionUsage.context_window_tokens, 1)
-      : null;
-  const contextWindowLabel = sessionUsage?.context_window_tokens
-    ? `${formatCompactTokenValue(promptContextTokens)} / ${formatCompactTokenValue(sessionUsage.context_window_tokens)}`
-    : null;
-  const usageModeLabel = ragMode ? "Grounded" : "Chat";
-  const usageAccuracyLabel =
-    sessionUsage?.tokenizer_accuracy === "approximate" ? "Approximate" : "Model-aligned";
-  const usageAccuracyTone =
-    sessionUsage?.tokenizer_accuracy === "approximate" ? "warning" : "success";
-  const usageBackendLabel =
-    sessionUsage?.tokenizer_backend === "deterministic_fallback"
-      ? "Local fallback"
-      : "cl100k_base";
-  const usageHonestyDetail =
-    sessionUsage?.tokenizer_accuracy === "approximate"
-      ? "Counts use a deterministic local fallback and may differ from model-side totals."
-      : "Counts use the model-aligned cl100k_base tokenizer.";
-  const showStreamingUsageNotice = Boolean(sessionUsage && isStreaming);
-  const selectedRegistryRecord =
-    artifactRegistryRecords.find((record) => record.path === inspectorPreviewPath) ?? null;
   const selectedArtifactItem =
     artifactItems.find((item) => item.path === inspectorPreviewPath) ?? null;
-  const registryScopedRunId =
-    selectedRegistryRecord?.run_id ?? latestWorkflowEvent?.run_id ?? null;
-  const artifactRegistryListItems = (
-    registryScopedRunId
-      ? artifactRegistryRecords.filter((record) => record.run_id === registryScopedRunId)
-      : artifactRegistryRecords
-  ).slice(0, 6);
-  const artifactRegistryListLabel = selectedRegistryRecord
-    ? `Run scope: ${selectedRegistryRecord.run_id}`
-    : registryScopedRunId
-      ? `Current run: ${registryScopedRunId}`
-      : "Recent registry entries";
-  const registryMetadataSummary = selectedRegistryRecord
-    ? getArtifactRegistryMetadataSummary(selectedRegistryRecord).filter(
-        (item) =>
-          item !== humanizeArtifactToken(selectedRegistryRecord.workflow) &&
-          item !== selectedRegistryRecord.workflow
-      )
-    : [];
   const inspectorPreviewTarget: FilePreviewTarget | null = inspectorPreviewPath
     ? {
         path: inspectorPreviewPath,
         displayName:
-          selectedRegistryRecord
-            ? getArtifactRegistryDisplayName(selectedRegistryRecord)
-            : selectedArtifactItem?.label ??
-              inspectorPreviewPath.split("/").pop() ??
-              inspectorPreviewPath,
+          selectedArtifactItem?.label ??
+          inspectorPreviewPath.split("/").pop() ??
+          inspectorPreviewPath,
         artifactType:
-          selectedRegistryRecord?.artifact_type ??
-          selectedArtifactItem?.artifactType ??
-          null,
-        outputName: selectedArtifactItem?.outputName ?? null,
-        runId:
-          selectedRegistryRecord?.run_id ??
-          latestWorkflowEvent?.run_id ??
-          null,
+          selectedArtifactItem?.artifactType ?? null,
+        outputName: null,
+        runId: null,
       }
     : null;
   const preview = useFilePreview(inspectorPreviewTarget);
@@ -2672,55 +2037,6 @@ export default function InspectorPanel() {
   useEffect(() => {
     setPreviewActionError("");
   }, [inspectorPreviewPath]);
-
-  useEffect(() => {
-    if (!currentSessionId) {
-      setTokens(null);
-      setUsageLoading(false);
-      setUsageLoadError("");
-      return;
-    }
-
-    if (!hasInspectionAccess) {
-      setTokens(null);
-      setUsageLoading(false);
-      setUsageLoadError(accessByScope.inspection.detail);
-      return;
-    }
-
-    if (isStreaming) {
-      setUsageLoading(false);
-      setUsageLoadError("");
-      return;
-    }
-
-    let cancelled = false;
-    setUsageLoading(true);
-    setUsageLoadError("");
-
-    getSessionTokens(currentSessionId)
-      .then((nextTokens) => {
-        if (!cancelled) {
-          setTokens(nextTokens);
-          setUsageLoadError("");
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setTokens(null);
-          setUsageLoadError("Could not load token usage for this session.");
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setUsageLoading(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [accessByScope.inspection.detail, currentSessionId, hasInspectionAccess, isStreaming]);
 
   useEffect(() => {
     if (
@@ -2824,51 +2140,6 @@ export default function InspectorPanel() {
     setSkillActionMsg("");
     setSkillEditorOpen(false);
   }, [accessByScope.inspection.detail, inspectionAccessStatus]);
-
-  useEffect(() => {
-    if (inspectorTab !== "files") {
-      return;
-    }
-
-    if (!hasInspectionAccess) {
-      setArtifactRegistryLoading(false);
-      setArtifactRegistryRecords([]);
-      setArtifactRegistryError(accessByScope.inspection.detail);
-      return;
-    }
-
-    let cancelled = false;
-    setArtifactRegistryLoading(true);
-    setArtifactRegistryError("");
-
-    void listArtifactRegistry({ include_invalid: true })
-      .then((response) => {
-        if (cancelled) {
-          return;
-        }
-
-        setArtifactRegistryRecords(sortArtifactRegistryRecords(response.records));
-      })
-      .catch(() => {
-        if (cancelled) {
-          return;
-        }
-
-        setArtifactRegistryRecords([]);
-        setArtifactRegistryError(
-          "Could not load the artifact registry. Open the Artifacts workspace and try again."
-        );
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setArtifactRegistryLoading(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [accessByScope.inspection.detail, artifactRegistryRefreshKey, hasInspectionAccess, inspectorTab]);
 
   useEffect(() => {
     const pendingPaths = reviewedSourceItems
@@ -3139,11 +2410,6 @@ export default function InspectorPanel() {
     window.setTimeout(() => setSkillActionMsg(""), 2000);
   };
 
-  const clearSkillRegistryMutationState = () => {
-    setSkillRegistryUpdateMsg("");
-    setSkillRegistryUpdateError("");
-  };
-
   const handleInspectorExport = () => {
     if (typeof window === "undefined" || messages.length === 0) {
       return;
@@ -3188,44 +2454,6 @@ export default function InspectorPanel() {
       nextSkills?.some((skill) => skill.location === keepSelectedPath)
     ) {
       await loadSkillFile(keepSelectedPath);
-    }
-  };
-
-  const handleSkillRegistryToggle = async (skill: SkillRegistryEntry) => {
-    if (!hasAdminAccess) {
-      setSkillRegistryUpdateMsg("");
-      setSkillRegistryUpdateError(accessByScope.admin.detail);
-      return;
-    }
-
-    const nextEnabled = !skill.enabled;
-    setSkillRegistryUpdatePendingName(skill.name);
-    setSkillRegistryUpdateMsg("");
-    setSkillRegistryUpdateError("");
-
-    try {
-      await updateSkillRegistryEntry(skill.name, { enabled: nextEnabled });
-      setSkills((current) =>
-        current.map((entry) =>
-          entry.name === skill.name ? { ...entry, enabled: nextEnabled } : entry
-        )
-      );
-      const refreshedSkills = await refreshSkills(skill.location);
-      setSkillRegistryUpdateMsg(
-        refreshedSkills
-          ? nextEnabled
-            ? "Registry entry enabled. Underlying skill file unchanged."
-            : "Registry entry disabled. Underlying skill file unchanged."
-          : nextEnabled
-            ? "Registry entry enabled. Latest registry refresh failed; showing last known state."
-            : "Registry entry disabled. Latest registry refresh failed; showing last known state."
-      );
-    } catch (error) {
-      setSkillRegistryUpdateError(
-        getSkillRegistryMutationErrorMessage(error, accessByScope.admin)
-      );
-    } finally {
-      setSkillRegistryUpdatePendingName(null);
     }
   };
 
@@ -3338,7 +2566,6 @@ export default function InspectorPanel() {
 
     setSkillSaveMsg("");
     setSkillEditorOpen(false);
-    clearSkillRegistryMutationState();
     await loadSkillFile(path);
   };
 
@@ -3361,75 +2588,38 @@ export default function InspectorPanel() {
     setSkillFileLoadError("");
     setSkillSaveMsg("");
     setSkillEditorOpen(false);
-    clearSkillRegistryMutationState();
   };
 
   const renderFilesTab = () => (
     <div className="space-y-2">
       <InspectorCard
-        title="Active Run"
-        meta={workflowSummary.workflowId ?? (hasActiveRun ? "Current workflow run" : undefined)}
+        title="Current Turn"
+        meta={scopedMessages.at(-1)?.request_id ?? undefined}
       >
-        {hasActiveRun ? (
+        {scopedMessages.length > 0 ? (
           <div
-            className={cn(
-              "space-y-2 rounded-[12px] border px-2.5 py-2.5",
-              getRunSurfaceClass(workflowSummary)
-            )}
+            className="space-y-2 rounded-[12px] border border-[rgba(35,130,83,0.14)] bg-[linear-gradient(180deg,rgba(242,250,245,0.98),rgba(234,247,239,0.98))] px-2.5 py-2.5"
           >
-            <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0">
-                <p className="truncate text-[12px] font-semibold text-slate-800">
-                  {workflowSummary.workflowName ?? workflowSummary.workflowId ?? "Workflow run"}
-                </p>
-                {progressLabel ? (
-                  <p className="mt-0.5 truncate text-[10px] leading-4 text-slate-500">
-                    {progressLabel}
-                  </p>
-                ) : null}
-              </div>
-              <span
-                className={cn(
-                  "inline-flex shrink-0 items-center rounded-full border px-2 py-1 text-[10px] font-semibold",
-                  getRunStatusClass(workflowSummary)
-                )}
-              >
-                {runStatusLabel}
-              </span>
-            </div>
-
             <div className="grid grid-cols-2 gap-1.5">
               <MiniStat
-                label="Steps"
-                value={stepCountLabel}
-                accent={workflowSummary.status === "running"}
+                label="Messages"
+                value={String(scopedMessages.length)}
+                accent={isStreaming}
               />
               <MiniStat
-                label="State"
-                value={runStatusLabel}
-                accent={
-                  workflowSummary.status === "running" ||
-                  workflowSummary.status === "completed"
-                }
+                label="Artifacts"
+                value={String(artifactItems.length)}
+                accent={artifactItems.length > 0}
               />
             </div>
 
-            <p className="text-[11px] leading-5 text-slate-600">{runDetail}</p>
-
-            {runComplianceReport ? (
-              <ComplianceSummaryCard
-                report={runComplianceReport}
-                auditLogPath={runComplianceAuditLogPath}
-                title="Run compliance"
-                compact
-                maxRules={2}
-                className="mt-2"
-              />
-            ) : null}
+            <p className="text-[11px] leading-5 text-slate-600">
+              Generated files and source evidence below are scoped to the latest chat request.
+            </p>
           </div>
         ) : (
           <EmptyState>
-            Send a workflow-oriented request to populate run progress and generated files here.
+            Send a message to populate generated files and source detail here.
           </EmptyState>
         )}
       </InspectorCard>
@@ -3451,132 +2641,10 @@ export default function InspectorPanel() {
           </div>
         ) : (
           <EmptyState>
-            Generated workflow outputs will appear here once a step materializes inspectable artifacts.
+            Generated files will appear here once tool calls materialize inspectable artifacts.
           </EmptyState>
         )}
       </InspectorCard>
-
-      <InspectorCard
-        title="Artifact Registry"
-        meta={artifactRegistryListLabel}
-        controls={
-          <ActionButton onClick={() => setWorkspaceMode("artifacts")}>
-            Open workspace
-          </ActionButton>
-        }
-      >
-        {artifactRegistryLoading ? (
-          <LoadingState label="Loading registry entries..." />
-        ) : artifactRegistryError ? (
-          <EmptyState>{artifactRegistryError}</EmptyState>
-        ) : artifactRegistryListItems.length > 0 ? (
-          <div className="space-y-1">
-            {artifactRegistryListItems.map((record) => (
-              <ArtifactRegistryInspectorRow
-                key={record.path}
-                record={record}
-                active={inspectorPreviewPath === record.path}
-                onClick={() => openInspectorPath(record.path)}
-              />
-            ))}
-          </div>
-        ) : (
-          <EmptyState>
-            Durable registry entries will appear here once BioAPEX indexes artifacts on disk.
-          </EmptyState>
-        )}
-      </InspectorCard>
-
-      {selectedRegistryRecord ? (
-        <InspectorCard
-          title="Registry Metadata"
-          meta={shortenArtifactPath(selectedRegistryRecord.path, 4)}
-          controls={
-            <>
-              <ActionButton
-                onClick={() =>
-                  openInspectorPath(getArtifactRegistryRunRecordPath(selectedRegistryRecord))
-                }
-              >
-                Run record
-              </ActionButton>
-              <ActionButton onClick={() => setWorkspaceMode("artifacts")}>
-                Open workspace
-              </ActionButton>
-            </>
-          }
-        >
-          {selectedRegistryRecord.status === "invalid" ? (
-            <EmptyState>
-              {selectedRegistryRecord.error ??
-                "This registry entry is marked invalid. Review the run record or raw file before relying on it."}
-            </EmptyState>
-          ) : null}
-
-          <div className="grid grid-cols-2 gap-1.5">
-            <MiniStat
-              label="Status"
-              value={selectedRegistryRecord.status}
-              accent={selectedRegistryRecord.status === "valid"}
-            />
-            <MiniStat
-              label="Type"
-              value={
-                humanizeArtifactToken(selectedRegistryRecord.artifact_type) ?? "Artifact"
-              }
-              accent={selectedRegistryRecord.status === "valid"}
-            />
-          </div>
-
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            <MetaBadge tone={selectedRegistryRecord.status === "invalid" ? "warning" : "accent"}>
-              {humanizeArtifactToken(selectedRegistryRecord.workflow) ??
-                selectedRegistryRecord.workflow}
-            </MetaBadge>
-            {registryMetadataSummary.map((item) => (
-              <MetaBadge key={`${selectedRegistryRecord.path}-${item}`}>{item}</MetaBadge>
-            ))}
-          </div>
-
-          <div className="mt-3 space-y-2">
-            <UsageMetadataRow
-              label="Artifact ID"
-              value={selectedRegistryRecord.artifact_id}
-              monospace
-            />
-            <UsageMetadataRow
-              label="Declared ID"
-              value={selectedRegistryRecord.declared_id ?? "Not declared"}
-              monospace
-            />
-            <UsageMetadataRow
-              label="Created"
-              value={selectedRegistryRecord.created_at ?? "Unknown"}
-            />
-            <UsageMetadataRow
-              label="Indexed"
-              value={selectedRegistryRecord.indexed_at}
-            />
-            <UsageMetadataRow
-              label="Source"
-              value={
-                humanizeArtifactToken(selectedRegistryRecord.source_tool) ??
-                humanizeArtifactToken(selectedRegistryRecord.source_workflow) ??
-                "Registry artifact"
-              }
-            />
-            <UsageMetadataRow
-              label="Dataset"
-              value={selectedRegistryRecord.dataset_id ?? "Not recorded"}
-            />
-          </div>
-
-          <PreviewPane
-            className="mt-3"
-            content={`${selectedRegistryRecord.path}\n${selectedRegistryRecord.hash ?? "No content hash recorded"}`}
-          />
-        </InspectorCard>
-      ) : null}
 
       {inspectorPreviewPath ? (
         <InspectorCard
@@ -3632,7 +2700,7 @@ export default function InspectorPanel() {
           </div>
         ) : (
           <EmptyState>
-            No reviewed evidence or retrieval-backed citations are linked to the current turn or workflow run yet. Evidence retrieval and evidence review outputs will populate this view.
+            No reviewed evidence or retrieval-backed citations are linked to the current turn yet. Evidence retrieval and evidence review outputs will populate this view.
           </EmptyState>
         )}
       </section>
@@ -3640,46 +2708,39 @@ export default function InspectorPanel() {
       <section
         className={cn(
           "rounded-[16px] border px-3 py-3 shadow-[0_1px_2px_rgba(32,43,35,0.03)]",
-          getComplianceCardClass(sourcesSummary.compliance.state)
+          getChecklistCardClass(sourcesSummary.checklist.state)
         )}
       >
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <h3 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--apex-accent-strong)]">
-              Compliance
+              Source checklist
             </h3>
-            {sourcesSummary.compliance.detail &&
-            sourcesSummary.compliance.state !== "complete" ? (
+            {sourcesSummary.checklist.detail &&
+            sourcesSummary.checklist.state !== "complete" ? (
               <p className="mt-1 text-[10px] leading-4 text-slate-500">
-                {sourcesSummary.compliance.detail}
+                {sourcesSummary.checklist.detail}
               </p>
             ) : null}
           </div>
-          {sourcesSummary.compliance.summary_label ? (
+          {sourcesSummary.checklist.summary_label ? (
             <span
               className={cn(
                 "inline-flex shrink-0 items-center rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em]",
-                getComplianceBadgeClass(sourcesSummary.compliance.state)
+                getChecklistBadgeClass(sourcesSummary.checklist.state)
               )}
             >
-              {sourcesSummary.compliance.summary_label}
+              {sourcesSummary.checklist.summary_label}
             </span>
           ) : null}
         </div>
 
         <div className="mt-3 space-y-2">
-          {sourcesSummary.compliance.items.map((item) => (
-            <ComplianceChecklistRow key={item.id} item={item} />
+          {sourcesSummary.checklist.items.map((item) => (
+            <ChecklistRow key={item.id} item={item} />
           ))}
         </div>
       </section>
-
-      <ComplianceSummaryCard
-        report={sourcesSummary.compliance.report}
-        auditLogPath={sourcesSummary.compliance.audit_log_path}
-        title="Compliance detail"
-        emptyMessage="Compliance preflight results will appear here once the current turn or workflow run produces them."
-      />
     </div>
   );
 
@@ -4087,7 +3148,7 @@ export default function InspectorPanel() {
         }
       >
         <p className="text-[11px] leading-5 text-slate-500">
-          Add more analysis tools, data processors, or custom workflows without
+          Add more analysis tools, data processors, or custom skills without
           losing the file-first skill model.
         </p>
 
@@ -4245,59 +3306,19 @@ export default function InspectorPanel() {
               </div>
             ) : null}
 
-            <div className="rounded-[12px] border border-amber-200 bg-[linear-gradient(180deg,rgba(255,251,235,0.96),rgba(255,247,237,0.96))] px-3 py-3">
+            <div className="rounded-[12px] border border-[rgba(211,219,210,0.86)] bg-[rgba(248,250,246,0.9)] px-3 py-3">
               <div className="flex items-start justify-between gap-2">
                 <div className="space-y-1">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-amber-700">
-                    Admin Controls
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                    Registry Status
                   </p>
-                  <p className="text-[11px] leading-5 text-amber-900/80">
-                    Registry mutations require admin access and do not edit the
-                    underlying file.
+                  <p className="text-[11px] leading-5 text-slate-600">
+                    Skill registry entries are currently read-only in this shell. Use the
+                    on-disk `SKILL.md` editor below to change skill content.
                   </p>
                 </div>
-                <MetaBadge tone="warning">Admin only</MetaBadge>
+                <MetaBadge tone="neutral">Read only</MetaBadge>
               </div>
-
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                <PrimaryActionButton
-                  onClick={() => void handleSkillRegistryToggle(selectedSkill)}
-                  disabled={selectedSkillUpdatePending || !hasAdminAccess}
-                >
-                  {selectedSkillUpdatePending ? (
-                    <Clock3 size={11} />
-                  ) : selectedSkill.enabled ? (
-                    <Package size={11} />
-                  ) : (
-                    <Sparkles size={11} />
-                  )}
-                  {selectedSkillUpdatePending
-                    ? "Updating…"
-                    : selectedSkill.enabled
-                      ? "Disable Skill"
-                      : "Enable Skill"}
-                </PrimaryActionButton>
-              </div>
-
-              {!hasAdminAccess ? (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  <MetaBadge tone="warning">{accessByScope.admin.detail}</MetaBadge>
-                </div>
-              ) : null}
-
-              {selectedSkillUpdatePending || skillRegistryUpdateMsg || skillRegistryUpdateError ? (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {selectedSkillUpdatePending ? (
-                    <MetaBadge tone="accent">Registry update pending</MetaBadge>
-                  ) : null}
-                  {skillRegistryUpdateMsg ? (
-                    <MetaBadge tone="success">{skillRegistryUpdateMsg}</MetaBadge>
-                  ) : null}
-                  {skillRegistryUpdateError ? (
-                    <MetaBadge tone="warning">{skillRegistryUpdateError}</MetaBadge>
-                  ) : null}
-                </div>
-              ) : null}
             </div>
           </div>
         </InspectorCard>
@@ -4405,114 +3426,27 @@ export default function InspectorPanel() {
     </div>
   );
 
-  const renderUsageTab = () => (
+  const renderTurnsTab = () => (
     <div className="space-y-2">
       <InspectorCard
-        title="Usage"
+        title="Turn Details"
         controls={
-          <MetaBadge tone={ragMode ? "accent" : "neutral"}>{usageModeLabel}</MetaBadge>
+          <MetaBadge tone={messages.length > 0 ? "accent" : "neutral"}>
+            {pluralize(messages.length, "message")}
+          </MetaBadge>
         }
       >
-        {!currentSessionId ? (
-          <EmptyState>Select a session to inspect token usage.</EmptyState>
-        ) : usageLoading && !sessionUsage ? (
-          <LoadingState label="Loading usage..." />
-        ) : usageLoadError ? (
-          <EmptyState>{usageLoadError}</EmptyState>
-        ) : sessionUsage ? (
-          <div className="space-y-4">
-            {showStreamingUsageNotice ? (
-              <p className="rounded-[10px] bg-[rgba(251,252,248,0.86)] px-2 py-1.5 text-[10px] leading-4 text-slate-500">
-                Current response is still streaming. Usage totals refresh when it
-                finishes.
-              </p>
-            ) : null}
-
-            <div className="space-y-2 rounded-[14px] border border-[rgba(211,219,210,0.8)] bg-[rgba(251,252,248,0.9)] px-3 py-2.5">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <MetaBadge tone={usageAccuracyTone}>{usageAccuracyLabel}</MetaBadge>
-                <MetaBadge tone={
-                  sessionUsage.tokenizer_backend === "deterministic_fallback"
-                    ? "warning"
-                    : "neutral"
-                }>{usageBackendLabel}</MetaBadge>
-              </div>
-              <p className="text-[10px] leading-4 text-slate-500">{usageHonestyDetail}</p>
-            </div>
-
-            <div className="pt-1 text-center">
-              <p className="text-[40px] font-semibold tracking-[-0.06em] text-slate-800">
-                {trackedTotalTokens.toLocaleString()}
-              </p>
-              <p className="mt-1 text-[11px] text-slate-400">Total tokens</p>
-            </div>
-
-            <div className="space-y-1.5">
-              <UsageMetricRow
-                label="Input"
-                value={sessionUsage.input_tokens.toLocaleString()}
-              />
-              <UsageMetricRow
-                label="Output"
-                value={sessionUsage.output_tokens.toLocaleString()}
-              />
-              <UsageMetricRow
-                label="Tools"
-                value={sessionUsage.tool_tokens.toLocaleString()}
-              />
-            </div>
-
-            <div className="space-y-1.5 pt-0.5">
-              <div className="flex items-center justify-between gap-3 text-[12px] leading-5">
-                <span>Context</span>
-                <span className="font-semibold text-slate-700">
-                  {contextWindowLabel ?? "Unavailable"}
-                </span>
-              </div>
-              <div className="h-[2px] overflow-hidden rounded-full bg-[rgba(211,219,210,0.76)]">
-                {contextWindowRatio !== null ? (
-                  <div
-                    className="h-full rounded-full bg-[var(--apex-accent)]"
-                    style={{ width: `${contextWindowRatio * 100}%` }}
-                  />
-                ) : null}
-              </div>
-              {contextWindowLabel ? null : (
-                <p className="text-[10px] leading-4 text-slate-500">
-                  Context-window budget is not configured for this model.
-                </p>
-              )}
-            </div>
-
-            <div className="border-t border-[rgba(211,219,210,0.72)] pt-2.5">
-              <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-                <Info size={12} strokeWidth={1.8} />
-                <span>Provenance</span>
-              </div>
-              <div className="mt-2 space-y-1.5">
-                <UsageMetadataRow
-                  label="Session"
-                  value={shortIdentifier(sessionUsage.session_id)}
-                  monospace
-                />
-                <UsageMetadataRow
-                  label="Model"
-                  value={sessionUsage.model_name}
-                  monospace
-                />
-                <UsageMetadataRow label="Accuracy" value={usageAccuracyLabel} />
-                <UsageMetadataRow label="Backend" value={usageBackendLabel} />
-              </div>
-            </div>
-          </div>
-        ) : isStreaming ? (
-          <EmptyState>
-            Usage will refresh after the current response finishes streaming.
-          </EmptyState>
+        {messages.length === 0 ? (
+          <EmptyState>Start a conversation to inspect turn details.</EmptyState>
         ) : (
-          <EmptyState>
-            Token usage is unavailable for this session right now.
-          </EmptyState>
+          <div className="space-y-3">
+            <p className="rounded-[10px] bg-[rgba(251,252,248,0.86)] px-2 py-1.5 text-[10px] leading-4 text-slate-500">
+              Main chat stays concise after each turn. This view keeps the
+              detailed retrieval, tool, and response trace available
+              for inspection.
+            </p>
+            <TurnDetailsPanel messages={messages} />
+          </div>
         )}
       </InspectorCard>
     </div>
@@ -4521,7 +3455,7 @@ export default function InspectorPanel() {
   return (
     <aside className="apex-panel apex-panel-muted flex h-full flex-col overflow-hidden rounded-[18px]">
       <div className="border-b border-[var(--shell-border)] bg-white/70 px-2 py-1.5">
-        <div className="grid grid-cols-5 gap-0.5">
+        <div className="grid grid-cols-6 gap-0.5">
           {INSPECTOR_TABS.map((tab) => (
             <TabButton
               key={tab.id}
@@ -4540,7 +3474,7 @@ export default function InspectorPanel() {
         {inspectorTab === "sources" && renderSourcesTab()}
         {inspectorTab === "memory" && renderMemoryTab()}
         {inspectorTab === "skills" && renderSkillsTab()}
-        {inspectorTab === "usage" && renderUsageTab()}
+        {inspectorTab === "turns" && renderTurnsTab()}
       </div>
 
       <div className="border-t border-[var(--shell-border)] bg-white/70 px-2 py-2">

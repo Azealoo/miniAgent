@@ -11,6 +11,7 @@ from fastapi import HTTPException, Request
 import config as cfg
 
 _LOCALHOST_CLIENTS = {"127.0.0.1", "::1", "localhost"}
+_FORWARDED_CLIENT_HEADERS = ("forwarded", "x-forwarded-for", "x-real-ip")
 AccessScope = Literal["inspection", "execution", "admin"]
 AccessGrantMode = Literal["loopback", "bearer"]
 
@@ -19,6 +20,12 @@ def is_loopback_client(request: Request | None) -> bool:
     client = request.client if request is not None else None
     host = client.host if client is not None else None
     return host in _LOCALHOST_CLIENTS
+
+
+def has_forwarded_client_headers(request: Request | None) -> bool:
+    if request is None:
+        return False
+    return any(request.headers.get(header, "").strip() for header in _FORWARDED_CLIENT_HEADERS)
 
 
 def _configured_token(scope: AccessScope) -> tuple[str | None, str | None]:
@@ -53,7 +60,15 @@ def determine_route_access_mode(
         return None
 
     policy = cfg.get_production_hardening_policy()
-    if policy.api.allow_loopback_without_auth and is_loopback_client(request):
+    forwarded_headers_present = has_forwarded_client_headers(request)
+    if (
+        policy.api.allow_loopback_without_auth
+        and is_loopback_client(request)
+        and (
+            policy.api.trust_forwarded_loopback_headers
+            or not forwarded_headers_present
+        )
+    ):
         return "loopback"
 
     env_var, expected_token = _configured_token(scope)
@@ -92,6 +107,7 @@ __all__ = [
     "AccessGrantMode",
     "AccessScope",
     "determine_route_access_mode",
+    "has_forwarded_client_headers",
     "is_loopback_client",
     "require_admin_access",
     "require_execution_access",

@@ -1,5 +1,6 @@
 # Review Action
 
+read my frontend: http://localhost:3000/
 1. Read current-feature.md to understand the goals
 2. Read any linked or relevant spec files under `context/features/`
 3. Review all code and docs changed for this feature

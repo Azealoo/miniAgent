@@ -1,11 +1,16 @@
 ---
 name: results_summarizer
 description: Parse common pipeline log/output and summarize metrics and status.
-category: bio/hpc
+category: bio/compute
 version: 1.0
 requires_tools: [read_file, python_repl]
 requires_network: false
 user_invocable: true
+species: any
+modality: compute
+stage: reporting
+stability: experimental
+safety_level: low
 ---
 
 # Results Summarizer

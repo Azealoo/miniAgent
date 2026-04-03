@@ -29,10 +29,6 @@ from graph.agent import agent_manager
 from graph.session_manager import SessionManager
 
 
-async def _fake_title(*args, **kwargs) -> str:
-    return "Captured Baseline Title"
-
-
 async def _capture_scenario(
     name: str,
     message: str,
@@ -49,9 +45,7 @@ async def _capture_scenario(
 
     session_id = sessions_api.create_session()["id"]
 
-    with patch.object(agent_manager, "astream", fake_astream), patch.object(
-        chat_api, "_generate_title_only", _fake_title
-    ):
+    with patch.object(agent_manager, "astream", fake_astream):
         response = await chat_api.chat(
             chat_api.ChatRequest(
                 message=message,

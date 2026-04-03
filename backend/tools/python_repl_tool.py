@@ -22,8 +22,10 @@ import pty
 import re
 import subprocess
 import sys
+import threading
 import types
 from collections.abc import MutableMapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Type
 
@@ -31,6 +33,8 @@ import config
 from hardening import is_secret_like_path
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr
+
+from .policy import get_tool_policy_context
 
 _MAX_OUTPUT = 5_000
 _PATH_READ_METHODS = {"read_text", "read_bytes", "open"}
@@ -93,6 +97,7 @@ _BLOCKED_ASYNCIO_PROCESS_ATTRIBUTES = frozenset({
     "create_subprocess_exec",
     "create_subprocess_shell",
 })
+_DEFAULT_SESSION_KEY = "__default__"
 
 # (compiled regex, human-readable reason) — checked before every execution
 _BLOCKED_CODE_PATTERNS: list[tuple[re.Pattern, str]] = [
@@ -244,6 +249,16 @@ class PythonReplInput(BaseModel):
     code: str = Field(description="Python code to execute.")
 
 
+@dataclass
+class _PythonReplSessionState:
+    repl: Any = None
+    runtime_guards_installed: bool = False
+    safe_import: Any = None
+    safe_import_module: Any = None
+    safe_modules: dict[str, types.ModuleType] = field(default_factory=dict)
+    safe_open: Any = None
+
+
 class PythonReplTool(BaseTool):
     name: str = "python_repl"
     description: str = (
@@ -260,12 +275,60 @@ class PythonReplTool(BaseTool):
     _safe_import_module: Any = PrivateAttr(default=None)
     _safe_modules: dict[str, types.ModuleType] = PrivateAttr(default_factory=dict)
     _safe_open: Any = PrivateAttr(default=None)
+    _session_states: dict[str, _PythonReplSessionState] = PrivateAttr(default_factory=dict)
+    _execution_lock: threading.RLock = PrivateAttr(default_factory=threading.RLock)
 
-    def _run_with_global_runtime_patches(self, code: str) -> Any:
-        if self._safe_import is None or self._safe_import_module is None or self._safe_open is None:
-            return self._repl.run(code)
+    def _resolve_session_state(self) -> tuple[str, _PythonReplSessionState]:
+        context = get_tool_policy_context()
+        session_key = (
+            context.session_id
+            if context is not None and context.session_id
+            else _DEFAULT_SESSION_KEY
+        )
+        state = self._session_states.get(session_key)
+        if state is None:
+            state = _PythonReplSessionState()
+            self._session_states[session_key] = state
+        return session_key, state
 
-        safe_modules = self._safe_modules
+    def _sync_default_session_aliases(self) -> None:
+        state = self._session_states.get(_DEFAULT_SESSION_KEY)
+        if state is None:
+            self._repl = None
+            self._runtime_guards_installed = False
+            self._safe_import = None
+            self._safe_import_module = None
+            self._safe_modules = {}
+            self._safe_open = None
+            return
+
+        self._repl = state.repl
+        self._runtime_guards_installed = state.runtime_guards_installed
+        self._safe_import = state.safe_import
+        self._safe_import_module = state.safe_import_module
+        self._safe_modules = state.safe_modules
+        self._safe_open = state.safe_open
+
+    def clear_session_state(self, session_id: str | None) -> None:
+        session_key = session_id or _DEFAULT_SESSION_KEY
+        with self._execution_lock:
+            self._session_states.pop(session_key, None)
+            if session_key == _DEFAULT_SESSION_KEY:
+                self._sync_default_session_aliases()
+
+    def _run_with_global_runtime_patches(
+        self,
+        code: str,
+        state: _PythonReplSessionState,
+    ) -> Any:
+        if (
+            state.safe_import is None
+            or state.safe_import_module is None
+            or state.safe_open is None
+        ):
+            return state.repl.run(code)
+
+        safe_modules = state.safe_modules
         missing = object()
         attr_patches: list[tuple[object, str, Any]] = []
         sys_module_patches: list[tuple[str, Any]] = []
@@ -281,9 +344,9 @@ class PythonReplTool(BaseTool):
             sys.modules[module_name] = module_value
 
         try:
-            patch_attr(builtins, "__import__", self._safe_import)
-            patch_attr(builtins, "open", self._safe_open)
-            patch_attr(importlib, "import_module", self._safe_import_module)
+            patch_attr(builtins, "__import__", state.safe_import)
+            patch_attr(builtins, "open", state.safe_open)
+            patch_attr(importlib, "import_module", state.safe_import_module)
 
             safe_os = safe_modules.get("os")
             if safe_os is not None:
@@ -346,7 +409,7 @@ class PythonReplTool(BaseTool):
                     continue
                 patch_module_entry(module_name, module_value)
 
-            return self._repl.run(code)
+            return state.repl.run(code)
         finally:
             for module_name, original in reversed(sys_module_patches):
                 if original is missing:
@@ -359,11 +422,11 @@ class PythonReplTool(BaseTool):
                 else:
                     setattr(target, attr_name, original)
 
-    def _ensure_runtime_guards(self) -> None:
-        if self._repl is None or self._runtime_guards_installed:
+    def _ensure_runtime_guards(self, state: _PythonReplSessionState) -> None:
+        if state.repl is None or state.runtime_guards_installed:
             return
 
-        python_repl = self._repl.python_repl
+        python_repl = state.repl.python_repl
         original_open = builtins.open
         original_import = builtins.__import__
         original_os_open = os.open
@@ -587,10 +650,10 @@ class PythonReplTool(BaseTool):
         safe_builtins = dict(builtins.__dict__)
         safe_builtins["open"] = safe_open
         safe_builtins["__import__"] = safe_import
-        self._safe_import = safe_import
-        self._safe_import_module = safe_import_module
-        self._safe_modules = safe_modules
-        self._safe_open = safe_open
+        state.safe_import = safe_import
+        state.safe_import_module = safe_import_module
+        state.safe_modules = safe_modules
+        state.safe_open = safe_open
         python_repl.globals["__builtins__"] = safe_builtins
         python_repl.globals["asyncio"] = safe_asyncio
         python_repl.globals["builtins"] = safe_builtins_module
@@ -602,7 +665,7 @@ class PythonReplTool(BaseTool):
         python_repl.globals["Path"] = SafePath
         python_repl.globals["pathlib"] = safe_pathlib
         python_repl.globals["sys"] = safe_sys
-        self._runtime_guards_installed = True
+        state.runtime_guards_installed = True
 
     def _run(self, code: str) -> str:
         if self.base_dir:
@@ -613,12 +676,16 @@ class PythonReplTool(BaseTool):
         if blocked:
             return blocked
         try:
-            if self._repl is None:
-                from langchain_experimental.tools import PythonREPLTool
+            with self._execution_lock:
+                session_key, state = self._resolve_session_state()
+                if state.repl is None:
+                    from langchain_experimental.tools import PythonREPLTool
 
-                self._repl = PythonREPLTool()
-            self._ensure_runtime_guards()
-            output = self._run_with_global_runtime_patches(code)
+                    state.repl = PythonREPLTool()
+                self._ensure_runtime_guards(state)
+                if session_key == _DEFAULT_SESSION_KEY:
+                    self._sync_default_session_aliases()
+                output = self._run_with_global_runtime_patches(code, state)
             if len(str(output)) > _MAX_OUTPUT:
                 output = str(output)[:_MAX_OUTPUT] + "\n...[output truncated]"
             if _is_secret_runtime_block(output):

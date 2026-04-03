@@ -1,11 +1,16 @@
 ---
 name: slurm_job_template
 description: Generate an sbatch script template for GPU or CPU jobs (Slurm).
-category: bio/hpc
+category: bio/compute
 version: 1.0
 requires_tools: [python_repl, write_file]
 requires_network: false
 user_invocable: true
+species: any
+modality: compute
+stage: utilities
+stability: experimental
+safety_level: medium
 ---
 
 # Slurm Job Template

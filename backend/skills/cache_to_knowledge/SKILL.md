@@ -6,6 +6,11 @@ version: 1.0
 requires_tools: [write_file]
 requires_network: false
 user_invocable: true
+species: any
+modality: literature
+stage: utilities
+stability: experimental
+safety_level: low
 ---
 
 # Cache to Knowledge

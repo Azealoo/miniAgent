@@ -53,9 +53,18 @@ Use this taxonomy when assigning `category`, `stage`, `species`, and `modality` 
 ## Metadata tips
 
 - Use `species: human`, `mouse`, or `any` when relevant.
-- Use `modality` for the experimental context, such as `single_cell_rna`, `perturb_seq`, `wet_lab`, `literature`, or `compute`.
+- Use `modality` for the experimental context, such as `single_cell_rna`, `perturb_seq`, `crispr_screen`, `multiomics`, `spatial`, `wet_lab`, `literature`, or `compute`.
 - Use `tags` for searchable keywords, not for broad categories.
 - Use `aliases` for common alternate names or abbreviations.
+- Use `stability: stable`, `evolving`, or `experimental` to make the maturity level explicit in the catalog.
+- Stable biology skills should only depend on tools that are present in the active runtime catalog.
+
+## Legacy values to migrate away from
+
+- `bio/scRNA` -> `bio/single_cell_rna`
+- `bio/perturbation` -> `bio/perturb_seq`
+- `bio/calculations` -> `bio/molecular_lab`
+- `bio/hpc` -> `bio/compute`
 
 ## Growth strategy
 

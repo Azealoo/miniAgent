@@ -11,7 +11,7 @@ rules:
     category: human_subjects
     severity: high
     recommended_action: require_approval
-    sources: [message, attachments, workflow]
+    sources: [message, attachments]
     patterns:
       - '\b(human subjects?|irb|institutional review board|consent waiver|participant recruitment)\b'
   - rule_id: privacy-direct-identifiers
@@ -35,7 +35,7 @@ rules:
     recommended_action: block
     sources: [message]
     patterns:
-      - '\b(step[-\s]?by[-\s]?step|protocol|instructions?)\b.*\b(culture|grow|propagate|amplify|isolate|synthesize|assemble)\b.*\b(sars[-\s]?cov[-\s]?2|influenza|anthrax|ricin|botulinum|pathogen|virus|toxin)\b'
+      - '\b(step[-\s]?by[-\s]?step|procedure|instructions?)\b.*\b(culture|grow|propagate|amplify|isolate|synthesize|assemble)\b.*\b(sars[-\s]?cov[-\s]?2|influenza|anthrax|ricin|botulinum|pathogen|virus|toxin)\b'
       - '\bhow (do|to)\b.*\b(culture|grow|propagate|amplify|isolate|synthesize|assemble)\b.*\b(sars[-\s]?cov[-\s]?2|influenza|anthrax|ricin|botulinum|pathogen|virus|toxin)\b'
   - rule_id: export-sensitive-transfer
     category: export_control

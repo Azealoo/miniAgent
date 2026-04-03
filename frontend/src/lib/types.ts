@@ -151,12 +151,11 @@ export type ComplianceRuntimeState =
   | "approval_required"
   | "approved_override";
 
-export type ComplianceApprovalScope = "message" | "workflow" | "run";
+export type ComplianceApprovalScope = "message" | "run";
 
 export interface ComplianceRequestContext {
   user_message: string;
   attached_identifiers: string[];
-  selected_workflow?: string | null;
   session_id?: string | null;
 }
 
@@ -225,174 +224,18 @@ export interface SourcesInspectorChecklistItem {
   detail: string | null;
 }
 
-export interface SourcesInspectorComplianceCard {
+export interface SourcesInspectorChecklistCard {
   summary_label: string | null;
   detail: string | null;
   state: SourcesInspectorChecklistState;
   items: SourcesInspectorChecklistItem[];
-  report: ComplianceReportArtifact | null;
-  audit_log_path: string | null;
 }
 
 export interface SourcesInspectorSummary {
   scoped_message_count: number;
   citations: SourcesInspectorCitation[];
-  compliance: SourcesInspectorComplianceCard;
+  checklist: SourcesInspectorChecklistCard;
 }
-
-export type WorkflowLifecycleStatus =
-  | "created"
-  | "preflight_checked"
-  | "running"
-  | "waiting"
-  | "failed"
-  | "completed"
-  | "blocked";
-
-export type WorkflowStepStatus =
-  | "created"
-  | "waiting"
-  | "running"
-  | "failed"
-  | "completed"
-  | "blocked";
-
-export type WorkflowBlockingSource =
-  | "qc_gate"
-  | "compliance_hook"
-  | "step_failure"
-  | "qa_review"
-  | "input_validation"
-  | "unknown";
-
-export type WorkflowBlockStage =
-  | "before_execution"
-  | "before_step"
-  | "after_step"
-  | "before_publish";
-
-export type WorkflowArtifactScope =
-  | "run_record"
-  | "step_output"
-  | "workflow_output"
-  | "related_artifact";
-
-export interface WorkflowArtifactRef {
-  artifact_type: string;
-  path: string;
-  id?: string | null;
-  run_id?: string | null;
-}
-
-export interface WorkflowIssueDetail {
-  code: string;
-  message: string;
-  field_path?: string | null;
-  path?: string | null;
-}
-
-export interface WorkflowEventBase {
-  contract_version: "workflow_event.v1";
-  run_id: string;
-  workflow_id: string;
-  request_id?: string;
-}
-
-export interface WorkflowStepDescriptor {
-  step_id: string;
-  step_label: string;
-  prerequisite_step_ids: string[];
-  executor_type: string;
-  engine_name?: string | null;
-  status?: WorkflowStepStatus | null;
-  artifact_refs?: WorkflowArtifactRef[];
-  warnings?: string[];
-  warning_details?: WorkflowIssueDetail[];
-  errors?: string[];
-  error_details?: WorkflowIssueDetail[];
-  started_at?: string | null;
-  ended_at?: string | null;
-  duration_seconds?: number | null;
-}
-
-export interface WorkflowStartEvent extends WorkflowEventBase {
-  type: "workflow_start";
-  workflow_name: string;
-  lifecycle_status: WorkflowLifecycleStatus;
-  resumed: boolean;
-  run_record_path: string;
-  total_steps?: number | null;
-  steps?: WorkflowStepDescriptor[];
-  started_at?: string | null;
-}
-
-export interface WorkflowStepStartEvent extends WorkflowEventBase {
-  type: "workflow_step_start";
-  step_id: string;
-  step_label: string;
-  status: "running";
-  executor_type: string;
-  prerequisite_step_ids: string[];
-  engine_name?: string | null;
-  started_at?: string | null;
-}
-
-export interface WorkflowStepEndEvent extends WorkflowEventBase {
-  type: "workflow_step_end";
-  step_id: string;
-  step_label: string;
-  status: Extract<WorkflowStepStatus, "waiting" | "completed" | "failed" | "blocked">;
-  artifact_refs: WorkflowArtifactRef[];
-  warnings: string[];
-  warning_details: WorkflowIssueDetail[];
-  errors: string[];
-  error_details: WorkflowIssueDetail[];
-  started_at?: string | null;
-  ended_at?: string | null;
-  duration_seconds?: number | null;
-}
-
-export interface WorkflowBlockedEvent extends WorkflowEventBase {
-  type: "workflow_blocked";
-  lifecycle_status: "blocked";
-  reason: string;
-  issue_details: WorkflowIssueDetail[];
-  stage: WorkflowBlockStage;
-  blocking_source: WorkflowBlockingSource;
-  step_id?: string | null;
-  step_label?: string | null;
-}
-
-export interface WorkflowArtifactEvent extends WorkflowEventBase {
-  type: "workflow_artifact";
-  artifact: WorkflowArtifactRef;
-  scope: WorkflowArtifactScope;
-  step_id?: string | null;
-  step_label?: string | null;
-  output_name?: string | null;
-}
-
-export interface WorkflowDoneEvent extends WorkflowEventBase {
-  type: "workflow_done";
-  lifecycle_status: WorkflowLifecycleStatus;
-  run_record_path: string;
-  completed_steps: number;
-  total_steps: number;
-  warning_count: number;
-  started_at?: string | null;
-  ended_at?: string | null;
-  duration_seconds?: number | null;
-  blocked_reason?: string | null;
-  blocked_issue_details?: WorkflowIssueDetail[];
-}
-
-export type WorkflowStreamEvent =
-  | WorkflowStartEvent
-  | WorkflowStepStartEvent
-  | WorkflowStepEndEvent
-  | WorkflowBlockedEvent
-  | WorkflowArtifactEvent
-  | WorkflowDoneEvent;
 
 export interface ToolCall {
   tool: string;
@@ -406,7 +249,154 @@ export interface RetrievalResult {
   text: string;
   score: number;
   source: string;
+  memory_type?: string;
+  memory_type_label?: string;
+  memory_name?: string;
+  memory_description?: string;
 }
+
+interface ChatStreamEventBase {
+  request_id?: string;
+  event_index?: number;
+}
+
+export interface ChatStreamRetrievalEvent extends ChatStreamEventBase {
+  type: "retrieval";
+  query: string;
+  results: RetrievalResult[];
+}
+
+export interface ChatStreamTokenEvent extends ChatStreamEventBase {
+  type: "token";
+  content: string;
+}
+
+export interface ChatStreamToolStartEvent extends ChatStreamEventBase {
+  type: "tool_start";
+  tool: string;
+  input: string;
+  run_id?: string;
+}
+
+export interface ChatStreamToolEndEvent extends ChatStreamEventBase {
+  type: "tool_end";
+  tool: string;
+  output: string;
+  run_id?: string;
+  result?: ToolResultEnvelope;
+  policy?: JsonObject;
+}
+
+interface ChatStreamPlanEventBase extends ChatStreamEventBase {
+  summary: string;
+  run_id?: string;
+  plan: JsonObject;
+  tool_trace?: JsonObject[];
+}
+
+export interface ChatStreamPlanCreatedEvent extends ChatStreamPlanEventBase {
+  type: "plan_created";
+}
+
+export interface ChatStreamPlanUpdatedEvent extends ChatStreamPlanEventBase {
+  type: "plan_updated";
+}
+
+export interface ChatStreamVerificationResultEvent extends ChatStreamEventBase {
+  type: "verification_result";
+  summary: string;
+  verdict: "pass" | "repair_required" | "fail";
+  run_id?: string;
+  verification: JsonObject;
+  tool_trace?: JsonObject[];
+}
+
+export interface ChatStreamNewResponseEvent extends ChatStreamEventBase {
+  type: "new_response";
+}
+
+export interface ChatStreamDoneEvent extends ChatStreamEventBase {
+  type: "done";
+  content: string;
+  session_id?: string;
+}
+
+export interface ChatStreamErrorEvent extends ChatStreamEventBase {
+  type: "error";
+  error: string;
+}
+
+export type ChatStreamEvent =
+  | ChatStreamRetrievalEvent
+  | ChatStreamTokenEvent
+  | ChatStreamToolStartEvent
+  | ChatStreamToolEndEvent
+  | ChatStreamPlanCreatedEvent
+  | ChatStreamPlanUpdatedEvent
+  | ChatStreamVerificationResultEvent
+  | ChatStreamNewResponseEvent
+  | ChatStreamDoneEvent
+  | ChatStreamErrorEvent;
+
+export type ChatStreamEventType = ChatStreamEvent["type"];
+
+export interface SessionTextBlock {
+  type: "text";
+  text: string;
+}
+
+export interface SessionToolUseBlock {
+  type: "tool_use";
+  tool: string;
+  input: string;
+  run_id?: string;
+}
+
+export interface SessionToolResultBlock {
+  type: "tool_result";
+  tool: string;
+  output: string;
+  run_id?: string;
+  result?: ToolResultEnvelope;
+}
+
+export interface SessionRetrievalBlock {
+  type: "retrieval";
+  query?: string;
+  results: RetrievalResult[];
+}
+
+export interface SessionUsageBlock {
+  type: "usage";
+  metadata: JsonObject;
+}
+
+export interface SessionPlanBlock {
+  type: "plan";
+  event: "created" | "updated";
+  summary: string;
+  run_id?: string;
+  plan: JsonObject;
+  tool_trace?: JsonObject[];
+}
+
+export interface SessionVerificationBlock {
+  type: "verification";
+  summary: string;
+  verdict: "pass" | "repair_required" | "fail";
+  run_id?: string;
+  verification: JsonObject;
+  tool_trace?: JsonObject[];
+}
+
+export type SessionContentBlock =
+  | SessionTextBlock
+  | SessionToolUseBlock
+  | SessionToolResultBlock
+  | SessionRetrievalBlock
+  | SessionUsageBlock
+  | SessionPlanBlock
+  | SessionVerificationBlock;
 
 export interface Message {
   id: string;
@@ -414,89 +404,46 @@ export interface Message {
   content: string;
   request_id?: string;
   tool_calls?: ToolCall[];
-  workflow_events?: WorkflowStreamEvent[];
   retrievals?: RetrievalResult[];
+  blocks?: SessionContentBlock[];
   isStreaming?: boolean;
+  startedAtMs?: number;
+  endedAtMs?: number;
   /** Tool currently executing (cleared when tool_end arrives) */
   pendingTool?: { tool: string; input: string; runId: string };
 }
 
 export interface SessionHistoryMessage {
   role: string;
-  content: string;
+  content?: string;
   request_id?: string;
   tool_calls?: ToolCall[];
-  workflow_events?: WorkflowStreamEvent[];
   retrievals?: RetrievalResult[];
+  blocks?: SessionContentBlock[];
 }
 
-export type WorkspaceMode =
-  | "sessions"
-  | "flows"
-  | "docs"
+export interface SessionContinuitySummary {
+  source_format: "structured" | "legacy";
+  legacy_summary: string | null;
+  decisions_and_rationale: string[];
+  results_register: string[];
+  evidence_register: string[];
+  compliance_register: string[];
+  open_questions_and_next_actions: string[];
+  archive_id: string | null;
+  archived_message_count: number;
+}
+
+export interface SessionContinuityResponse {
+  summaries: SessionContinuitySummary[];
+}
+
+export type InspectorTab =
   | "files"
-  | "studies"
-  | "ops"
-  | "artifacts";
-
-export type StudyActiveRunState =
-  | "not_started"
-  | "active"
-  | "blocked"
-  | "failed"
-  | "completed";
-
-export type StudyEvidenceState =
-  | "not_started"
-  | "supported"
-  | "mixed"
-  | "insufficient_evidence";
-
-export type StudyComplianceState =
-  | "not_started"
-  | "allowed"
-  | "warning_issued"
-  | "approval_required"
-  | "approved_override"
-  | "blocked";
-
-export type StudyQaState =
-  | "not_started"
-  | "passed"
-  | "warning"
-  | "failed"
-  | "blocked";
-
-export interface StudyArtifactCounts {
-  dataset_manifests: number;
-  workflow_runs: number;
-  evidence_reviews: number;
-  claim_graphs: number;
-  compliance_reports: number;
-  qa_reports: number;
-  checklist_results: number;
-  exports: number;
-}
-
-export interface StudySummary {
-  study_id: string;
-  title: string;
-  assay_type: string;
-  organism: string;
-  privacy_classification: string;
-  latest_activity_at: string | null;
-  run_count: number;
-  active_run_state: StudyActiveRunState;
-  evidence_state: StudyEvidenceState;
-  compliance_state: StudyComplianceState;
-  qa_state: StudyQaState;
-  export_available: boolean;
-  artifact_counts: StudyArtifactCounts;
-}
-
-export interface StudiesWorkspaceResponse {
-  items: StudySummary[];
-}
+  | "sources"
+  | "memory"
+  | "skills"
+  | "turns";
 
 export interface Session {
   id: string;
@@ -505,24 +452,10 @@ export interface Session {
   message_count: number;
 }
 
-export type FlowsWorkspaceStatus = "active" | "idle" | "blocked" | "failed";
-
-export interface FlowsWorkspaceSummaryItem {
-  id: string;
-  run_count: number;
-  last_activity_at: number | null;
-  status: FlowsWorkspaceStatus;
-}
-
-export interface FlowsWorkspaceSummaryResponse {
-  items: FlowsWorkspaceSummaryItem[];
-}
-
 export interface FilesWorkspaceItem {
   path: string;
   name: string;
   artifact_type: string | null;
-  workflow: string | null;
   run_id: string | null;
   source_tool: string | null;
   step_label: string | null;
@@ -634,436 +567,6 @@ export interface AccessScopeState {
   authorizationMode: AccessAuthorizationMode | null;
   hasToken: boolean;
   detail: string;
-}
-
-export interface RagModeResponse {
-  rag_mode: boolean;
-}
-
-export interface RetentionPolicy {
-  rotation_strategy: string;
-  retention_expectation_days: number;
-  automatic_deletion: boolean;
-}
-
-export interface ArtifactRegistryRecord {
-  artifact_id: string;
-  declared_id?: string | null;
-  artifact_type: string;
-  path: string;
-  hash?: string | null;
-  created_at?: string | null;
-  run_id: string;
-  workflow: string;
-  date: string;
-  source_workflow?: string | null;
-  source_tool?: string | null;
-  dataset_id?: string | null;
-  status: "valid" | "invalid";
-  error?: string | null;
-  indexed_at: string;
-}
-
-export interface ArtifactRegistrySnapshot {
-  schema_version: string;
-  generated_at: string;
-  artifact_root: string;
-  registry_path: string;
-  record_count: number;
-  valid_count: number;
-  invalid_count: number;
-  records: ArtifactRegistryRecord[];
-}
-
-export interface ArtifactRegistryLookupResult {
-  generated_at: string;
-  artifact_root: string;
-  registry_path: string;
-  total_count: number;
-  matched_count: number;
-  valid_count: number;
-  invalid_count: number;
-  records: ArtifactRegistryRecord[];
-}
-
-export interface ArtifactRegistryQuery {
-  run_id?: string;
-  artifact_type?: string;
-  workflow?: string;
-  date?: string;
-  dataset_id?: string;
-  include_invalid?: boolean;
-}
-
-export type AuditEventType =
-  | "chat_request_received"
-  | "compliance_decision"
-  | "workflow_started"
-  | "workflow_finished"
-  | "tool_invoked"
-  | "connector_action"
-  | "file_written"
-  | "job_submitted"
-  | "export_generated";
-
-export interface AuditEventRecord {
-  contract_version: string;
-  event_id: string;
-  event_type: AuditEventType;
-  recorded_at: string;
-  summary: string;
-  outcome?: string | null;
-  session_id?: string | null;
-  run_id?: string | null;
-  step_id?: string | null;
-  job_id?: string | null;
-  workflow_id?: string | null;
-  tool_name?: string | null;
-  connector_name?: string | null;
-  actor: string;
-  artifact_paths: string[];
-  external_systems: string[];
-  redaction_policy: string;
-  details: JsonObject;
-}
-
-export interface AuditEventsResponse {
-  events: AuditEventRecord[];
-  retention_policy: RetentionPolicy;
-}
-
-export interface AuditEventsQuery {
-  event_type?: AuditEventType;
-  session_id?: string;
-  run_id?: string;
-  step_id?: string;
-  job_id?: string;
-  workflow_id?: string;
-  tool_name?: string;
-  connector_name?: string;
-  outcome?: string;
-  limit?: number;
-}
-
-export type ObservabilityMetricKind = "duration" | "rate" | "count" | "gauge";
-
-export type ObservabilityTraceStatus = "ok" | "error" | "blocked";
-
-export interface ObservabilityMetricRecord {
-  contract_version: "observability_metric.v1";
-  record_id: string;
-  recorded_at: string;
-  metric_name: string;
-  metric_kind: ObservabilityMetricKind;
-  value: number;
-  unit: string;
-  request_id?: string | null;
-  session_id?: string | null;
-  run_id?: string | null;
-  step_id?: string | null;
-  job_id?: string | null;
-  workflow_id?: string | null;
-  trace_id?: string | null;
-  span_id?: string | null;
-  attributes: JsonObject;
-}
-
-export interface ObservabilityTraceRecord {
-  contract_version: "observability_trace.v1";
-  trace_id: string;
-  span_id: string;
-  parent_span_id?: string | null;
-  span_name: string;
-  started_at: string;
-  ended_at: string;
-  duration_seconds: number;
-  status: ObservabilityTraceStatus;
-  request_id?: string | null;
-  session_id?: string | null;
-  run_id?: string | null;
-  step_id?: string | null;
-  job_id?: string | null;
-  workflow_id?: string | null;
-  attributes: JsonObject;
-}
-
-export interface ObservabilityDashboardPanelDefinition {
-  title: string;
-  metric_name: string;
-  aggregation: string;
-  filters?: JsonObject;
-}
-
-export interface ObservabilityDashboardDefinition {
-  id: string;
-  title: string;
-  description: string;
-  panels: ObservabilityDashboardPanelDefinition[];
-}
-
-export interface ObservabilityMetricsResponse {
-  metrics: ObservabilityMetricRecord[];
-  retention_policy: RetentionPolicy;
-}
-
-export interface ObservabilityTracesResponse {
-  traces: ObservabilityTraceRecord[];
-  retention_policy: RetentionPolicy;
-}
-
-export interface ObservabilityDashboardDefinitionsResponse {
-  dashboards: ObservabilityDashboardDefinition[];
-  retention_policy: RetentionPolicy;
-}
-
-export interface ObservabilityDurationSummary {
-  count: number;
-  average: number | null;
-  p50: number | null;
-  p95: number | null;
-  min: number | null;
-  max: number | null;
-}
-
-export interface ObservabilityRateSummary {
-  count: number;
-  average: number | null;
-}
-
-export interface ObservabilityOverviewFilters {
-  workflow_id: string | null;
-  session_id: string | null;
-  request_id: string | null;
-}
-
-export interface ObservabilityOverviewRecordCounts {
-  metric_records: number;
-  trace_records: number;
-}
-
-export interface ObservabilityOverview {
-  generated_at: string;
-  window_days: number;
-  filters: ObservabilityOverviewFilters;
-  record_counts: ObservabilityOverviewRecordCounts;
-  chat_responsiveness: {
-    user_visible_latency_seconds: ObservabilityDurationSummary;
-    backend_execution_latency_seconds: ObservabilityDurationSummary;
-  };
-  workflow_delivery: {
-    workflow_duration_seconds: ObservabilityDurationSummary;
-    step_duration_seconds: ObservabilityDurationSummary;
-    failure_rate: ObservabilityRateSummary;
-    block_rate: ObservabilityRateSummary;
-  };
-  workflow_quality: {
-    qc_pass_rate: ObservabilityRateSummary;
-    evidence_coverage_rate: ObservabilityRateSummary;
-  };
-  dashboards: ObservabilityDashboardDefinition[];
-  retention_policy: RetentionPolicy;
-}
-
-export interface ObservabilityMetricsQuery {
-  metric_name?: string;
-  request_id?: string;
-  session_id?: string;
-  run_id?: string;
-  step_id?: string;
-  job_id?: string;
-  workflow_id?: string;
-  trace_id?: string;
-  span_id?: string;
-  limit?: number;
-}
-
-export interface ObservabilityTracesQuery {
-  trace_id?: string;
-  span_id?: string;
-  parent_span_id?: string;
-  span_name?: string;
-  request_id?: string;
-  session_id?: string;
-  run_id?: string;
-  step_id?: string;
-  job_id?: string;
-  workflow_id?: string;
-  status?: ObservabilityTraceStatus;
-  limit?: number;
-}
-
-export interface ObservabilityOverviewQuery {
-  days?: number;
-  request_id?: string;
-  session_id?: string;
-  workflow_id?: string;
-  limit?: number;
-}
-
-export type ConnectorAction =
-  | "configure"
-  | "validate"
-  | "import"
-  | "export"
-  | "sync_status";
-
-export type ConnectorExecutionAction = "import" | "export" | "sync_status";
-
-export type ConnectorActionStatus = "success" | "failed";
-
-export type ConnectorActionOutcome =
-  | "success"
-  | "invalid_input"
-  | "blocked"
-  | "unsupported"
-  | "execution_failure";
-
-export type ConnectorFailureMode =
-  | "invalid_configuration"
-  | "unsupported_capability"
-  | "blocked_action"
-  | "remote_failure"
-  | "sync_conflict"
-  | "partial_result";
-
-export type ConnectorTransportPattern =
-  | "file_drop"
-  | "rest_api"
-  | "webhook_callback";
-
-export type ConnectorConfigFieldKind =
-  | "string"
-  | "url"
-  | "directory_path"
-  | "route_path"
-  | "env_var"
-  | "string_list"
-  | "boolean"
-  | "enum";
-
-export type ConnectorSystemKind =
-  | "eln"
-  | "lims"
-  | "instrument"
-  | "external_service";
-
-export type ConnectorArtifactDomain =
-  | "dataset_manifest"
-  | "workflow_run"
-  | "protocol_run"
-  | "evidence_card"
-  | "evidence_review"
-  | "entity_grounding"
-  | "claim_graph"
-  | "compliance_report"
-  | "qa_report"
-  | "eln_export"
-  | "report_bundle"
-  | "report_bundle_manifest";
-
-export interface ConnectorGuardrails {
-  requires_compliance_gate: boolean;
-  requires_provenance_records: boolean;
-  requires_artifact_registration: boolean;
-  allow_destructive_sync: boolean;
-}
-
-export interface ConnectorConfigField {
-  key: string;
-  kind: ConnectorConfigFieldKind;
-  description: string;
-  required: boolean;
-  allowed_values: string[];
-  secret_reference: boolean;
-}
-
-export interface ConnectorCapabilities {
-  supported_actions: ConnectorAction[];
-  transport_patterns: ConnectorTransportPattern[];
-  artifact_domains: ConnectorArtifactDomain[];
-  guardrails: ConnectorGuardrails;
-}
-
-export interface ConnectorConfigSummary {
-  configured: boolean;
-  configured_fields: string[];
-  missing_required_fields: string[];
-  uses_secret_references: boolean;
-}
-
-export interface ConnectorRegistryEntry {
-  name: string;
-  display_name: string;
-  description: string;
-  system_kind: ConnectorSystemKind;
-  external_system: string;
-  capabilities: ConnectorCapabilities;
-  config_fields: ConnectorConfigField[];
-  enabled: boolean;
-  config_summary: ConnectorConfigSummary;
-  validation_result?: ConnectorActionResult | null;
-  notes: string[];
-}
-
-export interface ConnectorValidationIssue {
-  field?: string | null;
-  code: string;
-  message: string;
-}
-
-export interface ConnectorActionRequest {
-  dry_run?: boolean;
-  artifact_path?: string | null;
-  payload?: JsonObject | null;
-  compliance_artifact_path?: string | null;
-  provenance_artifact_paths?: string[];
-  event_type?: string | null;
-  delivery_signature?: string | null;
-  session_id?: string | null;
-  run_id?: string | null;
-  workflow_id?: string | null;
-}
-
-export interface ConnectorActionResult {
-  contract_version: string;
-  connector_name: string;
-  action: ConnectorAction;
-  status: ConnectorActionStatus;
-  outcome: ConnectorActionOutcome;
-  summary: string;
-  action_supported: boolean;
-  non_destructive: boolean;
-  failure_mode?: ConnectorFailureMode | null;
-  issues: ConnectorValidationIssue[];
-  config_summary?: ConnectorConfigSummary | null;
-  artifact_paths: string[];
-  external_paths: string[];
-  metadata: JsonObject;
-}
-
-export interface ConnectorRegistryListResponse {
-  connectors: ConnectorRegistryEntry[];
-}
-
-export interface ConnectorRegistryUpdateRequest {
-  enabled: boolean;
-  config?: JsonObject | null;
-}
-
-export interface ConnectorRegistryUpdateResponse {
-  connector: ConnectorRegistryEntry;
-  result: ConnectorActionResult;
-}
-
-export interface ConnectorRegistryAdminDetailResponse {
-  connector_name: string;
-  enabled: boolean;
-  config: JsonObject;
-  validation_result: ConnectorActionResult;
-}
-
-export interface ConnectorValidationRequest {
-  config?: JsonObject | null;
 }
 
 export interface SkillRegistryUpdateRequest {

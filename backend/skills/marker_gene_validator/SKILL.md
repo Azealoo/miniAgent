@@ -27,28 +27,25 @@ Use this skill when the user already has a marker panel or top DE genes and want
 
 ## Required inputs
 
-- **markers**: A list of marker genes
-- **proposed label**: Cell type or state
-- **context** (optional): species, tissue, disease, stimulation
+- **markers**: a list of marker genes
+- **proposed label**: cell type or state
+- **context** (optional): species, tissue, disease, stimulation, or assay context
 
 ## Steps
 
-1. Search local guidance such as `marker-panel-guidelines.md` with `search_knowledge_base`.
-2. Use `ncbi_eutils` and `uniprot_api` to confirm unclear or surprising markers when necessary.
-3. Separate markers into:
-   - strongly supportive
-   - weakly supportive
-   - conflicting or suspicious
-4. Use `python_repl` if useful to organize the marker evidence table.
-5. Return a confidence judgment with explicit caveats.
+1. Restate the proposed label, species, tissue, and disease or stimulation context because the same markers can mean different things across systems.
+2. Search local guidance such as marker panel notes with `search_knowledge_base` before leaning on generic marker heuristics.
+3. Use `ncbi_eutils` and `uniprot_api` to confirm unclear, surprising, or multifunctional markers when necessary.
+4. Use `python_repl` to organize markers into strongly supportive, weakly supportive, and conflicting groups if the list is long.
+5. Return a confidence judgment that clearly separates well-supported markers from context-dependent or contradictory ones.
 
 ## Output format
 
-- **Proposed label**
-- **Supportive markers**
-- **Conflicting markers**
-- **Confidence**
-- **Alternative interpretations**
+- **Biological context or assumptions**: proposed label, species, tissue, and any inferred activation or disease context.
+- **Evidence or source basis**: which `search_knowledge_base`, `ncbi_eutils`, `uniprot_api`, and `python_repl` checks support the call.
+- **Marker assessment**: supportive markers, conflicting markers, and confidence in the proposed label.
+- **Caveats or ambiguity**: lineage overlap, activation-state confounding, or insufficient marker coverage.
+- **Recommended next step**: what marker, modality, or follow-up validation would most reduce uncertainty.
 
 ## Failure modes
 

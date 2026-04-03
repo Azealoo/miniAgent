@@ -1,11 +1,16 @@
 ---
 name: buffer_recipe_scaler
 description: Scale a buffer recipe to a target volume and compute component masses/volumes.
-category: bio/calculations
+category: bio/molecular_lab
 version: 1.0
 requires_tools: [python_repl]
 requires_network: false
 user_invocable: true
+species: any
+modality: wet_lab
+stage: utilities
+stability: experimental
+safety_level: low
 ---
 
 # Buffer Recipe Scaler

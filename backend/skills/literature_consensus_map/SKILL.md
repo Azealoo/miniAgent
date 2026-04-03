@@ -3,7 +3,7 @@ name: literature_consensus_map
 description: Summarize the current literature consensus, disagreements, and evidence strength for a biological question.
 category: bio/literature
 version: 1.0
-requires_tools: [ncbi_eutils, search_knowledge_base, python_repl]
+requires_tools: [search_knowledge_base, evidence_retrieval, evidence_review, python_repl]
 requires_network: true
 user_invocable: true
 tags: [literature, consensus, controversy, evidence-synthesis]
@@ -11,7 +11,7 @@ aliases: [consensus_builder, literature_synthesis]
 species: any
 modality: literature
 stage: interpretation
-stability: evolving
+stability: stable
 safety_level: medium
 ---
 
@@ -27,25 +27,25 @@ Use this skill when the user asks for the current state of the field on a questi
 
 ## Required inputs
 
-- **question**: The biological claim, mechanism, or target of interest
+- **question**: the biological claim, mechanism, or target of interest
 - **context** (optional): species, tissue, disease, or experimental system
 
 ## Steps
 
-1. Search `knowledge/` with `search_knowledge_base` for any local playbooks or prior notes on the topic.
-2. Use `ncbi_eutils` to search PubMed with a focused query combining the main question and context.
-3. Group findings into:
-   - strong recurring claims
-   - partial support or context-dependent findings
-   - disagreement or uncertainty
-4. Use `python_repl` if helpful to organize papers into a small evidence table.
-5. Keep citations attached to the claims. Do not overstate consensus when evidence is sparse.
+1. Restate the biological question and the key scope assumptions such as species, tissue, disease, and perturbation context.
+2. Search `knowledge/` with `search_knowledge_base` for local notes, prior evidence syntheses, or project-specific framing.
+3. Use `evidence_retrieval` to gather a bounded set of relevant PubMed-backed evidence cards for the question.
+4. Use `evidence_review` to separate supported conclusions, unresolved conflicts, and explicit unsupported claims when the evidence is thin.
+5. Use `python_repl` if helpful to organize the included studies into a small comparison table.
+6. Keep citations attached to claims and do not overstate consensus when the literature is sparse or context-dependent.
 
 ## Output format
 
-- **Consensus summary**
-- **Evidence table**: Claim | Support level | Example PMID(s) | Caveat
-- **Open questions**
+- **Biological context or assumptions**: species, system, disease, and scope used to judge consensus.
+- **Evidence or source basis**: which `search_knowledge_base`, `evidence_retrieval`, and `evidence_review` artifacts supported the summary.
+- **Consensus map**: strong recurring claims, context-dependent findings, and disagreement or uncertainty.
+- **Caveats or ambiguity**: weak evidence base, unresolved conflicts, or questions that remain unsupported.
+- **Recommended next step**: what evidence gap to resolve, experiment to prioritize, or narrower follow-up question to ask.
 
 ## Failure modes
 

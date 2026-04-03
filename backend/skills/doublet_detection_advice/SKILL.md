@@ -1,11 +1,16 @@
 ---
 name: doublet_detection_advice
 description: Advise on doublet detection and removal for scRNA (scrublet, scDblFinder, best practices).
-category: bio/scRNA
+category: bio/single_cell_rna
 version: 1.0
 requires_tools: [search_knowledge_base]
 requires_network: false
 user_invocable: true
+species: any
+modality: single_cell_rna
+stage: qc
+stability: experimental
+safety_level: low
 ---
 
 # Doublet Detection Advice

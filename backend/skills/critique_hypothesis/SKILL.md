@@ -1,11 +1,16 @@
 ---
 name: critique_hypothesis
 description: Critically evaluate a perturbation hypothesis — challenge assumptions, propose negative controls, and flag confounders.
-category: bio/perturbation
+category: bio/perturb_seq
 version: 1.0
 requires_tools: [search_knowledge_base, ncbi_eutils, fetch_url, python_repl]
 requires_network: true
 user_invocable: true
+species: any
+modality: perturb_seq
+stage: validation
+stability: evolving
+safety_level: medium
 ---
 
 # Critique Hypothesis

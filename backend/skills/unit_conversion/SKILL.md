@@ -1,11 +1,16 @@
 ---
 name: unit_conversion
 description: Convert between common lab units (mg/mL to M, % to molar, ng/µL, etc.) given MW where needed.
-category: bio/calculations
+category: bio/molecular_lab
 version: 1.0
 requires_tools: [python_repl]
 requires_network: false
 user_invocable: true
+species: any
+modality: wet_lab
+stage: utilities
+stability: experimental
+safety_level: low
 ---
 
 # Unit Conversion

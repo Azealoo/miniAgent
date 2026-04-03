@@ -3,7 +3,7 @@ name: analysis_to_slurm_runner
 description: Turn an analysis request into a Slurm-ready execution plan with commands, resource assumptions, and job structure.
 category: bio/compute
 version: 1.0
-requires_tools: [search_knowledge_base, slurm_tool, python_repl, write_file]
+requires_tools: [search_knowledge_base, python_repl, write_file]
 requires_network: false
 user_invocable: true
 tags: [slurm, pipeline, execution, hpc, runbook]
@@ -38,7 +38,7 @@ Use this skill when the user wants to move from analysis planning to execution o
 2. Infer the likely resource profile from the requested analysis.
 3. Use `python_repl` to organize the run plan if needed.
 4. If a script is requested, draft a Slurm script or execution note using `write_file`.
-5. Use `slurm_tool` only if the user explicitly wants to inspect cluster status or submit a job.
+5. Keep the output at the draft-plan level unless the user explicitly asks for a runnable script path.
 
 ## Output format
 

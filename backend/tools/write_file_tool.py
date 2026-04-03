@@ -1,12 +1,14 @@
 """
 Safe allowlisted file writer. The agent can only write under memory/, skills/, and knowledge/.
 Path traversal is blocked. Used to update MEMORY.md, create/edit skills, or cache to knowledge.
+New scoped memory markdown files may include typed frontmatter; MEMORY.md remains the concise index.
 """
 from pathlib import Path
 from typing import Type
 
 import config
 from audit.store import append_file_written_event
+from graph.memory_types import validate_memory_write
 from hardening import is_secret_like_path
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -25,10 +27,17 @@ _MAX_CONTENT = 50_000
 
 class WriteFileInput(BaseModel):
     path: str = Field(
-        description="Relative path under memory/, skills/, or knowledge/ (e.g. memory/MEMORY.md, knowledge/cache/source/id.md)."
+        description=(
+            "Relative path under memory/, skills/, or knowledge/ "
+            "(e.g. memory/MEMORY.md, memory/project/runbook.md, knowledge/cache/source/id.md)."
+        )
     )
     content: str = Field(
-        description="Full file content to write. Use UTF-8 text. File will be overwritten."
+        description=(
+            "Full file content to write. Use UTF-8 text. File will be overwritten. "
+            "Prefer typed frontmatter for new markdown files under memory/project/, "
+            "memory/user/, or memory/agent/."
+        )
     )
 
 
@@ -37,6 +46,9 @@ class WriteFileTool(BaseTool):
     description: str = (
         "Write or overwrite a file under memory/, skills/, or knowledge/. "
         "Use this to update MEMORY.md, create or edit skill SKILL.md files, or save cached content to knowledge/. "
+        "Keep memory/MEMORY.md as a concise index and prefer typed frontmatter "
+        "(type, name, description) for new markdown files under memory/project/, "
+        "memory/user/, or memory/agent/. "
         "Path must be relative and start with one of: memory/, skills/, knowledge/. "
         "Input: path (relative) and content (full file content)."
     )
@@ -139,13 +151,24 @@ class WriteFileTool(BaseTool):
                     metadata={"requested_path": path, "character_count": len(content)},
                 )
 
+            memory_validation_errors = validate_memory_write(path_clean, content)
+            if memory_validation_errors:
+                reason = " ".join(memory_validation_errors)
+                _audit("invalid_input", reason=reason)
+                return invalid_input_result(
+                    self.name,
+                    reason,
+                    metadata={"requested_path": path, "sanitized_path": path_clean},
+                )
+
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             memory_index_rebuilt = False
             skills_rescanned = False
 
-            if path_clean == "memory/MEMORY.md":
-                # Rebuild memory vector index so RAG retrieval sees the new content.
+            if path_clean.startswith("memory/"):
+                # Rebuild memory vector index so writes anywhere under memory/
+                # are reflected in retrieval, not only MEMORY.md updates.
                 try:
                     from graph.agent import agent_manager
                     if agent_manager.memory_indexer:

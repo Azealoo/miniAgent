@@ -1,0 +1,150 @@
+import { describe, expect, it } from "vitest";
+import { makeGenericToolResultEnvelope } from "@/test/fixtures";
+import {
+  applyStreamEvent,
+  createOptimisticAssistantMessage,
+  type StreamReducerState,
+} from "./chat-stream-reducer";
+import type { ChatStreamEvent, Message } from "./types";
+
+function reduceEvent(
+  state: StreamReducerState,
+  event: ChatStreamEvent,
+  now: number
+): StreamReducerState {
+  return applyStreamEvent(state, event, {
+    createMessageId: () => "assistant-2",
+    now,
+  });
+}
+
+describe("applyStreamEvent", () => {
+  it("keeps request-id, pending-tool, and new_response semantics on one reducer path", () => {
+    const toolResult = makeGenericToolResultEnvelope();
+    const userMessage: Message = {
+      id: "user-1",
+      role: "user",
+      content: "Check this request for readiness.",
+      blocks: [{ type: "text", text: "Check this request for readiness." }],
+    };
+
+    let state: StreamReducerState = {
+      messages: [
+        userMessage,
+        createOptimisticAssistantMessage("assistant-1", 100),
+      ],
+      streamingMessageId: "assistant-1",
+    };
+
+    state = reduceEvent(
+      state,
+      {
+        type: "retrieval",
+        query: "readiness review",
+        request_id: "request-1",
+        results: [
+          {
+            source: "knowledge/readiness-checklist.md",
+            score: 0.92,
+            text: "Inspect the readiness checklist before execution.",
+          },
+        ],
+      },
+      110
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "tool_start",
+        tool: "read_file",
+        input: "knowledge/readiness-checklist.md",
+        run_id: "tool-1",
+        request_id: "request-1",
+      },
+      120
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "tool_end",
+        tool: "read_file",
+        output: "Read knowledge/readiness-checklist.md.",
+        run_id: "tool-1",
+        request_id: "request-1",
+        result: toolResult,
+      },
+      130
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "plan_created",
+        summary: "Planner produced 2 steps.",
+        plan: { goal: "Check readiness", steps: [{ step_id: "collect" }, { step_id: "report" }] },
+        request_id: "request-1",
+      },
+      140
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "verification_result",
+        summary: "Verifier verdict: pass. Looks good.",
+        verdict: "pass",
+        verification: { verdict: "pass", summary: "Looks good." },
+        request_id: "request-1",
+      },
+      150
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "token",
+        content: "BioAPEX reviewed the request.",
+        request_id: "request-1",
+      },
+      160
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "new_response",
+        request_id: "request-1",
+      },
+      170
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "done",
+        content: "BioAPEX prepared the final recommendation.",
+        request_id: "request-1",
+      },
+      180
+    );
+
+    expect(state.streamingMessageId).toBeNull();
+    expect(state.messages).toHaveLength(3);
+
+    const firstAssistant = state.messages[1];
+    expect(firstAssistant.request_id).toBe("request-1");
+    expect(firstAssistant.content).toBe("BioAPEX reviewed the request.");
+    expect(firstAssistant.isStreaming).toBe(false);
+    expect(firstAssistant.pendingTool).toBeUndefined();
+    expect(firstAssistant.tool_calls).toHaveLength(1);
+    expect(firstAssistant.blocks?.map((block) => block.type)).toEqual([
+      "retrieval",
+      "tool_use",
+      "tool_result",
+      "plan",
+      "verification",
+      "text",
+    ]);
+
+    const repairedAssistant = state.messages[2];
+    expect(repairedAssistant.request_id).toBe("request-1");
+    expect(repairedAssistant.content).toBe("BioAPEX prepared the final recommendation.");
+    expect(repairedAssistant.isStreaming).toBe(false);
+    expect(repairedAssistant.endedAtMs).toBe(180);
+  });
+});

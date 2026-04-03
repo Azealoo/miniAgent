@@ -1,11 +1,16 @@
 ---
 name: perturbation_signature_compare
 description: Compare gene signatures across perturbations and suggest clustering or grouping.
-category: bio/perturbation
+category: bio/perturb_seq
 version: 1.0
 requires_tools: [read_file, python_repl]
 requires_network: false
 user_invocable: true
+species: any
+modality: perturb_seq
+stage: analysis
+stability: experimental
+safety_level: low
 ---
 
 # Perturbation Signature Compare

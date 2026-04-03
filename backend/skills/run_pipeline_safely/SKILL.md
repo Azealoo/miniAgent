@@ -1,11 +1,16 @@
 ---
 name: run_pipeline_safely
 description: Propose safe commands and directory hygiene for running a pipeline.
-category: bio/hpc
+category: bio/compute
 version: 1.0
 requires_tools: [terminal, read_file]
 requires_network: false
 user_invocable: true
+species: any
+modality: compute
+stage: utilities
+stability: experimental
+safety_level: medium
 ---
 
 # Run Pipeline Safely

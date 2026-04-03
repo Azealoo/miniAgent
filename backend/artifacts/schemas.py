@@ -87,7 +87,7 @@ ComplianceRuntimeState = Literal[
     "approval_required",
     "approved_override",
 ]
-ComplianceApprovalScope = Literal["message", "workflow", "run"]
+ComplianceApprovalScope = Literal["message", "run"]
 ComplianceDecisionSource = Literal["deterministic_rules", "safe_fallback", "human_override"]
 ComplianceBlockStatus = Literal["not_blocked", "blocked"]
 ComplianceSeverity = Literal["low", "medium", "high", "critical"]
@@ -3029,7 +3029,6 @@ class ComplianceRequestContext(BaseModel):
 
     user_message: str
     attached_identifiers: list[str] = Field(default_factory=list)
-    selected_workflow: str | None = None
     session_id: str | None = None
 
     @field_validator("user_message")
@@ -3042,7 +3041,7 @@ class ComplianceRequestContext(BaseModel):
     def _validate_attached_identifiers(cls, value: list[str]) -> list[str]:
         return [_require_non_empty(item, field_name="attached_identifier") for item in value]
 
-    @field_validator("selected_workflow", "session_id")
+    @field_validator("session_id")
     @classmethod
     def _validate_optional_text(cls, value: str | None, info) -> str | None:
         if value is None:

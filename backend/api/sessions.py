@@ -3,12 +3,12 @@ Session management endpoints.
 
 GET    /api/sessions
 GET    /api/sessions/{id}/files/summary
-GET    /api/sessions/workflows/summary
 POST   /api/sessions
 PUT    /api/sessions/{id}
 DELETE /api/sessions/{id}
-GET    /api/sessions/{id}/messages   — full history including system prompt
-GET    /api/sessions/{id}/history    — raw messages with tool_calls and retrievals
+GET    /api/sessions/{id}/history    — raw messages with additive typed content blocks
+GET    /api/sessions/{id}/continuity — compressed continuity summaries for older history
+GET    /api/sessions/{id}/archives/{archive_id} — archived message batches for older history
 POST   /api/sessions/{id}/generate-title
 """
 from fastapi import APIRouter, HTTPException, Request
@@ -16,6 +16,7 @@ from pydantic import BaseModel, field_validator
 
 from access_control import require_execution_access, require_inspection_access
 from graph.session_manager import _validate_session_id
+from runtime.title_generation import generate_chat_title
 
 router = APIRouter()
 
@@ -42,14 +43,6 @@ def _check_session_id(session_id: str) -> None:
 def list_sessions(request: Request = None):
     require_inspection_access(request)
     return _sm().list_sessions()
-
-
-@router.get("/sessions/workflows/summary")
-def list_workflow_workspace_summary(request: Request = None):
-    require_inspection_access(request)
-    from graph.workflow_workspace import list_workflow_workspace_summaries
-
-    return {"items": list_workflow_workspace_summaries(_sm())}
 
 
 @router.get("/sessions/{session_id}/files/summary")
@@ -104,34 +97,47 @@ def rename_session(session_id: str, body: RenameRequest, request: Request = None
 def delete_session(session_id: str, request: Request = None):
     require_execution_access(request)
     _check_session_id(session_id)
-    _sm().delete_session(session_id)
-
-
-# ------------------------------------------------------------------ #
-# Messages                                                             #
-# ------------------------------------------------------------------ #
-
-
-@router.get("/sessions/{session_id}/messages")
-def get_messages(session_id: str, request: Request = None):
-    """Returns full message list including a leading system prompt entry."""
-    require_inspection_access(request)
-    _check_session_id(session_id)
     from graph.agent import agent_manager
-    from graph.prompt_builder import build_system_prompt
-    from config import get_rag_mode
 
-    system_prompt = build_system_prompt(agent_manager.base_dir, get_rag_mode())  # type: ignore[arg-type]
-    messages = _sm().load_session(session_id)
-    return [{"role": "system", "content": system_prompt}] + messages
+    _sm().delete_session(session_id)
+    agent_manager.clear_session_runtime(session_id)
+
+
+# ------------------------------------------------------------------ #
+# History                                                              #
+# ------------------------------------------------------------------ #
 
 
 @router.get("/sessions/{session_id}/history")
 def get_history(session_id: str, request: Request = None):
-    """Returns raw stored messages (with tool_calls/retrievals, without system prompt)."""
+    """Returns raw stored messages, including additive typed content blocks."""
     require_inspection_access(request)
     _check_session_id(session_id)
     return _sm().load_session(session_id)
+
+
+@router.get("/sessions/{session_id}/continuity")
+def get_session_continuity(session_id: str, request: Request = None):
+    """Returns compact continuity summaries for compressed older history."""
+    require_inspection_access(request)
+    _check_session_id(session_id)
+    return {"summaries": _sm().get_session_continuity(session_id)}
+
+
+@router.get("/sessions/{session_id}/archives/{archive_id}")
+def get_session_history_archive(
+    session_id: str, archive_id: str, request: Request = None
+):
+    """Returns one archived batch of older messages for on-demand inspection."""
+    require_inspection_access(request)
+    _check_session_id(session_id)
+
+    try:
+        return _sm().load_archived_history(session_id, archive_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid archive_id")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Archive not found")
 
 
 # ------------------------------------------------------------------ #
@@ -144,7 +150,6 @@ async def generate_title(session_id: str, request: Request = None):
     require_execution_access(request)
     _check_session_id(session_id)
     from graph.agent import agent_manager
-    from langchain_core.messages import HumanMessage, SystemMessage
 
     messages = _sm().load_session(session_id)
     if not messages:
@@ -155,20 +160,7 @@ async def generate_title(session_id: str, request: Request = None):
         raise HTTPException(400, "No user messages found")
 
     try:
-        resp = await agent_manager.llm.ainvoke(  # type: ignore[union-attr]
-            [
-                SystemMessage(
-                    content="You generate concise chat titles. Reply with ONLY the title."
-                ),
-                HumanMessage(
-                    content=(
-                        f"Generate a short English title for a conversation that starts with: '{first_user[:200]}'. "
-                        "Maximum 10 words. No punctuation, no quotes."
-                    )
-                ),
-            ]
-        )
-        title = resp.content.strip()[:60]
+        title = await generate_chat_title(agent_manager, first_user)
     except Exception as exc:
         raise HTTPException(500, str(exc))
 

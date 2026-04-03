@@ -26,7 +26,6 @@ def append_compliance_audit_record(
     summary = request_summary(
         message=report.request_context.user_message,
         attached_identifiers=report.request_context.attached_identifiers,
-        selected_workflow=report.request_context.selected_workflow,
     )
     record = {
         "event_type": "compliance_decision",
@@ -59,7 +58,6 @@ def append_compliance_audit_record(
         outcome=report.final_disposition,
         session_id=report.request_context.session_id,
         run_id=report.run_id,
-        workflow_id=report.request_context.selected_workflow,
         artifact_paths=[artifact_relpath],
         details={
             "schema_version": report.schema_version,

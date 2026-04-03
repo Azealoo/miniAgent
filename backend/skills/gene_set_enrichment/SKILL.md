@@ -1,11 +1,16 @@
 ---
 name: gene_set_enrichment
 description: Run or interpret gene set enrichment (Enrichr/g:Profiler) and summarize results.
-category: bio/scRNA
+category: bio/single_cell_rna
 version: 1.0
 requires_tools: [fetch_url, python_repl]
 requires_network: true
 user_invocable: true
+species: any
+modality: single_cell_rna
+stage: interpretation
+stability: experimental
+safety_level: low
 ---
 
 # Gene Set Enrichment

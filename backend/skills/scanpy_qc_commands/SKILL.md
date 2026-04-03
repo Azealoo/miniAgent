@@ -1,11 +1,16 @@
 ---
 name: scanpy_qc_commands
 description: Suggest Scanpy/Python commands for basic scRNA QC (filtering, mito, UMI).
-category: bio/scRNA
+category: bio/single_cell_rna
 version: 1.0
 requires_tools: [python_repl]
 requires_network: false
 user_invocable: true
+species: any
+modality: single_cell_rna
+stage: qc
+stability: experimental
+safety_level: low
 ---
 
 # Scanpy QC Commands

@@ -107,73 +107,31 @@ class TestSessionSummaryHelpers:
         assert "/tmp/output/report.txt" in human_prompt
         assert "blocked risky action pending review" in human_prompt
 
-    def test_format_messages_for_summary_includes_workflow_event_context(self):
+    def test_format_messages_for_summary_ignores_unknown_legacy_event_context(self):
         rendered = format_messages_for_summary(
             [
                 {
                     "role": "assistant",
-                    "content": "Workflow requires manual review before publishing.",
-                    "workflow_events": [
+                    "content": "Legacy run metadata should not leak into the summary.",
+                    "legacy_events": [
                         {
-                            "type": "workflow_start",
+                            "type": "legacy_run_event",
                             "run_id": "run-20260319T120000Z-demo1234",
-                            "workflow_id": "rna-seq-qc",
-                            "lifecycle_status": "created",
-                            "run_record_path": (
-                                "artifacts/rna-seq-qc/2026-03-19/"
-                                "run-20260319T120000Z-demo1234/run.json"
-                            ),
-                        },
-                        {
-                            "type": "workflow_artifact",
-                            "run_id": "run-20260319T120000Z-demo1234",
-                            "workflow_id": "rna-seq-qc",
-                            "artifact": {
-                                "artifact_type": "qa_report",
+                            "payload": {
                                 "path": (
                                     "artifacts/rna-seq-qc/2026-03-19/"
-                                    "run-20260319T120000Z-demo1234/qa_report.json"
+                                    "run-20260319T120000Z-demo1234/run.json"
                                 ),
                             },
-                        },
-                        {
-                            "type": "workflow_blocked",
-                            "run_id": "run-20260319T120000Z-demo1234",
-                            "workflow_id": "rna-seq-qc",
-                            "lifecycle_status": "blocked",
-                            "reason": "approval required before publish",
-                            "step_id": "publish",
-                        },
-                        {
-                            "type": "workflow_step_end",
-                            "run_id": "run-20260319T120000Z-demo1234",
-                            "workflow_id": "rna-seq-qc",
-                            "step_id": "summarize_qc",
-                            "status": "completed",
-                            "artifact_refs": [
-                                {
-                                    "artifact_type": "qa_report",
-                                    "path": (
-                                        "artifacts/rna-seq-qc/2026-03-19/"
-                                        "run-20260319T120000Z-demo1234/"
-                                        "outputs/generated/summarize_qc/qa_report.json"
-                                    ),
-                                }
-                            ],
                         },
                     ],
                 }
             ]
         )
 
-        assert "Workflow event 1: workflow_start" in rendered
-        assert "Workflow run: run-20260319T120000Z-demo1234" in rendered
-        assert "Workflow run record: artifacts/rna-seq-qc/2026-03-19/" in rendered
-        assert "Workflow event 2: workflow_artifact" in rendered
-        assert "Workflow artifact: artifacts/rna-seq-qc/2026-03-19/" in rendered
-        assert "Workflow step: publish" in rendered
-        assert "Workflow reason: approval required before publish" in rendered
-        assert "outputs/generated/summarize_qc/qa_report.json" in rendered
+        assert "Legacy run metadata should not leak into the summary." in rendered
+        assert "legacy_run_event" not in rendered
+        assert "run-20260319T120000Z-demo1234" not in rendered
 
     def test_format_messages_for_summary_includes_tool_artifacts_and_evidence_review_markers(self):
         rendered = format_messages_for_summary(
@@ -269,7 +227,11 @@ class TestSaveAndLoad:
         sm.save_message(sid, "user", "Hello")
         msgs = sm.load_session(sid)
         assert len(msgs) == 1
-        assert msgs[0] == {"role": "user", "content": "Hello"}
+        assert msgs[0]["role"] == "user"
+        assert msgs[0]["content"] == "Hello"
+        assert msgs[0]["blocks"] == [{"type": "text", "text": "Hello"}]
+        stored = sm._read(sid)["messages"][0]
+        assert stored["blocks"] == [{"type": "text", "text": "Hello"}]
 
     def test_save_assistant_message(self, sm):
         sid = sm.create_session()
@@ -284,24 +246,32 @@ class TestSaveAndLoad:
         sm.save_message(sid, "assistant", "Done", tool_calls)
         msgs = sm.load_session(sid)
         assert msgs[0]["tool_calls"] == tool_calls
-
-    def test_save_message_with_workflow_events(self, sm):
-        sid = sm.create_session()
-        workflow_events = [
-            {
-                "contract_version": "workflow_event.v1",
-                "type": "workflow_start",
-                "run_id": "run-20260319T120000Z-demo1234",
-                "workflow_id": "rna-seq-qc",
-                "workflow_name": "RNA-seq QC",
-                "lifecycle_status": "created",
-                "resumed": False,
-                "run_record_path": "artifacts/rna-seq-qc/2026-03-19/run-20260319T120000Z-demo1234/run.json",
-            }
+        assert msgs[0]["blocks"] == [
+            {"type": "tool_use", "tool": "terminal", "input": "echo hi"},
+            {"type": "tool_result", "tool": "terminal", "output": "hi"},
+            {"type": "text", "text": "Done"},
         ]
-        sm.save_message(sid, "assistant", "", workflow_events=workflow_events)
+
+    def test_load_session_ignores_unknown_legacy_event_blocks(self, sm):
+        sid = sm.create_session()
+        sm.save_message(
+            sid,
+            "assistant",
+            "",
+            blocks=[
+                {
+                    "type": "legacy_event",
+                    "event": {
+                        "contract_version": "legacy_event.v1",
+                        "type": "legacy_start",
+                        "run_id": "run-20260319T120000Z-demo1234",
+                    },
+                }
+            ],
+        )
         msgs = sm.load_session(sid)
-        assert msgs[0]["workflow_events"] == workflow_events
+        assert "legacy_events" not in msgs[0]
+        assert "blocks" not in msgs[0]
 
     def test_save_message_with_retrievals(self, sm):
         sid = sm.create_session()
@@ -315,12 +285,89 @@ class TestSaveAndLoad:
         sm.save_message(sid, "assistant", "Done", retrievals=retrievals)
         msgs = sm.load_session(sid)
         assert msgs[0]["retrievals"] == retrievals
+        assert msgs[0]["blocks"] == [
+            {"type": "retrieval", "results": retrievals},
+            {"type": "text", "text": "Done"},
+        ]
 
     def test_no_tool_calls_key_when_none(self, sm):
         sid = sm.create_session()
         sm.save_message(sid, "user", "text")
         msgs = sm.load_session(sid)
         assert "tool_calls" not in msgs[0]
+
+    def test_load_session_derives_legacy_fields_from_blocks_only_messages(self, sm):
+        sid = sm.create_session()
+        data = sm._read(sid)
+        data["messages"] = [
+            {
+                "role": "assistant",
+                "request_id": "request-1",
+                "blocks": [
+                    {
+                        "type": "retrieval",
+                        "query": "Find TP53 evidence",
+                        "results": [
+                            {
+                                "text": "TP53 regulates stress response genes.",
+                                "score": 0.88,
+                                "source": "knowledge/tp53.md",
+                            }
+                        ],
+                    },
+                    {
+                        "type": "tool_use",
+                        "tool": "read_file",
+                        "input": "memory/MEMORY.md",
+                        "run_id": "tool-run-1",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool": "read_file",
+                        "output": "# Memory",
+                        "run_id": "tool-run-1",
+                        "result": {
+                            "contract_version": "tool_result.v1",
+                            "tool_name": "read_file",
+                            "summary": "# Memory",
+                            "structured_payload": {
+                                "path": "memory/MEMORY.md",
+                                "content": "# Memory",
+                            },
+                            "artifact_refs": [],
+                            "warnings": [],
+                            "status": "success",
+                            "outcome": "success",
+                            "error": None,
+                            "metadata": {},
+                            "source_payload": None,
+                        },
+                    },
+                    {
+                        "type": "legacy_event",
+                        "event": {
+                            "contract_version": "legacy_event.v1",
+                            "type": "legacy_done",
+                            "run_id": "run-1",
+                            "run_record_path": "artifacts/rna-seq-qc/demo/run.json",
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": "Structured blocks only.",
+                    },
+                ],
+            }
+        ]
+        sm._write(sid, data)
+
+        msgs = sm.load_session(sid)
+        assert msgs[0]["content"] == "Structured blocks only."
+        assert msgs[0]["retrievals"][0]["source"] == "knowledge/tp53.md"
+        assert msgs[0]["tool_calls"][0]["tool"] == "read_file"
+        assert msgs[0]["tool_calls"][0]["input"] == "memory/MEMORY.md"
+        assert msgs[0]["tool_calls"][0]["result"]["tool_name"] == "read_file"
+        assert "legacy_events" not in msgs[0]
 
     def test_multiple_messages_in_order(self, sm):
         sid = sm.create_session()
@@ -329,6 +376,16 @@ class TestSaveAndLoad:
         msgs = sm.load_session(sid)
         assert len(msgs) == 5
         assert [m["content"] for m in msgs] == [f"msg{i}" for i in range(5)]
+
+    def test_load_request_messages_filters_by_request_id(self, sm):
+        sid = sm.create_session()
+        sm.save_message(sid, "user", "First", request_id="request-1")
+        sm.save_message(sid, "assistant", "Reply one", request_id="request-1")
+        sm.save_message(sid, "user", "Second", request_id="request-2")
+
+        msgs = sm.load_request_messages(sid, "request-1")
+
+        assert [msg["content"] for msg in msgs] == ["First", "Reply one"]
 
     def test_updated_at_changes_on_save(self, sm):
         sid = sm.create_session()
@@ -485,6 +542,83 @@ class TestCompressHistory:
         assert summaries[0]["results_register"] == ["first block result"]
         assert summaries[1]["results_register"] == ["second block result"]
 
+    def test_list_archived_history_batches_returns_archive_metadata(self, sm):
+        sid = sm.create_session()
+        self._populate(sm, sid, 6)
+
+        archived, _ = sm.compress_history(sid, _structured_summary("batch one"), 4)
+        assert archived == 4
+
+        batches = sm.list_archived_history_batches(sid)
+        assert len(batches) == 1
+        assert batches[0]["message_count"] == 4
+        assert batches[0]["archive_id"].isdigit()
+
+    def test_load_archived_history_returns_normalized_messages(self, sm):
+        sid = sm.create_session()
+        self._populate(sm, sid, 6)
+        sm.compress_history(sid, _structured_summary("batch two"), 4)
+
+        archive_id = sm.list_archived_history_batches(sid)[0]["archive_id"]
+        archived_messages = sm.load_archived_history(sid, archive_id)
+
+        assert len(archived_messages) == 4
+        assert archived_messages[0]["role"] == "user"
+        assert archived_messages[0]["content"] == "msg0"
+
+    def test_get_session_continuity_pairs_summaries_with_archives(self, sm):
+        sid = sm.create_session()
+        self._populate(sm, sid, 10)
+        sm.compress_history(sid, _structured_summary("first block"), 4)
+        self._populate(sm, sid, 10)
+        sm.compress_history(sid, _structured_summary("second block"), 4)
+
+        continuity = sm.get_session_continuity(sid)
+
+        assert len(continuity) == 2
+        assert continuity[0]["results_register"] == ["first block result"]
+        assert continuity[0]["archived_message_count"] == 4
+        assert continuity[0]["archive_id"].isdigit()
+        assert continuity[1]["results_register"] == ["second block result"]
+        assert continuity[1]["archived_message_count"] == 4
+
+    def test_get_session_continuity_keeps_legacy_summaries_unlinked(self, sm):
+        sid = sm.create_session()
+        data = sm._read(sid)
+        data["compressed_context"] = "Legacy summary with PMID:12345 and archived findings"
+        sm._write(sid, data)
+        self._populate(sm, sid, 6)
+
+        sm.compress_history(sid, _structured_summary("fresh block"), 4)
+        continuity = sm.get_session_continuity(sid)
+
+        assert len(continuity) == 2
+        assert continuity[0]["source_format"] == "legacy"
+        assert continuity[0]["archive_id"] is None
+        assert continuity[0]["archived_message_count"] == 0
+        assert continuity[1]["results_register"] == ["fresh block result"]
+        assert continuity[1]["archive_id"].isdigit()
+        assert continuity[1]["archived_message_count"] == 4
+
+    def test_get_session_continuity_does_not_guess_when_archive_counts_mismatch(self, sm):
+        sid = sm.create_session()
+        self._populate(sm, sid, 10)
+        sm.compress_history(sid, _structured_summary("first block"), 4)
+        self._populate(sm, sid, 10)
+        sm.compress_history(sid, _structured_summary("second block"), 4)
+
+        data = sm._read(sid)
+        data.pop("compressed_archive_index", None)
+        sm._write(sid, data)
+
+        first_archive = sorted(sm.archive_dir.glob(f"{sid}_*.json"))[0]
+        first_archive.write_text("{invalid", encoding="utf-8")
+
+        continuity = sm.get_session_continuity(sid)
+
+        assert [item["archive_id"] for item in continuity] == [None, None]
+        assert [item["archived_message_count"] for item in continuity] == [0, 0]
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # rename / delete / list
@@ -501,6 +635,18 @@ class TestRenameDeleteList:
         sid = sm.create_session()
         sm.delete_session(sid)
         assert not (tmp_path / "sessions" / f"{sid}.json").exists()
+
+    def test_delete_session_removes_archived_batches(self, sm, tmp_path):
+        sid = sm.create_session()
+        for i in range(6):
+            sm.save_message(sid, "user" if i % 2 == 0 else "assistant", f"msg{i}")
+        sm.compress_history(sid, _structured_summary("cleanup check"), 4)
+
+        assert list((tmp_path / "sessions" / "archive").glob(f"{sid}_*.json"))
+
+        sm.delete_session(sid)
+
+        assert not list((tmp_path / "sessions" / "archive").glob(f"{sid}_*.json"))
 
     def test_delete_nonexistent_no_error(self, sm):
         sm.delete_session(_valid_session_id(2))  # should not raise

@@ -21,19 +21,23 @@ import {
 } from "./access-control";
 import * as api from "./api";
 import {
+  applyStreamEvent,
+  createOptimisticAssistantMessage,
+} from "./chat-stream-reducer";
+import { normalizeMessageContent } from "./message-blocks";
+import {
   getScopedSurfaceErrorMessage,
   shouldPromoteScopeError,
 } from "./surface-errors";
-import { getLatestSelectedWorkflow } from "./session-status";
 import { uid } from "./utils";
 import type {
   AccessScope,
   AccessScopeState,
+  InspectorTab,
   Message,
+  SessionContinuitySummary,
   Session,
   SessionHistoryMessage,
-  ToolCall,
-  WorkspaceMode,
 } from "./types";
 
 // ────────────────────────────────────────────────────────────────
@@ -56,14 +60,11 @@ interface AppContextValue {
   sessionListError: string | null;
   sessionHistoryStatus: "idle" | "loading" | "ready" | "error";
   sessionHistoryError: string | null;
-  ragMode: boolean;
-  canManageRagMode: boolean;
-  workspaceMode: WorkspaceMode;
-  selectedWorkflow: string | null;
+  sessionContinuitySummaries: SessionContinuitySummary[];
   attachedIdentifiers: string[];
   draftMessage: string;
   draftRevision: number;
-  inspectorTab: "files" | "sources" | "memory" | "skills" | "usage";
+  inspectorTab: InspectorTab;
   inspectorPreviewPath: string | null;
 
   // Actions
@@ -75,8 +76,6 @@ interface AppContextValue {
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
   sendMessage: (content: string, context?: api.ChatRequestContext) => Promise<void>;
-  setWorkspaceMode: (mode: WorkspaceMode) => void;
-  selectWorkflow: (workflowId: string | null) => void;
   uploadAttachedReference: (file: File) => Promise<void>;
   addAttachedIdentifier: (identifier: string) => void;
   removeAttachedIdentifier: (identifier: string) => void;
@@ -85,13 +84,9 @@ interface AppContextValue {
   clearDraftMessage: () => void;
   setAccessToken: (scope: AccessScope, token: string) => void;
   clearAccessTokens: () => void;
-  setInspectorTab: (
-    tab: "files" | "sources" | "memory" | "skills" | "usage"
-  ) => void;
+  setInspectorTab: (tab: InspectorTab) => void;
   openInspectorPath: (path: string) => void;
   clearInspectorPath: () => void;
-  setRagMode: (enabled: boolean) => Promise<void>;
-  compressSession: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -127,23 +122,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     "idle" | "loading" | "ready" | "error"
   >("idle");
   const [sessionHistoryError, setSessionHistoryError] = useState<string | null>(null);
-  const [ragMode, setRagModeState] = useState(false);
-  const [canManageRagMode, setCanManageRagMode] = useState(false);
-  const [workspaceMode, setWorkspaceModeState] = useState<WorkspaceMode>("sessions");
-  const [selectedWorkflow, setSelectedWorkflow] = useState<string | null>(null);
+  const [sessionContinuitySummaries, setSessionContinuitySummaries] = useState<
+    SessionContinuitySummary[]
+  >([]);
   const [attachedIdentifiers, setAttachedIdentifiers] = useState<string[]>([]);
   const [draftMessage, setDraftMessage] = useState("");
   const [draftRevision, setDraftRevision] = useState(0);
-  const [inspectorTab, setInspectorTabState] = useState<
-    "files" | "sources" | "memory" | "skills" | "usage"
-  >("files");
+  const [inspectorTab, setInspectorTabState] = useState<InspectorTab>("files");
   const [inspectorPreviewPath, setInspectorPreviewPath] = useState<string | null>(null);
 
   // Ref to current streaming message ID (avoids stale closure issues)
   const streamingIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
   const messagesRef = useRef<Message[]>([]);
-  const selectedWorkflowRef = useRef<string | null>(null);
+  const sessionContinuitySummariesRef = useRef<SessionContinuitySummary[]>([]);
   const referenceUploadTokenRef = useRef(0);
   const apiAuthStateRef = useRef(apiAuthState);
   const accessRefreshIdRef = useRef(0);
@@ -182,8 +174,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [messages]);
 
   useEffect(() => {
-    selectedWorkflowRef.current = selectedWorkflow;
-  }, [selectedWorkflow]);
+    sessionContinuitySummariesRef.current = sessionContinuitySummaries;
+  }, [sessionContinuitySummaries]);
 
   const runAccessProbe = useCallback(async (showChecking: boolean) => {
     const requestId = accessRefreshIdRef.current + 1;
@@ -293,7 +285,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setSessionListError(null);
     setSessionHistoryStatus("idle");
     setSessionHistoryError(null);
-    setSelectedWorkflow(null);
+    setSessionContinuitySummaries([]);
     setInspectorPreviewPath(null);
   }, [accessByScope.inspection.status, hasLoadedApiAuthState]);
 
@@ -374,6 +366,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setSessionListError(null);
       setSessionHistoryStatus("idle");
       setSessionHistoryError(null);
+      setSessionContinuitySummaries([]);
       return;
     }
 
@@ -401,7 +394,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           setMessages([]);
           setSessionHistoryStatus("idle");
           setSessionHistoryError(null);
-          setSelectedWorkflow(null);
+          setSessionContinuitySummaries([]);
           return;
         }
 
@@ -411,13 +404,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             {
               currentSessionId: currentSessionIdRef.current,
               messages: messagesRef.current,
-              selectedWorkflow: selectedWorkflowRef.current,
+              continuitySummaries: sessionContinuitySummariesRef.current,
             },
             setMessages,
             setCurrentSessionId,
-            setSelectedWorkflow,
             setSessionHistoryStatus,
             setSessionHistoryError,
+            setSessionContinuitySummaries,
             getSessionHistoryErrorMessage
           );
         } catch (error) {
@@ -432,6 +425,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           if (currentSessionIdRef.current === null && messagesRef.current.length === 0) {
             setSessionHistoryStatus("idle");
             setSessionHistoryError(null);
+            setSessionContinuitySummaries([]);
           }
           promoteInspectionScopeError(error);
         }
@@ -451,48 +445,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     hasLoadedApiAuthState,
     promoteInspectionScopeError,
   ]);
-
-  useEffect(() => {
-    if (!hasLoadedApiAuthState || accessByScope.admin.status === "checking") {
-      return;
-    }
-
-    if (!hasAdminAccess) {
-      setCanManageRagMode(false);
-      return;
-    }
-
-    let cancelled = false;
-
-    const loadRagMode = async () => {
-      try {
-        const ragCfg = await api.getRagMode();
-        if (cancelled) {
-          return;
-        }
-        setRagModeState(ragCfg.rag_mode);
-        setCanManageRagMode(true);
-      } catch (error) {
-        if (!cancelled) {
-          setCanManageRagMode(false);
-          setAccessByScope((current) => ({
-            ...current,
-            admin: classifyAccessError(
-              "admin",
-              error,
-              hasScopeBearerToken(apiAuthStateRef.current, "admin")
-            ),
-          }));
-        }
-      }
-    };
-
-    void loadRagMode();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [accessByScope.admin.status, hasAdminAccess, hasLoadedApiAuthState]);
 
   // ── Session helpers ──────────────────────────────────────────
 
@@ -524,13 +476,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         {
           currentSessionId,
           messages: messagesRef.current,
-          selectedWorkflow: selectedWorkflowRef.current,
+          continuitySummaries: sessionContinuitySummariesRef.current,
         },
         setMessages,
         setCurrentSessionId,
-        setSelectedWorkflow,
         setSessionHistoryStatus,
         setSessionHistoryError,
+        setSessionContinuitySummaries,
         getSessionHistoryErrorMessage
       );
     } catch (error) {
@@ -550,11 +502,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setSessionListStatus("ready");
     setSessionListError(null);
     setCurrentSessionId(session.id);
-    setWorkspaceModeState("sessions");
     setMessages([]);
     setSessionHistoryStatus("ready");
     setSessionHistoryError(null);
-    setSelectedWorkflow(null);
+    setSessionContinuitySummaries([]);
     setAttachedIdentifiers([]);
     setDraftMessage("");
     setDraftRevision((prev) => prev + 1);
@@ -571,16 +522,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         {
           currentSessionId,
           messages: messagesRef.current,
-          selectedWorkflow: selectedWorkflowRef.current,
+          continuitySummaries: sessionContinuitySummariesRef.current,
         },
         setMessages,
         setCurrentSessionId,
-        setSelectedWorkflow,
         setSessionHistoryStatus,
         setSessionHistoryError,
+        setSessionContinuitySummaries,
         getSessionHistoryErrorMessage
       );
-      setWorkspaceModeState("sessions");
       setAttachedIdentifiers([]);
       setDraftMessage("");
       setDraftRevision((prev) => prev + 1);
@@ -604,11 +554,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setSessions((prev) => prev.filter((s) => s.id !== id));
       if (id === currentSessionId) {
         setCurrentSessionId(null);
-        setWorkspaceModeState("sessions");
         setMessages([]);
         setSessionHistoryStatus("idle");
         setSessionHistoryError(null);
-        setSelectedWorkflow(null);
+        setSessionContinuitySummaries([]);
         setAttachedIdentifiers([]);
         setDraftMessage("");
         setDraftRevision((prev) => prev + 1);
@@ -628,38 +577,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       prev.map((s) => (s.id === id ? { ...s, title } : s))
     );
   }, [hasExecutionAccess]);
-
-  // ── RAG mode ─────────────────────────────────────────────────
-
-  const setRagMode = useCallback(async (enabled: boolean) => {
-    if (!canManageRagMode || !hasAdminAccess) {
-      return;
-    }
-
-    try {
-      const response = await api.setRagMode(enabled);
-      setRagModeState(response.rag_mode);
-      setCanManageRagMode(true);
-    } catch (error) {
-      setCanManageRagMode(false);
-      setAccessByScope((current) => ({
-        ...current,
-        admin: classifyAccessError(
-          "admin",
-          error,
-          hasScopeBearerToken(apiAuthStateRef.current, "admin")
-        ),
-      }));
-    }
-  }, [canManageRagMode, hasAdminAccess]);
-
-  const setWorkspaceMode = useCallback((mode: WorkspaceMode) => {
-    setWorkspaceModeState(mode);
-  }, []);
-
-  const selectWorkflow = useCallback((workflowId: string | null) => {
-    setSelectedWorkflow(workflowId);
-  }, []);
 
   const uploadAttachedReference = useCallback(async (file: File) => {
     if (!hasExecutionAccess) {
@@ -735,12 +652,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setApiAuthState(clearAllBearerTokens());
   }, []);
 
-  const setInspectorTab = useCallback(
-    (tab: "files" | "sources" | "memory" | "skills" | "usage") => {
-      setInspectorTabState(tab);
-    },
-    []
-  );
+  const setInspectorTab = useCallback((tab: InspectorTab) => {
+    setInspectorTabState(tab);
+  }, []);
 
   const openInspectorPath = useCallback((path: string) => {
     setInspectorPreviewPath(path);
@@ -751,29 +665,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setInspectorPreviewPath(null);
   }, []);
 
-  // ── Compression ──────────────────────────────────────────────
-
-  const compressSession = useCallback(async () => {
-    if (!currentSessionId || !hasExecutionAccess) return;
-    await api.compressSession(currentSessionId);
-    if (hasInspectionAccess) {
-      const history = await api.getHistory(currentSessionId);
-      const msgs = _historyToMessages(history);
-      setMessages(msgs);
-      setSelectedWorkflow(getLatestSelectedWorkflow(msgs));
-    }
-    await refreshSessions();
-  }, [currentSessionId, hasExecutionAccess, hasInspectionAccess, refreshSessions]);
-
   // ── Send message ─────────────────────────────────────────────
 
   const sendMessage = useCallback(
     async (content: string, context?: api.ChatRequestContext) => {
       if (isStreaming || isReferenceUploading || !hasExecutionAccess) return;
-      const requestedWorkflow =
-        context && "selectedWorkflow" in context
-          ? context.selectedWorkflow ?? null
-          : selectedWorkflow;
       const requestedAttachments =
         context && "attachedIdentifiers" in context
           ? context.attachedIdentifiers ?? []
@@ -787,183 +683,71 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setSessionListStatus("ready");
         setSessionListError(null);
         setCurrentSessionId(session.id);
-        setWorkspaceModeState("sessions");
         setSessionHistoryStatus("ready");
         setSessionHistoryError(null);
         sessionId = session.id;
       }
 
       // Add user message + streaming placeholder
-      const userMsg: Message = { id: uid(), role: "user", content };
-      const assistantMsg: Message = {
+      const userMsg: Message = {
         id: uid(),
-        role: "assistant",
-        content: "",
-        isStreaming: true,
-        tool_calls: [],
-        workflow_events: [],
+        role: "user",
+        content,
+        blocks: [{ type: "text", text: content }],
       };
+      const assistantMsg = createOptimisticAssistantMessage(uid(), Date.now());
       streamingIdRef.current = assistantMsg.id;
 
-      setMessages((prev) => [...prev, userMsg, assistantMsg]);
+      const nextMessages = [...messagesRef.current, userMsg, assistantMsg];
+      messagesRef.current = nextMessages;
+      setMessages(nextMessages);
       setIsStreaming(true);
-      setSelectedWorkflow(requestedWorkflow);
       setAttachedIdentifiers([]);
       setDraftMessage("");
       setDraftRevision((prev) => prev + 1);
 
-      await api.streamChat(content, sessionId, {
-        onRetrieval: (query, results) => {
-          const id = streamingIdRef.current;
-          if (!id) return;
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === id
-                ? { ...m, retrievals: results }
-                : m
-            )
-          );
-        },
-
-        onToken: (token) => {
-          const id = streamingIdRef.current;
-          if (!id) return;
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === id ? { ...m, content: m.content + token } : m
-            )
-          );
-        },
-
-        onToolStart: (tool, input, runId, requestId) => {
-          const id = streamingIdRef.current;
-          if (!id) return;
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === id
-                ? {
-                    ...m,
-                    request_id: m.request_id ?? requestId,
-                    pendingTool: { tool, input, runId },
-                  }
-                : m
-            )
-          );
-        },
-
-        onToolEnd: (tool, output, runId, result, requestId) => {
-          const id = streamingIdRef.current;
-          if (!id) return;
-          setMessages((prev) =>
-            prev.map((m) => {
-              if (m.id !== id) return m;
-              const pending = m.pendingTool?.runId === runId ? m.pendingTool : null;
-              const tc: ToolCall = {
-                tool: pending?.tool ?? tool,
-                input: pending?.input ?? "",
-                output,
-                run_id: runId,
-                result,
-              };
-              return {
-                ...m,
-                request_id: m.request_id ?? requestId,
-                tool_calls: [...(m.tool_calls ?? []), tc],
-                pendingTool: undefined,
-              };
-            })
-          );
-        },
-
-        onWorkflowEvent: (event) => {
-          const id = streamingIdRef.current;
-          if (!id) return;
-          if (
-            event.type === "workflow_start" ||
-            event.type === "workflow_blocked" ||
-            event.type === "workflow_done"
-          ) {
-            setSelectedWorkflow(event.workflow_id);
+      const applyAndCommitEvent = (event: Parameters<typeof applyStreamEvent>[1]) => {
+        const reduced = applyStreamEvent(
+          {
+            messages: messagesRef.current,
+            streamingMessageId: streamingIdRef.current,
+          },
+          event,
+          {
+            createMessageId: uid,
+            now: Date.now(),
           }
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === id
-                ? {
-                    ...m,
-                    request_id: m.request_id ?? event.request_id,
-                    workflow_events: [...(m.workflow_events ?? []), event],
-                  }
-                : m
-            )
-          );
-        },
+        );
 
-        onNewResponse: () => {
-          // Capture old ID before updating ref so the map can still find it
-          const oldId = streamingIdRef.current;
-          const newMsg: Message = {
-            id: uid(),
-            role: "assistant",
-            content: "",
-            isStreaming: true,
-            tool_calls: [],
-            workflow_events: [],
-          };
-          // Update ref synchronously so subsequent onToken calls use the new ID
-          streamingIdRef.current = newMsg.id;
-          setMessages((prev) => [
-            ...prev.map((m) =>
-              m.id === oldId ? { ...m, isStreaming: false } : m
-            ),
-            newMsg,
-          ]);
-        },
+        messagesRef.current = reduced.messages;
+        streamingIdRef.current = reduced.streamingMessageId;
+        setMessages(reduced.messages);
 
-        onDone: (_content, requestId) => {
-          const id = streamingIdRef.current;
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === id
-                ? { ...m, request_id: m.request_id ?? requestId, isStreaming: false }
-                : m
-            )
-          );
-          streamingIdRef.current = null;
+        if (reduced.finished) {
           setIsStreaming(false);
-          refreshSessions();
-        },
+          if (event.type === "done") {
+            void refreshSessions();
+          }
+        }
+      };
 
-        onTitle: (title) => {
-          setSessions((prev) =>
-            prev.map((s) =>
-              s.id === sessionId ? { ...s, title } : s
-            )
-          );
-        },
-
-        onError: (error, requestId) => {
-          const id = streamingIdRef.current;
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === id
-                ? {
-                    ...m,
-                    request_id: m.request_id ?? requestId,
-                    content:
-                      (m.content ? m.content + "\n\n" : "") +
-                      `⚠️ Error: ${error}`,
-                    isStreaming: false,
-                  }
-                : m
-            )
-          );
-          streamingIdRef.current = null;
-          setIsStreaming(false);
-        },
-      }, {
-        attachedIdentifiers: requestedAttachments,
-        selectedWorkflow: requestedWorkflow,
-      });
+      try {
+        await api.streamChat(content, sessionId, {
+          onEvent: (event) => {
+            applyAndCommitEvent(event);
+          },
+        }, {
+          attachedIdentifiers: requestedAttachments,
+        });
+      } catch (error) {
+        applyAndCommitEvent({
+          type: "error",
+          error:
+            error instanceof Error
+              ? error.message
+              : "The response stream failed before completion.",
+        });
+      }
     },
     [
       attachedIdentifiers,
@@ -972,7 +756,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       isReferenceUploading,
       isStreaming,
       refreshSessions,
-      selectedWorkflow,
     ]
   );
 
@@ -994,10 +777,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         sessionListError,
         sessionHistoryStatus,
         sessionHistoryError,
-        ragMode,
-        canManageRagMode,
-        workspaceMode,
-        selectedWorkflow,
+        sessionContinuitySummaries,
         attachedIdentifiers,
         draftMessage,
         draftRevision,
@@ -1011,8 +791,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         deleteSession,
         renameSession,
         sendMessage,
-        setWorkspaceMode,
-        selectWorkflow,
         uploadAttachedReference,
         addAttachedIdentifier,
         removeAttachedIdentifier,
@@ -1024,8 +802,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setInspectorTab,
         openInspectorPath,
         clearInspectorPath,
-        setRagMode,
-        compressSession,
       }}
     >
       {children}
@@ -1097,21 +873,24 @@ async function readReferenceUpload(file: File): Promise<string> {
 function _historyToMessages(raw: SessionHistoryMessage[]): Message[] {
   return raw
     .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => ({
-      id: uid(),
-      role: m.role as "user" | "assistant",
-      content: m.content ?? "",
-      request_id: m.request_id,
-      tool_calls: m.tool_calls ?? [],
-      workflow_events: m.workflow_events ?? [],
-      retrievals: m.retrievals ?? [],
-    }));
+    .map((m) => {
+      const normalized = normalizeMessageContent(m);
+      return {
+        id: uid(),
+        role: m.role as "user" | "assistant",
+        content: normalized.content,
+        request_id: m.request_id,
+        tool_calls: normalized.toolCalls,
+        retrievals: normalized.retrievals,
+        blocks: normalized.blocks,
+      };
+    });
 }
 
 interface SessionLoadSnapshot {
   currentSessionId: string | null;
   messages: Message[];
-  selectedWorkflow: string | null;
+  continuitySummaries: SessionContinuitySummary[];
 }
 
 function getPreservedSessionLoadErrorMessage(baseMessage: string): string {
@@ -1127,11 +906,13 @@ async function _loadSession(
   snapshot: SessionLoadSnapshot,
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   setCurrentSessionId: React.Dispatch<React.SetStateAction<string | null>>,
-  setSelectedWorkflow: React.Dispatch<React.SetStateAction<string | null>>,
   setSessionHistoryStatus: React.Dispatch<
     React.SetStateAction<"idle" | "loading" | "ready" | "error">
   >,
   setSessionHistoryError: React.Dispatch<React.SetStateAction<string | null>>,
+  setSessionContinuitySummaries: React.Dispatch<
+    React.SetStateAction<SessionContinuitySummary[]>
+  >,
   getErrorMessage: (error: unknown) => string
 ) {
   const hadPriorContext =
@@ -1139,12 +920,16 @@ async function _loadSession(
 
   setSessionHistoryStatus("loading");
   setSessionHistoryError(null);
+  setSessionContinuitySummaries([]);
   try {
-    const history = await api.getHistory(id);
+    const [history, continuity] = await Promise.all([
+      api.getHistory(id),
+      api.getSessionContinuity(id).catch(() => ({ summaries: [] })),
+    ]);
     const messages = _historyToMessages(history);
     setCurrentSessionId(id);
     setMessages(messages);
-    setSelectedWorkflow(getLatestSelectedWorkflow(messages));
+    setSessionContinuitySummaries(continuity.summaries);
     setSessionHistoryStatus("ready");
     setSessionHistoryError(null);
   } catch (error) {
@@ -1156,11 +941,11 @@ async function _loadSession(
     if (hadPriorContext) {
       setCurrentSessionId(snapshot.currentSessionId);
       setMessages(snapshot.messages);
-      setSelectedWorkflow(snapshot.selectedWorkflow);
+      setSessionContinuitySummaries(snapshot.continuitySummaries);
     } else {
       setCurrentSessionId(id);
       setMessages([]);
-      setSelectedWorkflow(null);
+      setSessionContinuitySummaries([]);
     }
     setSessionHistoryStatus("error");
     setSessionHistoryError(nextErrorMessage);

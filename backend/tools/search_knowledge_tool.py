@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, PrivateAttr
 from .contracts import empty_result, success_result
 
 _TOP_K = 3
+_SUPPORTED_EXTS = {".md", ".txt", ".pdf"}
 
 
 class SearchKnowledgeInput(BaseModel):
@@ -41,9 +42,8 @@ class SearchKnowledgeBaseTool(BaseTool):
         if not knowledge_path.exists():
             return 0.0
         latest = 0.0
-        supported = {".md", ".txt", ".pdf"}
         for f in knowledge_path.rglob("*"):
-            if f.is_file() and f.suffix.lower() in supported:
+            if f.is_file() and f.suffix.lower() in _SUPPORTED_EXTS:
                 try:
                     latest = max(latest, f.stat().st_mtime)
                 except OSError:
@@ -73,9 +73,8 @@ class SearchKnowledgeBaseTool(BaseTool):
             return
 
         # Check for any supported files
-        supported_exts = {".md", ".txt", ".pdf"}
         files = [
-            f for f in knowledge_path.rglob("*") if f.suffix.lower() in supported_exts
+            f for f in knowledge_path.rglob("*") if f.suffix.lower() in _SUPPORTED_EXTS
         ]
         if not files:
             self._built = True

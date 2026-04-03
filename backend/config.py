@@ -1,99 +1,94 @@
-import copy
-import json
-import os
-import tempfile
-import threading
 from pathlib import Path
 from typing import Any
 
 from hardening import ProductionHardeningPolicy
+from runtime_config import load_runtime_config
 
 _CONFIG_FILE = Path(__file__).parent / "config.json"
-# Protects all read-modify-write operations so concurrent API calls can't
-# overwrite each other's changes.
-_config_lock = threading.Lock()
 _DEFAULT: dict = {
     "rag_mode": False,
+    "prompt_context": {
+        "include_git_context": False,
+    },
+    "tool_policy": {
+        "enabled": True,
+        "allow_without_context": True,
+        "warn_on_missing_artifact_refs": True,
+    },
+    "access_defaults": {
+        "allow_loopback_without_auth": True,
+    },
+    "execution_backends": {
+        "llm": {
+            "provider": "deepseek",
+            "roles": {
+                "executor": {
+                    "provider": "deepseek",
+                    "model": "deepseek-chat",
+                    "temperature": 0.3,
+                    "streaming": True,
+                },
+                "planner": {
+                    "provider": "openai",
+                    "model": "gpt-5.4-mini",
+                    "temperature": 0.2,
+                    "streaming": True,
+                },
+                "verifier": {
+                    "provider": "openai",
+                    "model": "gpt-5.4-mini",
+                    "temperature": 0.2,
+                    "streaming": True,
+                },
+                "title": {
+                    "provider": "openai",
+                    "model": "gpt-5-mini",
+                    "temperature": 0.2,
+                    "streaming": False,
+                },
+            },
+        }
+    },
     "skills": {
         "extra_dirs": [],
-        "entries": {},
-    },
-    "connectors": {
         "entries": {},
     },
     "read_file_extra_roots": [],
 }
 
 
-def _load() -> dict:
-    if _CONFIG_FILE.exists():
-        try:
-            data = json.loads(_CONFIG_FILE.read_text())
-            if not isinstance(data, dict):
-                return copy.deepcopy(_DEFAULT)
-            # Merge with defaults so new keys exist
-            merged = copy.deepcopy(_DEFAULT)
-            for key, value in data.items():
-                if key in {"skills", "connectors"}:
-                    continue
-                merged[key] = value
-            if "skills" in data and isinstance(data["skills"], dict):
-                merged.setdefault("skills", {}).setdefault("extra_dirs", [])
-                merged.setdefault("skills", {}).setdefault("entries", {})
-                skills_payload = dict(data["skills"])
-                if not isinstance(skills_payload.get("extra_dirs"), list):
-                    skills_payload.pop("extra_dirs", None)
-                if not isinstance(skills_payload.get("entries"), dict):
-                    skills_payload.pop("entries", None)
-                merged["skills"].update(skills_payload)
-            if "connectors" in data and isinstance(data["connectors"], dict):
-                merged.setdefault("connectors", {}).setdefault("entries", {})
-                connector_payload = dict(data["connectors"])
-                if not isinstance(connector_payload.get("entries"), dict):
-                    connector_payload.pop("entries", None)
-                merged["connectors"].update(connector_payload)
-            return merged
-        except Exception:
-            pass
-    return copy.deepcopy(_DEFAULT)
+def _load_runtime() -> dict:
+    return load_runtime_config(
+        default_config=_DEFAULT,
+        project_config_path=_CONFIG_FILE,
+    ).data
+
+def get_prompt_context_settings() -> dict[str, Any]:
+    prompt_context = _load_runtime().get("prompt_context", {})
+    return dict(prompt_context) if isinstance(prompt_context, dict) else {}
 
 
-def _save(cfg: dict) -> None:
-    """Write config atomically: write to a temp file then rename.
+def get_tool_policy_settings() -> dict[str, Any]:
+    tool_policy = _load_runtime().get("tool_policy", {})
+    return dict(tool_policy) if isinstance(tool_policy, dict) else {}
 
-    os.replace() is atomic on POSIX (Linux/macOS) — readers either see the
-    old file or the new file, never a partial write.  This prevents corruption
-    when the process is killed mid-write.
-    """
-    content = json.dumps(cfg, indent=2)
-    dir_path = _CONFIG_FILE.parent
-    fd, tmp_path = tempfile.mkstemp(dir=str(dir_path), suffix=".tmp.json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(tmp_path, str(_CONFIG_FILE))  # atomic on POSIX
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
 
+def get_access_defaults() -> dict[str, Any]:
+    access_defaults = _load_runtime().get("access_defaults", {})
+    return dict(access_defaults) if isinstance(access_defaults, dict) else {}
+
+
+def get_execution_backend_settings() -> dict[str, Any]:
+    execution_backends = _load_runtime().get("execution_backends", {})
+    return dict(execution_backends) if isinstance(execution_backends, dict) else {}
 
 def get_rag_mode() -> bool:
-    return _load().get("rag_mode", False)
-
-
-def set_rag_mode(enabled: bool) -> None:
-    with _config_lock:
-        cfg = _load()
-        cfg["rag_mode"] = enabled
-        _save(cfg)
+    return _load_runtime().get("rag_mode", False)
 
 
 def get_skills_extra_dirs(base_dir: Path) -> list[Path]:
     """Return list of extra skill directories (absolute paths)."""
-    cfg = _load()
+    cfg = _load_runtime()
     extra = cfg.get("skills", {}).get("extra_dirs", [])
     result = []
     for p in extra:
@@ -107,7 +102,7 @@ def get_skills_extra_dirs(base_dir: Path) -> list[Path]:
 
 def get_skill_enabled(skill_name: str) -> bool:
     """Return True if skill is enabled. Missing entry means enabled."""
-    cfg = _load()
+    cfg = _load_runtime()
     entries = cfg.get("skills", {}).get("entries", {})
     if skill_name not in entries:
         return True
@@ -116,7 +111,7 @@ def get_skill_enabled(skill_name: str) -> bool:
 
 def get_read_file_extra_roots(base_dir: Path) -> list[Path]:
     """Return list of additional allowed roots for read_file (absolute paths)."""
-    cfg = _load()
+    cfg = _load_runtime()
     raw = cfg.get("read_file_extra_roots", [])
     result = []
     for p in raw:
@@ -133,27 +128,8 @@ def get_read_file_extra_roots(base_dir: Path) -> list[Path]:
     return result
 
 
-def get_connector_entry(connector_name: str) -> dict[str, Any]:
-    """Return connector config entry. Missing entries default to disabled."""
-    cfg = _load()
-    connectors = cfg.get("connectors", {})
-    if not isinstance(connectors, dict):
-        connectors = {}
-    entries = connectors.get("entries", {})
-    if not isinstance(entries, dict):
-        entries = {}
-    raw = entries.get(connector_name, {})
-    if not isinstance(raw, dict):
-        raw = {}
-    config_payload = raw.get("config")
-    return {
-        "enabled": bool(raw.get("enabled", False)),
-        "config": dict(config_payload) if isinstance(config_payload, dict) else {},
-    }
-
-
 def get_production_hardening_policy() -> ProductionHardeningPolicy:
-    cfg = _load()
+    cfg = _load_runtime()
     if "production_hardening" not in cfg:
         return ProductionHardeningPolicy()
     raw = cfg.get("production_hardening", {})
@@ -163,17 +139,3 @@ def get_production_hardening_policy() -> ProductionHardeningPolicy:
         return ProductionHardeningPolicy.model_validate(raw)
     except Exception:
         return ProductionHardeningPolicy.fail_closed()
-
-
-def set_connector_entry(connector_name: str, *, enabled: bool, config: dict[str, Any]) -> None:
-    with _config_lock:
-        data = _load()
-        if "connectors" not in data or not isinstance(data["connectors"], dict):
-            data["connectors"] = {"entries": {}}
-        if "entries" not in data["connectors"] or not isinstance(data["connectors"]["entries"], dict):
-            data["connectors"]["entries"] = {}
-        data["connectors"]["entries"][connector_name] = {
-            "enabled": enabled,
-            "config": dict(config),
-        }
-        _save(data)

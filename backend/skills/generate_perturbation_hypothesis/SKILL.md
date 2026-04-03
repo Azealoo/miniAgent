@@ -1,7 +1,7 @@
 ---
 name: generate_perturbation_hypothesis
 description: Generate candidate perturbation hypotheses (targets, mechanism, expected signature, experiment plan) for a given biological context and phenotype goal.
-category: bio/perturbation
+category: bio/perturb_seq
 version: 1.0
 requires_tools: [search_knowledge_base, ncbi_eutils, uniprot_api, fetch_url, python_repl, write_file]
 requires_network: true

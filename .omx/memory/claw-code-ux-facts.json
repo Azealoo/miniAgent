@@ -1,0 +1,16 @@
+{
+  "updated_at": "2026-04-01T00:00:00Z",
+  "topic": "claw_code_ux_benchmark",
+  "facts": [
+    "The most valuable thing to borrow from claw-code is its interaction contract: live compact activity during a turn, clean final transcript after the turn, and full structured truth in secondary inspectable surfaces.",
+    "BioAPEX already has additive session blocks for text, tool use, tool result, retrieval, workflow event, and usage, so the next UX phase can be presentation-first instead of waiting on a deep runtime rewrite.",
+    "A good BioAPEX modern-agent UX should separate three layers: turn surface, answer surface, and truth surface.",
+    "Compliance should remain severity-based in main chat: quiet for low-risk allow states, prominent for warnings, approval-required states, and blocked states.",
+    "BioAPEX should add domain-specific quick actions and context discoverability rather than copying claw-code's full developer-oriented slash-command breadth."
+  ],
+  "sources": [
+    ".omx/research/claw-code-ux-benchmark-2026-04-01.md",
+    ".omx/research/frontend-compliance-ux-2026-04-01.md",
+    ".omx/plans/p3-modern-agent-ux-from-claw-code.md"
+  ]
+}

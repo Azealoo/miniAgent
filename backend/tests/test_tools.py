@@ -4,7 +4,7 @@ No LLM or embedding API keys required.
 """
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -459,6 +459,43 @@ class TestPythonReplTool:
         out = self.tool._run("print(json.dumps({'key': 'val'}))")
         assert "key" in out
 
+    def test_persistence_isolated_by_policy_session_id(self):
+        from tools.policy import tool_policy_context
+        from tools.policy_types import ToolPolicyExecutionContext
+
+        with tool_policy_context(ToolPolicyExecutionContext(session_id="session-a")):
+            self.tool._run("x = 42")
+
+        with tool_policy_context(ToolPolicyExecutionContext(session_id="session-b")):
+            out_other = self.tool._run("print(globals().get('x', 'missing'))")
+
+        with tool_policy_context(ToolPolicyExecutionContext(session_id="session-a")):
+            out_same = self.tool._run("print(x)")
+
+        assert "missing" in out_other
+        assert "42" in out_same
+
+    def test_clear_session_state_resets_only_target_session(self):
+        from tools.policy import tool_policy_context
+        from tools.policy_types import ToolPolicyExecutionContext
+
+        with tool_policy_context(ToolPolicyExecutionContext(session_id="session-a")):
+            self.tool._run("marker = 'session-a'")
+
+        with tool_policy_context(ToolPolicyExecutionContext(session_id="session-b")):
+            self.tool._run("marker = 'session-b'")
+
+        self.tool.clear_session_state("session-a")
+
+        with tool_policy_context(ToolPolicyExecutionContext(session_id="session-a")):
+            out_cleared = self.tool._run("print(globals().get('marker', 'missing'))")
+
+        with tool_policy_context(ToolPolicyExecutionContext(session_id="session-b")):
+            out_preserved = self.tool._run("print(marker)")
+
+        assert "missing" in out_cleared
+        assert "session-b" in out_preserved
+
     def test_syntax_error_handled(self):
         out = self.tool._run("def broken(:")
         assert "[ERROR]" in out or "SyntaxError" in out
@@ -753,6 +790,164 @@ class TestPythonReplTool:
         assert "[BLOCKED]" in out
 
 
+class TestToolRegistry:
+    def test_tool_manifest_entries_are_typed_and_unique(self, tmp_path):
+        from tools import get_all_tools, get_tool_manifest_entries
+
+        (tmp_path / "knowledge").mkdir()
+        (tmp_path / "storage").mkdir()
+
+        tools = get_all_tools(tmp_path)
+        manifests = get_tool_manifest_entries(tmp_path)
+
+        assert len(manifests) == len(tools)
+        assert len({manifest.name for manifest in manifests}) == len(manifests)
+
+    def test_tool_manifest_exposes_policy_and_contract_metadata(self, tmp_path):
+        from tools import get_tool_manifest_entries
+
+        (tmp_path / "knowledge").mkdir()
+        (tmp_path / "storage").mkdir()
+
+        manifests = {manifest.name: manifest for manifest in get_tool_manifest_entries(tmp_path)}
+
+        assert manifests["read_file"].access_scope == "inspection"
+        assert manifests["terminal"].access_scope == "execution"
+        assert manifests["evidence_review"].evidence_requirement == "required"
+        assert manifests["plan_agent"].access_scope == "inspection"
+        assert manifests["verification_agent"].access_scope == "inspection"
+        assert "slurm_tool" not in manifests
+        assert manifests["read_file"].args_schema is not None
+        assert manifests["read_file"].read_only is True
+        assert manifests["read_file"].planner_exposed is True
+        assert manifests["read_file"].verifier_exposed is True
+        assert manifests["read_file"].interrupt_behavior == "restartable"
+        assert manifests["read_file"].tool_validates_input is True
+        assert manifests["read_file"].activity_summary_hint is not None
+        assert manifests["read_file"].result_summary_hint is not None
+        assert manifests["write_file"].destructive is True
+        assert manifests["write_file"].interrupt_behavior == "avoid_interrupting"
+
+    def test_runtime_helper_agent_tool_exposure_uses_policy_wrapped_manifests(self, tmp_path):
+        from runtime.helper_agent_runner import build_tool_catalog, filter_tools_by_exposure
+        from tools import get_runtime_tools
+
+        (tmp_path / "knowledge").mkdir()
+        (tmp_path / "storage").mkdir()
+
+        runtime_tools = get_runtime_tools(tmp_path)
+        planner_tools = {tool.name for tool in filter_tools_by_exposure(runtime_tools, "planner")}
+        verifier_tools = {tool.name for tool in filter_tools_by_exposure(runtime_tools, "verifier")}
+        planner_catalog = {
+            entry["name"]: entry for entry in build_tool_catalog(filter_tools_by_exposure(runtime_tools, "planner"))
+        }
+
+        assert "read_file" in planner_tools
+        assert "fetch_url" in planner_tools
+        assert "terminal" not in planner_tools
+        assert "write_file" not in planner_tools
+        assert "plan_agent" not in planner_tools
+        assert "verification_agent" not in planner_tools
+
+        assert "read_file" in verifier_tools
+        assert "evidence_review" in verifier_tools
+        assert "terminal" not in verifier_tools
+        assert "write_file" not in verifier_tools
+        assert planner_catalog["read_file"]["interrupt_behavior"] == "restartable"
+        assert planner_catalog["read_file"]["tool_validates_input"] is True
+        assert planner_catalog["read_file"]["activity_summary_hint"]
+        assert planner_catalog["read_file"]["result_summary_hint"]
+        assert planner_catalog["read_file"]["planner_exposed"] is True
+        assert planner_catalog["read_file"]["verifier_exposed"] is True
+
+
+class TestHelperAgentTools:
+    @pytest.mark.asyncio
+    async def test_plan_agent_returns_structured_contract(self):
+        from graph.agent import agent_manager
+        from runtime.helper_agent_runner import ScopedAgentRunResult
+        from tools.plan_agent_tool import PlanAgentTool
+
+        original_planner_llm = agent_manager.planner_llm
+        original_tools = agent_manager.tools
+        agent_manager.planner_llm = object()
+        agent_manager.tools = [type("DummyTool", (), {"name": "read_file"})()]
+
+        try:
+            tool = PlanAgentTool()
+            with patch(
+                "tools.plan_agent_tool.role_model_is_configured",
+                return_value=True,
+            ), patch(
+                "tools.plan_agent_tool.run_scoped_agent",
+                new=AsyncMock(
+                    return_value=ScopedAgentRunResult(
+                        response_text=(
+                            '{"goal":"Investigate BRCA1 expression","assumptions":[],"constraints":[],'  # noqa: E501
+                            '"steps":[{"step_id":"step-1","intent":"Read the relevant file","allowed_tools":["read_file"],'  # noqa: E501
+                            '"preferred_tool_order":["read_file"],"exit_criteria":"Understand the current implementation"}],'  # noqa: E501
+                            '"success_criteria":["The implementation path is understood"],'
+                            '"verification_checks":["Confirm the selected file contains the entry point"]}'
+                        ),
+                        tool_trace=({"tool": "read_file", "input": "backend/api/chat.py"},),
+                    )
+                ),
+            ):
+                summary, contract = await tool._arun("Investigate BRCA1 expression handling")
+        finally:
+            agent_manager.planner_llm = original_planner_llm
+            agent_manager.tools = original_tools
+
+        assert "Planner produced 1 step" in summary
+        assert contract["tool_name"] == "plan_agent"
+        assert contract["status"] == "success"
+        assert contract["structured_payload"]["plan"]["steps"][0]["preferred_tool_order"] == ["read_file"]
+        assert contract["structured_payload"]["tool_trace"][0]["tool"] == "read_file"
+
+    @pytest.mark.asyncio
+    async def test_verification_agent_returns_structured_contract(self):
+        from graph.agent import agent_manager
+        from runtime.helper_agent_runner import ScopedAgentRunResult
+        from tools.verification_agent_tool import VerificationAgentTool
+
+        original_verifier_llm = agent_manager.verifier_llm
+        original_tools = agent_manager.tools
+        agent_manager.verifier_llm = object()
+        agent_manager.tools = [type("DummyTool", (), {"name": "read_file"})()]
+
+        try:
+            tool = VerificationAgentTool()
+            with patch(
+                "tools.verification_agent_tool.role_model_is_configured",
+                return_value=True,
+            ), patch(
+                "tools.verification_agent_tool.run_scoped_agent",
+                new=AsyncMock(
+                    return_value=ScopedAgentRunResult(
+                        response_text=(
+                            '{"verdict":"repair_required","summary":"The answer lacks evidence grounding.",'
+                            '"checks":[{"name":"evidence-grounding","status":"fail","note":"No cited evidence review found."}],'
+                            '"issues":["The answer overstates certainty without evidence."],'
+                            '"repair_instructions":["Run evidence review before finalizing the answer."]}'
+                        ),
+                        tool_trace=(),
+                    )
+                ),
+            ):
+                summary, contract = await tool._arun(
+                    "Summarize BRCA1 evidence",
+                    "BRCA1 definitely increases under condition X.",
+                )
+        finally:
+            agent_manager.verifier_llm = original_verifier_llm
+            agent_manager.tools = original_tools
+
+        assert summary.startswith("Verifier verdict: repair_required.")
+        assert contract["tool_name"] == "verification_agent"
+        assert contract["structured_payload"]["verification"]["verdict"] == "repair_required"
+        assert contract["metadata"]["verdict"] == "repair_required"
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # ReadFileTool
 # ──────────────────────────────────────────────────────────────────────────────
@@ -833,7 +1028,7 @@ class TestFetchURLTool:
         """JSON responses should be returned without an error."""
         mock_resp = MagicMock()
         mock_resp.headers = {"content-type": "application/json"}
-        mock_resp.text = '{"ok": true, "user-agent": "miniOpenClaw"}'
+        mock_resp.text = '{"ok": true, "user-agent": "BioAPEX"}'
         mock_resp.raise_for_status = MagicMock()
 
         with patch("tools.fetch_url_tool.httpx.Client") as MockClient:
@@ -845,7 +1040,7 @@ class TestFetchURLTool:
 
             out = self.tool._run("https://httpbin.org/get")
         assert "[ERROR]" not in out
-        assert "miniOpenClaw" in out or "user-agent" in out.lower()
+        assert "BioAPEX" in out or "user-agent" in out.lower()
 
     def test_fetch_html_converted_to_markdown(self):
         """HTML content should be converted to plain Markdown text."""
@@ -994,6 +1189,50 @@ class TestWriteFileTool:
         assert contract is not None
         assert contract["status"] == "success"
         assert (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8") == "# Updated\n"
+
+    def test_nested_memory_write_rebuilds_memory_index(self, tmp_path):
+        from graph.agent import agent_manager
+        from tools.write_file_tool import WriteFileTool
+
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+        original_memory_indexer = agent_manager.memory_indexer
+        agent_manager.memory_indexer = MagicMock()
+
+        try:
+            tool = WriteFileTool(root_dir=str(tmp_path))
+            result = tool._run("memory/project/notes.md", "# Updated\n")
+            contract = _tool_contract(result)
+        finally:
+            rebuilt = agent_manager.memory_indexer.rebuild_index.call_count
+            agent_manager.memory_indexer = original_memory_indexer
+
+        assert contract is not None
+        assert contract["status"] == "success"
+        assert contract["structured_payload"]["memory_index_rebuilt"] is True
+        assert rebuilt == 1
+
+    def test_invalid_typed_memory_frontmatter_is_rejected(self, tmp_path):
+        from tools.write_file_tool import WriteFileTool
+
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+        tool = WriteFileTool(root_dir=str(tmp_path))
+
+        result = tool._run(
+            "memory/project/invalid.md",
+            (
+                "---\n"
+                "type: unsupported_type\n"
+                "name: Invalid note\n"
+                "description: This should fail validation.\n"
+                "---\n"
+                "# Body\nNo write should happen.\n"
+            ),
+        )
+        contract = _tool_contract(result)
+
+        assert contract is not None
+        assert contract["outcome"] == "invalid_input"
+        assert not (tmp_path / "memory" / "project" / "invalid.md").exists()
 
     def test_write_secret_file_blocked(self, tmp_path):
         from tools.write_file_tool import WriteFileTool

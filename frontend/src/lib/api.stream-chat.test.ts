@@ -1,22 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { streamChat } from "./api";
-import {
-  makeComplianceReport,
-  makeToolResultEnvelope,
-  makeWorkflowDoneEvent,
-  makeWorkflowStartEvent,
-} from "@/test/fixtures";
+import { makeGenericToolResultEnvelope } from "@/test/fixtures";
 import { sseResponse } from "@/test/mock-fetch";
 
 describe("streamChat", () => {
-  it("parses chunked SSE payloads across retrieval, tool, workflow, and done events", async () => {
-    const complianceReport = makeComplianceReport();
-    const toolResult = makeToolResultEnvelope(complianceReport);
+  it("parses the typed stream contract across retrieval, tool, plan, verification, and done events", async () => {
+    const toolResult = makeGenericToolResultEnvelope();
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       sseResponse(
         [
           {
             type: "retrieval",
+            event_index: 1,
             query: "rnaseq patient cohort",
             results: [
               {
@@ -27,37 +22,78 @@ describe("streamChat", () => {
             ],
           },
           "data: {not-json}\n\n",
-          { type: "token", content: "BioAPEX " },
-          { type: "tool_start", tool: "compliance_preflight", input: "{}", run_id: "tool-1" },
+          { type: "token", content: "BioAPEX ", event_index: 2 },
+          {
+            type: "tool_start",
+            tool: "read_file",
+            input: "knowledge/study_protocol.md",
+            run_id: "tool-1",
+            event_index: 3,
+          },
           {
             type: "tool_end",
-            tool: "compliance_preflight",
-            output: "warning",
+            tool: "read_file",
+            output: "Read knowledge/study_protocol.md.",
             run_id: "tool-1",
             result: toolResult,
+            event_index: 4,
           },
-          makeWorkflowStartEvent(),
-          { type: "new_response" },
-          makeWorkflowDoneEvent(),
-          { type: "done", content: "BioAPEX complete.", request_id: "request-1" },
+          {
+            type: "plan_created",
+            summary: "Planner produced 2 steps.",
+            plan: { goal: "Answer", steps: [{ step_id: "s1" }, { step_id: "s2" }] },
+            event_index: 5,
+          },
+          {
+            type: "plan_updated",
+            summary: "Planner refined the evidence step.",
+            plan: {
+              goal: "Answer",
+              steps: [{ step_id: "s1" }, { step_id: "s2" }, { step_id: "s3" }],
+            },
+            event_index: 6,
+          },
+          {
+            type: "verification_result",
+            summary: "Verifier verdict: pass. Looks good.",
+            verdict: "pass",
+            verification: { verdict: "pass", summary: "Looks good." },
+            event_index: 7,
+          },
+          { type: "new_response", event_index: 8 },
+          {
+            type: "done",
+            content: "BioAPEX complete.",
+            request_id: "request-1",
+            event_index: 9,
+          },
         ],
         { chunkSize: 23 }
       )
     );
 
+    const eventTypes: string[] = [];
+    const eventIndices: number[] = [];
     const retrievals: Array<{ query: string; count: number }> = [];
     const tokens: string[] = [];
     const toolStarts: string[] = [];
     const toolEnds: string[] = [];
-    const workflowEvents: string[] = [];
+    const planSummaries: string[] = [];
+    const verificationVerdicts: string[] = [];
     let sawNewResponse = false;
     let finalContent = "";
     let finalRequestId = "";
 
     await streamChat(
-      "Run the RNA-seq workflow.",
+      "Review the RNA-seq dataset.",
       "session-1",
       {
+        onEvent: (event) => {
+          eventTypes.push(event.type);
+          if (event.event_index) {
+            eventIndices.push(event.event_index);
+          }
+        },
         onRetrieval: (query, results) => {
           retrievals.push({ query, count: results.length });
         },
@@ -71,8 +107,17 @@ describe("streamChat", () => {
           toolEnds.push(tool);
           expect(result?.structured_payload).toBeTruthy();
         },
-        onWorkflowEvent: (event) => {
-          workflowEvents.push(event.type);
+        onPlanCreated: (event) => {
+          planSummaries.push(event.summary);
+          expect(event.plan.steps).toHaveLength(2);
+        },
+        onPlanUpdated: (event) => {
+          planSummaries.push(event.summary);
+          expect(event.plan.steps).toHaveLength(3);
+        },
+        onVerificationResult: (event) => {
+          verificationVerdicts.push(event.verdict);
+          expect(event.verification.summary).toBe("Looks good.");
         },
         onNewResponse: () => {
           sawNewResponse = true;
@@ -81,35 +126,160 @@ describe("streamChat", () => {
           finalContent = content;
           finalRequestId = requestId ?? "";
         },
-        onTitle: () => {},
         onError: (error) => {
           throw new Error(`unexpected stream error: ${error}`);
         },
       },
       {
         attachedIdentifiers: ["artifacts/input/dataset.csv"],
-        selectedWorkflow: "rnaseq_qc_de",
       }
     );
 
     expect(retrievals).toEqual([{ query: "rnaseq patient cohort", count: 1 }]);
     expect(tokens.join("")).toBe("BioAPEX ");
-    expect(toolStarts).toEqual(["compliance_preflight"]);
-    expect(toolEnds).toEqual(["compliance_preflight"]);
-    expect(workflowEvents).toEqual(["workflow_start", "workflow_done"]);
+    expect(toolStarts).toEqual(["read_file"]);
+    expect(toolEnds).toEqual(["read_file"]);
+    expect(planSummaries).toEqual([
+      "Planner produced 2 steps.",
+      "Planner refined the evidence step.",
+    ]);
+    expect(verificationVerdicts).toEqual(["pass"]);
     expect(sawNewResponse).toBe(true);
     expect(finalContent).toBe("BioAPEX complete.");
     expect(finalRequestId).toBe("request-1");
+    expect(eventTypes).toEqual([
+      "retrieval",
+      "token",
+      "tool_start",
+      "tool_end",
+      "plan_created",
+      "plan_updated",
+      "verification_result",
+      "new_response",
+      "done",
+    ]);
+    expect(eventIndices).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
     const init = fetchSpy.mock.calls[0]?.[1];
     expect(init).toBeTruthy();
     const parsedBody = JSON.parse(String(init?.body));
     expect(parsedBody).toMatchObject({
       attached_identifiers: ["artifacts/input/dataset.csv"],
-      message: "Run the RNA-seq workflow.",
-      selected_workflow: "rnaseq_qc_de",
+      message: "Review the RNA-seq dataset.",
       session_id: "session-1",
       stream: true,
     });
+  });
+
+  it("surfaces typed error events without crashing on malformed SSE chunks", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      sseResponse(
+        [
+          "data: {not-json}\n\n",
+          {
+            type: "error",
+            error: "executor boom",
+            request_id: "request-2",
+            event_index: 1,
+          },
+        ],
+        { chunkSize: 11 }
+      )
+    );
+
+    const eventTypes: string[] = [];
+    const eventIndices: number[] = [];
+    let surfacedError = "";
+    let surfacedRequestId = "";
+
+    await streamChat(
+      "Cause an error.",
+      "session-2",
+      {
+        onEvent: (event) => {
+          eventTypes.push(event.type);
+          if (event.event_index) {
+            eventIndices.push(event.event_index);
+          }
+        },
+        onRetrieval: () => {
+          throw new Error("unexpected retrieval");
+        },
+        onToken: () => {
+          throw new Error("unexpected token");
+        },
+        onToolStart: () => {
+          throw new Error("unexpected tool start");
+        },
+        onToolEnd: () => {
+          throw new Error("unexpected tool end");
+        },
+        onNewResponse: () => {
+          throw new Error("unexpected new response");
+        },
+        onDone: () => {
+          throw new Error("unexpected done");
+        },
+        onError: (error, requestId) => {
+          surfacedError = error;
+          surfacedRequestId = requestId ?? "";
+        },
+      }
+    );
+
+    expect(eventTypes).toEqual(["error"]);
+    expect(eventIndices).toEqual([1]);
+    expect(surfacedError).toBe("executor boom");
+    expect(surfacedRequestId).toBe("request-2");
+
+    const init = fetchSpy.mock.calls[0]?.[1];
+    expect(init).toBeTruthy();
+  });
+
+  it("surfaces a synthetic error when the stream closes before a terminal event", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      sseResponse(
+        [
+          {
+            type: "retrieval",
+            query: "memory",
+            results: [
+              {
+                source: "memory/MEMORY.md",
+                score: 0.99,
+                text: "Remember to inspect memory first.",
+              },
+            ],
+            request_id: "request-truncated-1",
+            event_index: 1,
+          },
+        ],
+        { chunkSize: 17 }
+      )
+    );
+
+    const eventTypes: string[] = [];
+    const surfacedErrors: string[] = [];
+    const surfacedRequestIds: string[] = [];
+
+    await streamChat(
+      "Check latest session.",
+      "session-truncated",
+      {
+        onEvent: (event) => {
+          eventTypes.push(event.type);
+        },
+        onError: (error, requestId) => {
+          surfacedErrors.push(error);
+          surfacedRequestIds.push(requestId ?? "");
+        },
+      }
+    );
+
+    expect(eventTypes).toEqual(["retrieval", "error"]);
+    expect(surfacedErrors).toEqual([
+      "The response stream closed before completion.",
+    ]);
+    expect(surfacedRequestIds).toEqual(["request-truncated-1"]);
   });
 });

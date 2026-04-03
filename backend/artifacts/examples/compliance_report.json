@@ -18,7 +18,6 @@
     "attached_identifiers": [
       "patient_sheet.csv"
     ],
-    "selected_workflow": "scrna-seq-qc",
     "session_id": "session-compliance-demo"
   },
   "risk_category": "privacy",

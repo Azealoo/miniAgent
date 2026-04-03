@@ -1,7 +1,7 @@
 ---
 name: dilution_calculator
 description: Calculate C1V1=C2V2 dilutions, serial dilutions with plate-based replicates, and budget-conscious volume planning that accounts for micropipette systematic error.
-category: bio/calculations
+category: bio/molecular_lab
 version: 2.0
 requires_tools: [python_repl]
 requires_network: false

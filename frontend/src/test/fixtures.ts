@@ -1,21 +1,15 @@
+import { deriveMessageBlocks } from "@/lib/message-blocks";
 import type {
   AccessProbeResponse,
-  ArtifactRegistryRecord,
   ComplianceReportArtifact,
   FilesWorkspaceItem,
   JsonValue,
   Session,
+  SessionContinuitySummary,
   SessionHistoryMessage,
-  StudyArtifactCounts,
   SkillRegistryEntry,
-  StudySummary,
   TokenStats,
   ToolResultEnvelope,
-  WorkflowArtifactEvent,
-  WorkflowDoneEvent,
-  WorkflowStartEvent,
-  WorkflowStepEndEvent,
-  WorkflowStepStartEvent,
 } from "@/lib/types";
 
 export function makeAccessProbe(
@@ -50,7 +44,6 @@ export function makeComplianceReport(
     request_context: {
       user_message: "Run the RNA-seq QC and DE workflow.",
       attached_identifiers: [],
-      selected_workflow: "rnaseq_qc_de",
       session_id: "session-alpha",
     },
     triggered_rules: [
@@ -109,124 +102,30 @@ export function makeToolResultEnvelope(
   };
 }
 
-export function makeWorkflowStartEvent(
-  overrides: Partial<WorkflowStartEvent> = {}
-): WorkflowStartEvent {
+export function makeGenericToolResultEnvelope(
+  overrides: Partial<ToolResultEnvelope> = {}
+): ToolResultEnvelope {
   return {
-    contract_version: "workflow_event.v1",
-    type: "workflow_start",
-    run_id: "run-rnaseq-1",
-    workflow_id: "rnaseq_qc_de",
-    workflow_name: "RNA-seq QC + DE",
-    lifecycle_status: "running",
-    resumed: false,
-    run_record_path: "artifacts/workflows/run-rnaseq-1/run.json",
-    total_steps: 2,
-    steps: [
-      {
-        step_id: "qc",
-        step_label: "Quality control",
-        prerequisite_step_ids: [],
-        executor_type: "tool",
-      },
-      {
-        step_id: "de",
-        step_label: "Differential expression",
-        prerequisite_step_ids: ["qc"],
-        executor_type: "tool",
-      },
-    ],
-    started_at: "2026-03-24T18:00:00Z",
-    ...overrides,
-  };
-}
-
-export function makeWorkflowStepStartEvent(
-  overrides: Partial<WorkflowStepStartEvent> = {}
-): WorkflowStepStartEvent {
-  return {
-    contract_version: "workflow_event.v1",
-    type: "workflow_step_start",
-    run_id: "run-rnaseq-1",
-    workflow_id: "rnaseq_qc_de",
-    step_id: "qc",
-    step_label: "Quality control",
-    status: "running",
-    executor_type: "tool",
-    prerequisite_step_ids: [],
-    started_at: "2026-03-24T18:00:01Z",
-    ...overrides,
-  };
-}
-
-export function makeWorkflowStepEndEvent(
-  overrides: Partial<WorkflowStepEndEvent> = {}
-): WorkflowStepEndEvent {
-  return {
-    contract_version: "workflow_event.v1",
-    type: "workflow_step_end",
-    run_id: "run-rnaseq-1",
-    workflow_id: "rnaseq_qc_de",
-    step_id: "qc",
-    step_label: "Quality control",
-    status: "completed",
+    contract_version: "tool_result.v1",
+    tool_name: "read_file",
+    summary: "Read knowledge/study_protocol.md.",
+    structured_payload: {
+      path: "knowledge/study_protocol.md",
+      content_preview: "Protocol guidance for the active RNA-seq cohort.",
+    } as unknown as JsonValue,
     artifact_refs: [
       {
-        artifact_type: "qa_report",
-        path: "artifacts/reports/qc-summary.md",
-        run_id: "run-rnaseq-1",
+        artifact_type: "file",
+        path: "knowledge/study_protocol.md",
+        label: "study_protocol.md",
       },
     ],
     warnings: [],
-    warning_details: [],
-    errors: [],
-    error_details: [],
-    started_at: "2026-03-24T18:00:01Z",
-    ended_at: "2026-03-24T18:00:15Z",
-    duration_seconds: 14,
-    ...overrides,
-  };
-}
-
-export function makeWorkflowArtifactEvent(
-  overrides: Partial<WorkflowArtifactEvent> = {}
-): WorkflowArtifactEvent {
-  return {
-    contract_version: "workflow_event.v1",
-    type: "workflow_artifact",
-    run_id: "run-rnaseq-1",
-    workflow_id: "rnaseq_qc_de",
-    artifact: {
-      artifact_type: "qa_report",
-      path: "artifacts/reports/qc-summary.md",
-      run_id: "run-rnaseq-1",
-    },
-    scope: "workflow_output",
-    step_id: "qc",
-    step_label: "Quality control",
-    output_name: "qc_summary",
-    ...overrides,
-  };
-}
-
-export function makeWorkflowDoneEvent(
-  overrides: Partial<WorkflowDoneEvent> = {}
-): WorkflowDoneEvent {
-  return {
-    contract_version: "workflow_event.v1",
-    type: "workflow_done",
-    run_id: "run-rnaseq-1",
-    workflow_id: "rnaseq_qc_de",
-    lifecycle_status: "completed",
-    run_record_path: "artifacts/workflows/run-rnaseq-1/run.json",
-    completed_steps: 2,
-    total_steps: 2,
-    warning_count: 1,
-    started_at: "2026-03-24T18:00:00Z",
-    ended_at: "2026-03-24T18:05:00Z",
-    duration_seconds: 300,
-    blocked_reason: null,
-    blocked_issue_details: [],
+    status: "success",
+    outcome: "success",
+    error: null,
+    metadata: {},
+    source_payload: null,
     ...overrides,
   };
 }
@@ -234,13 +133,35 @@ export function makeWorkflowDoneEvent(
 export function makeHistoryMessage(
   overrides: Partial<SessionHistoryMessage> = {}
 ): SessionHistoryMessage {
-  return {
+  const message: SessionHistoryMessage = {
     role: "assistant",
     content: "BioAPEX loaded the saved session.",
     request_id: "request-history-1",
     tool_calls: [],
-    workflow_events: [],
     retrievals: [],
+    ...overrides,
+  };
+
+  if (!("blocks" in overrides)) {
+    message.blocks = deriveMessageBlocks(message);
+  }
+
+  return message;
+}
+
+export function makeSessionContinuitySummary(
+  overrides: Partial<SessionContinuitySummary> = {}
+): SessionContinuitySummary {
+  return {
+    source_format: "structured",
+    legacy_summary: null,
+    decisions_and_rationale: ["Reviewed earlier RNA-seq QC and evidence synthesis work."],
+    results_register: ["Generated qc-summary.md and compliance-report.json."],
+    evidence_register: ["PMID:41910001 linked to the archived claim set."],
+    compliance_register: ["Approval was required before publication."],
+    open_questions_and_next_actions: ["Re-open the archived results before exporting."],
+    archive_id: "1712012234",
+    archived_message_count: 4,
     ...overrides,
   };
 }
@@ -252,68 +173,12 @@ export function makeFilesWorkspaceItem(
     path: "artifacts/reports/qc-summary.md",
     name: "qc-summary.md",
     artifact_type: "qa_report",
-    workflow: "rnaseq_qc_de",
     run_id: "run-rnaseq-1",
     source_tool: "qc_reporter",
     step_label: "Quality control",
     output_name: "qc_summary",
     size_bytes: 1024,
     materialized_at: Date.parse("2026-03-24T18:05:00Z"),
-    ...overrides,
-  };
-}
-
-export function makeArtifactRegistryRecord(
-  overrides: Partial<ArtifactRegistryRecord> = {}
-): ArtifactRegistryRecord {
-  return {
-    artifact_id: "artifact-1",
-    declared_id: "artifact-1",
-    artifact_type: "qa_report",
-    path: "artifacts/reports/qc-summary.md",
-    hash: "sha256:test",
-    created_at: "2026-03-24T18:05:00Z",
-    run_id: "run-rnaseq-1",
-    workflow: "rnaseq_qc_de",
-    date: "2026-03-24",
-    source_workflow: "rnaseq_qc_de",
-    source_tool: "qc_reporter",
-    dataset_id: "dataset-alpha",
-    status: "valid",
-    error: null,
-    indexed_at: "2026-03-24T18:06:00Z",
-    ...overrides,
-  };
-}
-
-export function makeStudySummary(
-  overrides: Partial<StudySummary> = {}
-): StudySummary {
-  const artifactCounts: StudyArtifactCounts = {
-    dataset_manifests: 1,
-    workflow_runs: 2,
-    evidence_reviews: 1,
-    claim_graphs: 1,
-    compliance_reports: 1,
-    qa_reports: 1,
-    checklist_results: 0,
-    exports: 1,
-  };
-
-  return {
-    study_id: "dataset-alpha",
-    title: "Alpha Cohort",
-    assay_type: "RNA-seq",
-    organism: "Homo sapiens",
-    privacy_classification: "restricted",
-    latest_activity_at: "2026-03-24T19:20:00Z",
-    run_count: 2,
-    active_run_state: "completed",
-    evidence_state: "supported",
-    compliance_state: "allowed",
-    qa_state: "passed",
-    export_available: true,
-    artifact_counts: artifactCounts,
     ...overrides,
   };
 }

@@ -1,0 +1,214 @@
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Message } from "@/lib/types";
+import {
+  makeGenericToolResultEnvelope,
+  makeHistoryMessage,
+  makeSessionContinuitySummary,
+} from "@/test/fixtures";
+import { installMockFetch, jsonResponse, route } from "@/test/mock-fetch";
+import SessionHistorySummary from "./SessionHistorySummary";
+
+const mockSendMessage = vi.fn(async () => {});
+
+vi.mock("@/lib/store", () => ({
+  useApp: () => ({
+    isStreaming: false,
+    sendMessage: mockSendMessage,
+  }),
+}));
+
+function makeMessage(overrides: Partial<Message>): Message {
+  return {
+    id: overrides.id ?? `message-${Math.random().toString(16).slice(2)}`,
+    role: overrides.role ?? "assistant",
+    content: overrides.content ?? "",
+    tool_calls: overrides.tool_calls ?? [],
+    retrievals: overrides.retrievals ?? [],
+    ...overrides,
+  };
+}
+
+afterEach(() => {
+  mockSendMessage.mockClear();
+});
+
+describe("SessionHistorySummary", () => {
+  it("compacts older visible turns while keeping recent turns expanded", async () => {
+    const user = userEvent.setup();
+    const messages: Message[] = [
+      makeMessage({
+        id: "user-1",
+        role: "user",
+        content: "Review the alpha run.",
+        request_id: "request-1",
+      }),
+      makeMessage({
+        id: "assistant-1",
+        role: "assistant",
+        content: "Alpha run summary.",
+        request_id: "request-1",
+        retrievals: [
+          {
+            source: "knowledge/alpha.md",
+            score: 0.9,
+            text: "Alpha lab note.",
+          },
+        ],
+        tool_calls: [
+          {
+            tool: "read_file",
+            input: "knowledge/alpha.md",
+            output: "Read knowledge/alpha.md.",
+            run_id: "tool-1",
+            result: makeGenericToolResultEnvelope({
+              artifact_refs: [
+                {
+                  artifact_type: "file",
+                  path: "knowledge/alpha.md",
+                  label: "alpha.md",
+                },
+              ],
+              structured_payload: {
+                path: "knowledge/alpha.md",
+                content_preview: "Alpha lab note.",
+              },
+              summary: "Read knowledge/alpha.md.",
+            }),
+          },
+        ],
+      }),
+      makeMessage({
+        id: "user-2",
+        role: "user",
+        content: "Review the beta run.",
+        request_id: "request-2",
+      }),
+      makeMessage({
+        id: "assistant-2",
+        role: "assistant",
+        content: "Beta run summary.",
+        request_id: "request-2",
+      }),
+      makeMessage({
+        id: "user-3",
+        role: "user",
+        content: "Review the gamma run.",
+        request_id: "request-3",
+      }),
+      makeMessage({
+        id: "assistant-3",
+        role: "assistant",
+        content: "Gamma run summary.",
+        request_id: "request-3",
+      }),
+      makeMessage({
+        id: "user-4",
+        role: "user",
+        content: "Review the delta run.",
+        request_id: "request-4",
+      }),
+      makeMessage({
+        id: "assistant-4",
+        role: "assistant",
+        content: "Delta run summary.",
+        request_id: "request-4",
+      }),
+    ];
+
+    render(
+      <SessionHistorySummary
+        currentSessionId="session-alpha"
+        messages={messages}
+        continuitySummaries={[]}
+      />
+    );
+
+    expect(screen.getByText("Earlier Turns")).toBeTruthy();
+    expect(screen.getByText("Review the alpha run.")).toBeTruthy();
+    expect(screen.getByText("1 tool")).toBeTruthy();
+    expect(screen.getByText("1 source")).toBeTruthy();
+    expect(screen.getByText("Beta run summary.")).toBeTruthy();
+    expect(screen.getByText("Gamma run summary.")).toBeTruthy();
+    expect(screen.getByText("Delta run summary.")).toBeTruthy();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Show older turn Review the alpha run.",
+      })
+    );
+
+    expect((await screen.findAllByText("Alpha run summary.")).length).toBeGreaterThan(0);
+  });
+
+  it("reopens archived continuity summaries on demand", async () => {
+    const user = userEvent.setup();
+    const fetchMock = installMockFetch([
+      route(
+        "GET",
+        "/api/sessions/session-alpha/archives/1712012234",
+        () =>
+          jsonResponse([
+            { role: "user", content: "Archived request." },
+            makeHistoryMessage({
+              request_id: "request-archive-1",
+              content: "",
+              tool_calls: [],
+              retrievals: [],
+              blocks: [
+                {
+                  type: "retrieval",
+                  query: "archive review",
+                  results: [
+                    {
+                      source: "knowledge/archive-history.md",
+                      score: 0.82,
+                      text: "Archived study context.",
+                    },
+                  ],
+                },
+                {
+                  type: "text",
+                  text: "Archived answer.",
+                },
+              ],
+            }),
+          ])
+      ),
+    ]);
+
+    render(
+      <SessionHistorySummary
+        currentSessionId="session-alpha"
+        messages={[
+          makeMessage({
+            id: "recent-user",
+            role: "user",
+            content: "Current request.",
+            request_id: "request-current",
+          }),
+          makeMessage({
+            id: "recent-assistant",
+            role: "assistant",
+            content: "Current answer.",
+            request_id: "request-current",
+          }),
+        ]}
+        continuitySummaries={[makeSessionContinuitySummary()]}
+      />
+    );
+
+    expect(screen.getByText("Archived Work")).toBeTruthy();
+    expect(
+      screen.getByText("Reviewed earlier RNA-seq QC and evidence synthesis work.")
+    ).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Open archived turns" }));
+
+    expect(await screen.findByText("Archived answer.")).toBeTruthy();
+    expect(await screen.findByText("Looked at archive-history.md.")).toBeTruthy();
+
+    fetchMock.restore();
+  });
+});

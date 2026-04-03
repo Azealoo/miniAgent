@@ -7,7 +7,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from artifacts import EvidenceReviewArtifact, load_artifact_document, lookup_artifact_registry
 from evidence.review import EvidenceReviewInput, run_evidence_review
-from evidence.review_gate import EvidenceReviewGateInput, run_evidence_review_gate
 from evidence.retrieval import EvidenceRetrievalResult
 from tools.evidence_review_tool import EvidenceReviewTool
 
@@ -93,31 +92,3 @@ def test_evidence_review_tool_returns_structured_review_contract(tmp_path):
     assert artifact["structured_payload"]["review_status"] == "supported"
     assert artifact["structured_payload"]["source_facts"]
     assert artifact["artifact_refs"][0]["artifact_type"] == "evidence_review"
-
-
-def test_evidence_review_gate_keeps_gene_symbol_questions_reviewable():
-    result = run_evidence_review_gate(
-        EvidenceReviewGateInput(user_message="What does TP53 do in stress response?")
-    )
-
-    assert result.requires_review is True
-    assert "gene-symbol-signal" in result.reasons
-
-
-def test_evidence_review_gate_skips_technical_json_schema_questions():
-    result = run_evidence_review_gate(
-        EvidenceReviewGateInput(user_message="What does JSON schema mean?")
-    )
-
-    assert result.requires_review is False
-    assert "biology-signal" not in result.reasons
-
-
-def test_evidence_review_gate_still_requires_review_for_biology_requests_with_json_output():
-    result = run_evidence_review_gate(
-        EvidenceReviewGateInput(user_message="Summarize the evidence for TP53 as JSON")
-    )
-
-    assert result.requires_review is True
-    assert "biology-signal" in result.reasons
-    assert "evidence-intent" in result.reasons

@@ -1,16 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import {
-  ChevronDown,
-  Download,
-  GitBranch,
-  KeyRound,
-  RefreshCw,
-  ShieldAlert,
-  ShieldCheck,
-  Sparkles,
-} from "lucide-react";
+import { Download, KeyRound, RefreshCw } from "lucide-react";
 import {
   ACCESS_SCOPES,
   accessStatusBadgeLabel,
@@ -18,15 +9,9 @@ import {
   scopeRequirement,
 } from "@/lib/access-control";
 import { getHealth } from "@/lib/api";
-import {
-  getReadinessSummary,
-  getWorkflowSummary,
-  isWorkflowSelectionPending,
-  type ReadinessState,
-  type WorkflowSummary,
-} from "@/lib/session-status";
+import { getReadinessSummary, type ReadinessState } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
-import type { AccessScope, Message, WorkflowStreamEvent } from "@/lib/types";
+import type { AccessScope, Message } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 function buildExportMarkdown(title: string, messages: Message[]) {
@@ -49,14 +34,6 @@ function buildExportMarkdown(title: string, messages: Message[]) {
       });
     }
 
-    if (message.workflow_events?.length) {
-      lines.push("");
-      lines.push("Workflow events:");
-      message.workflow_events.forEach((event) => {
-        lines.push(`- ${formatWorkflowEvent(event)}`);
-      });
-    }
-
     if (message.tool_calls?.length) {
       lines.push("");
       lines.push("Tool calls:");
@@ -69,23 +46,6 @@ function buildExportMarkdown(title: string, messages: Message[]) {
   });
 
   return lines.join("\n").trim() + "\n";
-}
-
-function formatWorkflowEvent(event: WorkflowStreamEvent) {
-  switch (event.type) {
-    case "workflow_start":
-      return `${event.workflow_name} started`;
-    case "workflow_done":
-      return `${event.workflow_id} ${event.lifecycle_status}`;
-    case "workflow_blocked":
-      return `${event.workflow_id} blocked: ${event.reason}`;
-    case "workflow_step_start":
-      return `${event.step_label} running`;
-    case "workflow_step_end":
-      return `${event.step_label} ${event.status}`;
-    case "workflow_artifact":
-      return `${event.scope}: ${event.artifact.path}`;
-  }
 }
 
 type StatusTone = "neutral" | "accent" | "warning" | "danger" | "info";
@@ -101,13 +61,11 @@ function StatusPill({
   leading,
   tone = "neutral",
   title,
-  className,
 }: {
   label: string;
   leading?: ReactNode;
   tone?: StatusTone;
   title?: string;
-  className?: string;
 }) {
   const toneClass =
     tone === "accent"
@@ -125,8 +83,7 @@ function StatusPill({
       title={title}
       className={cn(
         "inline-flex min-w-0 items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] font-medium",
-        toneClass,
-        className
+        toneClass
       )}
     >
       {leading}
@@ -164,104 +121,9 @@ function authDraftsFromState(state: {
 
 function readinessTone(state: ReadinessState): StatusTone {
   if (state === "blocked") return "danger";
-  if (state === "warning" || state === "approval_required") return "warning";
-  if (state === "approved") return "info";
+  if (state === "warning") return "warning";
   if (state === "ready") return "accent";
   return "neutral";
-}
-
-function formatWorkflowLabel(value: string): string {
-  return value.replaceAll("_", " ").replaceAll("-", " ");
-}
-
-function workflowLabel(
-  summary: WorkflowSummary,
-  selectedWorkflow: string | null,
-  selectionPending: boolean
-): string | null {
-  if (selectionPending && selectedWorkflow) {
-    return formatWorkflowLabel(selectedWorkflow);
-  }
-
-  if (summary.workflowName) {
-    return summary.workflowName;
-  }
-
-  if (selectedWorkflow) {
-    return formatWorkflowLabel(selectedWorkflow);
-  }
-
-  if (summary.workflowId) {
-    return formatWorkflowLabel(summary.workflowId);
-  }
-
-  return null;
-}
-
-function workflowTone(
-  summary: WorkflowSummary,
-  selectedWorkflow: string | null,
-  selectionPending: boolean
-): StatusTone {
-  if (summary.status === "blocked" || summary.status === "failed") return "danger";
-  if (workflowLabel(summary, selectedWorkflow, selectionPending)) return "accent";
-  return "neutral";
-}
-
-function describeWorkflow(
-  summary: WorkflowSummary,
-  selectedWorkflow: string | null,
-  selectionPending: boolean
-): string {
-  const label = workflowLabel(summary, selectedWorkflow, selectionPending);
-
-  if (!label) {
-    return "No active workflow selected.";
-  }
-
-  if (selectionPending) {
-    return `${label} is selected and waiting to start.`;
-  }
-
-  if (!summary.workflowName) {
-    return `${label} is selected and waiting to start.`;
-  }
-
-  const statusLabel =
-    summary.status === "blocked"
-      ? "blocked"
-      : summary.status === "failed"
-        ? "failed"
-        : summary.status === "not_started"
-          ? "not started"
-          : summary.status === "running"
-            ? "in progress"
-            : summary.status === "completed"
-              ? "completed"
-              : "idle";
-  const parts = [`${label} is ${statusLabel}.`];
-
-  if (summary.currentStep) {
-    parts.push(`Current step: ${summary.currentStep}.`);
-  }
-
-  if (summary.totalSteps !== null) {
-    parts.push(`${summary.completedSteps}/${summary.totalSteps} steps completed.`);
-  } else if (summary.observedSteps > 0) {
-    parts.push(
-      `${summary.completedSteps}/${summary.observedSteps} observed steps completed.`
-    );
-  }
-
-  if (summary.blockedReason) {
-    parts.push(summary.blockedReason);
-  }
-
-  if (summary.failureReason) {
-    parts.push(summary.failureReason);
-  }
-
-  return parts.join(" ");
 }
 
 function exportFilename(title: string): string {
@@ -281,11 +143,7 @@ export default function Navbar() {
     sessions,
     currentSessionId,
     messages,
-    ragMode,
-    canManageRagMode,
-    setRagMode,
     isStreaming,
-    selectedWorkflow,
   } = useApp();
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("checking");
@@ -390,21 +248,9 @@ export default function Navbar() {
 
   const activeSession =
     sessions.find((session) => session.id === currentSessionId) ?? null;
-  const workflowSummary = getWorkflowSummary(messages);
-  const pendingWorkflowSelection = isWorkflowSelectionPending(
-    messages,
-    selectedWorkflow
-  );
-  const readinessSummary = getReadinessSummary(messages, {
-    workflowSummary,
-    isStreaming,
-  });
-  const title = activeSession?.title ?? "BioAPEX Workspace";
-  const activeWorkflowLabel = workflowLabel(
-    workflowSummary,
-    selectedWorkflow,
-    pendingWorkflowSelection
-  );
+  const readinessSummary = getReadinessSummary(messages, { isStreaming });
+  const title = activeSession?.title ?? "BioAPEX Chat";
+  const accessSummary = getOverallAccessSummary(accessByScope);
 
   const connectionLabel =
     connectionState === "connected"
@@ -425,7 +271,6 @@ export default function Navbar() {
         : connectionState === "offline" || connectionState === "unavailable"
           ? "danger"
           : "neutral";
-  const accessSummary = getOverallAccessSummary(accessByScope);
 
   const handleAccessDraftChange = (scope: AccessScope, value: string) => {
     setAccessDrafts((current) => ({
@@ -438,10 +283,6 @@ export default function Navbar() {
     ACCESS_SCOPES.forEach((scope) => {
       setAccessToken(scope, accessDrafts[scope]);
     });
-  };
-
-  const handleClearAccessTokens = () => {
-    clearAccessTokens();
   };
 
   const handleExport = () => {
@@ -473,13 +314,12 @@ export default function Navbar() {
 
           <div className="min-w-0">
             <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-              Workspace
+              Chat Engine
             </p>
-            <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+            <div className="mt-0.5 min-w-0">
               <span className="truncate text-[15px] font-semibold tracking-tight text-slate-800 sm:text-base">
                 {title}
               </span>
-              <ChevronDown size={15} className="flex-shrink-0 text-slate-400" />
             </div>
           </div>
         </div>
@@ -490,6 +330,12 @@ export default function Navbar() {
             tone={connectionTone}
             title="Backend connection status"
             leading={<ConnectionDot tone={connectionTone} />}
+          />
+
+          <StatusPill
+            label={readinessSummary.label}
+            tone={readinessTone(readinessSummary.state)}
+            title={readinessSummary.detail ?? "No active readiness warnings."}
           />
 
           <div ref={accessPanelRef} className="relative">
@@ -555,26 +401,20 @@ export default function Navbar() {
                           </div>
                           <span
                             className={cn(
-                              "inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]",
+                              "rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em]",
                               state.status === "granted"
-                                ? "border-[rgba(35,130,83,0.18)] bg-[rgba(35,130,83,0.08)] text-[var(--apex-accent-strong)]"
+                                ? "bg-[rgba(35,130,83,0.12)] text-[var(--apex-accent-strong)]"
                                 : state.status === "checking"
-                                  ? "border-[rgba(148,163,184,0.24)] bg-[rgba(248,250,252,0.94)] text-slate-600"
-                                  : state.status === "server_misconfigured"
-                                    ? "border-[rgba(217,119,6,0.22)] bg-[rgba(255,247,237,0.95)] text-amber-700"
-                                    : "border-[rgba(220,38,38,0.18)] bg-[rgba(254,242,242,0.95)] text-rose-700"
+                                  ? "bg-[rgba(59,130,246,0.12)] text-sky-700"
+                                  : "bg-[rgba(189,72,72,0.12)] text-[rgb(149,49,49)]"
                             )}
                           >
                             {accessStatusBadgeLabel(state)}
                           </span>
                         </div>
 
-                        <p className="mt-2 text-[12px] leading-5 text-slate-600">
-                          {state.detail}
-                        </p>
-
                         <label className="mt-3 block">
-                          <span className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                          <span className="text-[11px] font-medium text-slate-600">
                             Bearer token
                           </span>
                           <input
@@ -584,120 +424,52 @@ export default function Navbar() {
                               handleAccessDraftChange(scope, event.target.value)
                             }
                             placeholder={`Optional ${scope} token`}
-                            className="w-full rounded-[12px] border border-[var(--shell-border)] bg-white px-3 py-2 text-[13px] text-slate-700 outline-none placeholder:text-slate-400 focus:border-[var(--apex-accent)]"
+                            className="mt-1.5 w-full rounded-[12px] border border-[var(--shell-border)] bg-white px-3 py-2 text-sm outline-none placeholder:text-slate-400 focus:border-[var(--apex-accent)]"
                           />
                         </label>
+
+                        <p className="mt-2 text-[11px] leading-5 text-slate-500">
+                          {state.detail}
+                        </p>
                       </div>
                     );
                   })}
                 </div>
 
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <p className="w-full text-[11px] leading-5 text-slate-500">
-                    Tokens stay in memory for this browser tab and clear on reload.
-                  </p>
+                <div className="mt-4 flex items-center justify-end gap-2">
                   <button
                     type="button"
-                    onClick={handleApplyAccessTokens}
-                    className="inline-flex items-center gap-2 rounded-full border border-[rgba(35,130,83,0.18)] bg-[var(--apex-accent-soft)] px-3 py-1.5 text-[11px] font-semibold text-[var(--apex-accent-strong)] transition-colors hover:bg-[rgba(35,130,83,0.16)]"
+                    onClick={clearAccessTokens}
+                    className="rounded-full border border-[var(--shell-border)] bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 transition-colors hover:bg-[var(--panel-soft)] hover:text-slate-800"
                   >
-                    <ShieldCheck size={12} />
-                    Apply Tokens
+                    Clear
                   </button>
                   <button
                     type="button"
-                    onClick={handleClearAccessTokens}
-                    className="inline-flex items-center gap-2 rounded-full border border-[var(--shell-border)] bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 transition-colors hover:bg-[var(--panel-soft)] hover:text-slate-800"
+                    onClick={handleApplyAccessTokens}
+                    className="rounded-full bg-[var(--apex-accent)] px-3 py-1.5 text-[11px] font-semibold text-white transition-colors hover:bg-[var(--apex-accent-strong)]"
                   >
-                    Clear Tokens
+                    Apply Tokens
                   </button>
                 </div>
               </div>
             ) : null}
           </div>
 
-          <StatusPill
-            label={activeWorkflowLabel ?? "No workflow"}
-            tone={workflowTone(
-              workflowSummary,
-              selectedWorkflow,
-              pendingWorkflowSelection
-            )}
-            title={describeWorkflow(
-              workflowSummary,
-              selectedWorkflow,
-              pendingWorkflowSelection
-            )}
-            className="hidden max-w-[220px] md:inline-flex"
-            leading={<GitBranch size={12} className="flex-shrink-0" />}
-          />
-
-          {canManageRagMode ? (
-            <button
-              type="button"
-              onClick={() => void setRagMode(!ragMode)}
-              className={cn(
-                "hidden min-w-0 items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] font-medium transition-colors sm:inline-flex",
-                ragMode
-                  ? "border-[rgba(35,130,83,0.18)] bg-[var(--apex-accent-soft)] text-[var(--apex-accent-strong)] hover:bg-[rgba(35,130,83,0.16)]"
-                  : "border-[var(--shell-border)] bg-[var(--panel-soft)] text-slate-500 hover:bg-white hover:text-slate-700"
-              )}
-              title={
-                ragMode
-                  ? "Retrieval-augmented generation is enabled. Click to disable it."
-                  : "Retrieval-augmented generation is disabled. Click to enable it."
-              }
-            >
-              <Sparkles size={12} className="flex-shrink-0" />
-              <span className="truncate">{ragMode ? "RAG On" : "RAG Off"}</span>
-            </button>
-          ) : null}
-
-          <StatusPill
-            label={readinessSummary.label}
-            tone={readinessTone(readinessSummary.state)}
-            title={readinessSummary.detail ?? undefined}
-            leading={
-              readinessSummary.state === "blocked" ||
-              readinessSummary.state === "warning" ||
-              readinessSummary.state === "approval_required" ? (
-                <ShieldAlert size={12} className="flex-shrink-0" />
-              ) : (
-                <ShieldCheck size={12} className="flex-shrink-0" />
-              )
-            }
-          />
-
           <button
+            type="button"
             onClick={handleExport}
             disabled={messages.length === 0}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-semibold transition-colors",
-              messages.length === 0
-                ? "cursor-not-allowed border-[var(--shell-border)] bg-[var(--panel-soft)] text-slate-400"
-                : "border-[rgba(35,130,83,0.18)] bg-[var(--panel-strong)] text-slate-700 hover:bg-[var(--apex-accent-soft)] hover:text-[var(--apex-accent-strong)]"
-            )}
+            className="inline-flex items-center gap-1.5 rounded-full border border-[var(--shell-border)] bg-white/92 px-2.5 py-1.5 text-[11px] font-medium text-slate-600 transition-colors hover:bg-[var(--panel-soft)] hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
             title={
-              messages.length === 0
-                ? "Start a conversation to export this workspace."
-                : "Export the current session transcript."
+              messages.length > 0
+                ? "Export the current chat session as Markdown"
+                : "Start a conversation to enable export"
             }
           >
-            <Download size={13} className="flex-shrink-0" />
+            <Download size={12} />
             <span className="hidden sm:inline">Export</span>
           </button>
-
-          <div
-            title="Local workspace profile"
-            className="inline-flex items-center gap-2 rounded-full border border-[var(--shell-border)] bg-[var(--panel-strong)] px-1.5 py-1"
-          >
-            <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-[var(--apex-accent)] text-[11px] font-semibold text-white">
-              B
-            </span>
-            <span className="hidden pr-1 text-[11px] font-medium text-slate-600 lg:inline">
-              Local
-            </span>
-          </div>
         </div>
       </div>
     </header>

@@ -1,11 +1,16 @@
 ---
 name: normalization_advice
 description: Advise on normalization for scRNA (library size, log, SCTransform, etc.).
-category: bio/scRNA
+category: bio/single_cell_rna
 version: 1.0
 requires_tools: [search_knowledge_base]
 requires_network: false
 user_invocable: true
+species: any
+modality: single_cell_rna
+stage: preprocess
+stability: experimental
+safety_level: low
 ---
 
 # Normalization Advice

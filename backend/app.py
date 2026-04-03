@@ -1,5 +1,5 @@
 """
-miniOpenClaw backend entry point.
+BioAPEX backend entry point.
 
 Run with:
     cd backend
@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
     agent_manager.initialize(BASE_DIR)
     print("[startup] AgentManager initialised")
 
-    # ── 3. Build MEMORY.md vector index ───────────────────────────
+    # ── 3. Build the memory/ retrieval index ──────────────────────
     try:
         agent_manager.memory_indexer.rebuild_index()
         print("[startup] Memory index built")
@@ -73,8 +73,8 @@ async def lifespan(app: FastAPI):
 # ------------------------------------------------------------------ #
 
 app = FastAPI(
-    title="miniOpenClaw",
-    description="Lightweight, transparent AI Agent system",
+    title="BioAPEX",
+    description="Transparent, file-first biologist-assistant backend",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -88,36 +88,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Register routers ───────────────────────────────────────────────
+# ── Register chat-engine routers only ──────────────────────────────
 from api.access import router as access_router
-from api.audit import router as audit_router
-from api.artifact_registry import router as artifact_registry_router
 from api.chat import router as chat_router
-from api.compress import router as compress_router
-from api.config_api import router as config_router
-from api.connectors import router as connectors_router
 from api.files import router as files_router
-from api.observability import router as observability_router
-from api.studies import router as studies_router
 from api.sessions import router as sessions_router
-from api.skills_registry import router as skills_registry_router
-from api.tokens import router as tokens_router
 
 app.include_router(chat_router, prefix="/api")
 app.include_router(access_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
-app.include_router(audit_router, prefix="/api")
-app.include_router(observability_router, prefix="/api")
-app.include_router(artifact_registry_router, prefix="/api")
-app.include_router(studies_router, prefix="/api")
-app.include_router(tokens_router, prefix="/api")
-app.include_router(compress_router, prefix="/api")
-app.include_router(config_router, prefix="/api")
-app.include_router(connectors_router, prefix="/api")
-app.include_router(skills_registry_router, prefix="/api")
 
 
 @app.get("/")
 def health():
-    return {"status": "ok", "service": "miniOpenClaw"}
+    return {"status": "ok", "service": "BioAPEX"}

@@ -1,39 +1,59 @@
 ---
 name: paper_triage
-description: Classify relevance of a paper (perturb-seq/scRNA), extract main claims and limitations from abstract.
+description: Triage a paper for biological relevance, extract the main claims, and separate evidence-backed takeaways from abstract-only impressions.
 category: bio/literature
 version: 1.0
-requires_tools: []
-requires_network: false
+requires_tools: [ncbi_eutils, evidence_retrieval, evidence_review, python_repl]
+requires_network: true
 user_invocable: true
+tags: [paper-triage, abstract, literature, relevance]
+aliases: [abstract_triage, paper_relevance_check]
+species: any
+modality: literature
+stage: interpretation
+stability: stable
+safety_level: low
 ---
 
 # Paper Triage
 
-## When to use
-User pastes an abstract or asks whether a paper is relevant to perturb-seq / scRNA / single-cell perturbation.
+## Purpose
 
-## Inputs
-- **abstract**: The abstract text (or user provides it in the message)
+Decide whether a paper is worth deeper follow-up and summarize the strongest claims, methods, and limitations with clear provenance.
+
+## When to use
+
+Use this skill when the user pastes an abstract, provides a title or PMID, or asks whether a paper is relevant to perturb-seq, single-cell RNA-seq, or a related biology question.
+
+## Required inputs
+
+- **paper details**: abstract text, title, DOI, PMID, or citation fragment
+- **research question** (optional): the biological question the user wants the paper judged against
 
 ## Steps
 
-1. **Identify**: If the user did not paste the abstract, ask for it or use the last provided text.
-
-2. **Classify**: Determine relevance:
-   - High: Perturb-seq, CRISPR screens, single-cell perturbation, scRNA-seq of perturbations.
-   - Medium: scRNA-seq, single-cell methods, gene regulation.
-   - Low: Other (specify).
-
-3. **Extract**: From the abstract, list:
-   - Main claims (1–3 bullets)
-   - Key methods (e.g. platform, perturbations, analysis)
-   - Stated limitations or caveats (if any).
-
-4. **Respond**: Present classification + claims + methods + limitations in a short structured block.
+1. Normalize what the user supplied: abstract-only, title-plus-question, or PMID/citation-backed request.
+2. If a title, citation, or PMID is available, use `ncbi_eutils` or `evidence_retrieval` to ground the paper metadata before judging relevance.
+3. If the user is asking a question about what the paper supports, use `evidence_review` to distinguish supported conclusions from unresolved claims whenever enough source material is available.
+4. Use `python_repl` if helpful to organize the paper into a compact table covering relevance, methods, claims, and limitations.
+5. If only abstract text is available, say explicitly that the triage is abstract-only and lower confidence than a metadata-backed or evidence-reviewed pass.
+6. Return the triage result with provenance, caveats, and the most useful follow-up action.
 
 ## Output format
-- **Relevance**: High / Medium / Low + one sentence.
-- **Main claims**: Bullet list.
-- **Key methods**: Short line.
-- **Limitations**: Bullet list or "None stated."
+
+- **Biological context or assumptions**: the disease, system, assay, or research question used to judge relevance.
+- **Evidence or source basis**: whether the triage came from `ncbi_eutils`, `evidence_retrieval`, `evidence_review`, or abstract-only text.
+- **Relevance and claims**: High / Medium / Low fit plus the main claims and key methods.
+- **Caveats or ambiguity**: missing full text, abstract-only limitations, or unclear alignment with the user's question.
+- **Recommended next step**: retrieve full evidence, compare with a second paper, or move into a deeper evidence review.
+
+## Failure modes
+
+- No usable citation details: say the triage is provisional and based only on the pasted text.
+- Metadata mismatch: call out title, PMID, or abstract inconsistencies before summarizing.
+- Over-broad relevance question: ask what assay, disease, or mechanism the user cares about most.
+
+## Examples
+
+- "Is this paper relevant to Perturb-seq in T cells?"
+- "Triage this abstract and tell me whether it is worth reading in full."

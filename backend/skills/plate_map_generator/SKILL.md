@@ -1,11 +1,16 @@
 ---
 name: plate_map_generator
 description: Generate a 96- or 384-well plate map for perturbations and replicates.
-category: bio/calculations
+category: bio/molecular_lab
 version: 1.0
 requires_tools: [python_repl, write_file]
 requires_network: false
 user_invocable: true
+species: any
+modality: wet_lab
+stage: design
+stability: experimental
+safety_level: low
 ---
 
 # Plate Map Generator

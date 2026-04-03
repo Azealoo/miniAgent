@@ -1,11 +1,16 @@
 ---
 name: cluster_interpretation
 description: Interpret scRNA clusters using marker genes and suggest cell type or state.
-category: bio/scRNA
+category: bio/single_cell_rna
 version: 1.0
 requires_tools: [read_file, python_repl, fetch_url]
-requires_network: false
+requires_network: true
 user_invocable: true
+species: any
+modality: single_cell_rna
+stage: annotation
+stability: experimental
+safety_level: low
 ---
 
 # Cluster Interpretation

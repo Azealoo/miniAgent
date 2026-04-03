@@ -274,7 +274,6 @@ class TestArtifactSchemas:
             "request_context": {
                 "user_message": "Review the patient sheet before analysis.",
                 "attached_identifiers": ["patient_sheet.csv"],
-                "selected_workflow": "scrna-seq-qc",
             },
             "risk_category": "privacy",
             "triggered_rules": [
@@ -309,7 +308,6 @@ class TestArtifactSchemas:
             "request_context": {
                 "user_message": "Review the patient sheet before analysis.",
                 "attached_identifiers": ["patient_sheet.csv"],
-                "selected_workflow": "scrna-seq-qc",
                 "session_id": "session-approved-override",
             },
             "risk_category": "privacy",

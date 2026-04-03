@@ -15,7 +15,7 @@ _TIMEOUT = 15.0
 _MAX_OUTPUT = 5_000
 _HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (compatible; miniOpenClaw/1.0; +https://fufan.ai)"
+        "Mozilla/5.0 (compatible; BioAPEX/1.0; +https://fufan.ai)"
     )
 }
 

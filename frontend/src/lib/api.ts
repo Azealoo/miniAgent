@@ -1,49 +1,22 @@
 import type {
   AccessProbeResponse,
-  ArtifactRegistryLookupResult,
-  ArtifactRegistryQuery,
-  ArtifactRegistrySnapshot,
-  AuditEventsQuery,
-  AuditEventsResponse,
-  ConnectorActionRequest,
-  ConnectorActionResult,
-  ConnectorExecutionAction,
-  ConnectorRegistryAdminDetailResponse,
-  ConnectorRegistryEntry,
-  ConnectorRegistryListResponse,
-  ConnectorRegistryUpdateRequest,
-  ConnectorRegistryUpdateResponse,
-  ConnectorValidationRequest,
+  ChatStreamEvent,
+  ChatStreamErrorEvent,
+  ChatStreamPlanCreatedEvent,
+  ChatStreamPlanUpdatedEvent,
+  ChatStreamVerificationResultEvent,
   FileContentsResponse,
   FileSaveResponse,
-  FilesWorkspaceSummaryResponse,
-  FlowsWorkspaceSummaryResponse,
-  ObservabilityDashboardDefinitionsResponse,
-  ObservabilityMetricsQuery,
-  ObservabilityMetricsResponse,
-  ObservabilityOverview,
-  ObservabilityOverviewQuery,
-  ObservabilityTracesQuery,
-  ObservabilityTracesResponse,
-  RagModeResponse,
   RawFileTextResponse,
   RetrievalResult,
-  RetentionPolicy,
   Session,
-  SessionCompressionResponse,
+  SessionContinuityResponse,
+  SessionContinuitySummary,
   SessionHistoryMessage,
-  SessionTitleResponse,
-  StudiesWorkspaceResponse,
-  Skill,
   SkillRegistryEntry,
-  SkillRegistryUpdateRequest,
-  SkillRegistryUpdateResponse,
-  StudyArtifactCounts,
-  StudySummary,
-  TokenStats,
   ToolResultEnvelope,
-  WorkflowStreamEvent,
 } from "./types";
+import { parseChatStreamChunk } from "./chat-stream-events";
 
 function getBase(): string {
   if (typeof window === "undefined") return "http://localhost:8002";
@@ -341,6 +314,78 @@ function expectArrayField(
   );
 }
 
+function expectStringArrayField(
+  value: UnknownRecord,
+  field: string,
+  path: string,
+  label: string
+): string[] {
+  const items = expectArrayField(value, field, path, label);
+  items.forEach((item) => {
+    if (typeof item !== "string") {
+      throw createPayloadError(
+        path,
+        label,
+        `Expected "${field}" to contain only strings.`
+      );
+    }
+  });
+  return items as string[];
+}
+
+function expectNullableStringField(
+  value: UnknownRecord,
+  field: string,
+  path: string,
+  label: string
+): string | null {
+  if (!(field in value)) {
+    throw createPayloadError(
+      path,
+      label,
+      `Expected "${field}" to be a string or null.`
+    );
+  }
+
+  const fieldValue = value[field];
+  if (fieldValue === null) {
+    return null;
+  }
+  if (typeof fieldValue !== "string") {
+    throw createPayloadError(
+      path,
+      label,
+      `Expected "${field}" to be a string or null.`
+    );
+  }
+  return fieldValue;
+}
+
+function expectNullableObjectField(
+  value: UnknownRecord,
+  field: string,
+  path: string,
+  label: string
+): UnknownRecord | null {
+  if (!(field in value)) {
+    throw createPayloadError(
+      path,
+      label,
+      `Expected "${field}" to be a JSON object or null.`
+    );
+  }
+
+  const fieldValue = value[field];
+  if (fieldValue === null) {
+    return null;
+  }
+  return expectObject(
+    fieldValue,
+    path,
+    label
+  );
+}
+
 function expectObjectField(
   value: UnknownRecord,
   field: string,
@@ -431,6 +476,114 @@ function validateSessionList(value: unknown, path: string): Session[] {
   return sessions as Session[];
 }
 
+function validateSessionContentBlocks(
+  value: unknown,
+  path: string,
+  label: string
+): void {
+  const blocks = expectArray(value, path, label);
+  blocks.forEach((block, index) => {
+    const record = expectObject(block, path, label);
+    const blockLabel = `${label} block ${index + 1}`;
+    const blockType = expectStringField(record, "type", path, blockLabel);
+
+    switch (blockType) {
+      case "text":
+        expectStringField(record, "text", path, blockLabel);
+        break;
+      case "tool_use":
+        expectStringField(record, "tool", path, blockLabel);
+        expectStringField(record, "input", path, blockLabel);
+        if ("run_id" in record && typeof record.run_id !== "string") {
+          throw createPayloadError(
+            path,
+            blockLabel,
+            'Expected "run_id" to be a string when present.'
+          );
+        }
+        break;
+      case "tool_result":
+        expectStringField(record, "tool", path, blockLabel);
+        expectStringField(record, "output", path, blockLabel);
+        if ("run_id" in record && typeof record.run_id !== "string") {
+          throw createPayloadError(
+            path,
+            blockLabel,
+            'Expected "run_id" to be a string when present.'
+          );
+        }
+        if ("result" in record && !isObjectRecord(record.result)) {
+          throw createPayloadError(
+            path,
+            blockLabel,
+            'Expected "result" to be an object when present.'
+          );
+        }
+        break;
+      case "retrieval":
+        expectArrayField(record, "results", path, blockLabel);
+        if ("query" in record && typeof record.query !== "string") {
+          throw createPayloadError(
+            path,
+            blockLabel,
+            'Expected "query" to be a string when present.'
+          );
+        }
+        break;
+      case "usage":
+        expectObjectField(record, "metadata", path, blockLabel);
+        break;
+      case "plan":
+        expectStringLiteralField(record, "event", path, blockLabel, [
+          "created",
+          "updated",
+        ] as const);
+        expectStringField(record, "summary", path, blockLabel);
+        expectObjectField(record, "plan", path, blockLabel);
+        if ("run_id" in record && typeof record.run_id !== "string") {
+          throw createPayloadError(
+            path,
+            blockLabel,
+            'Expected "run_id" to be a string when present.'
+          );
+        }
+        if ("tool_trace" in record && !Array.isArray(record.tool_trace)) {
+          throw createPayloadError(
+            path,
+            blockLabel,
+            'Expected "tool_trace" to be an array when present.'
+          );
+        }
+        break;
+      case "verification":
+        expectStringLiteralField(record, "verdict", path, blockLabel, [
+          "pass",
+          "repair_required",
+          "fail",
+        ] as const);
+        expectStringField(record, "summary", path, blockLabel);
+        expectObjectField(record, "verification", path, blockLabel);
+        if ("run_id" in record && typeof record.run_id !== "string") {
+          throw createPayloadError(
+            path,
+            blockLabel,
+            'Expected "run_id" to be a string when present.'
+          );
+        }
+        if ("tool_trace" in record && !Array.isArray(record.tool_trace)) {
+          throw createPayloadError(
+            path,
+            blockLabel,
+            'Expected "tool_trace" to be an array when present.'
+          );
+        }
+        break;
+      default:
+        break;
+    }
+  });
+}
+
 function validateSessionHistory(value: unknown, path: string): SessionHistoryMessage[] {
   const history = expectArray(value, path, "the session history");
   history.forEach((message, index) => {
@@ -443,110 +596,58 @@ function validateSessionHistory(value: unknown, path: string): SessionHistoryMes
         'Expected "content" to be a string when present.'
       );
     }
+    if ("blocks" in record) {
+      validateSessionContentBlocks(
+        record.blocks,
+        path,
+        `session history item ${index + 1}`
+      );
+    }
   });
   return history as SessionHistoryMessage[];
 }
 
-function validateFlowsWorkspaceSummary(
-  value: unknown,
-  path: string
-): FlowsWorkspaceSummaryResponse {
-  const response = expectObject(value, path, "the flows workspace summary");
-  expectArrayField(response, "items", path, "the flows workspace summary");
-  return response as unknown as FlowsWorkspaceSummaryResponse;
-}
-
-function validateStudyArtifactCounts(
+function validateSessionContinuitySummary(
   value: unknown,
   path: string,
   label: string
-): StudyArtifactCounts {
-  const counts = expectObject(value, path, label);
-  expectNumberField(counts, "dataset_manifests", path, label);
-  expectNumberField(counts, "workflow_runs", path, label);
-  expectNumberField(counts, "evidence_reviews", path, label);
-  expectNumberField(counts, "claim_graphs", path, label);
-  expectNumberField(counts, "compliance_reports", path, label);
-  expectNumberField(counts, "qa_reports", path, label);
-  expectNumberField(counts, "checklist_results", path, label);
-  expectNumberField(counts, "exports", path, label);
-  return counts as unknown as StudyArtifactCounts;
-}
-
-function validateStudySummary(value: unknown, path: string, label: string): StudySummary {
+): SessionContinuitySummary {
   const summary = expectObject(value, path, label);
-  expectStringField(summary, "study_id", path, label);
-  expectStringField(summary, "title", path, label);
-  expectStringField(summary, "assay_type", path, label);
-  expectStringField(summary, "organism", path, label);
-  expectStringField(summary, "privacy_classification", path, label);
-  if (
-    "latest_activity_at" in summary &&
-    summary.latest_activity_at !== null &&
-    typeof summary.latest_activity_at !== "string"
-  ) {
-    throw createPayloadError(path, label, 'Expected "latest_activity_at" to be a string or null.');
+  expectStringField(summary, "source_format", path, label);
+  if ("legacy_summary" in summary && summary.legacy_summary !== null) {
+    expectStringField(summary, "legacy_summary", path, label);
   }
-  expectNumberField(summary, "run_count", path, label);
-  expectStringLiteralField(
-    summary,
-    "active_run_state",
-    path,
-    label,
-    ["not_started", "active", "blocked", "failed", "completed"] as const
-  );
-  expectStringLiteralField(
-    summary,
-    "evidence_state",
-    path,
-    label,
-    ["not_started", "supported", "mixed", "insufficient_evidence"] as const
-  );
-  expectStringLiteralField(
-    summary,
-    "compliance_state",
-    path,
-    label,
-    [
-      "not_started",
-      "allowed",
-      "warning_issued",
-      "approval_required",
-      "approved_override",
-      "blocked",
-    ] as const
-  );
-  expectStringLiteralField(
-    summary,
-    "qa_state",
-    path,
-    label,
-    ["not_started", "passed", "warning", "failed", "blocked"] as const
-  );
-  expectBooleanField(summary, "export_available", path, label);
-  validateStudyArtifactCounts(summary.artifact_counts, path, `${label} artifact counts`);
-  return summary as unknown as StudySummary;
+  expectArrayField(summary, "decisions_and_rationale", path, label);
+  expectArrayField(summary, "results_register", path, label);
+  expectArrayField(summary, "evidence_register", path, label);
+  expectArrayField(summary, "compliance_register", path, label);
+  expectArrayField(summary, "open_questions_and_next_actions", path, label);
+  if ("archive_id" in summary && summary.archive_id !== null) {
+    expectStringField(summary, "archive_id", path, label);
+  }
+  expectNumberField(summary, "archived_message_count", path, label);
+  return summary as unknown as SessionContinuitySummary;
 }
 
-function validateStudiesWorkspaceResponse(
+function validateSessionContinuity(
   value: unknown,
   path: string
-): StudiesWorkspaceResponse {
-  const response = expectObject(value, path, "the studies workspace");
-  const items = expectArrayField(response, "items", path, "the studies workspace");
-  items.forEach((item, index) =>
-    validateStudySummary(item, path, `study summary ${index + 1}`)
+): SessionContinuityResponse {
+  const response = expectObject(value, path, "the session continuity response");
+  const summaries = expectArrayField(
+    response,
+    "summaries",
+    path,
+    "the session continuity response"
   );
-  return response as unknown as StudiesWorkspaceResponse;
-}
-
-function validateFilesWorkspaceSummary(
-  value: unknown,
-  path: string
-): FilesWorkspaceSummaryResponse {
-  const response = expectObject(value, path, "the files workspace summary");
-  expectArrayField(response, "items", path, "the files workspace summary");
-  return response as unknown as FilesWorkspaceSummaryResponse;
+  summaries.forEach((summary, index) =>
+    validateSessionContinuitySummary(
+      summary,
+      path,
+      `session continuity summary ${index + 1}`
+    )
+  );
+  return response as unknown as SessionContinuityResponse;
 }
 
 function validateFileContentsResponse(value: unknown, path: string): FileContentsResponse {
@@ -556,278 +657,8 @@ function validateFileContentsResponse(value: unknown, path: string): FileContent
   return response as unknown as FileContentsResponse;
 }
 
-function validateTokenStats(value: unknown, path: string): TokenStats {
-  const response = expectObject(value, path, "the usage summary");
-  expectStringField(response, "session_id", path, "the usage summary");
-  expectStringField(response, "model_name", path, "the usage summary");
-  expectStringLiteralField(
-    response,
-    "tokenizer_backend",
-    path,
-    "the usage summary",
-    ["tiktoken_cl100k_base", "deterministic_fallback"] as const
-  );
-  expectStringLiteralField(
-    response,
-    "tokenizer_accuracy",
-    path,
-    "the usage summary",
-    ["model_aligned", "approximate"] as const
-  );
-  return response as unknown as TokenStats;
-}
-
 function validateSkillRegistry(value: unknown, path: string): SkillRegistryEntry[] {
   return expectArray(value, path, "the skills registry") as SkillRegistryEntry[];
-}
-
-function validateArtifactRegistryRecord(
-  value: unknown,
-  path: string,
-  label: string
-): void {
-  const record = expectObject(value, path, label);
-  expectStringField(record, "artifact_id", path, label);
-  expectStringField(record, "artifact_type", path, label);
-  expectStringField(record, "path", path, label);
-  expectStringField(record, "run_id", path, label);
-  expectStringField(record, "workflow", path, label);
-  expectStringField(record, "date", path, label);
-  expectStringField(record, "indexed_at", path, label);
-  expectStringField(record, "status", path, label);
-}
-
-function validateArtifactRegistryLookup(
-  value: unknown,
-  path: string
-): ArtifactRegistryLookupResult {
-  const response = expectObject(value, path, "the artifact registry");
-  expectStringField(response, "generated_at", path, "the artifact registry");
-  expectNumberField(response, "total_count", path, "the artifact registry");
-  expectNumberField(response, "matched_count", path, "the artifact registry");
-  expectNumberField(response, "valid_count", path, "the artifact registry");
-  expectNumberField(response, "invalid_count", path, "the artifact registry");
-  const records = expectArrayField(response, "records", path, "the artifact registry");
-  records.forEach((record, index) =>
-    validateArtifactRegistryRecord(record, path, `artifact registry record ${index + 1}`)
-  );
-  return response as unknown as ArtifactRegistryLookupResult;
-}
-
-function validateRetentionPolicy(
-  value: unknown,
-  path: string,
-  label: string
-): RetentionPolicy {
-  const policy = expectObject(value, path, label);
-  expectStringField(policy, "rotation_strategy", path, label);
-  expectNumberField(policy, "retention_expectation_days", path, label);
-  expectBooleanField(policy, "automatic_deletion", path, label);
-  return policy as unknown as RetentionPolicy;
-}
-
-function validateAuditEvents(value: unknown, path: string): AuditEventsResponse {
-  const response = expectObject(value, path, "the audit events response");
-  expectArrayField(response, "events", path, "the audit events response");
-  validateRetentionPolicy(response.retention_policy, path, "the audit retention policy");
-  return response as unknown as AuditEventsResponse;
-}
-
-function validateMetricsResponse(
-  value: unknown,
-  path: string
-): ObservabilityMetricsResponse {
-  const response = expectObject(value, path, "the metrics response");
-  expectArrayField(response, "metrics", path, "the metrics response");
-  validateRetentionPolicy(response.retention_policy, path, "the metrics retention policy");
-  return response as unknown as ObservabilityMetricsResponse;
-}
-
-function validateTracesResponse(
-  value: unknown,
-  path: string
-): ObservabilityTracesResponse {
-  const response = expectObject(value, path, "the traces response");
-  expectArrayField(response, "traces", path, "the traces response");
-  validateRetentionPolicy(response.retention_policy, path, "the traces retention policy");
-  return response as unknown as ObservabilityTracesResponse;
-}
-
-function validateRateSummary(value: unknown, path: string, label: string): void {
-  const summary = expectObject(value, path, label);
-  expectNumberField(summary, "count", path, label);
-  if (
-    "average" in summary &&
-    summary.average !== null &&
-    typeof summary.average !== "number"
-  ) {
-    throw createPayloadError(path, label, 'Expected "average" to be a number or null.');
-  }
-}
-
-function validateDurationSummary(value: unknown, path: string, label: string): void {
-  const summary = expectObject(value, path, label);
-  expectNumberField(summary, "count", path, label);
-}
-
-function validateOverviewResponse(value: unknown, path: string): ObservabilityOverview {
-  const response = expectObject(value, path, "the ops overview");
-  expectStringField(response, "generated_at", path, "the ops overview");
-  expectNumberField(response, "window_days", path, "the ops overview");
-  const filters = expectObjectField(response, "filters", path, "the ops overview");
-  if (
-    ("workflow_id" in filters && filters.workflow_id !== null && typeof filters.workflow_id !== "string") ||
-    ("session_id" in filters && filters.session_id !== null && typeof filters.session_id !== "string") ||
-    ("request_id" in filters && filters.request_id !== null && typeof filters.request_id !== "string")
-  ) {
-    throw createPayloadError(
-      path,
-      "the ops overview",
-      "Expected the overview filters to be strings or null values."
-    );
-  }
-  const recordCounts = expectObjectField(response, "record_counts", path, "the ops overview");
-  expectNumberField(recordCounts, "metric_records", path, "the ops overview");
-  expectNumberField(recordCounts, "trace_records", path, "the ops overview");
-  const chatResponsiveness = expectObjectField(
-    response,
-    "chat_responsiveness",
-    path,
-    "the ops overview"
-  );
-  validateDurationSummary(
-    chatResponsiveness.user_visible_latency_seconds,
-    path,
-    "the user-visible latency summary"
-  );
-  validateDurationSummary(
-    chatResponsiveness.backend_execution_latency_seconds,
-    path,
-    "the backend execution latency summary"
-  );
-  const workflowDelivery = expectObjectField(
-    response,
-    "workflow_delivery",
-    path,
-    "the ops overview"
-  );
-  validateDurationSummary(
-    workflowDelivery.workflow_duration_seconds,
-    path,
-    "the workflow duration summary"
-  );
-  validateDurationSummary(
-    workflowDelivery.step_duration_seconds,
-    path,
-    "the workflow step duration summary"
-  );
-  validateRateSummary(
-    workflowDelivery.failure_rate,
-    path,
-    "the workflow failure-rate summary"
-  );
-  validateRateSummary(
-    workflowDelivery.block_rate,
-    path,
-    "the workflow block-rate summary"
-  );
-  const workflowQuality = expectObjectField(
-    response,
-    "workflow_quality",
-    path,
-    "the ops overview"
-  );
-  validateRateSummary(
-    workflowQuality.qc_pass_rate,
-    path,
-    "the QC pass-rate summary"
-  );
-  validateRateSummary(
-    workflowQuality.evidence_coverage_rate,
-    path,
-    "the evidence-coverage summary"
-  );
-  expectArrayField(response, "dashboards", path, "the ops overview");
-  validateRetentionPolicy(response.retention_policy, path, "the overview retention policy");
-  return response as unknown as ObservabilityOverview;
-}
-
-function validateDashboardDefinitions(
-  value: unknown,
-  path: string
-): ObservabilityDashboardDefinitionsResponse {
-  const response = expectObject(value, path, "the dashboard definitions");
-  expectArrayField(response, "dashboards", path, "the dashboard definitions");
-  validateRetentionPolicy(
-    response.retention_policy,
-    path,
-    "the dashboard retention policy"
-  );
-  return response as unknown as ObservabilityDashboardDefinitionsResponse;
-}
-
-function validateConnectorRegistryEntryPayload(
-  value: unknown,
-  path: string,
-  label: string
-): ConnectorRegistryEntry {
-  const response = expectObject(value, path, label);
-  expectStringField(response, "name", path, label);
-  expectStringField(response, "display_name", path, label);
-  expectStringField(response, "description", path, label);
-  expectStringField(response, "system_kind", path, label);
-  expectStringField(response, "external_system", path, label);
-  expectBooleanField(response, "enabled", path, label);
-  const capabilities = expectObjectField(response, "capabilities", path, label);
-  expectArrayField(capabilities, "supported_actions", path, label);
-  expectArrayField(capabilities, "transport_patterns", path, label);
-  expectArrayField(capabilities, "artifact_domains", path, label);
-  const guardrails = expectObjectField(capabilities, "guardrails", path, label);
-  expectBooleanField(guardrails, "requires_compliance_gate", path, label);
-  expectBooleanField(guardrails, "requires_provenance_records", path, label);
-  expectBooleanField(guardrails, "requires_artifact_registration", path, label);
-  expectBooleanField(guardrails, "allow_destructive_sync", path, label);
-  const configSummary = expectObjectField(response, "config_summary", path, label);
-  expectBooleanField(configSummary, "configured", path, label);
-  expectArrayField(configSummary, "configured_fields", path, label);
-  expectArrayField(configSummary, "missing_required_fields", path, label);
-  expectBooleanField(configSummary, "uses_secret_references", path, label);
-  expectArrayField(response, "config_fields", path, label);
-  expectArrayField(response, "notes", path, label);
-  return response as unknown as ConnectorRegistryEntry;
-}
-
-function validateConnectorRegistryList(
-  value: unknown,
-  path: string
-): ConnectorRegistryListResponse {
-  const response = expectObject(value, path, "the connector registry");
-  const connectors = expectArrayField(response, "connectors", path, "the connector registry");
-  connectors.forEach((connector, index) =>
-    validateConnectorRegistryEntryPayload(
-      connector,
-      path,
-      `connector registry entry ${index + 1}`
-    )
-  );
-  return response as unknown as ConnectorRegistryListResponse;
-}
-
-function validateConnectorAdminDetail(
-  value: unknown,
-  path: string
-): ConnectorRegistryAdminDetailResponse {
-  const response = expectObject(value, path, "the connector admin detail");
-  expectStringField(response, "connector_name", path, "the connector admin detail");
-  expectBooleanField(response, "enabled", path, "the connector admin detail");
-  expectObjectField(response, "config", path, "the connector admin detail");
-  expectObjectField(
-    response,
-    "validation_result",
-    path,
-    "the connector admin detail"
-  );
-  return response as unknown as ConnectorRegistryAdminDetailResponse;
 }
 
 const inspectReq = <T>(path: string, options: Omit<ApiRequestOptions, "scope"> = {}) =>
@@ -835,9 +666,6 @@ const inspectReq = <T>(path: string, options: Omit<ApiRequestOptions, "scope"> =
 
 const executeReq = <T>(path: string, options: Omit<ApiRequestOptions, "scope"> = {}) =>
   req<T>(path, { ...options, scope: "execution" });
-
-const adminReq = <T>(path: string, options: Omit<ApiRequestOptions, "scope"> = {}) =>
-  req<T>(path, { ...options, scope: "admin" });
 
 const inspectFetch = (
   path: string,
@@ -874,24 +702,16 @@ export const getHistory = async (id: string) =>
     `/api/sessions/${id}/history`
   );
 
-export const getFlowsWorkspaceSummary = async () =>
-  validateFlowsWorkspaceSummary(
-    await inspectReq<unknown>("/api/sessions/workflows/summary"),
-    "/api/sessions/workflows/summary"
+export const getSessionContinuity = async (id: string) =>
+  validateSessionContinuity(
+    await inspectReq<unknown>(`/api/sessions/${id}/continuity`),
+    `/api/sessions/${id}/continuity`
   );
 
-export const getFilesWorkspaceSummary = async (sessionId: string) =>
-  validateFilesWorkspaceSummary(
-    await inspectReq<unknown>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/files/summary`
-    ),
-    `/api/sessions/${encodeURIComponent(sessionId)}/files/summary`
-  );
-
-export const getStudiesWorkspaceSummary = async () =>
-  validateStudiesWorkspaceResponse(
-    await inspectReq<unknown>("/api/studies"),
-    "/api/studies"
+export const getSessionArchive = async (id: string, archiveId: string) =>
+  validateSessionHistory(
+    await inspectReq<unknown>(`/api/sessions/${id}/archives/${archiveId}`),
+    `/api/sessions/${id}/archives/${archiveId}`
   );
 
 export const readFile = async (path: string) =>
@@ -1179,89 +999,9 @@ export const openRawFileInNewTab = async (path: string): Promise<void> => {
 export const getRawFileUrl = (path: string) =>
   buildApiUrl("/api/files/raw", { path });
 
-export const listSkills = () => inspectReq<Skill[]>("/api/skills");
-
 export const listSkillsRegistry = () =>
   inspectReq<unknown>("/api/skills/registry").then((payload) =>
     validateSkillRegistry(payload, "/api/skills/registry")
-  );
-
-export const getSessionTokens = async (id: string) =>
-  validateTokenStats(
-    await inspectReq<unknown>(`/api/tokens/session/${id}`),
-    `/api/tokens/session/${id}`
-  );
-
-export const listArtifactRegistry = async (query: ArtifactRegistryQuery = {}) =>
-  validateArtifactRegistryLookup(
-    await inspectReq<unknown>("/api/artifacts/registry", {
-      query: { ...query },
-    }),
-    "/api/artifacts/registry"
-  );
-
-export const listAuditEvents = async (query: AuditEventsQuery = {}) =>
-  validateAuditEvents(
-    await inspectReq<unknown>("/api/audit/events", {
-      query: { ...query },
-    }),
-    "/api/audit/events"
-  );
-
-export const listObservabilityMetrics = (
-  query: ObservabilityMetricsQuery = {}
-) =>
-  inspectReq<unknown>("/api/observability/metrics", {
-    query: { ...query },
-  }).then((payload) =>
-    validateMetricsResponse(payload, "/api/observability/metrics")
-  );
-
-export const listObservabilityTraces = (
-  query: ObservabilityTracesQuery = {}
-) =>
-  inspectReq<unknown>("/api/observability/traces", {
-    query: { ...query },
-  }).then((payload) =>
-    validateTracesResponse(payload, "/api/observability/traces")
-  );
-
-export const getObservabilityOverview = (
-  query: ObservabilityOverviewQuery = {}
-) =>
-  inspectReq<unknown>("/api/observability/overview", {
-    query: { ...query },
-  }).then((payload) =>
-    validateOverviewResponse(payload, "/api/observability/overview")
-  );
-
-export const getObservabilityDashboardDefinitions = async () =>
-  validateDashboardDefinitions(
-    await inspectReq<unknown>("/api/observability/dashboard-definitions"),
-    "/api/observability/dashboard-definitions"
-  );
-
-export const listConnectorRegistry = async () =>
-  validateConnectorRegistryList(
-    await inspectReq<unknown>("/api/connectors/registry"),
-    "/api/connectors/registry"
-  );
-
-export const getConnectorRegistryDetail = async (connectorName: string) =>
-  validateConnectorRegistryEntryPayload(
-    await inspectReq<unknown>(
-      `/api/connectors/registry/${encodeURIComponent(connectorName)}`
-    ),
-    `/api/connectors/registry/${encodeURIComponent(connectorName)}`,
-    "the selected connector detail"
-  );
-
-export const getConnectorRegistryAdminDetail = async (connectorName: string) =>
-  validateConnectorAdminDetail(
-    await adminReq<unknown>(
-      `/api/connectors/registry/${encodeURIComponent(connectorName)}/admin-detail`
-    ),
-    `/api/connectors/registry/${encodeURIComponent(connectorName)}/admin-detail`
   );
 
 // Execution routes
@@ -1278,115 +1018,41 @@ export const renameSession = (id: string, title: string) =>
 export const deleteSession = (id: string) =>
   executeReq<void>(`/api/sessions/${id}`, { method: "DELETE" });
 
-export const generateTitle = (id: string) =>
-  executeReq<SessionTitleResponse>(`/api/sessions/${id}/generate-title`, {
-    method: "POST",
-  });
-
 export const saveFile = (path: string, content: string) =>
   executeReq<FileSaveResponse>("/api/files", {
     jsonBody: { content, path },
     method: "POST",
   });
 
-export const compressSession = (id: string) =>
-  executeReq<SessionCompressionResponse>(`/api/sessions/${id}/compress`, {
-    method: "POST",
-  });
-
-// Admin routes
-
-export const getRagMode = () =>
-  adminReq<RagModeResponse>("/api/config/rag-mode");
-
-export const setRagMode = (enabled: boolean) =>
-  adminReq<RagModeResponse>("/api/config/rag-mode", {
-    jsonBody: { enabled },
-    method: "PUT",
-  });
-
-export const rebuildArtifactRegistry = () =>
-  adminReq<ArtifactRegistrySnapshot>("/api/artifacts/registry/rebuild", {
-    method: "POST",
-  });
-
-export const updateConnectorRegistryEntry = (
-  connectorName: string,
-  body: ConnectorRegistryUpdateRequest
-) =>
-  adminReq<ConnectorRegistryUpdateResponse>(
-    `/api/connectors/registry/${encodeURIComponent(connectorName)}`,
-    {
-      jsonBody: body,
-      method: "PUT",
-    }
-  );
-
-export const validateConnectorRegistryEntry = (
-  connectorName: string,
-  body?: ConnectorValidationRequest
-) =>
-  adminReq<ConnectorActionResult>(
-    `/api/connectors/registry/${encodeURIComponent(connectorName)}/validate`,
-    {
-      jsonBody: body,
-      method: "POST",
-    }
-  );
-
-export const runConnectorRegistryAction = (
-  connectorName: string,
-  action: ConnectorExecutionAction,
-  body?: ConnectorActionRequest
-) =>
-  adminReq<ConnectorActionResult>(
-    `/api/connectors/registry/${encodeURIComponent(connectorName)}/actions/${action}`,
-    {
-      jsonBody: body,
-      method: "POST",
-    }
-  );
-
-export const updateSkillRegistryEntry = (
-  skillName: string,
-  body: SkillRegistryUpdateRequest
-) =>
-  adminReq<SkillRegistryUpdateResponse>(
-    `/api/skills/registry/${encodeURIComponent(skillName)}`,
-    {
-      jsonBody: body,
-      method: "PUT",
-    }
-  );
-
 // Chat streaming (custom SSE parser — POST-based)
 
 export interface StreamCallbacks {
-  onRetrieval: (query: string, results: RetrievalResult[]) => void;
-  onToken: (content: string) => void;
-  onToolStart: (
+  onEvent?: (event: ChatStreamEvent) => void;
+  onRetrieval?: (query: string, results: RetrievalResult[]) => void;
+  onToken?: (content: string) => void;
+  onToolStart?: (
     tool: string,
     input: string,
     runId: string,
     requestId?: string
   ) => void;
-  onToolEnd: (
+  onToolEnd?: (
     tool: string,
     output: string,
     runId: string,
     result?: ToolResultEnvelope,
     requestId?: string
   ) => void;
-  onWorkflowEvent: (event: WorkflowStreamEvent) => void;
-  onNewResponse: () => void;
-  onDone: (content: string, requestId?: string) => void;
-  onTitle: (title: string) => void;
-  onError: (error: string, requestId?: string) => void;
+  onPlanCreated?: (event: ChatStreamPlanCreatedEvent) => void;
+  onPlanUpdated?: (event: ChatStreamPlanUpdatedEvent) => void;
+  onVerificationResult?: (event: ChatStreamVerificationResultEvent) => void;
+  onNewResponse?: () => void;
+  onDone?: (content: string, requestId?: string) => void;
+  onError?: (error: string, requestId?: string) => void;
 }
 
 export interface ChatRequestContext {
   attachedIdentifiers?: string[];
-  selectedWorkflow?: string | null;
 }
 
 export async function streamChat(
@@ -1399,7 +1065,6 @@ export async function streamChat(
     jsonBody: {
       attached_identifiers: context?.attachedIdentifiers ?? [],
       message,
-      selected_workflow: context?.selectedWorkflow ?? null,
       session_id: sessionId,
       stream: true,
     },
@@ -1408,81 +1073,104 @@ export async function streamChat(
 
   if (!response.ok || !response.body) {
     const text = await response.text().catch(() => response.statusText);
-    callbacks.onError(
-      extractApiErrorMessage(text, response.status, response.statusText)
-    );
+    const errorEvent: ChatStreamErrorEvent = {
+      type: "error",
+      error: extractApiErrorMessage(text, response.status, response.statusText),
+    };
+    callbacks.onEvent?.(errorEvent);
+    callbacks.onError?.(errorEvent.error, errorEvent.request_id);
     return;
   }
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
+  let sawTerminalEvent = false;
+  let lastRequestId: string | undefined;
+
+  const dispatchEvent = (event: ChatStreamEvent) => {
+    if (event.request_id) {
+      lastRequestId = event.request_id;
+    }
+    if (event.type === "done" || event.type === "error") {
+      sawTerminalEvent = true;
+    }
+
+    callbacks.onEvent?.(event);
+    switch (event.type) {
+      case "retrieval":
+        callbacks.onRetrieval?.(event.query, event.results);
+        break;
+      case "token":
+        callbacks.onToken?.(event.content);
+        break;
+      case "tool_start":
+        callbacks.onToolStart?.(
+          event.tool,
+          event.input,
+          event.run_id ?? event.tool,
+          event.request_id
+        );
+        break;
+      case "tool_end":
+        callbacks.onToolEnd?.(
+          event.tool,
+          event.output,
+          event.run_id ?? event.tool,
+          event.result,
+          event.request_id
+        );
+        break;
+      case "plan_created":
+        callbacks.onPlanCreated?.(event);
+        break;
+      case "plan_updated":
+        callbacks.onPlanUpdated?.(event);
+        break;
+      case "verification_result":
+        callbacks.onVerificationResult?.(event);
+        break;
+      case "new_response":
+        callbacks.onNewResponse?.();
+        break;
+      case "done":
+        callbacks.onDone?.(event.content, event.request_id);
+        break;
+      case "error":
+        callbacks.onError?.(event.error, event.request_id);
+        break;
+    }
+  };
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
+      const parsed = parseChatStreamChunk(
+        buffer,
+        decoder.decode(value, { stream: true })
+      );
+      buffer = parsed.bufferedRemainder;
 
-      const events = buffer.split("\n\n");
-      buffer = events.pop() ?? "";
-
-      for (const event of events) {
-        for (const line of event.split("\n")) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const data = JSON.parse(line.slice(6));
-            switch (data.type) {
-              case "retrieval":
-                callbacks.onRetrieval(data.query, data.results);
-                break;
-              case "token":
-                callbacks.onToken(data.content);
-                break;
-              case "tool_start":
-                callbacks.onToolStart(
-                  data.tool,
-                  data.input,
-                  data.run_id ?? data.tool,
-                  data.request_id
-                );
-                break;
-              case "tool_end":
-                callbacks.onToolEnd(
-                  data.tool,
-                  data.output,
-                  data.run_id ?? data.tool,
-                  data.result,
-                  data.request_id
-                );
-                break;
-              case "workflow_start":
-              case "workflow_step_start":
-              case "workflow_step_end":
-              case "workflow_blocked":
-              case "workflow_artifact":
-              case "workflow_done":
-                callbacks.onWorkflowEvent(data as WorkflowStreamEvent);
-                break;
-              case "new_response":
-                callbacks.onNewResponse();
-                break;
-              case "done":
-                callbacks.onDone(data.content ?? "", data.request_id);
-                break;
-              case "title":
-                callbacks.onTitle(data.title);
-                break;
-              case "error":
-                callbacks.onError(data.error ?? "Unknown error", data.request_id);
-                break;
-            }
-          } catch {
-            // Skip malformed lines
-          }
-        }
+      for (const event of parsed.events) {
+        dispatchEvent(event);
       }
+    }
+
+    const finalParsed = parseChatStreamChunk(buffer, decoder.decode());
+    buffer = finalParsed.bufferedRemainder;
+    for (const event of finalParsed.events) {
+      dispatchEvent(event);
+    }
+
+    if (!sawTerminalEvent) {
+      const errorEvent: ChatStreamErrorEvent = {
+        type: "error",
+        error: "The response stream closed before completion.",
+        request_id: lastRequestId,
+      };
+      dispatchEvent(errorEvent);
     }
   } finally {
     reader.releaseLock();

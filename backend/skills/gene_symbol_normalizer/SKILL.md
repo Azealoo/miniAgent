@@ -27,32 +27,30 @@ Use this skill when the user provides one or more gene names that may be aliases
 
 ## Required inputs
 
-- **genes**: One or more gene symbols, aliases, or identifiers.
-- **species** (optional): Human, mouse, or another organism if the user already knows it.
+- **genes**: one or more gene symbols, aliases, or identifiers
+- **species** (optional): human, mouse, or another organism if the user already knows it
 
 ## Steps
 
-1. Parse the input into a clean list of candidate gene names.
-2. If species is unclear, infer it cautiously from context and say when the species remains ambiguous.
-3. Use `ensembl_api` and `uniprot_api` to confirm canonical symbols, known aliases, and organism.
-4. Use `python_repl` to assemble a clean table with:
-   - input term
-   - normalized symbol
-   - species
-   - matched source
-   - confidence or ambiguity note
-5. If multiple plausible mappings exist, do not guess. Return the ambiguous options clearly.
+1. Parse the input into a clean list of candidate gene names and restate any stated or inferred species assumptions.
+2. Use `ensembl_api` as the primary source for canonical symbols, aliases, and organism mapping.
+3. Use `uniprot_api` as a cross-check when alias families, protein naming, or species assignments remain unclear.
+4. Use `python_repl` to assemble a compact normalization table with input term, canonical symbol, species, matched source, and ambiguity or confidence note.
+5. Separate exact matches, likely alias matches, and unresolved collisions; do not silently choose between equally plausible species or symbols.
+6. Return the normalized mapping together with the source basis, uncertainty, and the most useful downstream next step.
 
 ## Output format
 
-- **Normalized table**: Input | Canonical symbol | Species | Notes
-- **Ambiguities**: List any symbols that need user confirmation
-- **Recommended next step**: Suggest the next skill if helpful
+- **Biological context or assumptions**: stated or inferred species, identifier type, and any naming assumptions.
+- **Evidence or source basis**: which `ensembl_api` and `uniprot_api` results supported each normalization.
+- **Normalized mapping**: Input | Canonical symbol | Species | Match type | Note
+- **Caveats or ambiguity**: unresolved aliases, multi-species collisions, or low-confidence mappings.
+- **Recommended next step**: suggest the next skill or lookup if helpful.
 
 ## Failure modes
 
-- No confident match: report that the symbol could not be normalized.
-- Multiple species match equally well: ask the user to specify species.
+- No confident match: report that the symbol could not be normalized and say which sources were checked.
+- Multiple species match equally well: ask the user to specify species before choosing a canonical symbol.
 - Alias collision: return all plausible mappings instead of choosing one blindly.
 
 ## Examples

@@ -1,11 +1,16 @@
 ---
 name: data_location_help
 description: Explain where project data and outputs live (e.g. GPFS, data/, predictions/) from knowledge base.
-category: bio/hpc
+category: bio/compute
 version: 1.0
 requires_tools: [search_knowledge_base]
 requires_network: false
 user_invocable: true
+species: any
+modality: compute
+stage: utilities
+stability: experimental
+safety_level: low
 ---
 
 # Data Location Help

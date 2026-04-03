@@ -108,13 +108,14 @@ body {
 
 .apex-chat-prose {
   color: #203028;
-  font-size: 0.95rem;
-  line-height: 1.72;
+  font-size: 0.89rem;
+  line-height: 1.66;
+  letter-spacing: -0.003em;
 }
 
 .apex-chat-prose :where(p) {
   margin-top: 0;
-  margin-bottom: 0.95rem;
+  margin-bottom: 0.72rem;
 }
 
 .apex-chat-prose :where(p:last-child) {
@@ -122,29 +123,29 @@ body {
 }
 
 .apex-chat-prose :where(h1, h2, h3, h4) {
-  margin-top: 1.4rem;
-  margin-bottom: 0.7rem;
+  margin-top: 1.15rem;
+  margin-bottom: 0.55rem;
   color: #17211c;
   font-weight: 600;
   letter-spacing: -0.02em;
 }
 
 .apex-chat-prose :where(h1) {
-  font-size: 1.18rem;
-}
-
-.apex-chat-prose :where(h2) {
   font-size: 1.08rem;
 }
 
+.apex-chat-prose :where(h2) {
+  font-size: 1rem;
+}
+
 .apex-chat-prose :where(h3, h4) {
-  font-size: 0.98rem;
+  font-size: 0.93rem;
 }
 
 .apex-chat-prose :where(ul, ol) {
-  margin-top: 0.7rem;
-  margin-bottom: 0.95rem;
-  padding-left: 1.25rem;
+  margin-top: 0.55rem;
+  margin-bottom: 0.72rem;
+  padding-left: 1.1rem;
 }
 
 .apex-chat-prose :where(li) {
@@ -167,9 +168,9 @@ body {
 }
 
 .apex-chat-prose :where(blockquote) {
-  margin: 1rem 0;
+  margin: 0.85rem 0;
   border-left: 2px solid rgba(35, 130, 83, 0.22);
-  padding-left: 0.95rem;
+  padding-left: 0.8rem;
   color: #516159;
 }
 
@@ -186,7 +187,7 @@ body {
 .streaming-cursor::after {
   content: "▍";
   display: inline-block;
-  animation: blink 1s step-end infinite;
+  animation: blink 0.6s step-end infinite;
   color: var(--apex-accent);
   margin-left: 1px;
 }
@@ -197,7 +198,130 @@ body {
 }
 
 .animate-blink {
-  animation: blink 1s step-end infinite;
+  animation: blink 0.6s step-end infinite;
+}
+
+.apex-live-dot {
+  animation: blink 0.6s step-end infinite;
+}
+
+@keyframes apex-process-section-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(35, 130, 83, 0.18);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(35, 130, 83, 0);
+    transform: scale(1.02);
+  }
+}
+
+.apex-process-section-dot-live {
+  animation: apex-process-section-pulse 1.05s ease-out infinite;
+}
+
+@keyframes apex-streaming-preview {
+  0% {
+    opacity: 0.45;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.apex-streaming-draft {
+  border-color: rgba(35, 130, 83, 0.14);
+  background: linear-gradient(
+    180deg,
+    rgba(250, 252, 249, 0.98),
+    rgba(243, 248, 244, 0.98)
+  );
+  color: rgba(32, 48, 40, 0.72);
+  font-family: "IBM Plex Mono", "SFMono-Regular", "Menlo", monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  animation: apex-streaming-preview 160ms ease-out;
+}
+
+@keyframes apex-transcript-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.apex-transcript-enter {
+  animation: apex-transcript-enter 180ms ease-out;
+}
+
+.apex-process-rail {
+  position: relative;
+  padding-left: 0.95rem;
+}
+
+.apex-process-rail::before {
+  content: "";
+  position: absolute;
+  left: 0.22rem;
+  top: 0.35rem;
+  bottom: 0.35rem;
+  width: 1px;
+  background: rgba(32, 43, 35, 0.1);
+}
+
+@keyframes apex-thinking-sheen {
+  0% {
+    background-position: -140% 50%;
+  }
+  100% {
+    background-position: 220% 50%;
+  }
+}
+
+.apex-thinking-label {
+  display: inline-block;
+  color: rgb(94, 105, 97);
+  letter-spacing: 0.01em;
+  background-image: linear-gradient(
+    90deg,
+    rgb(94, 105, 97) 0%,
+    rgb(94, 105, 97) 34%,
+    rgb(242, 249, 245) 47%,
+    rgb(124, 149, 131) 55%,
+    rgb(94, 105, 97) 66%,
+    rgb(94, 105, 97) 100%
+  );
+  background-size: 240% 100%;
+  background-position: -140% 50%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  will-change: background-position;
+  animation: apex-thinking-sheen 1.18s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .streaming-cursor::after,
+  .animate-blink,
+  .apex-live-dot,
+  .apex-process-section-dot-live,
+  .apex-streaming-draft,
+  .apex-transcript-enter,
+  .apex-thinking-label {
+    animation: none !important;
+    transform: none !important;
+  }
+
+  .apex-thinking-label {
+    background-image: none !important;
+    -webkit-text-fill-color: initial !important;
+    color: rgb(94, 105, 97) !important;
+  }
 }
 
 /* ── Highlight.js theme (GitHub light) ────────────── */
