@@ -9,6 +9,7 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr
 
 from .contracts import empty_result, success_result
+from .untrusted_wrapper import wrap_untrusted
 
 _TOP_K = 3
 _SUPPORTED_EXTS = {".md", ".txt", ".pdf"}
@@ -214,7 +215,12 @@ class SearchKnowledgeBaseTool(BaseTool):
 
         top_results = results[:_TOP_K]
         output = "\n\n---\n\n".join(
-            f"[Source: {result['source']}]\n{result['text']}"
+            f"[Source: {result['source']}]\n"
+            + wrap_untrusted(
+                result["text"],
+                source=result["source"],
+                tool_name=self.name,
+            )
             for result in top_results
         )
         return success_result(

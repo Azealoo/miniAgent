@@ -11,6 +11,8 @@ import httpx
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from .untrusted_wrapper import wrap_untrusted
+
 _TIMEOUT = 15.0
 _MAX_OUTPUT = 5_000
 _HEADERS = {
@@ -120,7 +122,8 @@ class FetchURLTool(BaseTool):
             text = text.strip()
             if len(text) > _MAX_OUTPUT:
                 text = text[:_MAX_OUTPUT] + "\n...[output truncated]"
-            return text or "(empty response)"
+            body = text or "(empty response)"
+            return wrap_untrusted(body, source=url, tool_name=self.name)
 
         except httpx.TimeoutException:
             return f"[ERROR] Request timed out after {_TIMEOUT}s."
