@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 import config
 
@@ -14,6 +17,9 @@ MAX_PROJECT_INSTRUCTION_TOTAL_CHARS = 8_000
 MAX_GIT_CONTEXT_CHARS = 2_000
 MAX_RETRIEVED_MEMORY_BLOCK_CHARS = 1_600
 MAX_RETRIEVED_MEMORY_ITEM_CHARS = 280
+MAX_SCOPED_MEMORY_BLOCK_CHARS = 4_000
+
+_MEMORY_SCOPE_DIRS = ("project", "user", "agent")
 
 _RAG_MEMORY_GUIDANCE = (
     "<!-- Long-term Memory -->\n"
@@ -267,6 +273,114 @@ def _build_git_context(base_dir: Path) -> str:
     return f"<!-- Project Git Context -->\n{rendered}"
 
 
+def _parse_memory_frontmatter(text: str) -> dict[str, Any]:
+    if not text.startswith("---"):
+        return {}
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}
+    try:
+        parsed = yaml.safe_load(parts[1])
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _resolve_memory_updated_at(path: Path, frontmatter: dict[str, Any]) -> datetime | None:
+    explicit = _parse_iso_datetime(frontmatter.get("updated_at"))
+    if explicit is not None:
+        return explicit
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    return datetime.fromtimestamp(mtime, tz=timezone.utc)
+
+
+def _is_memory_entry_included(
+    path: Path,
+    frontmatter: dict[str, Any],
+    *,
+    now: datetime,
+    stale_threshold: timedelta,
+) -> bool:
+    if bool(frontmatter.get("pinned")):
+        return True
+    updated_at = _resolve_memory_updated_at(path, frontmatter)
+    if updated_at is None:
+        return False
+    return (now - updated_at) <= stale_threshold
+
+
+def _format_scoped_memory_entry(relative_path: Path, frontmatter: dict[str, Any]) -> str:
+    line = f"- {relative_path.as_posix()}"
+    name = frontmatter.get("name")
+    if isinstance(name, str) and name.strip():
+        line += f" — {name.strip()}"
+    description = frontmatter.get("description")
+    if isinstance(description, str) and description.strip():
+        line += f": {description.strip()}"
+    return line
+
+
+def _build_scoped_memory_listing(base_dir: Path) -> str:
+    memory_root = base_dir / "memory"
+    if not memory_root.is_dir():
+        return ""
+
+    stale_days = config.get_memory_stale_days()
+    stale_threshold = timedelta(days=max(0, stale_days))
+    now = datetime.now(timezone.utc)
+
+    lines: list[str] = []
+    for scope in _MEMORY_SCOPE_DIRS:
+        scope_dir = memory_root / scope
+        if not scope_dir.is_dir():
+            continue
+        for md_file in sorted(scope_dir.glob("*.md")):
+            try:
+                content = md_file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            frontmatter = _parse_memory_frontmatter(content)
+            if not _is_memory_entry_included(
+                md_file,
+                frontmatter,
+                now=now,
+                stale_threshold=stale_threshold,
+            ):
+                continue
+            try:
+                relative = md_file.relative_to(base_dir)
+            except ValueError:
+                relative = Path("memory") / scope / md_file.name
+            lines.append(_format_scoped_memory_entry(relative, frontmatter))
+
+    if not lines:
+        return ""
+
+    rendered = "<!-- Scoped Memory (fresh or pinned) -->\n" + "\n".join(lines)
+    rendered, _ = _truncate_text(rendered, MAX_SCOPED_MEMORY_BLOCK_CHARS)
+    return rendered
+
+
 def _build_skills_snapshot_context(
     base_dir: Path,
     *,
@@ -332,5 +446,8 @@ def build_system_prompt(
         memory = _read_component(base_dir / "memory" / "MEMORY.md")
         if memory:
             parts.append(f"<!-- Long-term Memory -->\n{memory}")
+        scoped_memory = _build_scoped_memory_listing(base_dir)
+        if scoped_memory:
+            parts.append(scoped_memory)
 
     return "\n\n".join(parts)
