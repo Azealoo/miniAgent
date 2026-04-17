@@ -1,0 +1,35 @@
+id: protocol_summarization
+name: Protocol summarization
+description: >-
+  Agent should summarize a wet-lab / bioinformatics protocol, grounded in
+  local knowledge or a readable file rather than hallucinated.
+tags: [protocol, summarization]
+
+input:
+  prompt: >-
+    Summarize the standard bulk RNA-seq quality control protocol used in
+    this project. List the tools the protocol runs (in order), the key
+    metrics a reviewer should check, and any hard-fail thresholds. If the
+    project has a documented protocol file or knowledge entry, ground the
+    summary in that source and cite it by path.
+
+expected_tool_sequence:
+  # A protocol summary should lean on either the local knowledge base or
+  # a concrete file read. Both are read-only inspection tools.
+  regex: "(^|\\b)(search_knowledge_base|read_file)(\\b|$)"
+  description: Uses search_knowledge_base and/or read_file to ground the summary.
+
+rubric:
+  - id: cites_source
+    question: >-
+      Does the summary cite a concrete source — a file path under
+      workflows/, knowledge/, skills/, or memory/, or a knowledge-base
+      entry — rather than describing a generic RNA-seq QC protocol without
+      attribution?
+    max_score: 5
+  - id: lists_tools_in_order
+    question: >-
+      Does the answer enumerate the QC tools that actually run (e.g.
+      FastQC, MultiQC, trimming step, alignment QC) in a plausible order,
+      and name at least one metric or threshold a reviewer would check?
+    max_score: 5

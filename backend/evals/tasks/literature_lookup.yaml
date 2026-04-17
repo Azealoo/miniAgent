@@ -1,0 +1,31 @@
+id: literature_lookup
+name: Literature lookup
+description: Agent should find and summarize recent literature on a given topic.
+tags: [literature, retrieval]
+
+input:
+  prompt: >-
+    Find three recent peer-reviewed papers (last 5 years) about BRCA1 and
+    homologous recombination DNA repair. For each paper, report the PMID,
+    title, first author, and year.
+
+expected_tool_sequence:
+  # The agent must hit at least one literature-oriented inspection tool.
+  # Accept ncbi_eutils (PubMed), evidence_retrieval (local literature cache),
+  # or fetch_url (direct URL fetch) in any order.
+  regex: "(^|\\b)(ncbi_eutils|evidence_retrieval|fetch_url)(\\b|$)"
+  description: Uses at least one of ncbi_eutils, evidence_retrieval, or fetch_url.
+
+rubric:
+  - id: returns_specific_papers
+    question: >-
+      Does the final answer cite at least three specific papers with
+      identifiable PMIDs, DOIs, or (author, year, title) triples — not just
+      generic claims like "several studies have shown"?
+    max_score: 5
+  - id: topic_alignment
+    question: >-
+      Are the returned papers actually about BRCA1 and homologous
+      recombination DNA repair (or a clearly adjacent topic), rather than
+      off-topic hits?
+    max_score: 5
