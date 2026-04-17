@@ -594,6 +594,33 @@ class TestRetrieve:
         assert results
         assert all("brca1" in (result.get("memory_tags") or []) for result in results)
 
+    def test_retrieve_scope_defaults_match_kind_for_legacy_files(self, indexer, tmp_path):
+        """Legacy files (no frontmatter) should still match scope filters that
+        correspond to their directory-inferred kind. Otherwise typed and legacy
+        files would behave inconsistently under the same scope filter."""
+        _write_memory_file(
+            tmp_path,
+            "memory/project/legacy-note.md",
+            "# Legacy\nBRCA1 legacy note content.\n",
+        )
+        _write_memory_file(
+            tmp_path,
+            "memory/user/legacy-pref.md",
+            "# Legacy\nBRCA1 legacy user preference content.\n",
+        )
+
+        project_results = indexer.retrieve("BRCA1 legacy", top_k=5, scope="project")
+        user_results = indexer.retrieve("BRCA1 legacy", top_k=5, scope="user")
+
+        assert any(
+            r["source"].startswith("memory/project/legacy-note.md")
+            for r in project_results
+        )
+        assert any(
+            r["source"].startswith("memory/user/legacy-pref.md")
+            for r in user_results
+        )
+
     def test_retrieve_returns_empty_when_filter_excludes_all(self, indexer, tmp_path):
         self._seed_kind_scope_corpus(tmp_path)
 

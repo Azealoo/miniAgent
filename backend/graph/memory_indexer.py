@@ -8,6 +8,7 @@ from typing import Any, Iterable, Optional
 from .memory_types import (
     ParsedMemoryDocument,
     TypedMemoryMetadata,
+    default_scope_for_kind,
     display_memory_type,
     infer_kind_from_source,
     parse_memory_document,
@@ -292,6 +293,12 @@ class MemoryIndexer:
             if memory_tags:
                 search_parts.append(" ".join(memory_tags))
 
+        # Legacy files with no frontmatter still belong to a kind (by directory).
+        # Give them the matching default scope so `retrieve(scope=kind)` behaves
+        # the same for legacy and typed files.
+        if memory_scope is None and memory_kind:
+            memory_scope = default_scope_for_kind(memory_kind)
+
         return _MemorySection(
             source=source,
             text=text,
@@ -354,28 +361,6 @@ class MemoryIndexer:
             if not section_tag_set.intersection(tag_filter):
                 return False
         return True
-
-    def _result_matches_filters(
-        self,
-        result: dict[str, Any],
-        *,
-        kind_filter: set[str] | None,
-        scope_filter: set[str] | None,
-        tag_filter: set[str] | None,
-    ) -> bool:
-        section_kind = result.get("memory_kind")
-        if section_kind is None:
-            section_kind = infer_kind_from_source(str(result.get("source", "")))
-        tags_value = result.get("memory_tags")
-        section_tags: Iterable[str] = tags_value if isinstance(tags_value, list) else ()
-        return self._section_matches_filters(
-            section_kind,
-            result.get("memory_scope"),
-            section_tags,
-            kind_filter=kind_filter,
-            scope_filter=scope_filter,
-            tag_filter=tag_filter,
-        )
 
     def _summarize_text(self, text: str) -> str:
         normalized = " ".join(text.split()).strip()
@@ -639,10 +624,11 @@ class MemoryIndexer:
                 return
 
             effective_kind = memory_kind or infer_kind_from_source(source)
+            effective_scope = memory_scope or default_scope_for_kind(effective_kind)
             tag_list = list(memory_tags or ())
             if not self._section_matches_filters(
                 effective_kind,
-                memory_scope,
+                effective_scope,
                 tag_list,
                 kind_filter=kind_filter,
                 scope_filter=scope_filter,
@@ -657,7 +643,7 @@ class MemoryIndexer:
                 memory_name=memory_name,
                 memory_description=memory_description,
                 memory_kind=effective_kind,
-                memory_scope=memory_scope,
+                memory_scope=effective_scope,
                 memory_tags=tag_list,
             )
             if existing is not None and normalized_score <= float(existing["score"]):

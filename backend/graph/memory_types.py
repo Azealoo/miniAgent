@@ -117,6 +117,13 @@ def infer_kind_from_source(source: str) -> str | None:
     return candidate if candidate in TYPED_MEMORY_KIND_VALUES else None
 
 
+def default_scope_for_kind(kind: str | None) -> str | None:
+    """Map a `kind` value to its default `scope` (agent->global, else identity). Unknown -> None."""
+    if not kind:
+        return None
+    return _DEFAULT_SCOPE_FOR_KIND.get(kind)
+
+
 def _coerce_tags(raw_value: Any) -> tuple[tuple[str, ...], str | None]:
     """Return (normalized_tags, error). Missing value -> ((), None)."""
     if raw_value is None:
