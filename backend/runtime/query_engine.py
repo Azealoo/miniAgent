@@ -411,6 +411,7 @@ class QueryEngine:
         # Deferred imports: ``tools`` pulls in langchain at module load time,
         # which some QueryEngine unit tests avoid by importing the class
         # without the full runtime. Keep the dependency scoped to SSE runs.
+        from runtime.compaction import maybe_compact_turn_boundary
         from tools.policy import tool_policy_context
         from tools.policy_types import ToolPolicyExecutionContext
 
@@ -418,6 +419,11 @@ class QueryEngine:
         assert session_manager is not None
 
         await session_manager.auto_compress_if_needed(
+            session_id,
+            self.agent_manager.llm,
+        )
+        compaction_event = await maybe_compact_turn_boundary(
+            session_manager,
             session_id,
             self.agent_manager.llm,
         )
@@ -454,6 +460,8 @@ class QueryEngine:
 
         with tool_policy_context(policy_context):
             try:
+                if compaction_event is not None:
+                    yield _sse(compaction_event)
                 async for event in self.run_turn(turn, ledger=ledger):
                     event_type = event.get("type")
 

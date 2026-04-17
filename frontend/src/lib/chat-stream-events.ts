@@ -1,4 +1,5 @@
 import type {
+  ChatStreamCompactionEvent,
   ChatStreamDoneEvent,
   ChatStreamErrorEvent,
   ChatStreamEvent,
@@ -265,6 +266,33 @@ function parseNewResponseEvent(
   };
 }
 
+function parseCompactionEvent(
+  payload: UnknownRecord,
+  requestId: string | undefined,
+  eventIndex: number | undefined
+): ChatStreamCompactionEvent | null {
+  const summary = readString(payload.summary);
+  if (summary === null) {
+    return null;
+  }
+  const fromTurn = typeof payload.from_turn === "number" ? payload.from_turn : null;
+  const toTurn = typeof payload.to_turn === "number" ? payload.to_turn : null;
+  const savedTokens =
+    typeof payload.saved_tokens === "number" ? payload.saved_tokens : null;
+  if (fromTurn === null || toTurn === null || savedTokens === null) {
+    return null;
+  }
+  return {
+    type: "compaction_event",
+    from_turn: fromTurn,
+    to_turn: toTurn,
+    summary,
+    saved_tokens: savedTokens,
+    request_id: requestId,
+    event_index: eventIndex,
+  };
+}
+
 function parseDoneEvent(
   payload: UnknownRecord,
   requestId: string | undefined,
@@ -321,6 +349,8 @@ export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent |
       return parseVerificationResultEvent(payload, requestId, eventIndex);
     case "new_response":
       return parseNewResponseEvent(requestId, eventIndex);
+    case "compaction_event":
+      return parseCompactionEvent(payload, requestId, eventIndex);
     case "done":
       return parseDoneEvent(payload, requestId, eventIndex);
     case "error":

@@ -143,6 +143,12 @@ export function applyStreamEvent(
       }));
     case "new_response":
       return reduceNewResponseEvent(state, event, options);
+    case "compaction_event":
+      return {
+        messages: state.messages,
+        streamingMessageId: state.streamingMessageId,
+        finished: false,
+      };
     case "done":
       return reduceDoneEvent(state, event, options.now);
     case "error":
