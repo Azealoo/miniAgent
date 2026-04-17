@@ -7,7 +7,6 @@ import type {
   Session,
   SessionContinuitySummary,
   SessionHistoryMessage,
-  SkillRegistryEntry,
   TokenStats,
   ToolResultEnvelope,
 } from "@/lib/types";
@@ -179,31 +178,6 @@ export function makeFilesWorkspaceItem(
     output_name: "qc_summary",
     size_bytes: 1024,
     materialized_at: Date.parse("2026-03-24T18:05:00Z"),
-    ...overrides,
-  };
-}
-
-export function makeSkillRegistryEntry(
-  overrides: Partial<SkillRegistryEntry> = {}
-): SkillRegistryEntry {
-  return {
-    name: "feature",
-    description: "Manage the BioAPEX current-feature workflow from scoping through review and completion",
-    location: "/gpfs/projects/hrbomics/miniAgent/.codex/skills/feature/SKILL.md",
-    source_path: "/gpfs/projects/hrbomics/miniAgent/.codex/skills/feature/SKILL.md",
-    category: "workflow",
-    version: "1.0.0",
-    tags: ["feature", "workflow"],
-    aliases: [],
-    requires_tools: [],
-    requires_network: false,
-    user_invocable: true,
-    species: "general",
-    modality: "text",
-    stage: "production",
-    stability: "stable",
-    safety_level: "standard",
-    enabled: true,
     ...overrides,
   };
 }

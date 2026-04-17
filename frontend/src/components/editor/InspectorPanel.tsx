@@ -17,14 +17,11 @@ import {
   Download,
   FileText,
   Hash,
-  Info,
-  Package,
   Plus,
   Pencil,
   RefreshCw,
   Save,
   Search,
-  Sparkles,
   Trash2,
 } from "lucide-react";
 import {
@@ -35,7 +32,6 @@ import {
 import TurnDetailsPanel from "@/components/editor/TurnDetailsPanel";
 import {
   getSessionTokens,
-  listSkillsRegistry,
   openRawFileInNewTab,
   readFile,
   saveFile,
@@ -62,7 +58,6 @@ import { cn, formatRelativeTime } from "@/lib/utils";
 import type {
   ConfidenceLevel,
   Message,
-  SkillRegistryEntry,
   SourcesInspectorCitation,
   SourcesInspectorCitationTone,
   SourcesInspectorChecklistItem,
@@ -85,7 +80,6 @@ const INSPECTOR_TABS = [
   { id: "files", label: "Files", icon: FileText },
   { id: "sources", label: "Sources", icon: Search },
   { id: "memory", label: "Memory", icon: Brain },
-  { id: "skills", label: "Skills", icon: Sparkles },
   { id: "usage", label: "Usage", icon: Hash },
   { id: "turns", label: "Turns", icon: Clock3 },
 ] as const;
@@ -599,41 +593,6 @@ function removeMemoryDocumentItem(
     ...document,
     items: document.items.filter((item) => item.id !== itemId),
   };
-}
-
-function getSkillVersionLabel(skill: SkillRegistryEntry): string {
-  const version = skill.version.trim();
-
-  if (!version) {
-    return "Local";
-  }
-
-  if (/^v/i.test(version)) {
-    return version;
-  }
-
-  return /^\d/.test(version) ? `v${version}` : version;
-}
-
-function getSkillMetadata(skill: SkillRegistryEntry): string[] {
-  return uniqueStrings([
-    humanizeLabel(skill.category),
-    humanizeLabel(skill.stage),
-    humanizeLabel(skill.stability),
-  ]);
-}
-
-function getSkillRegistryBadges(skill: SkillRegistryEntry): string[] {
-  return uniqueStrings([
-    humanizeLabel(skill.category),
-    humanizeLabel(skill.stage),
-    humanizeLabel(skill.species),
-    humanizeLabel(skill.modality),
-    humanizeLabel(skill.stability),
-    humanizeLabel(skill.safety_level),
-    skill.requires_network ? "Network" : null,
-    skill.user_invocable ? "User invocable" : "Internal only",
-  ]);
 }
 
 function shouldShowGeneratedArtifact(item: {
@@ -1522,72 +1481,6 @@ function WideActionButton({
   );
 }
 
-function SkillRegistryRow({
-  skill,
-  selected,
-  onClick,
-}: {
-  skill: SkillRegistryEntry;
-  selected: boolean;
-  onClick: () => void;
-}) {
-  const Icon = skill.enabled ? Sparkles : Package;
-  const rowMetadata = getSkillMetadata(skill).slice(0, 2);
-
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={skill.location}
-      aria-pressed={selected}
-      className={cn(
-        "flex w-full items-start gap-2 rounded-[12px] border px-2.5 py-2 text-left transition-colors",
-        selected
-          ? "border-[rgba(35,130,83,0.16)] bg-[rgba(35,130,83,0.08)]"
-          : "border-transparent hover:border-[rgba(211,219,210,0.9)] hover:bg-white"
-      )}
-    >
-      <span
-        className={cn(
-          "mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[10px]",
-          selected && "bg-[rgba(35,130,83,0.12)] text-[var(--apex-accent-strong)]",
-          !selected && skill.enabled && "bg-[rgba(35,130,83,0.08)] text-[var(--apex-accent-strong)]",
-          !selected &&
-            !skill.enabled &&
-            "bg-[rgba(211,219,210,0.42)] text-slate-500"
-        )}
-      >
-      <Icon size={12} />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex items-start justify-between gap-2">
-          <span className="min-w-0">
-            <span className="block truncate text-[13px] font-medium text-slate-700">
-              {skill.name}
-            </span>
-            <span className="mt-0.5 block truncate text-[10px] leading-4 text-slate-500">
-              {shortenPath(skill.location, 3)}
-            </span>
-          </span>
-          <MetaBadge tone={skill.enabled ? "success" : "neutral"}>
-            {skill.enabled ? "Enabled" : "Disabled"}
-          </MetaBadge>
-        </span>
-        {rowMetadata.length > 0 ? (
-          <span className="mt-1.5 flex flex-wrap gap-1">
-            {rowMetadata.map((value) => (
-              <MetaBadge key={`${skill.location}-${value}`}>{value}</MetaBadge>
-            ))}
-          </span>
-        ) : null}
-      </span>
-      <span className="mt-0.5 flex-shrink-0 text-[11px] text-slate-400">
-        {getSkillVersionLabel(skill)}
-      </span>
-    </button>
-  );
-}
-
 function MetaBadge({
   children,
   tone = "neutral",
@@ -1668,32 +1561,6 @@ function UsageMetricRow({
     <div className="flex items-center justify-between gap-3 text-[12px] leading-5">
       <span className="text-slate-400">{label}</span>
       <span className="font-semibold text-slate-700">{value}</span>
-    </div>
-  );
-}
-
-function SkillDetailField({
-  label,
-  value,
-  monospace = false,
-}: {
-  label: string;
-  value: string;
-  monospace?: boolean;
-}) {
-  return (
-    <div className="space-y-1 rounded-[10px] border border-[rgba(211,219,210,0.72)] bg-[rgba(251,252,248,0.84)] px-2.5 py-2">
-      <p className="text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-400">
-        {label}
-      </p>
-      <p
-        className={cn(
-          "break-all text-[11px] leading-5 text-slate-700",
-          monospace && "font-mono text-[11px]"
-        )}
-      >
-        {value}
-      </p>
     </div>
   );
 }
@@ -1986,10 +1853,8 @@ export default function InspectorPanel() {
     setInspectorTab,
     openInspectorPath,
     clearInspectorPath,
-    primeDraftMessage,
   } = useApp();
 
-  const [skills, setSkills] = useState<SkillRegistryEntry[]>([]);
   const [tokens, setTokens] = useState<TokenStats | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageLoadError, setUsageLoadError] = useState("");
@@ -2004,31 +1869,16 @@ export default function InspectorPanel() {
   const [memoryItemDraft, setMemoryItemDraft] = useState<MemoryItemDraft | null>(null);
   const [memoryFileOpen, setMemoryFileOpen] = useState(false);
   const [memoryEditorOpen, setMemoryEditorOpen] = useState(false);
-  const [skillContent, setSkillContent] = useState("");
-  const [savedSkillContent, setSavedSkillContent] = useState("");
-  const [skillsLoadError, setSkillsLoadError] = useState("");
-  const [skillFileLoadError, setSkillFileLoadError] = useState("");
-  const [selectedSkillPath, setSelectedSkillPath] = useState<string | null>(null);
-  const [skillsRegistryLoading, setSkillsRegistryLoading] = useState(false);
-  const [skillFileLoading, setSkillFileLoading] = useState(false);
-  const [skillSaving, setSkillSaving] = useState(false);
-  const [skillSaveMsg, setSkillSaveMsg] = useState("");
-  const [skillActionMsg, setSkillActionMsg] = useState("");
-  const [skillEditorOpen, setSkillEditorOpen] = useState(false);
   const [previewActionError, setPreviewActionError] = useState("");
   const [sourceArtifactMetadata, setSourceArtifactMetadata] = useState<
     Record<string, EvidenceArtifactMetadata | null>
   >({});
   const memoryRequestIdRef = useRef(0);
-  const skillsRequestIdRef = useRef(0);
-  const skillFileRequestIdRef = useRef(0);
   const sourceMetadataRequestIdRef = useRef(0);
   const hasLoadedMemoryRef = useRef(false);
-  const hasLoadedSkillsRef = useRef(false);
   const inspectionAccessStatus = accessByScope.inspection.status;
 
   const isMemoryDirty = memoryContent !== savedMemoryContent;
-  const isSkillDirty = skillContent !== savedSkillContent;
   const activeSession =
     sessions.find((session) => session.id === currentSessionId) ?? null;
   const parsedMemoryDocument = parseMemoryDocument(memoryContent);
@@ -2052,10 +1902,6 @@ export default function InspectorPanel() {
     reviewedItems: reviewedSourceItems,
     retrievedItems: sourceInspectorData.retrievedItems,
   });
-  const selectedSkill =
-    skills.find((skill) => skill.location === selectedSkillPath) ?? null;
-  const activeSkills = skills.filter((skill) => skill.enabled);
-  const availableSkills = skills.filter((skill) => !skill.enabled);
   const usageSummary = summarizeSessionUsage({
     sessionId: currentSessionId,
     messages,
@@ -2173,13 +2019,11 @@ export default function InspectorPanel() {
     }
 
     hasLoadedMemoryRef.current = false;
-    hasLoadedSkillsRef.current = false;
   }, [inspectionAccessStatus]);
 
   useEffect(() => {
     setMemoryFileOpen(false);
     setMemoryEditorOpen(false);
-    setSkillEditorOpen(false);
 
     if (inspectorTab === "memory") {
       setMemorySaveMsg("");
@@ -2193,27 +2037,6 @@ export default function InspectorPanel() {
         void loadMemory();
       }
     }
-
-    if (inspectorTab === "skills") {
-      setSkillSaveMsg("");
-      setSkillActionMsg("");
-      if (
-        inspectionAccessStatus !== "granted" &&
-        inspectionAccessStatus !== "checking" &&
-        inspectionAccessStatus !== "unavailable" &&
-        !hasLoadedSkillsRef.current
-      ) {
-        const preferredPath = selectedSkillPath ?? undefined;
-        void refreshSkills(preferredPath).then((nextSkills) => {
-          if (
-            preferredPath &&
-            nextSkills?.some((skill) => skill.location === preferredPath)
-          ) {
-            void loadSkillFile(preferredPath);
-          }
-        });
-      }
-    }
   }, [inspectorTab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -2224,19 +2047,7 @@ export default function InspectorPanel() {
     if (inspectorTab === "memory" && !hasLoadedMemoryRef.current) {
       void loadMemory();
     }
-
-    if (inspectorTab === "skills" && !hasLoadedSkillsRef.current) {
-      const preferredPath = selectedSkillPath ?? undefined;
-      void refreshSkills(preferredPath).then((nextSkills) => {
-        if (
-          preferredPath &&
-          nextSkills?.some((skill) => skill.location === preferredPath)
-        ) {
-          void loadSkillFile(preferredPath);
-        }
-      });
-    }
-  }, [hasInspectionAccess, inspectorTab, selectedSkillPath]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [hasInspectionAccess, inspectorTab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (
@@ -2259,15 +2070,6 @@ export default function InspectorPanel() {
     setMemorySaveMsg("");
     setMemoryActionMsg("");
     setMemoryLoadError(accessByScope.inspection.detail);
-    setSkills([]);
-    setSelectedSkillPath(null);
-    setSkillContent("");
-    setSavedSkillContent("");
-    setSkillsLoadError(accessByScope.inspection.detail);
-    setSkillFileLoadError("");
-    setSkillSaveMsg("");
-    setSkillActionMsg("");
-    setSkillEditorOpen(false);
   }, [accessByScope.inspection.detail, inspectionAccessStatus]);
 
   useEffect(() => {
@@ -2315,28 +2117,18 @@ export default function InspectorPanel() {
     });
   }, [reviewedSourceItems, sourceArtifactMetadata]);
 
-  const confirmDiscardChanges = (
-    scopeLabel: "memory" | "skill",
-    targetLabel: string
-  ) => {
+  const confirmDiscardChanges = (targetLabel: string) => {
     if (typeof window === "undefined") {
       return false;
     }
 
     return window.confirm(
-      `Discard unsaved ${scopeLabel} edits and load ${targetLabel} from disk?`
+      `Discard unsaved memory edits and load ${targetLabel} from disk?`
     );
   };
 
   const canReloadMemory = () =>
-    !isMemoryDirty || confirmDiscardChanges("memory", MEMORY_PATH);
-
-  const canReloadSkill = (targetPath?: string | null) =>
-    !isSkillDirty ||
-    confirmDiscardChanges(
-      "skill",
-      targetPath ? shortenPath(targetPath, 3) : "the selected skill file"
-    );
+    !isMemoryDirty || confirmDiscardChanges(MEMORY_PATH);
 
   const loadMemory = async () => {
     const requestId = memoryRequestIdRef.current + 1;
@@ -2385,119 +2177,6 @@ export default function InspectorPanel() {
     }
   };
 
-  const refreshSkills = async (preferredPath?: string) => {
-    const requestId = skillsRequestIdRef.current + 1;
-    skillsRequestIdRef.current = requestId;
-    setSkillsRegistryLoading(true);
-    setSkillsLoadError("");
-
-    if (!hasInspectionAccess) {
-      hasLoadedSkillsRef.current = false;
-      setSkills([]);
-      setSelectedSkillPath(null);
-      setSkillContent("");
-      setSavedSkillContent("");
-      setSkillFileLoadError("");
-      setSkillEditorOpen(false);
-      setSkillsLoadError(accessByScope.inspection.detail);
-      setSkillsRegistryLoading(false);
-      return null;
-    }
-
-    try {
-      const nextSkills = await listSkillsRegistry();
-      if (skillsRequestIdRef.current !== requestId) return;
-
-      setSkills(nextSkills);
-      setSkillsLoadError("");
-      hasLoadedSkillsRef.current = true;
-
-      if (nextSkills.length === 0) {
-        setSelectedSkillPath(null);
-        setSkillContent("");
-        setSavedSkillContent("");
-        setSkillFileLoadError("");
-        setSkillEditorOpen(false);
-        return nextSkills;
-      }
-
-      const nextPath =
-        preferredPath ??
-        (selectedSkillPath &&
-        nextSkills.some((skill) => skill.location === selectedSkillPath)
-          ? selectedSkillPath
-          : null);
-
-      if (!nextPath) {
-        setSelectedSkillPath(null);
-        setSkillContent("");
-        setSavedSkillContent("");
-        setSkillFileLoadError("");
-        setSkillEditorOpen(false);
-        return nextSkills;
-      }
-
-      if (!nextSkills.some((skill) => skill.location === nextPath)) {
-        setSelectedSkillPath(null);
-        setSkillContent("");
-        setSavedSkillContent("");
-        setSkillFileLoadError("");
-        setSkillEditorOpen(false);
-      }
-
-      return nextSkills;
-    } catch {
-      if (skillsRequestIdRef.current !== requestId) return;
-
-      hasLoadedSkillsRef.current = true;
-      setSkillsLoadError(
-        "Could not load the skills registry. Refresh this tab once the backend skill scan is available."
-      );
-      return null;
-    } finally {
-      if (skillsRequestIdRef.current === requestId) {
-        setSkillsRegistryLoading(false);
-      }
-    }
-  };
-
-  const loadSkillFile = async (path: string) => {
-    const requestId = skillFileRequestIdRef.current + 1;
-    skillFileRequestIdRef.current = requestId;
-    setSkillFileLoading(true);
-    setSkillFileLoadError("");
-    setSelectedSkillPath(path);
-
-    if (!hasInspectionAccess) {
-      setSkillContent("");
-      setSavedSkillContent("");
-      setSkillEditorOpen(false);
-      setSkillFileLoadError(accessByScope.inspection.detail);
-      setSkillFileLoading(false);
-      return;
-    }
-
-    try {
-      const res = await readFile(path);
-      if (skillFileRequestIdRef.current !== requestId) return;
-
-      setSkillContent(res.content);
-      setSavedSkillContent(res.content);
-      setSkillFileLoadError("");
-    } catch {
-      if (skillFileRequestIdRef.current !== requestId) return;
-
-      setSkillContent("");
-      setSavedSkillContent("");
-      setSkillEditorOpen(false);
-      setSkillFileLoadError(`Could not load \`${path}\`.`);
-    } finally {
-      if (skillFileRequestIdRef.current === requestId) {
-        setSkillFileLoading(false);
-      }
-    }
-  };
-
   const openPreviewRawFile = () => {
     if (!inspectorPreviewPath || typeof window === "undefined") {
       return;
@@ -2514,13 +2193,8 @@ export default function InspectorPanel() {
     }
 
     void openRawFileInNewTab(path).catch(() => {
-      if (path === MEMORY_PATH) {
-        setMemoryActionMsg("Raw file unavailable");
-        window.setTimeout(() => setMemoryActionMsg(""), 2000);
-        return;
-      }
-
-      flashSkillAction("Raw file unavailable");
+      setMemoryActionMsg("Raw file unavailable");
+      window.setTimeout(() => setMemoryActionMsg(""), 2000);
     });
   };
 
@@ -2532,11 +2206,6 @@ export default function InspectorPanel() {
   const flashMemoryAction = (message: string) => {
     setMemoryActionMsg(message);
     window.setTimeout(() => setMemoryActionMsg(""), 2000);
-  };
-
-  const flashSkillAction = (message: string) => {
-    setSkillActionMsg(message);
-    window.setTimeout(() => setSkillActionMsg(""), 2000);
   };
 
   const handleInspectorExport = () => {
@@ -2568,22 +2237,6 @@ export default function InspectorPanel() {
 
     setMemoryItemDraft(null);
     await loadMemory();
-  };
-
-  const handleSkillsRefresh = async () => {
-    if (!canReloadSkill(selectedSkillPath)) {
-      return;
-    }
-
-    const keepSelectedPath = selectedSkillPath;
-    const nextSkills = await refreshSkills(keepSelectedPath ?? undefined);
-
-    if (
-      keepSelectedPath &&
-      nextSkills?.some((skill) => skill.location === keepSelectedPath)
-    ) {
-      await loadSkillFile(keepSelectedPath);
-    }
   };
 
   const handleMemorySave = async () => {
@@ -2657,66 +2310,6 @@ export default function InspectorPanel() {
     const nextDocument = duplicateMemoryDocumentItem(parsedMemoryDocument, itemId);
     setMemoryContent(serializeMemoryDocument(nextDocument));
     flashMemoryAction("Memory item duplicated");
-  };
-
-  const handleSkillSave = async () => {
-    if (!selectedSkillPath || !isSkillDirty) return;
-
-    setSkillSaving(true);
-    setSkillSaveMsg("");
-
-    try {
-      await saveFile(selectedSkillPath, skillContent);
-      setSavedSkillContent(skillContent);
-      setSkillSaveMsg("Saved");
-      setTimeout(() => setSkillSaveMsg(""), 2000);
-    } catch {
-      setSkillSaveMsg("Save failed");
-    } finally {
-      setSkillSaving(false);
-    }
-  };
-
-  const handleSkillInstall = () => {
-    primeDraftMessage(
-      "Use the skill-installer skill to install a new skill into this BioAPEX workspace."
-    );
-    flashSkillAction("Install request drafted in the composer");
-  };
-
-  const handleSkillSelection = async (path: string) => {
-    if (path === selectedSkillPath && skillContent) {
-      return;
-    }
-
-    if (!canReloadSkill(path)) {
-      return;
-    }
-
-    setSkillSaveMsg("");
-    setSkillEditorOpen(false);
-    await loadSkillFile(path);
-  };
-
-  const handleSelectedSkillRefresh = async () => {
-    if (!selectedSkillPath || !canReloadSkill(selectedSkillPath)) {
-      return;
-    }
-
-    await loadSkillFile(selectedSkillPath);
-  };
-
-  const clearSelectedSkill = () => {
-    if (selectedSkillPath && !canReloadSkill(selectedSkillPath)) {
-      return;
-    }
-
-    setSelectedSkillPath(null);
-    setSkillContent("");
-    setSavedSkillContent("");
-    setSkillFileLoadError("");
-    setSkillSaveMsg("");
-    setSkillEditorOpen(false);
   };
 
   const renderFilesTab = () => (
@@ -3170,391 +2763,6 @@ export default function InspectorPanel() {
     </div>
   );
 
-  const renderSkillsTab = () => (
-    <div className="space-y-2">
-      <InspectorCard
-        title="Registry"
-        meta="Operational skill registry backed by the backend skills scan."
-        controls={
-          <ActionButton onClick={() => void handleSkillsRefresh()}>
-            <RefreshCw size={11} />
-            Refresh
-          </ActionButton>
-        }
-      >
-        {skillsRegistryLoading && skills.length === 0 ? (
-          <LoadingState label="Loading skills..." />
-        ) : skillsLoadError && skills.length === 0 ? (
-          <EmptyState>{skillsLoadError}</EmptyState>
-        ) : (
-          <div className="space-y-2">
-            <div className="grid grid-cols-2 gap-2">
-              <MiniStat
-                label="Enabled"
-                value={String(activeSkills.length)}
-                accent={activeSkills.length > 0}
-                detail={`${skills.length} scanned`}
-              />
-              <MiniStat
-                label="Disabled"
-                value={String(availableSkills.length)}
-                detail="Config-managed"
-              />
-            </div>
-
-            <div className="rounded-[10px] border border-[rgba(211,219,210,0.72)] bg-[rgba(251,252,248,0.86)] px-2.5 py-2.5">
-              <div className="flex items-start gap-2">
-                <Info size={13} className="mt-0.5 text-slate-400" />
-                <div className="space-y-1">
-                  <p className="text-[11px] font-semibold text-slate-700">
-                    Registry state and file edits are separate.
-                  </p>
-                  <p className="text-[10px] leading-4 text-slate-500">
-                    Enable or disable changes write registry config and trigger a
-                    rescan. Editing below only changes the underlying `SKILL.md`
-                    file.
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            {skillsLoadError ? (
-              <div className="flex flex-wrap gap-1.5">
-                <MetaBadge tone="warning">{skillsLoadError}</MetaBadge>
-              </div>
-            ) : null}
-          </div>
-        )}
-      </InspectorCard>
-
-      <InspectorCard
-        title="Enabled"
-        meta={
-          activeSkills.length > 0
-            ? `${activeSkills.length} registry entr${activeSkills.length === 1 ? "y" : "ies"} enabled`
-            : "No enabled skills yet"
-        }
-        controls={
-          skillsLoadError ? (
-            <MetaBadge tone="warning">
-              {skills.length > 0 ? "Refresh failed" : "Load failed"}
-            </MetaBadge>
-          ) : undefined
-        }
-      >
-        {skillsRegistryLoading && skills.length === 0 ? (
-          <LoadingState label="Loading enabled skills..." />
-        ) : skillsLoadError && skills.length === 0 ? (
-          <EmptyState>{skillsLoadError}</EmptyState>
-        ) : activeSkills.length > 0 ? (
-          <div className="space-y-1">
-            {activeSkills.map((skill) => (
-              <SkillRegistryRow
-                key={skill.location}
-                skill={skill}
-                selected={skill.location === selectedSkillPath}
-                onClick={() => void handleSkillSelection(skill.location)}
-              />
-            ))}
-          </div>
-        ) : (
-          <EmptyState>
-            No skills are enabled right now. Select a disabled entry below to inspect
-            it and enable it from the registry controls.
-          </EmptyState>
-        )}
-      </InspectorCard>
-
-      <InspectorCard
-        title="Available"
-        meta="Local or discovered entries that are not currently enabled."
-        controls={
-          skillsLoadError ? (
-            <MetaBadge tone="warning">
-              {skills.length > 0 ? "Refresh failed" : "Load failed"}
-            </MetaBadge>
-          ) : undefined
-        }
-      >
-        <p className="text-[11px] leading-5 text-slate-500">
-          Add more analysis tools, data processors, or custom skills without
-          losing the file-first skill model.
-        </p>
-
-        <div className="mt-3">
-          <WideActionButton onClick={handleSkillInstall}>
-            <Plus size={13} />
-            Install Skill
-          </WideActionButton>
-        </div>
-
-        {skillActionMsg ? (
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            <MetaBadge tone="accent">{skillActionMsg}</MetaBadge>
-          </div>
-        ) : null}
-
-        {skillsLoadError && skills.length === 0 ? (
-          <div className="mt-3">
-            <EmptyState>{skillsLoadError}</EmptyState>
-          </div>
-        ) : availableSkills.length > 0 ? (
-          <div className="mt-3 space-y-1">
-            {availableSkills.map((skill) => (
-              <SkillRegistryRow
-                key={skill.location}
-                skill={skill}
-                selected={skill.location === selectedSkillPath}
-                onClick={() => void handleSkillSelection(skill.location)}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="mt-3">
-            <EmptyState>
-              No additional disabled entries are available yet. Install a new skill
-              or add a `SKILL.md` file to expand this registry.
-            </EmptyState>
-          </div>
-        )}
-      </InspectorCard>
-
-      {selectedSkill ? (
-        <InspectorCard
-          title="Registry Entry"
-          meta={selectedSkill.name}
-          controls={
-            <MetaBadge tone={selectedSkill.enabled ? "success" : "neutral"}>
-              {selectedSkill.enabled ? "Enabled" : "Disabled"}
-            </MetaBadge>
-          }
-        >
-          <div className="space-y-3">
-            <div className="space-y-2">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <p className="text-[13px] font-semibold text-slate-700">
-                    {selectedSkill.name}
-                  </p>
-                  <p className="mt-1 text-[10px] leading-4 text-slate-500">
-                    {selectedSkill.description || "No registry description was provided."}
-                  </p>
-                </div>
-                <MetaBadge tone={selectedSkill.enabled ? "success" : "neutral"}>
-                  {getSkillVersionLabel(selectedSkill)}
-                </MetaBadge>
-              </div>
-
-              <div className="flex flex-wrap gap-1.5">
-                {getSkillRegistryBadges(selectedSkill).map((value) => (
-                  <MetaBadge key={`${selectedSkill.location}-${value}`}>{value}</MetaBadge>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <MiniStat
-                label="Tools"
-                value={
-                  selectedSkill.requires_tools.length > 0
-                    ? pluralize(selectedSkill.requires_tools.length, "dependency")
-                    : "None"
-                }
-                accent={selectedSkill.requires_tools.length > 0}
-                detail={
-                  selectedSkill.requires_network ? "Network-enabled" : "Local execution"
-                }
-              />
-              <MiniStat
-                label="Mode"
-                value={selectedSkill.user_invocable ? "User" : "Internal"}
-                detail={
-                  selectedSkill.aliases.length > 0
-                    ? pluralize(selectedSkill.aliases.length, "alias")
-                    : "No aliases"
-                }
-              />
-            </div>
-
-            <div className="space-y-2">
-              <SkillDetailField
-                label="Location"
-                value={selectedSkill.location}
-                monospace
-              />
-              {selectedSkill.source_path &&
-              selectedSkill.source_path !== selectedSkill.location ? (
-                <SkillDetailField
-                  label="Source Path"
-                  value={selectedSkill.source_path}
-                  monospace
-                />
-              ) : null}
-            </div>
-
-            {selectedSkill.tags.length > 0 ? (
-              <div className="space-y-1.5">
-                <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-                  Tags
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {selectedSkill.tags.map((tag) => (
-                    <MetaBadge key={`${selectedSkill.location}-tag-${tag}`}>{tag}</MetaBadge>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            {selectedSkill.aliases.length > 0 ? (
-              <div className="space-y-1.5">
-                <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-                  Aliases
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {selectedSkill.aliases.map((alias) => (
-                    <MetaBadge key={`${selectedSkill.location}-alias-${alias}`}>
-                      {alias}
-                    </MetaBadge>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            {selectedSkill.requires_tools.length > 0 ? (
-              <div className="space-y-1.5">
-                <p className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-                  Required Tools
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {selectedSkill.requires_tools.map((tool) => (
-                    <MetaBadge key={`${selectedSkill.location}-tool-${tool}`}>
-                      {tool}
-                    </MetaBadge>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            <div className="rounded-[12px] border border-[rgba(211,219,210,0.86)] bg-[rgba(248,250,246,0.9)] px-3 py-3">
-              <div className="flex items-start justify-between gap-2">
-                <div className="space-y-1">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
-                    Registry Status
-                  </p>
-                  <p className="text-[11px] leading-5 text-slate-600">
-                    Skill registry entries are currently read-only in this shell. Use the
-                    on-disk `SKILL.md` editor below to change skill content.
-                  </p>
-                </div>
-                <MetaBadge tone="neutral">Read only</MetaBadge>
-              </div>
-            </div>
-          </div>
-        </InspectorCard>
-      ) : null}
-
-      {selectedSkillPath ? (
-        <InspectorCard
-          title="Skill File"
-          meta={shortenPath(selectedSkillPath, 3)}
-          controls={
-            <ActionButton onClick={clearSelectedSkill}>Hide</ActionButton>
-          }
-        >
-          <div className="space-y-3">
-            <div className="space-y-2">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <p className="text-[13px] font-semibold text-slate-700">
-                    {selectedSkill?.name ?? "Selected skill file"}
-                  </p>
-                  <p className="mt-1 text-[10px] leading-4 text-slate-500">
-                    Edit or preview the on-disk `SKILL.md` file. Saving here does not
-                    enable the skill in the registry.
-                  </p>
-                </div>
-                {selectedSkill ? (
-                  <MetaBadge tone={selectedSkill.enabled ? "success" : "neutral"}>
-                    {getSkillVersionLabel(selectedSkill)}
-                  </MetaBadge>
-                ) : null}
-              </div>
-
-              <div className="flex flex-wrap gap-1.5">
-                {skillSaveMsg ? (
-                  <MetaBadge tone={skillSaveMsg === "Saved" ? "success" : "warning"}>
-                    {skillSaveMsg}
-                  </MetaBadge>
-                ) : null}
-                {skillFileLoadError ? (
-                  <MetaBadge tone="warning">Load failed</MetaBadge>
-                ) : (
-                  <MetaBadge tone={isSkillDirty ? "warning" : "neutral"}>
-                    {isSkillDirty ? "Unsaved edits" : "File synced"}
-                  </MetaBadge>
-                )}
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-1.5">
-              <ActionButton onClick={() => void handleSelectedSkillRefresh()}>
-                <RefreshCw size={11} />
-                Refresh
-              </ActionButton>
-              <ActionButton onClick={() => setSkillEditorOpen((value) => !value)}>
-                <BookOpen size={11} />
-                {skillEditorOpen ? "Preview" : "Edit"}
-              </ActionButton>
-              <ActionButton onClick={() => openRawFile(selectedSkillPath)}>
-                Open raw
-              </ActionButton>
-              <ActionButton onClick={() => inspectPathInFiles(selectedSkillPath)}>
-                Inspect
-              </ActionButton>
-              <PrimaryActionButton
-                onClick={() => void handleSkillSave()}
-                disabled={!isSkillDirty || skillSaving || !!skillFileLoadError}
-              >
-                <Save size={11} />
-                {skillSaving ? "Saving…" : "Save"}
-              </PrimaryActionButton>
-            </div>
-
-            {skillFileLoading ? (
-              <LoadingState label="Loading skill..." />
-            ) : skillFileLoadError ? (
-              <EmptyState>
-                {skillFileLoadError} Use Open raw or Inspect to verify the on-disk file.
-              </EmptyState>
-            ) : skillEditorOpen ? (
-              <div className="h-[220px] overflow-hidden rounded-[12px] border border-[rgba(211,219,210,0.86)] bg-white">
-                <MonacoEditor
-                  height="100%"
-                  language="markdown"
-                  value={skillContent}
-                  theme="vs"
-                  onChange={(value) => setSkillContent(value ?? "")}
-                  options={{
-                    minimap: { enabled: false },
-                    wordWrap: "on",
-                    fontSize: 11,
-                    lineNumbers: "on",
-                    scrollBeyondLastLine: false,
-                    overviewRulerLanes: 0,
-                    padding: { top: 10, bottom: 10 },
-                    fontFamily: '"SF Mono", "Fira Code", Consolas, monospace',
-                  }}
-                />
-              </div>
-            ) : (
-              <PreviewPane content={skillContent} className="max-h-[220px]" />
-            )}
-          </div>
-        </InspectorCard>
-      ) : null}
-    </div>
-  );
-
   const renderUsageTab = () => (
     <div className="space-y-2">
       <InspectorCard
@@ -3655,7 +2863,7 @@ export default function InspectorPanel() {
   return (
     <aside className="apex-panel apex-panel-muted flex h-full flex-col overflow-hidden rounded-[18px]">
       <div className="border-b border-[var(--shell-border)] bg-white/70 px-2 py-1.5">
-        <div className="grid grid-cols-6 gap-0.5">
+        <div className="grid grid-cols-5 gap-0.5">
           {INSPECTOR_TABS.map((tab) => (
             <TabButton
               key={tab.id}
@@ -3673,7 +2881,6 @@ export default function InspectorPanel() {
         {inspectorTab === "files" && renderFilesTab()}
         {inspectorTab === "sources" && renderSourcesTab()}
         {inspectorTab === "memory" && renderMemoryTab()}
-        {inspectorTab === "skills" && renderSkillsTab()}
         {inspectorTab === "usage" && renderUsageTab()}
         {inspectorTab === "turns" && renderTurnsTab()}
       </div>
