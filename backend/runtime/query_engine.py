@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Any, AsyncGenerator
 
 from config import get_max_tokens_per_turn, get_verification_settings
+from runtime.events import dump_runtime_event
 from runtime.turn_ledger import TurnLedger, TurnResult
 
 
@@ -444,7 +445,11 @@ class QueryEngine:
             event_index += 1
             envelope.setdefault("request_id", request_id)
             envelope.setdefault("event_index", event_index)
-            return f"data: {json.dumps(envelope, ensure_ascii=False)}\n\n"
+            # Validate + stamp schema_version through the transport-neutral
+            # RuntimeEvent schema so SSE, WebSocket, and any future adapter share
+            # one source of truth for event shapes.
+            validated = dump_runtime_event(envelope)
+            return f"data: {json.dumps(validated, ensure_ascii=False)}\n\n"
 
         turn = QueryTurnInput(
             message=message,

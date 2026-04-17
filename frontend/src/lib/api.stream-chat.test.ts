@@ -80,6 +80,7 @@ describe("streamChat", () => {
     const toolEnds: string[] = [];
     const planSummaries: string[] = [];
     const verificationVerdicts: string[] = [];
+    const parseErrors: string[] = [];
     let sawNewResponse = false;
     let finalContent = "";
     let finalRequestId = "";
@@ -129,6 +130,9 @@ describe("streamChat", () => {
         onError: (error) => {
           throw new Error(`unexpected stream error: ${error}`);
         },
+        onParseError: (event) => {
+          parseErrors.push(event.error);
+        },
       }
     );
 
@@ -144,8 +148,11 @@ describe("streamChat", () => {
     expect(sawNewResponse).toBe(true);
     expect(finalContent).toBe("BioAPEX complete.");
     expect(finalRequestId).toBe("request-1");
+    expect(parseErrors).toHaveLength(1);
+    expect(parseErrors[0]).toMatch(/JSON|runtime event/i);
     expect(eventTypes).toEqual([
       "retrieval",
+      "parse_error",
       "token",
       "tool_start",
       "tool_end",
@@ -184,6 +191,7 @@ describe("streamChat", () => {
 
     const eventTypes: string[] = [];
     const eventIndices: number[] = [];
+    const parseErrors: string[] = [];
     let surfacedError = "";
     let surfacedRequestId = "";
 
@@ -219,11 +227,15 @@ describe("streamChat", () => {
           surfacedError = error;
           surfacedRequestId = requestId ?? "";
         },
+        onParseError: (event) => {
+          parseErrors.push(event.error);
+        },
       }
     );
 
-    expect(eventTypes).toEqual(["error"]);
+    expect(eventTypes).toEqual(["parse_error", "error"]);
     expect(eventIndices).toEqual([1]);
+    expect(parseErrors).toHaveLength(1);
     expect(surfacedError).toBe("executor boom");
     expect(surfacedRequestId).toBe("request-2");
 
