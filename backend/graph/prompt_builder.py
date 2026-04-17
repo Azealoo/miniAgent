@@ -23,6 +23,22 @@ _RAG_MEMORY_GUIDANCE = (
     "prior-session notes. Do not present retrieved memory as something you verified in the current "
     "turn unless you explicitly inspected the referenced file or tool output."
 )
+_TOOL_RESULT_ERROR_GUIDANCE = (
+    "<!-- Tool Result Error Contract -->\n"
+    "Every tool call returns a structured envelope (contract_version = `tool_result.v1`) with a "
+    "top-level `status` field (`success` or `error`), an `outcome` tag, and — when something went "
+    "wrong — a populated `error` object of shape "
+    "`{ code: 'blocked' | 'invalid_input' | 'retriable_failure' | 'execution_failure', "
+    "message: string, retriable: boolean }`. If a wrapped tool raises an uncaught exception "
+    "the wrapper will NOT silently drop it: it logs the traceback and returns an envelope with "
+    "`status = 'error'` and `outcome = 'execution_failure'` (or `'retriable_failure'` for "
+    "timeouts / connection / rate-limit style errors). Treat any envelope where `status == 'error'` "
+    "as a failed call: do not assume the underlying action succeeded, do not fabricate output, and "
+    "do not proceed with downstream steps that depend on the failed result. React based on "
+    "`error.code`: retry only when `error.retriable` is true (after addressing the cause), ask the "
+    "user or adjust inputs when `code == 'invalid_input'`, respect policy when `code == 'blocked'`, "
+    "and surface the failure to the user with `error.message` when `code == 'execution_failure'`."
+)
 _PROJECT_REFERENCE_RE = re.compile(r"(?m)^\s*(?:[-*]\s+)?@(?P<path>[^\s#]+)")
 _PROJECT_INSTRUCTION_FILENAMES = (
     "AGENTS.md",
@@ -307,6 +323,8 @@ def build_system_prompt(
     git_context = _build_git_context(base_dir)
     if git_context:
         parts.append(git_context)
+
+    parts.append(_TOOL_RESULT_ERROR_GUIDANCE)
 
     if rag_mode:
         parts.append(_RAG_MEMORY_GUIDANCE)
