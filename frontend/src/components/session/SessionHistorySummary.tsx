@@ -12,6 +12,8 @@ import {
 import ChatMessage from "@/components/chat/ChatMessage";
 import * as api from "@/lib/api";
 import {
+  getMessageRetrievals,
+  getMessageToolCalls,
   normalizeMessageContent,
   normalizeTurnMessages,
 } from "@/lib/message-blocks";
@@ -99,7 +101,7 @@ function artifactCountForTurn(messages: Message[]): number {
   const artifactPaths = new Set<string>();
 
   for (const message of assistantMessagesForTurn(messages)) {
-    for (const call of message.tool_calls ?? []) {
+    for (const call of getMessageToolCalls(message)) {
       for (const artifact of call.result?.artifact_refs ?? []) {
         if (artifact.path) {
           artifactPaths.add(artifact.path);
@@ -139,12 +141,12 @@ function summarizeTurn(messages: Message[]): HistoryTurnSummary {
       compactText(firstRetrievalQuery, 180) ??
       "Tools, retrieval activity, and assistant output were recorded in this turn.",
     toolCount: assistants.reduce(
-      (total, message) => total + (message.tool_calls?.length ?? 0),
+      (total, message) => total + getMessageToolCalls(message).length,
       0
     ),
     artifactCount: artifactCountForTurn(messages),
     retrievalCount: assistants.reduce(
-      (total, message) => total + (message.retrievals?.length ?? 0),
+      (total, message) => total + getMessageRetrievals(message).length,
       0
     ),
   };
@@ -311,8 +313,6 @@ export default function SessionHistorySummary({
           role: message.role as "user" | "assistant",
           content: message.content ?? "",
           request_id: message.request_id,
-          tool_calls: message.tool_calls ?? [],
-          retrievals: message.retrievals ?? [],
           blocks: message.blocks,
         }));
       const normalizedArchiveMessages = groupMessagesIntoTurns(archiveMessages).flatMap(

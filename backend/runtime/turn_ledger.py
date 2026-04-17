@@ -7,8 +7,6 @@ from typing import Any, Optional
 @dataclass(frozen=True)
 class TurnSegment:
     content: str
-    tool_calls: list[dict[str, Any]]
-    retrievals: list[dict[str, Any]]
     blocks: list[dict[str, Any]]
 
 
@@ -21,6 +19,9 @@ class TurnResult:
 
 class TurnLedger:
     """Accumulates streamed runtime events into persisted assistant turn segments.
+
+    Blocks are the canonical on-disk shape — legacy ``tool_calls``/``retrievals``
+    arrays are derived at read boundaries by the session manager.
 
     When constructed with ``session_manager``/``session_id``/``request_id``/
     ``user_message`` the ledger also owns finalize-time persistence: the user
@@ -38,8 +39,6 @@ class TurnLedger:
     ) -> None:
         self._segments: list[TurnSegment] = []
         self._current_content: list[str] = []
-        self._current_tool_calls: list[dict[str, Any]] = []
-        self._current_retrievals: list[dict[str, Any]] = []
         self._current_blocks: list[dict[str, Any]] = []
         self._pending_tools: dict[str, dict[str, Any]] = {}
         self._session_manager = session_manager
@@ -143,32 +142,21 @@ class TurnLedger:
                 self._session_id,
                 "assistant",
                 segment.content,
-                segment.tool_calls or None,
-                segment.retrievals or None,
                 request_id=self._request_id,
                 blocks=segment.blocks or None,
             )
 
     def _flush_segment(self) -> None:
         content = "".join(self._current_content)
-        if (
-            content
-            or self._current_tool_calls
-            or self._current_retrievals
-            or self._current_blocks
-        ):
+        if content or self._current_blocks:
             self._segments.append(
                 TurnSegment(
                     content=content,
-                    tool_calls=[dict(call) for call in self._current_tool_calls],
-                    retrievals=[dict(item) for item in self._current_retrievals],
                     blocks=[dict(block) for block in self._current_blocks],
                 )
             )
 
         self._current_content.clear()
-        self._current_tool_calls.clear()
-        self._current_retrievals.clear()
         self._current_blocks.clear()
 
     def _append_text(self, text: str) -> None:
@@ -188,16 +176,6 @@ class TurnLedger:
         result: Any,
     ) -> None:
         started = self._pending_tools.pop(run_id, {"tool": tool_name, "input": ""})
-        call = {
-            "tool": started["tool"],
-            "input": started.get("input", ""),
-            "output": output if isinstance(output, str) else "",
-            "run_id": run_id,
-        }
-        if result is not None:
-            call["result"] = result
-        self._current_tool_calls.append(call)
-
         use_block = {
             "type": "tool_use",
             "tool": started["tool"],
@@ -217,7 +195,6 @@ class TurnLedger:
         self._current_blocks.append(result_block)
 
     def _append_retrieval(self, query: str, results: list[dict[str, Any]]) -> None:
-        self._current_retrievals.extend(results)
         self._current_blocks.append(
             {
                 "type": "retrieval",

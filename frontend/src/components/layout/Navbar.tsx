@@ -9,6 +9,10 @@ import {
   scopeRequirement,
 } from "@/lib/access-control";
 import { getHealth } from "@/lib/api";
+import {
+  getMessageRetrievals,
+  getMessageToolCalls,
+} from "@/lib/message-blocks";
 import { getReadinessSummary, type ReadinessState } from "@/lib/session-status";
 import { useApp } from "@/lib/store";
 import type { AccessScope, Message } from "@/lib/types";
@@ -26,18 +30,20 @@ function buildExportMarkdown(title: string, messages: Message[]) {
     lines.push(`## ${message.role === "user" ? "User" : "BioAPEX"}`);
     lines.push(message.content || "(empty response)");
 
-    if (message.retrievals?.length) {
+    const retrievals = getMessageRetrievals(message);
+    if (retrievals.length) {
       lines.push("");
       lines.push("Retrieved sources:");
-      message.retrievals.forEach((result) => {
+      retrievals.forEach((result) => {
         lines.push(`- ${result.source} (score ${result.score.toFixed(3)})`);
       });
     }
 
-    if (message.tool_calls?.length) {
+    const toolCalls = getMessageToolCalls(message);
+    if (toolCalls.length) {
       lines.push("");
       lines.push("Tool calls:");
-      message.tool_calls.forEach((call) => {
+      toolCalls.forEach((call) => {
         lines.push(`- ${call.tool}`);
       });
     }

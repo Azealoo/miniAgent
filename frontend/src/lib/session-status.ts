@@ -1,3 +1,4 @@
+import { getMessageToolCalls } from "./message-blocks";
 import type { Message, ToolCall } from "./types";
 
 export type ReadinessState = "ready" | "reviewing" | "warning" | "blocked";
@@ -104,7 +105,8 @@ function getToolCallsNewestFirst(messages: Message[]): ToolCall[] {
   const calls: ToolCall[] = [];
 
   for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
-    const toolCalls = messages[messageIndex]?.tool_calls ?? [];
+    const message = messages[messageIndex];
+    const toolCalls = message ? getMessageToolCalls(message) : [];
     for (let callIndex = toolCalls.length - 1; callIndex >= 0; callIndex -= 1) {
       calls.push(toolCalls[callIndex]);
     }

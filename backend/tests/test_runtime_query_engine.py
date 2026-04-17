@@ -675,7 +675,7 @@ async def test_query_engine_run_turn_persists_message_then_runs_agent_directly()
     assert turn_result.final_content == "ok"
     assert len(turn_result.segments) == 1
     assert turn_result.segments[0].content == "ok"
-    assert turn_result.segments[0].tool_calls == []
+    assert all(block["type"] != "tool_use" for block in turn_result.segments[0].blocks)
 
 
 @pytest.mark.asyncio
@@ -725,7 +725,7 @@ async def test_query_engine_run_turn_keeps_biology_questions_on_the_same_dispatc
     assert turn_result.final_content == "Draft answer on the normal path."
     assert len(turn_result.segments) == 1
     assert turn_result.segments[0].content == "Draft answer on the normal path."
-    assert turn_result.segments[0].tool_calls == []
+    assert all(block["type"] != "tool_use" for block in turn_result.segments[0].blocks)
     assert agent_manager.calls == [
         (
             "What is the evidence for TP53 stress response?",

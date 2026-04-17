@@ -296,6 +296,80 @@ class TestSaveAndLoad:
         msgs = sm.load_session(sid)
         assert "tool_calls" not in msgs[0]
 
+    def test_save_message_persists_blocks_only_no_legacy_arrays_on_disk(self, sm):
+        sid = sm.create_session()
+        sm.save_message(
+            sid,
+            "assistant",
+            "Done",
+            tool_calls=[{"tool": "terminal", "input": "echo hi", "output": "hi"}],
+            retrievals=[{"text": "Context", "score": 0.8, "source": "notes/a.md"}],
+        )
+        stored = sm._read(sid)["messages"][0]
+        assert "tool_calls" not in stored
+        assert "retrievals" not in stored
+        assert stored["blocks"] == [
+            {"type": "retrieval", "results": [
+                {"text": "Context", "score": 0.8, "source": "notes/a.md"}
+            ]},
+            {"type": "tool_use", "tool": "terminal", "input": "echo hi"},
+            {"type": "tool_result", "tool": "terminal", "output": "hi"},
+            {"type": "text", "text": "Done"},
+        ]
+
+    def test_load_session_migrates_legacy_only_sessions_without_writing_legacy_arrays(self, sm):
+        sid = sm.create_session()
+        data = sm._read(sid)
+        data["messages"] = [
+            {
+                "role": "assistant",
+                "content": "Legacy reply",
+                "tool_calls": [
+                    {"tool": "terminal", "input": "ls", "output": "file.txt"}
+                ],
+                "retrievals": [
+                    {"text": "Prior note", "score": 0.7, "source": "notes/b.md"}
+                ],
+            }
+        ]
+        sm._write(sid, data)
+
+        msgs = sm.load_session(sid)
+        assert msgs[0]["content"] == "Legacy reply"
+        assert msgs[0]["tool_calls"][0]["tool"] == "terminal"
+        assert msgs[0]["retrievals"][0]["source"] == "notes/b.md"
+        assert msgs[0]["blocks"] == [
+            {"type": "retrieval", "results": [
+                {"text": "Prior note", "score": 0.7, "source": "notes/b.md"}
+            ]},
+            {"type": "tool_use", "tool": "terminal", "input": "ls"},
+            {"type": "tool_result", "tool": "terminal", "output": "file.txt"},
+            {"type": "text", "text": "Legacy reply"},
+        ]
+
+    def test_compress_history_archive_file_is_blocks_only(self, sm, tmp_path):
+        sid = sm.create_session()
+        for i in range(6):
+            sm.save_message(
+                sid,
+                "assistant",
+                f"reply{i}",
+                tool_calls=[{"tool": "terminal", "input": f"cmd{i}", "output": f"out{i}"}],
+            )
+        sm.compress_history(sid, "summary", 4)
+
+        archive_path = next((tmp_path / "sessions" / "archive").glob(f"{sid}_*.json"))
+        archived = json.loads(archive_path.read_text(encoding="utf-8"))
+        for msg in archived:
+            assert "tool_calls" not in msg
+            assert "retrievals" not in msg
+            assert isinstance(msg.get("blocks"), list)
+
+        stored_remaining = sm._read(sid)["messages"]
+        for msg in stored_remaining:
+            assert "tool_calls" not in msg
+            assert "retrievals" not in msg
+
     def test_load_session_derives_legacy_fields_from_blocks_only_messages(self, sm):
         sid = sm.create_session()
         data = sm._read(sid)

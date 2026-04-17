@@ -313,61 +313,70 @@ def _derive_legacy_fields_from_blocks(
     return "".join(text_parts), tool_calls, retrievals
 
 
-def _normalize_message(message: dict[str, Any]) -> dict[str, Any]:
+def _ensure_blocks(message: dict[str, Any]) -> tuple[dict[str, Any], list[SessionContentBlock]]:
+    """Return a shallow-copied message with role/content normalized, plus its blocks.
+
+    If the message has no blocks (legacy on-disk shape), build them from the
+    legacy ``tool_calls``/``retrievals`` arrays so callers can treat blocks as
+    the canonical shape.
+    """
     normalized = dict(message)
     role = normalized.get("role")
     normalized["role"] = role if isinstance(role, str) else "assistant"
 
     content_value = normalized.get("content")
-    legacy_content = content_value if isinstance(content_value, str) else ""
-    tool_calls = _normalize_record_list(normalized.get("tool_calls"))
-    retrievals = _normalize_record_list(normalized.get("retrievals"))
+    normalized["content"] = content_value if isinstance(content_value, str) else ""
+
     blocks = _normalize_blocks(normalized.get("blocks"))
+    if not blocks:
+        blocks = _build_blocks_from_legacy_message(
+            normalized["role"],
+            normalized["content"],
+            _normalize_record_list(normalized.get("tool_calls")),
+            _normalize_record_list(normalized.get("retrievals")),
+        )
+    return normalized, blocks
+
+
+def _normalize_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Read-side normalization: blocks are canonical on disk, legacy
+    ``tool_calls``/``retrievals`` arrays are derived here for outgoing payloads.
+    """
+    normalized, blocks = _ensure_blocks(message)
 
     if blocks:
-        derived_content, derived_tool_calls, derived_retrievals = _derive_legacy_fields_from_blocks(
-            blocks
-        )
-        normalized["content"] = legacy_content if isinstance(content_value, str) else derived_content
-        if tool_calls:
-            normalized["tool_calls"] = tool_calls
-        elif derived_tool_calls:
-            normalized["tool_calls"] = derived_tool_calls
-        else:
-            normalized.pop("tool_calls", None)
-
-        if retrievals:
-            normalized["retrievals"] = retrievals
-        elif derived_retrievals:
-            normalized["retrievals"] = derived_retrievals
-        else:
-            normalized.pop("retrievals", None)
-
         normalized["blocks"] = blocks
-        return normalized
+        derived_text, derived_tool_calls, derived_retrievals = (
+            _derive_legacy_fields_from_blocks(blocks)
+        )
+        if not normalized["content"] and derived_text:
+            normalized["content"] = derived_text
+    else:
+        normalized.pop("blocks", None)
+        derived_tool_calls, derived_retrievals = [], []
 
-    normalized["content"] = legacy_content
-    if tool_calls:
-        normalized["tool_calls"] = tool_calls
+    if derived_tool_calls:
+        normalized["tool_calls"] = derived_tool_calls
     else:
         normalized.pop("tool_calls", None)
 
-    if retrievals:
-        normalized["retrievals"] = retrievals
+    if derived_retrievals:
+        normalized["retrievals"] = derived_retrievals
     else:
         normalized.pop("retrievals", None)
 
-    derived_blocks = _build_blocks_from_legacy_message(
-        normalized["role"],
-        normalized["content"],
-        tool_calls,
-        retrievals,
-    )
-    if derived_blocks:
-        normalized["blocks"] = derived_blocks
+    return normalized
+
+
+def _normalize_message_for_storage(message: dict[str, Any]) -> dict[str, Any]:
+    """Write-side normalization: keep blocks canonical, drop legacy arrays."""
+    normalized, blocks = _ensure_blocks(message)
+    if blocks:
+        normalized["blocks"] = blocks
     else:
         normalized.pop("blocks", None)
-
+    normalized.pop("tool_calls", None)
+    normalized.pop("retrievals", None)
     return normalized
 
 
@@ -375,6 +384,14 @@ def _normalize_messages(messages: Any) -> list[dict[str, Any]]:
     if not isinstance(messages, list):
         return []
     return [_normalize_message(item) for item in messages if isinstance(item, dict)]
+
+
+def _normalize_messages_for_storage(messages: Any) -> list[dict[str, Any]]:
+    if not isinstance(messages, list):
+        return []
+    return [
+        _normalize_message_for_storage(item) for item in messages if isinstance(item, dict)
+    ]
 
 
 def _empty_archive_index_entry() -> SessionArchiveIndexEntry:
@@ -577,27 +594,21 @@ class SessionManager:
     ) -> None:
         data = self._read(session_id)
         msg: dict = {"role": role, "content": content}
-        normalized_tool_calls = _normalize_record_list(tool_calls)
-        normalized_retrievals = _normalize_record_list(retrievals)
         normalized_blocks = _normalize_blocks(blocks)
 
-        if normalized_tool_calls:
-            msg["tool_calls"] = normalized_tool_calls
-        if normalized_retrievals:
-            msg["retrievals"] = normalized_retrievals
+        if not normalized_blocks:
+            normalized_blocks = _build_blocks_from_legacy_message(
+                role,
+                content,
+                _normalize_record_list(tool_calls),
+                _normalize_record_list(retrievals),
+            )
+
         if request_id:
             msg["request_id"] = request_id
         if normalized_blocks:
             msg["blocks"] = normalized_blocks
-        else:
-            derived_blocks = _build_blocks_from_legacy_message(
-                role,
-                content,
-                normalized_tool_calls,
-                normalized_retrievals,
-            )
-            if derived_blocks:
-                msg["blocks"] = derived_blocks
+
         data["messages"].append(msg)
         self._write(session_id, data)
 
@@ -656,7 +667,7 @@ class SessionManager:
         Returns (archived_count, remaining_count).
         """
         data = self._read(session_id)
-        messages = self.load_session(session_id)
+        messages = _normalize_messages_for_storage(data.get("messages", []))
 
         archived = messages[:n]
         remaining = messages[n:]

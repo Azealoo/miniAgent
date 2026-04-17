@@ -41,6 +41,10 @@ import {
   inferPreviewableFileKind,
 } from "@/lib/file-preview";
 import {
+  getMessageRetrievals,
+  getMessageToolCalls,
+} from "@/lib/message-blocks";
+import {
   getLatestRequestMessages,
 } from "@/lib/session-status";
 import {
@@ -213,18 +217,20 @@ function buildExportMarkdown(title: string, messages: Message[]) {
     lines.push(`## ${message.role === "user" ? "User" : "BioAPEX"}`);
     lines.push(message.content || "(empty response)");
 
-    if (message.retrievals?.length) {
+    const retrievals = getMessageRetrievals(message);
+    if (retrievals.length) {
       lines.push("");
       lines.push("Retrieved sources:");
-      message.retrievals.forEach((result) => {
+      retrievals.forEach((result) => {
         lines.push(`- ${result.source} (score ${result.score.toFixed(3)})`);
       });
     }
 
-    if (message.tool_calls?.length) {
+    const toolCalls = getMessageToolCalls(message);
+    if (toolCalls.length) {
       lines.push("");
       lines.push("Tool calls:");
-      message.tool_calls.forEach((call) => {
+      toolCalls.forEach((call) => {
         lines.push(`- ${call.tool}`);
       });
     }
@@ -641,7 +647,7 @@ function collectArtifacts(messages: Message[]) {
   };
 
   messages.forEach((message) => {
-    (message.tool_calls ?? []).forEach((call) => {
+    getMessageToolCalls(message).forEach((call) => {
       call.result?.artifact_refs?.forEach((artifact) => {
         if (!artifact.path) {
           return;
@@ -1092,7 +1098,7 @@ function collectSourceInspectorData(messages: Message[]) {
   let order = 0;
 
   scopedMessages.forEach((message, messageIndex) => {
-    (message.tool_calls ?? []).forEach((call, callIndex) => {
+    getMessageToolCalls(message).forEach((call, callIndex) => {
       const result = call.result;
       if (!result) {
         return;
@@ -1268,7 +1274,7 @@ function collectSourceInspectorData(messages: Message[]) {
       }
     });
 
-    (message.retrievals ?? []).forEach((result) => {
+    getMessageRetrievals(message).forEach((result) => {
       const existing = retrievedSources.get(result.source);
       if (existing) {
         existing.score = Math.max(existing.score, result.score);

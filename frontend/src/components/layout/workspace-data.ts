@@ -8,6 +8,10 @@ import {
   ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
+import {
+  getMessageRetrievals,
+  getMessageToolCalls,
+} from "@/lib/message-blocks";
 import type { Message } from "@/lib/types";
 
 export interface QuickStartItem {
@@ -111,7 +115,7 @@ export function recentFiles(messages: Message[]): SurfaceItem[] {
   for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
     const message = messages[messageIndex];
 
-    const toolCalls = message.tool_calls ?? [];
+    const toolCalls = getMessageToolCalls(message);
     for (let callIndex = toolCalls.length - 1; callIndex >= 0; callIndex -= 1) {
       const artifactRefs = toolCalls[callIndex]?.result?.artifact_refs ?? [];
       for (let refIndex = artifactRefs.length - 1; refIndex >= 0; refIndex -= 1) {
@@ -123,7 +127,7 @@ export function recentFiles(messages: Message[]): SurfaceItem[] {
       }
     }
 
-    const retrievals = message.retrievals ?? [];
+    const retrievals = getMessageRetrievals(message);
     for (let retrievalIndex = retrievals.length - 1; retrievalIndex >= 0; retrievalIndex -= 1) {
       const retrieval = retrievals[retrievalIndex];
       pushItem(retrieval.source, "Retrieved source", retrieval.source);
