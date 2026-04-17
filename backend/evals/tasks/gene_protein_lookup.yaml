@@ -1,0 +1,35 @@
+id: gene_protein_lookup
+name: Gene / protein lookup
+description: >-
+  Agent should resolve a gene or protein identifier to canonical metadata
+  using a structured biology API rather than free-form generation.
+tags: [entity, lookup]
+
+input:
+  prompt: >-
+    Look up the human gene TP53. I need its Ensembl gene ID, its canonical
+    UniProt accession, its chromosome and genomic coordinates (GRCh38),
+    and a one-line functional summary. Prefer authoritative databases over
+    paraphrased prose.
+
+expected_tool_sequence:
+  # Must call at least one of the structured gene/protein APIs, or the
+  # entity_grounding tool which resolves names to canonical IDs.
+  regex: "(^|\\b)(uniprot_api|ensembl_api|ncbi_eutils|entity_grounding)(\\b|$)"
+  description: >-
+    Uses uniprot_api, ensembl_api, ncbi_eutils, or entity_grounding to
+    resolve the identifier.
+
+rubric:
+  - id: returns_canonical_ids
+    question: >-
+      Does the answer include both a plausible Ensembl gene ID (ENSG…)
+      and a plausible UniProt accession (e.g. P04637) for TP53, plus a
+      chromosome assignment?
+    max_score: 5
+  - id: grounded_not_hallucinated
+    question: >-
+      Is the answer grounded in a tool result (IDs, coordinates, and
+      summary match what a structured biology API would return), rather
+      than obviously free-form generation with suspicious numbers?
+    max_score: 5

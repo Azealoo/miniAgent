@@ -1,0 +1,41 @@
+id: multi_step_workflow
+name: Multi-step workflow
+description: >-
+  Agent should plan a multi-step biologist task, execute at least one
+  concrete inspection step, and run verification before finalizing.
+tags: [workflow, planning, verification]
+
+input:
+  prompt: >-
+    I have a new bulk RNA-seq dataset and I want to go from raw FASTQs to
+    a short QC memo I can send to a collaborator. Plan the end-to-end
+    steps, identify which local workflow spec or skill in this repo I
+    should use, inspect at least one concrete file or knowledge entry to
+    ground the plan, and verify your final recommendation before you
+    answer.
+
+expected_tool_sequence:
+  # End-to-end tool-chain signature: a plan, at least one concrete
+  # inspection/compute step, and a verification pass. The regex requires
+  # plan_agent to appear before verification_agent, with at least one
+  # read-only or compute tool in between.
+  regex: "plan_agent.*(read_file|python_repl|terminal|search_knowledge_base|ncbi_eutils|evidence_retrieval|fetch_url|http_json|entity_grounding|uniprot_api|ensembl_api).*verification_agent"
+  description: >-
+    plan_agent → (at least one concrete step) → verification_agent, in
+    that order.
+
+rubric:
+  - id: plan_is_ordered_and_concrete
+    question: >-
+      Does the answer present an ordered, multi-step plan (not just a
+      bullet list of goals), with each step naming a tool, skill, or
+      workflow spec that exists in this repo?
+    max_score: 5
+  - id: grounded_and_verified
+    question: >-
+      Did the agent actually inspect at least one concrete file or
+      knowledge entry, and did the verification pass either approve the
+      answer or produce repair instructions that the final answer
+      addresses? Penalize if the plan is pure free-form prose with no
+      grounding or verification hook.
+    max_score: 5
