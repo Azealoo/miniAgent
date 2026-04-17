@@ -35,7 +35,11 @@ class ChatRuntime:
 
         pending_tools: dict[str, dict[str, str]] = {}
         user_msg_saved = False
-        policy_context = ToolPolicyExecutionContext(session_id=request.session_id)
+        policy_context = ToolPolicyExecutionContext(
+            session_id=request.session_id,
+            request_id=request_id,
+            turn_id=request_id,
+        )
 
         def _sse(payload: dict[str, Any]) -> str:
             nonlocal event_index

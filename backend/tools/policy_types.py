@@ -12,6 +12,7 @@ ToolPolicyStatus = Literal["allow", "allow_with_warning", "blocked"]
 class ToolPolicyExecutionContext:
     session_id: str | None = None
     request_id: str | None = None
+    turn_id: str | None = None
     allowed_access_scope: ToolAccessScope = "execution"
 
 
