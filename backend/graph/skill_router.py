@@ -345,6 +345,13 @@ def _path_hint_matches(path_hint: str, candidate_path: str) -> bool:
     )
 
 
+def _entry_declares_paths(entry: dict[str, Any]) -> bool:
+    path_hints = entry.get("paths", [])
+    if not isinstance(path_hints, list):
+        return False
+    return any(isinstance(p, str) and p.strip() for p in path_hints)
+
+
 def _score_path_activation(
     entry: dict[str, Any],
     *,
@@ -400,6 +407,13 @@ def select_skill_entries_for_query(
             query_paths=query_paths,
             history_paths=history_paths,
         )
+        # Skills declaring `paths:` are conditionally activated — only
+        # injected when at least one declared hint matches the current
+        # working set. Empty/absent paths remain always-on. Explicit
+        # name/alias invocations bypass this gate so users can still
+        # summon a path-scoped skill off-path.
+        if not explicit and path_score == 0 and _entry_declares_paths(entry):
+            continue
         score = text_score + path_score
         if score > 0:
             scored_entries.append((score, explicit, entry))
