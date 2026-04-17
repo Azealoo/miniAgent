@@ -391,6 +391,14 @@ class QueryEngine:
             payload = dict(event)
             payload["run_id"] = event.get("run_id", event["tool"])
             return cls._attach_policy_payload(payload, event.get("result"))
+        if event_type == "tool_awaiting_approval":
+            payload = dict(event)
+            payload["run_id"] = event.get("run_id", event["tool"])
+            return cls._attach_policy_payload(payload, event.get("result"))
+        if event_type == "tool_chunk":
+            payload = dict(event)
+            payload["run_id"] = event.get("run_id", event["tool"])
+            return payload
         if event_type == "new_response":
             return {"type": "new_response"}
         return event

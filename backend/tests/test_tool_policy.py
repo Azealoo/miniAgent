@@ -17,6 +17,7 @@ def test_policy_wrapper_allows_execution_tool_and_keeps_policy_metadata(tmp_path
             session_id="session-1",
             request_id="request-1",
             allowed_access_scope="execution",
+            approved_tool_runs=frozenset({"terminal"}),
         )
     ):
         summary, artifact = terminal._run(command="pwd")
@@ -26,6 +27,50 @@ def test_policy_wrapper_allows_execution_tool_and_keeps_policy_metadata(tmp_path
     assert artifact["metadata"]["policy"]["block_reason"] is None
     assert artifact["metadata"]["policy"]["status"] == "allow"
     assert artifact["warnings"] == []
+
+
+def test_policy_wrapper_short_circuits_to_needs_approval_for_gated_tool(tmp_path):
+    runtime_tools = get_runtime_tools(tmp_path)
+    terminal = next(tool for tool in runtime_tools if tool.name == "terminal")
+
+    with tool_policy_context(
+        ToolPolicyExecutionContext(
+            session_id="session-1",
+            request_id="request-1",
+            allowed_access_scope="execution",
+        )
+    ):
+        summary, artifact = terminal._run(command="pwd")
+
+    assert summary.startswith("[NEEDS_APPROVAL]")
+    assert artifact["outcome"] == "needs_approval"
+    assert artifact["status"] == "error"
+    assert artifact["error"]["code"] == "needs_approval"
+    assert artifact["metadata"]["policy"]["status"] == "needs_approval"
+    assert artifact["metadata"]["policy"]["approval_reason"] == "requires_approval"
+    assert artifact["metadata"]["contract"]["requires_approval"] is True
+
+
+def test_policy_wrapper_skips_approval_when_run_already_approved(tmp_path):
+    runtime_tools = get_runtime_tools(tmp_path)
+    write_file = next(tool for tool in runtime_tools if tool.name == "write_file")
+
+    with tool_policy_context(
+        ToolPolicyExecutionContext(
+            session_id="session-1",
+            request_id="request-1",
+            allowed_access_scope="execution",
+            approved_tool_runs=frozenset({"write_file"}),
+        )
+    ):
+        summary, artifact = write_file._run(
+            path="memory/notes.txt",
+            content="approved write",
+        )
+
+    assert artifact["outcome"] == "success"
+    assert "Wrote memory/notes.txt" in summary
+    assert artifact["metadata"]["policy"]["status"] == "allow"
 
 
 def test_policy_wrapper_annotates_successful_tool_results(tmp_path):

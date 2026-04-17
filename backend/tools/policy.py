@@ -68,10 +68,31 @@ def evaluate_pre_tool_policy(
             block_message="Execution-scoped tool execution is not allowed in this runtime context.",
         )
 
+    if manifest.requires_approval and not _user_has_approved(manifest, context):
+        return ToolPolicyDecision(
+            status="needs_approval",
+            approval_reason="requires_approval",
+            approval_message=(
+                f"Tool '{manifest.name}' is gated and needs human approval before it can run."
+            ),
+        )
+
     if warnings:
         return ToolPolicyDecision(status="allow_with_warning", warnings=tuple(warnings))
 
     return ToolPolicyDecision(status="allow")
+
+
+def _user_has_approved(
+    manifest: ToolManifestEntry,
+    context: ToolPolicyExecutionContext,
+) -> bool:
+    approved = context.approved_tool_runs
+    if not approved:
+        return False
+    if manifest.name in approved:
+        return True
+    return False
 
 
 def annotate_tool_result(
@@ -102,6 +123,7 @@ def annotate_tool_result(
         status=decision.status,
         warnings=tuple(decision.warnings),
         block_reason=decision.block_reason,
+        approval_reason=decision.approval_reason,
     )
 
     metadata = dict(result.metadata)
@@ -112,6 +134,7 @@ def annotate_tool_result(
         "status": annotation.status,
         "warnings": list(annotation.warnings),
         "block_reason": annotation.block_reason,
+        "approval_reason": annotation.approval_reason,
     }
     metadata["contract"] = {
         "output_contract_version": manifest.output_contract_version,
@@ -124,6 +147,7 @@ def annotate_tool_result(
         "result_summary_hint": manifest.result_summary_hint,
         "planner_exposed": manifest.planner_exposed,
         "verifier_exposed": manifest.verifier_exposed,
+        "requires_approval": manifest.requires_approval,
     }
 
     result.warnings = warnings

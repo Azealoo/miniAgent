@@ -78,6 +78,8 @@ export function applyStreamEvent(
           message.pendingTool?.runId === (event.run_id ?? event.tool)
             ? message.pendingTool
             : null;
+        const runId = event.run_id ?? event.tool;
+        const buffered = takeChunkBuffer(message.toolChunkBuffers, runId);
 
         return {
           ...message,
@@ -85,13 +87,50 @@ export function applyStreamEvent(
           blocks: appendSessionBlock(message.blocks, {
             type: "tool_result",
             tool: pending?.tool ?? event.tool,
-            output: event.output,
-            run_id: event.run_id ?? event.tool,
+            output:
+              buffered.text.length > 0 && !event.output.includes(buffered.text)
+                ? buffered.text + event.output
+                : event.output,
+            run_id: runId,
             result: event.result,
+          }),
+          pendingTool: undefined,
+          toolChunkBuffers: buffered.next,
+        };
+      });
+    case "tool_awaiting_approval":
+      return updateStreamingMessage(state, event, (message) => {
+        const pending =
+          message.pendingTool?.runId === event.run_id
+            ? message.pendingTool
+            : null;
+        return {
+          ...message,
+          request_id: event.request_id ?? message.request_id,
+          blocks: appendSessionBlock(message.blocks, {
+            type: "approval_gate",
+            tool: pending?.tool ?? event.tool,
+            input: pending?.input ?? event.input,
+            run_id: event.run_id,
+            reason: event.reason,
+            message: event.message,
+            result: event.result,
+            policy: event.policy,
           }),
           pendingTool: undefined,
         };
       });
+    case "tool_chunk":
+      return updateStreamingMessage(state, event, (message) => ({
+        ...message,
+        request_id: event.request_id ?? message.request_id,
+        toolChunkBuffers: appendChunkToBuffer(
+          message.toolChunkBuffers,
+          event.run_id,
+          event.chunk_index,
+          event.chunk
+        ),
+      }));
     case "plan_created":
       return updateStreamingMessage(state, event, (message) => ({
         ...message,
@@ -318,6 +357,46 @@ function appendTextBlock(
     text: normalized,
   });
   return next;
+}
+
+interface ChunkBufferEntry {
+  chunks: { index: number; text: string }[];
+}
+
+export type ToolChunkBuffers = Record<string, ChunkBufferEntry>;
+
+function appendChunkToBuffer(
+  buffers: ToolChunkBuffers | undefined,
+  runId: string,
+  chunkIndex: number,
+  chunkText: string
+): ToolChunkBuffers {
+  const next: ToolChunkBuffers = { ...(buffers ?? {}) };
+  const existing = next[runId]?.chunks ?? [];
+  if (existing.some((entry) => entry.index === chunkIndex)) {
+    return next;
+  }
+  const merged = [...existing, { index: chunkIndex, text: chunkText }].sort(
+    (a, b) => a.index - b.index
+  );
+  next[runId] = { chunks: merged };
+  return next;
+}
+
+function takeChunkBuffer(
+  buffers: ToolChunkBuffers | undefined,
+  runId: string
+): { text: string; next: ToolChunkBuffers | undefined } {
+  if (!buffers || !buffers[runId]) {
+    return { text: "", next: buffers };
+  }
+  const text = buffers[runId].chunks.map((entry) => entry.text).join("");
+  const next: ToolChunkBuffers = { ...buffers };
+  delete next[runId];
+  return {
+    text,
+    next: Object.keys(next).length > 0 ? next : undefined,
+  };
 }
 
 function replaceRetrievalBlock(

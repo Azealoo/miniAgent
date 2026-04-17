@@ -12,9 +12,55 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from tools.contracts import (
     MAX_SOURCE_PAYLOAD_JSON_CHARS,
     MAX_STRUCTURED_PAYLOAD_JSON_CHARS,
+    needs_approval_result,
     normalize_tool_output,
+    streaming_chunk_result,
     success_result,
 )
+
+
+def test_needs_approval_result_marks_envelope_with_typed_error():
+    summary, artifact = needs_approval_result(
+        "terminal",
+        "Tool gated by policy.",
+        metadata={"policy_approval_reason": "requires_approval"},
+    )
+
+    assert summary.startswith("[NEEDS_APPROVAL]")
+    assert artifact["status"] == "error"
+    assert artifact["outcome"] == "needs_approval"
+    assert artifact["error"]["code"] == "needs_approval"
+    assert artifact["error"]["retriable"] is False
+    assert artifact["metadata"]["policy_approval_reason"] == "requires_approval"
+
+
+def test_streaming_chunk_result_is_classified_as_success_with_chunk_metadata():
+    summary, artifact = streaming_chunk_result(
+        "terminal",
+        "stdout chunk",
+        chunk_index=2,
+        chunk="hello world\n",
+    )
+
+    assert summary == "stdout chunk"
+    assert artifact["status"] == "success"
+    assert artifact["outcome"] == "streaming_chunk"
+    assert artifact["error"] is None
+    assert artifact["metadata"]["chunk_index"] == 2
+    assert artifact["metadata"]["chunk_terminal"] is False
+    assert artifact["metadata"]["chunk_text"] == "hello world\n"
+
+
+def test_streaming_chunk_result_rejects_negative_chunk_index():
+    import pytest
+
+    with pytest.raises(ValueError):
+        streaming_chunk_result(
+            "terminal",
+            "x",
+            chunk_index=-1,
+            chunk="x",
+        )
 
 
 def test_normalize_tool_output_classifies_legacy_blocked_messages():

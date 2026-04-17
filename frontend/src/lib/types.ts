@@ -22,7 +22,8 @@ export interface ToolResultError {
     | "blocked"
     | "invalid_input"
     | "retriable_failure"
-    | "execution_failure";
+    | "execution_failure"
+    | "needs_approval";
   message: string;
   retriable: boolean;
 }
@@ -41,7 +42,9 @@ export interface ToolResultEnvelope {
     | "blocked"
     | "invalid_input"
     | "retriable_failure"
-    | "execution_failure";
+    | "execution_failure"
+    | "needs_approval"
+    | "streaming_chunk";
   error?: ToolResultError | null;
   metadata: JsonObject;
   source_payload?: JsonValue;
@@ -287,6 +290,27 @@ export interface ChatStreamToolEndEvent extends ChatStreamEventBase {
   policy?: JsonObject;
 }
 
+export interface ChatStreamToolAwaitingApprovalEvent
+  extends ChatStreamEventBase {
+  type: "tool_awaiting_approval";
+  tool: string;
+  input: string;
+  run_id: string;
+  reason: string;
+  message: string;
+  result?: ToolResultEnvelope;
+  policy?: JsonObject;
+}
+
+export interface ChatStreamToolChunkEvent extends ChatStreamEventBase {
+  type: "tool_chunk";
+  tool: string;
+  run_id: string;
+  chunk_index: number;
+  chunk: string;
+  terminal: boolean;
+}
+
 interface ChatStreamPlanEventBase extends ChatStreamEventBase {
   summary: string;
   run_id?: string;
@@ -349,6 +373,8 @@ export type ChatStreamEvent =
   | ChatStreamTokenEvent
   | ChatStreamToolStartEvent
   | ChatStreamToolEndEvent
+  | ChatStreamToolAwaitingApprovalEvent
+  | ChatStreamToolChunkEvent
   | ChatStreamPlanCreatedEvent
   | ChatStreamPlanUpdatedEvent
   | ChatStreamVerificationResultEvent
@@ -409,6 +435,17 @@ export interface SessionVerificationBlock {
   tool_trace?: JsonObject[];
 }
 
+export interface SessionApprovalGateBlock {
+  type: "approval_gate";
+  tool: string;
+  input: string;
+  run_id: string;
+  reason: string;
+  message: string;
+  result?: ToolResultEnvelope;
+  policy?: JsonObject;
+}
+
 export type SessionContentBlock =
   | SessionTextBlock
   | SessionToolUseBlock
@@ -416,7 +453,8 @@ export type SessionContentBlock =
   | SessionRetrievalBlock
   | SessionUsageBlock
   | SessionPlanBlock
-  | SessionVerificationBlock;
+  | SessionVerificationBlock
+  | SessionApprovalGateBlock;
 
 export interface Message {
   id: string;
@@ -429,6 +467,11 @@ export interface Message {
   endedAtMs?: number;
   /** Tool currently executing (cleared when tool_end arrives) */
   pendingTool?: { tool: string; input: string; runId: string };
+  /**
+   * Mid-tool partial outputs, keyed by run_id, accumulated until the matching
+   * `tool_end` arrives and the buffer is flushed into the persisted block.
+   */
+  toolChunkBuffers?: Record<string, { chunks: { index: number; text: string }[] }>;
 }
 
 export interface SessionHistoryMessage {

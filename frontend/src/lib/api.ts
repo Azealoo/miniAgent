@@ -586,6 +586,27 @@ function validateSessionContentBlocks(
           );
         }
         break;
+      case "approval_gate":
+        expectStringField(record, "tool", path, blockLabel);
+        expectStringField(record, "input", path, blockLabel);
+        expectStringField(record, "run_id", path, blockLabel);
+        expectStringField(record, "reason", path, blockLabel);
+        expectStringField(record, "message", path, blockLabel);
+        if ("result" in record && record.result != null && !isObjectRecord(record.result)) {
+          throw createPayloadError(
+            path,
+            blockLabel,
+            'Expected "result" to be an object when present.'
+          );
+        }
+        if ("policy" in record && record.policy != null && !isObjectRecord(record.policy)) {
+          throw createPayloadError(
+            path,
+            blockLabel,
+            'Expected "policy" to be an object when present.'
+          );
+        }
+        break;
       default:
         break;
     }

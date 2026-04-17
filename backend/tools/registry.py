@@ -27,6 +27,7 @@ class ToolPolicyMetadata:
     tool_validates_input: bool = False
     activity_summary_hint: str | None = None
     result_summary_hint: str | None = None
+    requires_approval: bool = False
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ class ToolManifestEntry:
     tool_validates_input: bool = False
     activity_summary_hint: str | None = None
     result_summary_hint: str | None = None
+    requires_approval: bool = False
 
 
 @dataclass(frozen=True)
@@ -59,11 +61,13 @@ class ToolRegistry:
 _POLICY_OVERRIDES: dict[str, ToolPolicyMetadata] = {
     "terminal": ToolPolicyMetadata(
         access_scope="execution",
+        requires_approval=True,
         activity_summary_hint="State the command goal and the target environment before running it.",
         result_summary_hint="Summarize the command outcome, key stdout or stderr signals, and any file or process side effects.",
     ),
     "python_repl": ToolPolicyMetadata(
         access_scope="execution",
+        requires_approval=True,
         activity_summary_hint="State the code goal and the data or files it will touch before executing it.",
         result_summary_hint="Summarize the computed result, warnings, and any files or variables materially changed.",
     ),
@@ -98,6 +102,7 @@ _POLICY_OVERRIDES: dict[str, ToolPolicyMetadata] = {
     "write_file": ToolPolicyMetadata(
         access_scope="execution",
         destructive=True,
+        requires_approval=True,
         interrupt_behavior="avoid_interrupting",
         activity_summary_hint="State what file will be written and why before applying the change.",
         result_summary_hint="Summarize what changed on disk and name the affected file paths.",
@@ -216,6 +221,7 @@ def build_tool_manifest_entry(tool: Any) -> ToolManifestEntry:
         tool_validates_input=tool_validates_input,
         activity_summary_hint=activity_summary_hint,
         result_summary_hint=result_summary_hint,
+        requires_approval=policy.requires_approval,
     )
 
 

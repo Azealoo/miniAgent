@@ -214,4 +214,112 @@ describe("applyStreamEvent", () => {
       },
     ]);
   });
+
+  it("appends an approval_gate block when the runtime emits tool_awaiting_approval", () => {
+    let state: StreamReducerState = {
+      messages: [createOptimisticAssistantMessage("assistant-1", 100)],
+      streamingMessageId: "assistant-1",
+    };
+
+    state = reduceEvent(
+      state,
+      {
+        type: "tool_start",
+        tool: "terminal",
+        input: "rm -rf /tmp/staging",
+        run_id: "run-approval-1",
+        request_id: "request-approval",
+      },
+      110
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "tool_awaiting_approval",
+        tool: "terminal",
+        input: "rm -rf /tmp/staging",
+        run_id: "run-approval-1",
+        reason: "requires_approval",
+        message: "Tool 'terminal' is gated and needs human approval before it can run.",
+        request_id: "request-approval",
+      },
+      120
+    );
+
+    const assistant = state.messages[0];
+    expect(assistant.pendingTool).toBeUndefined();
+    const approvalBlock = assistant.blocks?.find(
+      (block) => block.type === "approval_gate"
+    );
+    expect(approvalBlock).toBeDefined();
+    if (approvalBlock?.type === "approval_gate") {
+      expect(approvalBlock.tool).toBe("terminal");
+      expect(approvalBlock.run_id).toBe("run-approval-1");
+      expect(approvalBlock.reason).toBe("requires_approval");
+      expect(approvalBlock.input).toBe("rm -rf /tmp/staging");
+    }
+  });
+
+  it("buffers tool_chunk events and flushes them into the tool_result block on tool_end", () => {
+    let state: StreamReducerState = {
+      messages: [createOptimisticAssistantMessage("assistant-1", 100)],
+      streamingMessageId: "assistant-1",
+    };
+
+    state = reduceEvent(
+      state,
+      {
+        type: "tool_start",
+        tool: "terminal",
+        input: "tail -f log",
+        run_id: "run-stream-1",
+      },
+      110
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "tool_chunk",
+        tool: "terminal",
+        run_id: "run-stream-1",
+        chunk_index: 0,
+        chunk: "line one\n",
+        terminal: false,
+      },
+      120
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "tool_chunk",
+        tool: "terminal",
+        run_id: "run-stream-1",
+        chunk_index: 1,
+        chunk: "line two\n",
+        terminal: false,
+      },
+      125
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "tool_end",
+        tool: "terminal",
+        output: "[final]",
+        run_id: "run-stream-1",
+      },
+      130
+    );
+
+    const assistant = state.messages[0];
+    expect(assistant.toolChunkBuffers).toBeUndefined();
+    const result = assistant.blocks?.find(
+      (block) =>
+        block.type === "tool_result" && block.run_id === "run-stream-1"
+    );
+    expect(result).toBeDefined();
+    if (result?.type === "tool_result") {
+      expect(result.output).toBe("line one\nline two\n[final]");
+    }
+  });
 });
