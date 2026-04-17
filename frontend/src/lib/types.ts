@@ -442,7 +442,6 @@ export type InspectorTab =
   | "files"
   | "sources"
   | "memory"
-  | "skills"
   | "usage"
   | "turns";
 
@@ -496,26 +495,6 @@ export interface Skill {
   path: string;
   category?: string;
   stage?: string;
-}
-
-export interface SkillRegistryEntry {
-  name: string;
-  description: string;
-  location: string;
-  source_path: string;
-  category: string;
-  version: string;
-  tags: string[];
-  aliases: string[];
-  requires_tools: string[];
-  requires_network: boolean;
-  user_invocable: boolean;
-  species: string;
-  modality: string;
-  stage: string;
-  stability: string;
-  safety_level: string;
-  enabled: boolean;
 }
 
 export interface FileContentsResponse {

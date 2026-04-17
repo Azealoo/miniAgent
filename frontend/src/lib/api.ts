@@ -13,7 +13,6 @@ import type {
   SessionContinuityResponse,
   SessionContinuitySummary,
   SessionHistoryMessage,
-  SkillRegistryEntry,
   TokenStats,
   ToolResultEnvelope,
 } from "./types";
@@ -686,10 +685,6 @@ function validateTokenStats(value: unknown, path: string): TokenStats {
   return response as unknown as TokenStats;
 }
 
-function validateSkillRegistry(value: unknown, path: string): SkillRegistryEntry[] {
-  return expectArray(value, path, "the skills registry") as SkillRegistryEntry[];
-}
-
 const inspectReq = <T>(path: string, options: Omit<ApiRequestOptions, "scope"> = {}) =>
   req<T>(path, { ...options, scope: "inspection" });
 
@@ -1033,11 +1028,6 @@ export const openRawFileInNewTab = async (path: string): Promise<void> => {
 
 export const getRawFileUrl = (path: string) =>
   buildApiUrl("/api/files/raw", { path });
-
-export const listSkillsRegistry = () =>
-  inspectReq<unknown>("/api/skills/registry").then((payload) =>
-    validateSkillRegistry(payload, "/api/skills/registry")
-  );
 
 // Execution routes
 
