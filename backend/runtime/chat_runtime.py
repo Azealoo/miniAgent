@@ -206,6 +206,18 @@ class ChatRuntime:
 
                 if event_type == "error":
                     _save_user_message()
+                    turn_result = event.get("turn_result")
+                    if isinstance(turn_result, TurnResult):
+                        for seg in turn_result.segments:
+                            session_manager.save_message(
+                                request.session_id,
+                                "assistant",
+                                seg.content,
+                                seg.tool_calls or None,
+                                seg.retrievals or None,
+                                request_id=request_id,
+                                blocks=seg.blocks or None,
+                            )
                     yield _sse({"type": "error", "error": event["error"]})
                     return
 

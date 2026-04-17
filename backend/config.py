@@ -7,9 +7,11 @@ from runtime_config import load_runtime_config
 
 _CONFIG_FILE = Path(__file__).parent / "config.json"
 _DEFAULT_MEMORY_STALE_DAYS = 30
+_DEFAULT_MAX_TOKENS_PER_TURN = 200_000
 _DEFAULT: dict = {
     "rag_mode": False,
     "deterministic_seed": None,
+    "max_tokens_per_turn": _DEFAULT_MAX_TOKENS_PER_TURN,
     "prompt_context": {
         "include_git_context": False,
         "memory_stale_days": _DEFAULT_MEMORY_STALE_DAYS,
@@ -134,6 +136,16 @@ def get_execution_backend_settings() -> dict[str, Any]:
 
 def get_rag_mode() -> bool:
     return _load_runtime().get("rag_mode", False)
+
+
+def get_max_tokens_per_turn() -> int:
+    """Return the per-turn token budget. 0 or negative disables the cap."""
+    raw = _load_runtime().get("max_tokens_per_turn", _DEFAULT_MAX_TOKENS_PER_TURN)
+    try:
+        resolved = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_TOKENS_PER_TURN
+    return max(0, resolved)
 
 
 def get_deterministic_seed() -> int | None:

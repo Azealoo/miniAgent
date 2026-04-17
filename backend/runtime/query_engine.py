@@ -4,8 +4,15 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any, AsyncGenerator
 
-from config import get_verification_settings
+from config import get_max_tokens_per_turn, get_verification_settings
 from runtime.turn_ledger import TurnLedger
+
+
+def _count_tokens(value: Any) -> int:
+    """Delegate to the shared token accounting helper in api.tokens."""
+    from api.tokens import _count_optional_text
+
+    return _count_optional_text(value)
 
 
 @dataclass(frozen=True)
@@ -221,6 +228,12 @@ class QueryEngine:
                     "turn_result": ledger.finalize(turn_status=turn_status),
                 }
                 return
+            if event.get("type") == "error":
+                turn_status = event.get("turn_status", "error")
+                payload = dict(event)
+                payload["turn_result"] = ledger.finalize(turn_status=turn_status)
+                yield payload
+                return
             for output_event in ledger.consume(event):
                 yield output_event
 
@@ -231,6 +244,23 @@ class QueryEngine:
         saw_plan = False
         repair_attempted = False
         current_turn = turn
+
+        budget = get_max_tokens_per_turn()
+        input_tokens = _count_tokens(turn.message) + sum(
+            _count_tokens(message.get("content")) for message in turn.history
+        )
+        output_tokens = 0
+
+        def _budget_exceeded() -> bool:
+            return budget > 0 and (input_tokens + output_tokens) > budget
+
+        def _budget_error_event() -> dict[str, Any]:
+            total = input_tokens + output_tokens
+            return {
+                "type": "error",
+                "error": f"turn budget exceeded at {total} tokens",
+                "turn_status": "budget_exceeded",
+            }
 
         while True:
             latest_plan_event: dict[str, Any] | None = None
@@ -252,7 +282,11 @@ class QueryEngine:
                     content = event.get("content")
                     if isinstance(content, str) and content:
                         current_segment.append(content)
+                        output_tokens += _count_tokens(content)
                     yield event
+                    if _budget_exceeded():
+                        yield _budget_error_event()
+                        return
                     continue
 
                 if event_type == "new_response":
@@ -261,6 +295,11 @@ class QueryEngine:
                         current_segment.clear()
                     yield event
                     continue
+
+                if event_type == "tool_start":
+                    input_tokens += _count_tokens(event.get("input"))
+                elif event_type == "tool_end":
+                    output_tokens += _count_tokens(event.get("output"))
 
                 yield event
                 helper_event = self._extract_helper_agent_event(event, saw_plan=saw_plan)
@@ -272,8 +311,16 @@ class QueryEngine:
                         latest_verification_event = helper_event
                     yield helper_event
 
+                if _budget_exceeded():
+                    yield _budget_error_event()
+                    return
+
             if current_segment:
                 draft_segments.append("".join(current_segment))
+
+            if _budget_exceeded():
+                yield _budget_error_event()
+                return
 
             should_retry = (
                 not repair_attempted
@@ -295,4 +342,7 @@ class QueryEngine:
                     latest_verification=latest_verification_event,
                     draft_answer="\n\n".join(segment for segment in draft_segments if segment),
                 ),
+            )
+            input_tokens += sum(
+                _count_tokens(message.get("content")) for message in current_turn.history
             )
