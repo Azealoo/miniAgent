@@ -77,6 +77,13 @@ def test_runtime_event_snapshot_lists_every_expected_event_type() -> None:
             "verification": {"verdict": "pass"},
         },
         {"type": "new_response"},
+        {
+            "type": "compaction_event",
+            "from_turn": 1,
+            "to_turn": 4,
+            "summary": "Compacted early turns.",
+            "saved_tokens": 1200,
+        },
         {"type": "done", "content": "final"},
         {"type": "error", "error": "boom"},
     ],

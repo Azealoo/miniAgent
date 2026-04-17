@@ -1,5 +1,73 @@
 {
   "$defs": {
+    "CompactionRuntimeEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
+        },
+        "from_turn": {
+          "title": "From Turn",
+          "type": "integer"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
+        },
+        "saved_tokens": {
+          "title": "Saved Tokens",
+          "type": "integer"
+        },
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "to_turn": {
+          "title": "To Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "compaction_event",
+          "default": "compaction_event",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from_turn",
+        "to_turn",
+        "summary",
+        "saved_tokens"
+      ],
+      "title": "CompactionRuntimeEvent",
+      "type": "object"
+    },
     "DoneRuntimeEvent": {
       "additionalProperties": false,
       "properties": {
@@ -705,6 +773,7 @@
   },
   "discriminator": {
     "mapping": {
+      "compaction_event": "#/$defs/CompactionRuntimeEvent",
       "done": "#/$defs/DoneRuntimeEvent",
       "error": "#/$defs/ErrorRuntimeEvent",
       "new_response": "#/$defs/NewResponseRuntimeEvent",
@@ -742,6 +811,9 @@
     },
     {
       "$ref": "#/$defs/NewResponseRuntimeEvent"
+    },
+    {
+      "$ref": "#/$defs/CompactionRuntimeEvent"
     },
     {
       "$ref": "#/$defs/DoneRuntimeEvent"

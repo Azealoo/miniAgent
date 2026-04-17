@@ -23,6 +23,7 @@ export const RUNTIME_EVENT_TYPES = [
   "plan_updated",
   "verification_result",
   "new_response",
+  "compaction_event",
   "done",
   "error",
 ] as const;
@@ -147,6 +148,19 @@ const NewResponseRuntimeEventSchema = z
   })
   .strict();
 
+const CompactionRuntimeEventSchema = z
+  .object({
+    type: z.literal("compaction_event"),
+    schema_version: schemaVersionField,
+    request_id: requestIdField,
+    event_index: eventIndexField,
+    from_turn: z.number().int(),
+    to_turn: z.number().int(),
+    summary: z.string(),
+    saved_tokens: z.number().int(),
+  })
+  .strict();
+
 const DoneRuntimeEventSchema = z
   .object({
     type: z.literal("done"),
@@ -177,6 +191,7 @@ export const RuntimeEventSchema = z.discriminatedUnion("type", [
   PlanUpdatedRuntimeEventSchema,
   VerificationResultRuntimeEventSchema,
   NewResponseRuntimeEventSchema,
+  CompactionRuntimeEventSchema,
   DoneRuntimeEventSchema,
   ErrorRuntimeEventSchema,
 ]);
@@ -195,6 +210,7 @@ export const RUNTIME_EVENT_SCHEMAS: Record<
   plan_updated: PlanUpdatedRuntimeEventSchema,
   verification_result: VerificationResultRuntimeEventSchema,
   new_response: NewResponseRuntimeEventSchema,
+  compaction_event: CompactionRuntimeEventSchema,
   done: DoneRuntimeEventSchema,
   error: ErrorRuntimeEventSchema,
 };

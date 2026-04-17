@@ -94,6 +94,14 @@ class NewResponseRuntimeEvent(_RuntimeEventBase):
     type: Literal["new_response"] = "new_response"
 
 
+class CompactionRuntimeEvent(_RuntimeEventBase):
+    type: Literal["compaction_event"] = "compaction_event"
+    from_turn: int
+    to_turn: int
+    summary: str
+    saved_tokens: int
+
+
 class DoneRuntimeEvent(_RuntimeEventBase):
     type: Literal["done"] = "done"
     content: str
@@ -115,6 +123,7 @@ RuntimeEvent = Annotated[
         PlanUpdatedRuntimeEvent,
         VerificationResultRuntimeEvent,
         NewResponseRuntimeEvent,
+        CompactionRuntimeEvent,
         DoneRuntimeEvent,
         ErrorRuntimeEvent,
     ],
@@ -130,6 +139,7 @@ RUNTIME_EVENT_TYPES: tuple[str, ...] = (
     "plan_updated",
     "verification_result",
     "new_response",
+    "compaction_event",
     "done",
     "error",
 )
