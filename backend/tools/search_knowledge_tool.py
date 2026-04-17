@@ -13,6 +13,16 @@ from .untrusted_wrapper import wrap_untrusted
 
 _TOP_K = 3
 _SUPPORTED_EXTS = {".md", ".txt", ".pdf"}
+# Any file under a directory segment matching one of these names is excluded
+# from the default index. Callers that explicitly want archived content can
+# set include_archive=True on the tool.
+# TODO: surface include_archive through the tool args_schema if callers ever
+# need to flip this at query time rather than at tool-construction time.
+_ARCHIVE_SEGMENTS = {"archive"}
+
+
+def _is_archived(path: Path) -> bool:
+    return any(part in _ARCHIVE_SEGMENTS for part in path.parts)
 
 
 class SearchKnowledgeInput(BaseModel):
@@ -31,6 +41,10 @@ class SearchKnowledgeBaseTool(BaseTool):
     response_format: str = "content_and_artifact"
     knowledge_dir: str = ""
     storage_dir: str = ""
+    # When False (default), files under any 'archive' directory are excluded
+    # from indexing and retrieval — superseded docs stay addressable on disk
+    # but do not pollute retrieval results.
+    include_archive: bool = False
 
     _index: Optional[Any] = PrivateAttr(default=None)
     _nodes: list = PrivateAttr(default_factory=list)
@@ -44,11 +58,14 @@ class SearchKnowledgeBaseTool(BaseTool):
             return 0.0
         latest = 0.0
         for f in knowledge_path.rglob("*"):
-            if f.is_file() and f.suffix.lower() in _SUPPORTED_EXTS:
-                try:
-                    latest = max(latest, f.stat().st_mtime)
-                except OSError:
-                    pass
+            if not (f.is_file() and f.suffix.lower() in _SUPPORTED_EXTS):
+                continue
+            if not self.include_archive and _is_archived(f.relative_to(knowledge_path)):
+                continue
+            try:
+                latest = max(latest, f.stat().st_mtime)
+            except OSError:
+                pass
         return latest
 
     def _ensure_index(self) -> None:
@@ -73,9 +90,16 @@ class SearchKnowledgeBaseTool(BaseTool):
             self._last_mtime = current_mtime
             return
 
-        # Check for any supported files
+        # Check for any supported files (excluding archived unless opted in)
         files = [
-            f for f in knowledge_path.rglob("*") if f.suffix.lower() in _SUPPORTED_EXTS
+            f
+            for f in knowledge_path.rglob("*")
+            if f.is_file()
+            and f.suffix.lower() in _SUPPORTED_EXTS
+            and (
+                self.include_archive
+                or not _is_archived(f.relative_to(knowledge_path))
+            )
         ]
         if not files:
             self._built = True
@@ -120,7 +144,7 @@ class SearchKnowledgeBaseTool(BaseTool):
             storage_path.mkdir(parents=True, exist_ok=True)
 
             reader = SimpleDirectoryReader(
-                str(knowledge_path), recursive=True
+                input_files=[str(f) for f in files],
             )
             docs = reader.load_data()
             splitter = SentenceSplitter(chunk_size=512, chunk_overlap=64)
