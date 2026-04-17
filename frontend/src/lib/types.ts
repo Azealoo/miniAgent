@@ -315,6 +315,14 @@ export interface ChatStreamNewResponseEvent extends ChatStreamEventBase {
   type: "new_response";
 }
 
+export interface ChatStreamCompactionEvent extends ChatStreamEventBase {
+  type: "compaction_event";
+  from_turn: number;
+  to_turn: number;
+  summary: string;
+  saved_tokens: number;
+}
+
 export interface ChatStreamDoneEvent extends ChatStreamEventBase {
   type: "done";
   content: string;
@@ -345,6 +353,7 @@ export type ChatStreamEvent =
   | ChatStreamPlanUpdatedEvent
   | ChatStreamVerificationResultEvent
   | ChatStreamNewResponseEvent
+  | ChatStreamCompactionEvent
   | ChatStreamDoneEvent
   | ChatStreamErrorEvent
   | ChatStreamParseErrorEvent;

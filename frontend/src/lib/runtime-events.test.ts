@@ -78,6 +78,14 @@ function minimalPayloadFor(eventType: string): Record<string, unknown> {
       };
     case "new_response":
       return { type: "new_response" };
+    case "compaction_event":
+      return {
+        type: "compaction_event",
+        from_turn: 1,
+        to_turn: 4,
+        summary: "Compacted early turns.",
+        saved_tokens: 1200,
+      };
     case "done":
       return { type: "done", content: "final answer" };
     case "error":

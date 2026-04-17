@@ -111,6 +111,15 @@ export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent {
       };
     case "new_response":
       return { type: "new_response", ...base };
+    case "compaction_event":
+      return {
+        type: "compaction_event",
+        from_turn: event.from_turn,
+        to_turn: event.to_turn,
+        summary: event.summary,
+        saved_tokens: event.saved_tokens,
+        ...base,
+      };
     case "done":
       return {
         type: "done",
