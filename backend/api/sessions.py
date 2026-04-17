@@ -10,8 +10,10 @@ GET    /api/sessions/{id}/history    — raw messages with additive typed conten
 GET    /api/sessions/{id}/continuity — compressed continuity summaries for older history
 GET    /api/sessions/{id}/archives/{archive_id} — archived message batches for older history
 POST   /api/sessions/{id}/generate-title
+POST   /api/sessions/{id}/end        — fire post-session distillation idempotently
 """
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
 from access_control import require_execution_access, require_inspection_access
@@ -172,3 +174,36 @@ async def generate_title(session_id: str, request: Request = None):
 
     _sm().rename_session(session_id, title)
     return {"session_id": session_id, "title": title}
+
+
+# ------------------------------------------------------------------ #
+# Post-session distillation trigger                                    #
+# ------------------------------------------------------------------ #
+
+
+@router.post("/sessions/{session_id}/end")
+def end_session(session_id: str, request: Request = None):
+    """Idempotently fire the post-session distillation pipeline.
+
+    Returns 202 when the distillation task is scheduled; returns 404 if the
+    session id is unknown. The session file itself is left intact — callers
+    that also want to delete the session should follow up with DELETE.
+    """
+    require_execution_access(request)
+    _check_session_id(session_id)
+
+    sm = _sm()
+    if not sm._path(session_id).exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    from runtime.memory_distillation import fire_post_session_distillation
+
+    fire_post_session_distillation(
+        session_id,
+        base_dir=sm.sessions_dir.parent,
+        session_manager=sm,
+    )
+    return JSONResponse(
+        status_code=202,
+        content={"session_id": session_id, "status": "distillation_scheduled"},
+    )

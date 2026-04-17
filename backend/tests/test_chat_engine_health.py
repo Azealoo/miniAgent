@@ -399,3 +399,66 @@ def test_skills_registry_keeps_full_runtime_state_while_skills_list_stays_active
     assert disabled_entry["enabled"] is False
     assert disabled_entry["selected"] is False
     assert disabled_entry["selection_reason"] == "disabled_by_config"
+
+
+# --------------------------------------------------------------------- #
+# POST /api/sessions/{id}/end + GET /api/debug/failed-distillations    #
+# --------------------------------------------------------------------- #
+
+
+def test_post_session_end_returns_202_and_triggers_distillation(isolated_api_state):
+    from api.sessions import end_session
+    from graph.agent import agent_manager
+    from runtime.memory_distillation import clear_failed_distillations
+
+    clear_failed_distillations()
+    session_id = agent_manager.session_manager.create_session()
+    agent_manager.session_manager.save_message(
+        session_id, "user", "Kick off the QC pass.", request_id="req-end-1"
+    )
+
+    response = end_session(session_id, _request(f"/api/sessions/{session_id}/end", method="POST"))
+
+    assert response.status_code == 202
+    # Session still exists (end does not delete it).
+    assert (isolated_api_state / "sessions" / f"{session_id}.json").exists()
+    # Distillation ran synchronously because the test has no running loop.
+    distillation_path = (
+        isolated_api_state / "memory" / "agent" / f"session-{session_id}.md"
+    )
+    assert distillation_path.exists()
+    content = distillation_path.read_text(encoding="utf-8")
+    assert "type: session_distillation" in content
+    assert "## Turn req-end-1" in content
+
+
+def test_post_session_end_returns_404_for_unknown_session(isolated_api_state):
+    from api.sessions import end_session
+
+    unknown_id = "00000000-0000-4000-8000-000000000099"
+    with pytest.raises(HTTPException) as exc_info:
+        end_session(unknown_id, _request(f"/api/sessions/{unknown_id}/end", method="POST"))
+    assert exc_info.value.status_code == 404
+
+
+def test_debug_failed_distillations_exposes_recorded_failures(isolated_api_state):
+    from api.debug import list_failed_distillations
+    from runtime.memory_distillation import (
+        clear_failed_distillations,
+        record_failed_distillation,
+    )
+
+    clear_failed_distillations()
+    result = list_failed_distillations(_request("/api/debug/failed-distillations"))
+    assert result == {"session_ids": [], "count": 0}
+
+    record_failed_distillation("00000000-0000-4000-8000-000000000042")
+    record_failed_distillation("00000000-0000-4000-8000-000000000017")
+
+    result = list_failed_distillations(_request("/api/debug/failed-distillations"))
+    assert result["count"] == 2
+    assert result["session_ids"] == [
+        "00000000-0000-4000-8000-000000000017",
+        "00000000-0000-4000-8000-000000000042",
+    ]
+    clear_failed_distillations()

@@ -608,6 +608,22 @@ class SessionManager:
 
     def delete_session(self, session_id: str) -> None:
         path = self._path(session_id)
+
+        # Fire post-session distillation before removing the session file.
+        # Deferred import: runtime.memory_distillation imports SessionManager,
+        # so a top-level import would create a cycle at module load time.
+        try:
+            from runtime.memory_distillation import fire_post_session_distillation
+
+            fire_post_session_distillation(
+                session_id,
+                base_dir=self.sessions_dir.parent,
+                session_manager=self,
+            )
+        except Exception:
+            # Fire-and-forget: scheduling failures must never block deletion.
+            pass
+
         if path.exists():
             path.unlink()
         for archive_path in self.archive_dir.glob(f"{session_id}_*.json"):

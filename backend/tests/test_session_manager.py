@@ -793,3 +793,60 @@ class TestAutoCompress:
         result = await sm.auto_compress_if_needed(sid, llm=mock_llm, threshold=40)
         assert result is False
         assert len(sm.load_session(sid)) == 40  # untouched
+
+
+# --------------------------------------------------------------------- #
+# delete_session post-session distillation hook                         #
+# --------------------------------------------------------------------- #
+
+
+class TestDeleteSessionDistillationHook:
+    def test_delete_session_writes_post_session_distillation(self, sm, tmp_path):
+        from runtime.memory_distillation import clear_failed_distillations
+
+        clear_failed_distillations()
+        session_id = sm.create_session()
+        sm.save_message(session_id, "user", "Plan a QC rerun.", request_id="req-1")
+        sm.save_message(
+            session_id,
+            "assistant",
+            "Rerunning FastQC then MultiQC.",
+            request_id="req-1",
+            blocks=[{"type": "text", "text": "Rerunning FastQC then MultiQC."}],
+        )
+
+        sm.delete_session(session_id)
+
+        target = tmp_path / "memory" / "agent" / f"session-{session_id}.md"
+        assert target.exists(), "delete_session must fire distill_session before unlinking"
+        content = target.read_text(encoding="utf-8")
+        assert "type: session_distillation" in content
+        assert "## Turn req-1" in content
+        # Session file itself must be gone.
+        assert not (tmp_path / "sessions" / f"{session_id}.json").exists()
+
+    def test_distillation_failure_does_not_block_delete_and_surfaces_in_debug(
+        self, sm, tmp_path, monkeypatch
+    ):
+        from runtime import memory_distillation
+        from runtime.memory_distillation import (
+            clear_failed_distillations,
+            get_failed_distillations,
+        )
+
+        clear_failed_distillations()
+        session_id = sm.create_session()
+        sm.save_message(session_id, "user", "Doomed turn.", request_id="req-doom")
+
+        async def _exploding_distill(*args, **kwargs):
+            raise RuntimeError("post-session distillation exploded")
+
+        monkeypatch.setattr(memory_distillation, "distill_session", _exploding_distill)
+
+        # Must not raise, even when distillation fails.
+        sm.delete_session(session_id)
+
+        # Session file is deleted despite the failure.
+        assert not (tmp_path / "sessions" / f"{session_id}.json").exists()
+        # Failure is surfaced via the in-memory set the debug endpoint exposes.
+        assert session_id in get_failed_distillations()
