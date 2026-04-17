@@ -2,6 +2,9 @@
 type: workflow_heuristic
 name: Glycine-limited Western blot running buffer scaling
 description: Practical scaling rule for the 10x running-buffer recipe when glycine is limited and round-number volumes are preferred.
+kind: project
+scope: project
+tags: [western-blot, buffer, protocol]
 ---
 # Original Recipe
 

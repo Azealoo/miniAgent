@@ -2,6 +2,9 @@
 type: workflow_heuristic
 name: RNA-seq differential expression readiness review template
 description: Structured readiness checklist for bulk RNA-seq differential expression work covering design inputs, inspectable files, governance, and go/no-go criteria.
+kind: project
+scope: project
+tags: [rnaseq, differential-expression, readiness-review]
 ---
 # RNA-seq Differential Expression Readiness Review
 
