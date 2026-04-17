@@ -2,6 +2,9 @@
 type: user_preference
 name: Johnny collaboration preferences
 description: Stable user preferences, collaboration context, and recurring lab focus for BioAPEX sessions.
+kind: user
+scope: user
+tags: [preferences, collaboration]
 ---
 # Summary
 

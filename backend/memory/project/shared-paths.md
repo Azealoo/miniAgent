@@ -2,6 +2,9 @@
 type: project_fact
 name: Shared BioAPEX paths and runtime defaults
 description: Durable filesystem locations and local runtime defaults that frequently matter during project work.
+kind: project
+scope: project
+tags: [paths, runtime, environment]
 ---
 # Paths
 
