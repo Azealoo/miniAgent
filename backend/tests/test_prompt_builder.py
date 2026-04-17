@@ -573,6 +573,75 @@ class TestSkillRouting:
         assert selected is not None
         assert selected[0]["name"] == "memory_curator"
 
+    def test_skill_router_gates_out_path_scoped_skill_when_no_path_matches(self, workspace):
+        _write_skill(
+            workspace,
+            "runtime_debugger",
+            "Inspect backend runtime paths.",
+            category="bio/compute",
+            tags="runtime, debugger",
+            paths="backend/runtime/**",
+            modality="compute",
+            stage="utilities",
+        )
+        _write_skill(
+            workspace,
+            "paper_triage",
+            "Classify relevance of a paper abstract.",
+            category="bio/literature",
+            tags="paper, abstract, literature",
+            modality="literature",
+            stage="interpretation",
+        )
+
+        selected = select_skill_entries_for_query(
+            workspace,
+            "triage this paper abstract about runtime scheduling",
+        )
+
+        assert selected is not None
+        names = {entry["name"] for entry in selected}
+        assert "runtime_debugger" not in names
+        assert "paper_triage" in names
+
+    def test_skill_router_keeps_skill_without_paths_as_always_on(self, workspace):
+        _write_skill(
+            workspace,
+            "paper_triage",
+            "Classify relevance of a paper abstract.",
+            category="bio/literature",
+            tags="paper, abstract, literature",
+            modality="literature",
+            stage="interpretation",
+        )
+
+        selected = select_skill_entries_for_query(
+            workspace,
+            "triage this paper abstract",
+        )
+
+        assert selected is not None
+        assert [entry["name"] for entry in selected] == ["paper_triage"]
+
+    def test_skill_router_allows_explicit_invocation_to_bypass_path_gate(self, workspace):
+        _write_skill(
+            workspace,
+            "runtime_debugger",
+            "Inspect backend runtime paths.",
+            category="bio/compute",
+            paths="backend/runtime/**",
+            modality="compute",
+            stage="utilities",
+        )
+
+        selected = select_skill_entries_for_query(
+            workspace,
+            "use runtime_debugger to brainstorm checks",
+        )
+
+        assert selected is not None
+        assert [entry["name"] for entry in selected] == ["runtime_debugger"]
+
 
 class TestRetrievedMemoryBlock:
     def test_retrieved_memory_block_includes_typed_metadata_compactly(self):
