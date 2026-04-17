@@ -18,6 +18,7 @@ MAX_GIT_CONTEXT_CHARS = 2_000
 MAX_RETRIEVED_MEMORY_BLOCK_CHARS = 1_600
 MAX_RETRIEVED_MEMORY_ITEM_CHARS = 280
 MAX_SCOPED_MEMORY_BLOCK_CHARS = 4_000
+MAX_MEMORY_INDEX_CHARS = 2_048
 
 _MEMORY_SCOPE_DIRS = ("project", "user", "agent")
 
@@ -443,7 +444,15 @@ def build_system_prompt(
     if rag_mode:
         parts.append(_RAG_MEMORY_GUIDANCE)
     else:
-        memory = _read_component(base_dir / "memory" / "MEMORY.md")
+        # MEMORY.md is intentionally loaded as a concise curated index rather
+        # than durable content. The tight char budget prevents the prompt from
+        # silently bloating if someone starts accumulating narrative here —
+        # durable facts belong in typed notes under memory/{project,user,agent}/
+        # and are surfaced via _build_scoped_memory_listing.
+        memory = _read_component(
+            base_dir / "memory" / "MEMORY.md",
+            max_chars=MAX_MEMORY_INDEX_CHARS,
+        )
         if memory:
             parts.append(f"<!-- Long-term Memory -->\n{memory}")
         scoped_memory = _build_scoped_memory_listing(base_dir)

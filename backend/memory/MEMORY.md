@@ -1,42 +1,42 @@
-# Long-term Memory
+# Long-term Memory Index
 
-This file is the top-level memory index and compatibility entrypoint.
-Use scoped files under `memory/project/`, `memory/user/`, and `memory/agent/`
-for durable notes that should not all live in one document.
+This file is a concise, curated TOC — not a body of durable facts. Durable
+notes live in typed scoped files under `memory/project/`, `memory/user/`,
+and `memory/agent/`. The prompt builder auto-injects a listing of fresh or
+pinned scoped notes on each turn, so this index does not need to enumerate
+them.
 
-## Directory Index
-- `memory/MEMORY.md`: concise summary and compatibility entrypoint
-- `memory/project/`: typed project facts, paths, heuristics, and active work context
-- `memory/user/`: typed user preferences and recurring environment context
-- `memory/agent/`: runtime-maintained summaries and handoff notes
+## Scopes
 
-## Typed Memory Contract
+- `memory/project/` — typed project facts, workflow heuristics, and
+  scientific references tied to the current work.
+- `memory/user/` — typed user preferences and recurring environment context.
+- `memory/agent/` — runtime-maintained session summaries and handoff notes.
 
-For new markdown notes under `memory/project/`, `memory/user/`, and `memory/agent/`,
-prefer frontmatter with:
-- `type`
-- `name`
-- `description`
+## Typed Note Contract
 
-Allowed `type` values in this phase:
-- `user_preference`
-- `project_fact`
-- `workflow_heuristic`
-- `scientific_reference`
+Every note under the three scope directories should begin with YAML
+frontmatter:
 
-Legacy freeform notes remain readable during migration, but `MEMORY.md` should stay short
-and point readers toward scoped files instead of carrying the full durable body itself.
+- `type` — one of `user_preference`, `project_fact`, `workflow_heuristic`,
+  `scientific_reference`.
+- `name` — short human label.
+- `description` — one-line summary used by the scoped-memory listing.
 
-## Current Scoped Notes
-- `memory/user/johnny-preferences.md` — typed user preference summary for collaboration style and lab context
-- `memory/project/shared-paths.md` — typed project fact note for shared filesystem and runtime paths
-- `memory/project/western-blot-buffer-scaling.md` — typed workflow heuristic for the glycine-limited running buffer recipe
+Optional fields:
+
+- `pinned: true` — always surface the entry in the scoped listing, even when
+  stale.
+- `updated_at: <ISO-8601>` — override the file mtime for staleness decisions.
 
 ## Automatic Distillation
-- Verified runtime summaries are appended under `memory/agent/session-<session_id>.md` when the turn did not already write under `memory/` directly.
-- `memory/MEMORY.md` stays a curated index and compatibility entrypoint; automatic distillation does not rewrite this file.
 
-## Compatibility Summary
-- User works on AI and biology projects with a perturbation-screen focus.
-- Shared paths and local runtime defaults live in the scoped notes above.
-- Practical, round-number operating heuristics should stay in typed project notes rather than growing this file.
+Verified runtime summaries are appended under
+`memory/agent/session-<session_id>.md` when the turn did not already write
+directly under `memory/`. Automatic distillation does not rewrite this file.
+
+## Migration
+
+Durable narrative that previously lived in this file was split into typed
+artifacts under `memory/project/` and `memory/user/`. See
+`context/memory-migration.md` for the history and the rationale.

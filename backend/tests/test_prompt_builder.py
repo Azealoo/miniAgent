@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from graph.prompt_builder import (
     MAX_COMPONENT_CHARS,
+    MAX_MEMORY_INDEX_CHARS,
     MAX_RETRIEVED_MEMORY_BLOCK_CHARS,
     build_retrieved_memory_block,
     build_system_prompt,
@@ -137,6 +138,18 @@ class TestBuildSystemPrompt:
         assert "# Memory Index" in prompt
         assert "memory/project/buffer-heuristic.md" in prompt
         assert "Never inline this whole note" not in prompt
+
+    def test_memory_index_is_truncated_to_tight_budget(self, workspace):
+        oversized_index = "# Memory Index\n" + ("- stale narrative line\n" * 500)
+        assert len(oversized_index) > MAX_MEMORY_INDEX_CHARS
+        (workspace / "memory" / "MEMORY.md").write_text(oversized_index, encoding="utf-8")
+
+        prompt = build_system_prompt(workspace, rag_mode=False)
+
+        _, _, memory_block = prompt.partition("<!-- Long-term Memory -->\n")
+        memory_block = memory_block.split("\n\n", 1)[0]
+        assert "[truncated]" in memory_block
+        assert len(memory_block) <= MAX_MEMORY_INDEX_CHARS + len("\n...[truncated]")
 
     def test_non_rag_memory_filters_stale_unpinned_scoped_entries(self, workspace):
         project_dir = workspace / "memory" / "project"
