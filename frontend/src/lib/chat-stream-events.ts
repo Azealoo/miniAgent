@@ -1,16 +1,7 @@
+import { parseRuntimeEvent } from "./runtime-events";
 import type {
-  ChatStreamCompactionEvent,
-  ChatStreamDoneEvent,
-  ChatStreamErrorEvent,
   ChatStreamEvent,
-  ChatStreamNewResponseEvent,
-  ChatStreamPlanCreatedEvent,
-  ChatStreamPlanUpdatedEvent,
-  ChatStreamRetrievalEvent,
-  ChatStreamTokenEvent,
-  ChatStreamToolEndEvent,
-  ChatStreamToolStartEvent,
-  ChatStreamVerificationResultEvent,
+  ChatStreamParseErrorEvent,
   JsonObject,
   RetrievalResult,
   ToolResultEnvelope,
@@ -25,16 +16,6 @@ interface ParseChatStreamChunkOptions {
   flush?: boolean;
 }
 
-type UnknownRecord = Record<string, unknown>;
-
-function isObjectRecord(value: unknown): value is UnknownRecord {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readString(value: unknown): string | null {
-  return typeof value === "string" ? value : null;
-}
-
 function readOptionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
@@ -46,318 +27,138 @@ function readOptionalEventIndex(value: unknown): number | undefined {
   return value;
 }
 
-function readObject(value: unknown): JsonObject | null {
-  return isObjectRecord(value) ? (value as JsonObject) : null;
-}
-
-function readObjectArray(value: unknown): JsonObject[] | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
+/**
+ * Route an already-decoded payload through the RuntimeEvent zod schema and
+ * shape the result into the `ChatStreamEvent` union the app already consumes.
+ *
+ * Malformed payloads become a synthetic `parse_error` stream event so the app
+ * can surface the failure instead of silently dropping it — that matches the
+ * issue-21 acceptance criterion.
+ */
+export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent {
+  const parsed = parseRuntimeEvent(payload);
+  if (!parsed.ok) {
+    return buildParseErrorEvent(parsed.error, payload);
   }
 
-  const objects = value.filter(isObjectRecord);
-  return objects.length === value.length ? (objects as JsonObject[]) : undefined;
-}
-
-function readRetrievalResult(value: unknown): RetrievalResult | null {
-  if (!isObjectRecord(value)) {
-    return null;
-  }
-
-  const text = readString(value.text);
-  const source = readString(value.source);
-  const score = typeof value.score === "number" ? value.score : null;
-  if (text === null || source === null || score === null || Number.isNaN(score)) {
-    return null;
-  }
-
-  const result: RetrievalResult = { text, source, score };
-  const memoryType = readOptionalString(value.memory_type);
-  const memoryTypeLabel = readOptionalString(value.memory_type_label);
-  const memoryName = readOptionalString(value.memory_name);
-  const memoryDescription = readOptionalString(value.memory_description);
-
-  if (memoryType !== undefined) {
-    result.memory_type = memoryType;
-  }
-  if (memoryTypeLabel !== undefined) {
-    result.memory_type_label = memoryTypeLabel;
-  }
-  if (memoryName !== undefined) {
-    result.memory_name = memoryName;
-  }
-  if (memoryDescription !== undefined) {
-    result.memory_description = memoryDescription;
-  }
-
-  return result;
-}
-
-function readRetrievalResults(value: unknown): RetrievalResult[] | null {
-  if (!Array.isArray(value)) {
-    return null;
-  }
-
-  const results = value.map(readRetrievalResult);
-  return results.every((result): result is RetrievalResult => result !== null)
-    ? results
-    : null;
-}
-
-function readToolResultEnvelope(value: unknown): ToolResultEnvelope | undefined {
-  return isObjectRecord(value) ? (value as unknown as ToolResultEnvelope) : undefined;
-}
-
-function parseRetrievalEvent(
-  payload: UnknownRecord,
-  requestId: string | undefined,
-  eventIndex: number | undefined
-): ChatStreamRetrievalEvent | null {
-  const query = readString(payload.query);
-  const results = readRetrievalResults(payload.results);
-  if (query === null || results === null) {
-    return null;
-  }
-  return {
-    type: "retrieval",
-    query,
-    results,
+  const event = parsed.event;
+  const requestId = readOptionalString(event.request_id);
+  const eventIndex = readOptionalEventIndex(event.event_index);
+  const base = {
     request_id: requestId,
     event_index: eventIndex,
   };
-}
 
-function parseTokenEvent(
-  payload: UnknownRecord,
-  requestId: string | undefined,
-  eventIndex: number | undefined
-): ChatStreamTokenEvent | null {
-  const content = readString(payload.content);
-  if (content === null) {
-    return null;
-  }
-  return {
-    type: "token",
-    content,
-    request_id: requestId,
-    event_index: eventIndex,
-  };
-}
-
-function parseToolStartEvent(
-  payload: UnknownRecord,
-  requestId: string | undefined,
-  eventIndex: number | undefined
-): ChatStreamToolStartEvent | null {
-  const tool = readString(payload.tool);
-  const input = readString(payload.input);
-  if (tool === null || input === null) {
-    return null;
-  }
-  return {
-    type: "tool_start",
-    tool,
-    input,
-    run_id: readOptionalString(payload.run_id),
-    request_id: requestId,
-    event_index: eventIndex,
-  };
-}
-
-function parseToolEndEvent(
-  payload: UnknownRecord,
-  requestId: string | undefined,
-  eventIndex: number | undefined
-): ChatStreamToolEndEvent | null {
-  const tool = readString(payload.tool);
-  const output = readString(payload.output);
-  if (tool === null || output === null) {
-    return null;
-  }
-  return {
-    type: "tool_end",
-    tool,
-    output,
-    run_id: readOptionalString(payload.run_id),
-    result: readToolResultEnvelope(payload.result),
-    policy: readObject(payload.policy) ?? undefined,
-    request_id: requestId,
-    event_index: eventIndex,
-  };
-}
-
-function parsePlanCreatedEvent(
-  payload: UnknownRecord,
-  requestId: string | undefined,
-  eventIndex: number | undefined
-): ChatStreamPlanCreatedEvent | null {
-  const summary = readString(payload.summary);
-  const plan = readObject(payload.plan);
-  if (summary === null || plan === null) {
-    return null;
-  }
-  return {
-    type: "plan_created",
-    summary,
-    plan,
-    run_id: readOptionalString(payload.run_id),
-    tool_trace: readObjectArray(payload.tool_trace),
-    request_id: requestId,
-    event_index: eventIndex,
-  };
-}
-
-function parsePlanUpdatedEvent(
-  payload: UnknownRecord,
-  requestId: string | undefined,
-  eventIndex: number | undefined
-): ChatStreamPlanUpdatedEvent | null {
-  const summary = readString(payload.summary);
-  const plan = readObject(payload.plan);
-  if (summary === null || plan === null) {
-    return null;
-  }
-  return {
-    type: "plan_updated",
-    summary,
-    plan,
-    run_id: readOptionalString(payload.run_id),
-    tool_trace: readObjectArray(payload.tool_trace),
-    request_id: requestId,
-    event_index: eventIndex,
-  };
-}
-
-function parseVerificationResultEvent(
-  payload: UnknownRecord,
-  requestId: string | undefined,
-  eventIndex: number | undefined
-): ChatStreamVerificationResultEvent | null {
-  const summary = readString(payload.summary);
-  const verdict = readString(payload.verdict);
-  const verification = readObject(payload.verification);
-  if (
-    summary === null ||
-    verification === null ||
-    (verdict !== "pass" && verdict !== "repair_required" && verdict !== "fail")
-  ) {
-    return null;
-  }
-  return {
-    type: "verification_result",
-    summary,
-    verdict,
-    verification,
-    run_id: readOptionalString(payload.run_id),
-    tool_trace: readObjectArray(payload.tool_trace),
-    request_id: requestId,
-    event_index: eventIndex,
-  };
-}
-
-function parseNewResponseEvent(
-  requestId: string | undefined,
-  eventIndex: number | undefined
-): ChatStreamNewResponseEvent {
-  return {
-    type: "new_response",
-    request_id: requestId,
-    event_index: eventIndex,
-  };
-}
-
-function parseCompactionEvent(
-  payload: UnknownRecord,
-  requestId: string | undefined,
-  eventIndex: number | undefined
-): ChatStreamCompactionEvent | null {
-  const summary = readString(payload.summary);
-  if (summary === null) {
-    return null;
-  }
-  const fromTurn = typeof payload.from_turn === "number" ? payload.from_turn : null;
-  const toTurn = typeof payload.to_turn === "number" ? payload.to_turn : null;
-  const savedTokens =
-    typeof payload.saved_tokens === "number" ? payload.saved_tokens : null;
-  if (fromTurn === null || toTurn === null || savedTokens === null) {
-    return null;
-  }
-  return {
-    type: "compaction_event",
-    from_turn: fromTurn,
-    to_turn: toTurn,
-    summary,
-    saved_tokens: savedTokens,
-    request_id: requestId,
-    event_index: eventIndex,
-  };
-}
-
-function parseDoneEvent(
-  payload: UnknownRecord,
-  requestId: string | undefined,
-  eventIndex: number | undefined
-): ChatStreamDoneEvent {
-  return {
-    type: "done",
-    content: readString(payload.content) ?? "",
-    session_id: readOptionalString(payload.session_id),
-    request_id: requestId,
-    event_index: eventIndex,
-  };
-}
-
-function parseErrorEvent(
-  payload: UnknownRecord,
-  requestId: string | undefined,
-  eventIndex: number | undefined
-): ChatStreamErrorEvent {
-  return {
-    type: "error",
-    error: readString(payload.error) ?? "Unknown error",
-    request_id: requestId,
-    event_index: eventIndex,
-  };
-}
-
-export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent | null {
-  if (!isObjectRecord(payload)) {
-    return null;
-  }
-
-  const eventType = readString(payload.type);
-  const requestId = readOptionalString(payload.request_id);
-  const eventIndex = readOptionalEventIndex(payload.event_index);
-  if (eventType === null) {
-    return null;
-  }
-
-  switch (eventType) {
+  switch (event.type) {
     case "retrieval":
-      return parseRetrievalEvent(payload, requestId, eventIndex);
+      return {
+        type: "retrieval",
+        query: event.query,
+        results: event.results as unknown as RetrievalResult[],
+        ...base,
+      };
     case "token":
-      return parseTokenEvent(payload, requestId, eventIndex);
+      return {
+        type: "token",
+        content: event.content,
+        ...base,
+      };
     case "tool_start":
-      return parseToolStartEvent(payload, requestId, eventIndex);
+      return {
+        type: "tool_start",
+        tool: event.tool,
+        input: event.input,
+        run_id: event.run_id,
+        ...base,
+      };
     case "tool_end":
-      return parseToolEndEvent(payload, requestId, eventIndex);
+      return {
+        type: "tool_end",
+        tool: event.tool,
+        output: event.output,
+        run_id: event.run_id,
+        result: (event.result ?? undefined) as ToolResultEnvelope | undefined,
+        policy: (event.policy ?? undefined) as JsonObject | undefined,
+        ...base,
+      };
     case "plan_created":
-      return parsePlanCreatedEvent(payload, requestId, eventIndex);
+      return {
+        type: "plan_created",
+        summary: event.summary,
+        plan: event.plan as JsonObject,
+        run_id: event.run_id ?? undefined,
+        tool_trace: (event.tool_trace ?? undefined) as JsonObject[] | undefined,
+        ...base,
+      };
     case "plan_updated":
-      return parsePlanUpdatedEvent(payload, requestId, eventIndex);
+      return {
+        type: "plan_updated",
+        summary: event.summary,
+        plan: event.plan as JsonObject,
+        run_id: event.run_id ?? undefined,
+        tool_trace: (event.tool_trace ?? undefined) as JsonObject[] | undefined,
+        ...base,
+      };
     case "verification_result":
-      return parseVerificationResultEvent(payload, requestId, eventIndex);
+      return {
+        type: "verification_result",
+        summary: event.summary,
+        verdict: event.verdict,
+        verification: event.verification as JsonObject,
+        run_id: event.run_id ?? undefined,
+        tool_trace: (event.tool_trace ?? undefined) as JsonObject[] | undefined,
+        ...base,
+      };
     case "new_response":
-      return parseNewResponseEvent(requestId, eventIndex);
+      return { type: "new_response", ...base };
     case "compaction_event":
-      return parseCompactionEvent(payload, requestId, eventIndex);
+      return {
+        type: "compaction_event",
+        from_turn: event.from_turn,
+        to_turn: event.to_turn,
+        summary: event.summary,
+        saved_tokens: event.saved_tokens,
+        ...base,
+      };
     case "done":
-      return parseDoneEvent(payload, requestId, eventIndex);
+      return {
+        type: "done",
+        content: event.content,
+        session_id: event.session_id ?? undefined,
+        ...base,
+      };
     case "error":
-      return parseErrorEvent(payload, requestId, eventIndex);
-    default:
-      return null;
+      return {
+        type: "error",
+        error: event.error,
+        ...base,
+      };
   }
+}
+
+function buildParseErrorEvent(
+  message: string,
+  payload: unknown
+): ChatStreamParseErrorEvent {
+  const envelope =
+    typeof payload === "object" && payload !== null
+      ? (payload as Record<string, unknown>)
+      : undefined;
+  const event: ChatStreamParseErrorEvent = {
+    type: "parse_error",
+    error: message,
+    request_id: readOptionalString(envelope?.request_id),
+    event_index: readOptionalEventIndex(envelope?.event_index),
+  };
+  try {
+    const raw = JSON.stringify(payload);
+    if (typeof raw === "string") {
+      event.raw = raw.length > 2000 ? `${raw.slice(0, 2000)}…` : raw;
+    }
+  } catch {
+    // payload had a cycle or BigInt — omit raw.
+  }
+  return event;
 }
 
 export function parseChatStreamChunk(
@@ -381,15 +182,19 @@ export function parseChatStreamChunk(
         continue;
       }
 
+      const dataLine = line.slice(6);
+      let parsed: unknown;
       try {
-        const parsed = JSON.parse(line.slice(6));
-        const event = parseChatStreamEventPayload(parsed);
-        if (event) {
-          events.push(event);
-        }
+        parsed = JSON.parse(dataLine);
       } catch {
+        events.push({
+          type: "parse_error",
+          error: "SSE chunk was not valid JSON.",
+          raw: dataLine.length > 2000 ? `${dataLine.slice(0, 2000)}…` : dataLine,
+        });
         continue;
       }
+      events.push(parseChatStreamEventPayload(parsed));
     }
   }
 
