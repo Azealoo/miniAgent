@@ -1,18 +1,43 @@
 import { describe, expect, it } from "vitest";
-import type { Message, TokenStats } from "./types";
+import type { Message, SessionContentBlock, TokenStats, ToolCall } from "./types";
 import {
   estimateUsageFromMessages,
   summarizeSessionUsage,
 } from "./token-usage";
 
-function makeMessage(overrides: Partial<Message>): Message {
+interface MessageOverrides extends Partial<Omit<Message, "blocks">> {
+  tool_calls?: ToolCall[];
+  blocks?: SessionContentBlock[];
+}
+
+function toolCallBlocks(toolCalls: ToolCall[]): SessionContentBlock[] {
+  return toolCalls.flatMap<SessionContentBlock>((call) => [
+    {
+      type: "tool_use",
+      tool: call.tool,
+      input: call.input,
+      run_id: call.run_id,
+    },
+    {
+      type: "tool_result",
+      tool: call.tool,
+      output: call.output,
+      run_id: call.run_id,
+      result: call.result,
+    },
+  ]);
+}
+
+function makeMessage(overrides: MessageOverrides): Message {
+  const { tool_calls, blocks, ...rest } = overrides;
+  const derivedBlocks =
+    blocks ?? (tool_calls ? toolCallBlocks(tool_calls) : []);
   return {
-    id: overrides.id ?? "message-1",
-    role: overrides.role ?? "assistant",
-    content: overrides.content ?? "",
-    tool_calls: overrides.tool_calls ?? [],
-    blocks: overrides.blocks ?? [],
-    ...overrides,
+    id: rest.id ?? "message-1",
+    role: rest.role ?? "assistant",
+    content: rest.content ?? "",
+    blocks: derivedBlocks,
+    ...rest,
   };
 }
 

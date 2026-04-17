@@ -1,3 +1,4 @@
+import { getMessageToolCalls } from "@/lib/message-blocks";
 import type { Message, ToolCall, ToolResultEnvelope } from "@/lib/types";
 
 function metadataNumber(result: ToolResultEnvelope | undefined, key: string): number | null {
@@ -68,7 +69,7 @@ export function messageElapsedMs(message: Message, nowMs = Date.now()): number |
     return Math.max(0, (endedAtMs ?? nowMs) - startedAtMs);
   }
 
-  return toolDurationSummaryMs(message.tool_calls);
+  return toolDurationSummaryMs(getMessageToolCalls(message));
 }
 
 export function streamingElapsedLabel(message: Message, nowMs = Date.now()): string | null {

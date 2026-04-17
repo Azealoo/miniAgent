@@ -5,6 +5,7 @@ import {
   createOptimisticAssistantMessage,
   type StreamReducerState,
 } from "./chat-stream-reducer";
+import { getMessageToolCalls } from "./message-blocks";
 import type { ChatStreamEvent, Message } from "./types";
 
 function reduceEvent(
@@ -131,7 +132,7 @@ describe("applyStreamEvent", () => {
     expect(firstAssistant.content).toBe("BioAPEX reviewed the request.");
     expect(firstAssistant.isStreaming).toBe(false);
     expect(firstAssistant.pendingTool).toBeUndefined();
-    expect(firstAssistant.tool_calls).toHaveLength(1);
+    expect(getMessageToolCalls(firstAssistant)).toHaveLength(1);
     expect(firstAssistant.blocks?.map((block) => block.type)).toEqual([
       "retrieval",
       "tool_use",

@@ -10,10 +10,14 @@ import type {
   ToolResultEnvelope,
 } from "./types";
 
-type BlockCompatibleMessage = Pick<
-  Message | SessionHistoryMessage,
-  "role" | "content" | "request_id" | "tool_calls" | "retrievals" | "blocks"
->;
+type BlockCompatibleMessage = {
+  role: Message["role"] | SessionHistoryMessage["role"];
+  content?: string;
+  request_id?: string;
+  tool_calls?: ToolCall[];
+  retrievals?: RetrievalResult[];
+  blocks?: SessionContentBlock[];
+};
 
 type TurnCompatibleMessage = BlockCompatibleMessage & {
   role: string;
@@ -754,8 +758,6 @@ export function normalizeTurnMessages<T extends TurnCompatibleMessage>(
     return {
       ...message,
       content: normalized.content,
-      tool_calls: normalized.toolCalls,
-      retrievals: normalized.retrievals,
       blocks: sanitizedBlocks,
     };
   }) as T[];
@@ -832,12 +834,6 @@ function collapseVerificationRetryMessages<T extends TurnCompatibleMessage>(
       ),
       ...deriveMessageBlocks(last),
     ];
-    const mergedToolCalls = cluster.flatMap(
-      (entry) => normalizeMessageContent(entry).toolCalls
-    );
-    const mergedRetrievals = cluster.flatMap(
-      (entry) => normalizeMessageContent(entry).retrievals
-    );
 
     collapsed.push({
       ...first,
@@ -845,8 +841,6 @@ function collapseVerificationRetryMessages<T extends TurnCompatibleMessage>(
       id: first.id ?? last.id,
       request_id: last.request_id ?? first.request_id,
       content: last.content ?? "",
-      tool_calls: mergedToolCalls,
-      retrievals: mergedRetrievals,
       blocks: mergedBlocks,
       startedAtMs: first.startedAtMs ?? last.startedAtMs,
       endedAtMs: last.endedAtMs ?? first.endedAtMs,
@@ -994,10 +988,7 @@ export function normalizeMessageContent(
 }
 
 export function messageHasProcessTrail(
-  message: Pick<
-    Message,
-    "role" | "content" | "blocks" | "retrievals" | "tool_calls" | "pendingTool"
-  >
+  message: Pick<Message, "role" | "content" | "blocks" | "pendingTool">
 ): boolean {
   return (
     deriveMessageBlocks(message).some(
@@ -1012,4 +1003,16 @@ export function messageHasProcessTrail(
     ) ||
     (message.pendingTool !== undefined && message.pendingTool.tool !== "plan_agent")
   );
+}
+
+export function getMessageToolCalls(
+  message: BlockCompatibleMessage
+): ToolCall[] {
+  return normalizeMessageContent(message).toolCalls;
+}
+
+export function getMessageRetrievals(
+  message: BlockCompatibleMessage
+): RetrievalResult[] {
+  return normalizeMessageContent(message).retrievals;
 }

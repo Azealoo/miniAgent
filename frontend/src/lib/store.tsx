@@ -905,8 +905,6 @@ function _historyToMessages(raw: SessionHistoryMessage[]): Message[] {
         role: m.role as "user" | "assistant",
         content: normalized.content,
         request_id: m.request_id,
-        tool_calls: normalized.toolCalls,
-        retrievals: normalized.retrievals,
         blocks: normalized.blocks,
       };
     });

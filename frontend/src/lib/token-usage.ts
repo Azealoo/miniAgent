@@ -1,3 +1,4 @@
+import { getMessageToolCalls } from "./message-blocks";
 import type { Message, SessionContentBlock, TokenStats } from "./types";
 
 export type UsageSummaryOrigin = "tracked" | "tracked_live" | "estimated";
@@ -38,7 +39,7 @@ function messageText(message: Message): string {
 
 function sumToolTokens(messages: Message[]): number {
   return messages.reduce((total, message) => {
-    const completed = (message.tool_calls ?? []).reduce(
+    const completed = getMessageToolCalls(message).reduce(
       (callTotal, call) =>
         callTotal + estimateTextTokens(call.input) + estimateTextTokens(call.output),
       0

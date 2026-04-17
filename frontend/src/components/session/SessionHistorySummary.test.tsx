@@ -1,7 +1,12 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Message } from "@/lib/types";
+import type {
+  Message,
+  RetrievalResult,
+  SessionContentBlock,
+  ToolCall,
+} from "@/lib/types";
 import {
   makeGenericToolResultEnvelope,
   makeHistoryMessage,
@@ -19,14 +24,53 @@ vi.mock("@/lib/store", () => ({
   }),
 }));
 
-function makeMessage(overrides: Partial<Message>): Message {
+type MessageFixtureOverrides = Partial<Omit<Message, "blocks">> & {
+  tool_calls?: ToolCall[];
+  retrievals?: RetrievalResult[];
+  blocks?: SessionContentBlock[];
+};
+
+function buildBlocksFromLegacy(
+  toolCalls: ToolCall[] | undefined,
+  retrievals: RetrievalResult[] | undefined,
+  content: string
+): SessionContentBlock[] {
+  const blocks: SessionContentBlock[] = [];
+  if (retrievals && retrievals.length > 0) {
+    blocks.push({ type: "retrieval", results: [...retrievals] });
+  }
+  for (const call of toolCalls ?? []) {
+    blocks.push({
+      type: "tool_use",
+      tool: call.tool,
+      input: call.input,
+      run_id: call.run_id,
+    });
+    blocks.push({
+      type: "tool_result",
+      tool: call.tool,
+      output: call.output,
+      run_id: call.run_id,
+      result: call.result,
+    });
+  }
+  if (content) {
+    blocks.push({ type: "text", text: content });
+  }
+  return blocks;
+}
+
+function makeMessage(overrides: MessageFixtureOverrides = {}): Message {
+  const { tool_calls, retrievals, blocks, ...rest } = overrides;
+  const content = rest.content ?? "";
+  const derivedBlocks =
+    blocks ?? buildBlocksFromLegacy(tool_calls, retrievals, content);
   return {
-    id: overrides.id ?? `message-${Math.random().toString(16).slice(2)}`,
-    role: overrides.role ?? "assistant",
-    content: overrides.content ?? "",
-    tool_calls: overrides.tool_calls ?? [],
-    retrievals: overrides.retrievals ?? [],
-    ...overrides,
+    id: rest.id ?? `message-${Math.random().toString(16).slice(2)}`,
+    role: rest.role ?? "assistant",
+    content,
+    blocks: derivedBlocks,
+    ...rest,
   };
 }
 

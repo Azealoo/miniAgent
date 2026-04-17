@@ -1,12 +1,54 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { Message, ToolResultEnvelope } from "@/lib/types";
+import type {
+  Message,
+  RetrievalResult,
+  SessionContentBlock,
+  ToolCall,
+  ToolResultEnvelope,
+} from "@/lib/types";
 import {
   makeComplianceReport,
   makeGenericToolResultEnvelope,
   makeToolResultEnvelope,
 } from "@/test/fixtures";
 import ChatMessage from "./ChatMessage";
+
+type MessageFixtureOverrides = Partial<Omit<Message, "blocks">> & {
+  tool_calls?: ToolCall[];
+  retrievals?: RetrievalResult[];
+  blocks?: SessionContentBlock[];
+};
+
+function buildBlocksFromLegacy(
+  toolCalls: ToolCall[] | undefined,
+  retrievals: RetrievalResult[] | undefined,
+  content: string
+): SessionContentBlock[] {
+  const blocks: SessionContentBlock[] = [];
+  if (retrievals && retrievals.length > 0) {
+    blocks.push({ type: "retrieval", results: [...retrievals] });
+  }
+  for (const call of toolCalls ?? []) {
+    blocks.push({
+      type: "tool_use",
+      tool: call.tool,
+      input: call.input,
+      run_id: call.run_id,
+    });
+    blocks.push({
+      type: "tool_result",
+      tool: call.tool,
+      output: call.output,
+      run_id: call.run_id,
+      result: call.result,
+    });
+  }
+  if (content) {
+    blocks.push({ type: "text", text: content });
+  }
+  return blocks;
+}
 
 function makeToolResult(toolName: string): ToolResultEnvelope {
   return {
@@ -25,13 +67,19 @@ function makeToolResult(toolName: string): ToolResultEnvelope {
   };
 }
 
-function makeAssistantMessage(overrides: Partial<Message> = {}): Message {
+function makeAssistantMessage(
+  overrides: MessageFixtureOverrides = {}
+): Message {
+  const { tool_calls, retrievals, blocks, ...rest } = overrides;
+  const content = rest.content ?? "";
+  const derivedBlocks =
+    blocks ?? buildBlocksFromLegacy(tool_calls, retrievals, content);
   return {
     id: "assistant-1",
     role: "assistant",
-    content: "",
-    tool_calls: [],
-    ...overrides,
+    content,
+    blocks: derivedBlocks,
+    ...rest,
   };
 }
 

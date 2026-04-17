@@ -414,8 +414,6 @@ export interface Message {
   role: "user" | "assistant";
   content: string;
   request_id?: string;
-  tool_calls?: ToolCall[];
-  retrievals?: RetrievalResult[];
   blocks?: SessionContentBlock[];
   isStreaming?: boolean;
   startedAtMs?: number;

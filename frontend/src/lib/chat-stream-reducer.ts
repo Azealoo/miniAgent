@@ -3,8 +3,8 @@ import type {
   ChatStreamErrorEvent,
   ChatStreamEvent,
   Message,
+  RetrievalResult,
   SessionContentBlock,
-  ToolCall,
 } from "./types";
 
 export interface StreamReducerState {
@@ -33,7 +33,6 @@ export function createOptimisticAssistantMessage(
     request_id: requestId,
     isStreaming: true,
     startedAtMs,
-    tool_calls: [],
     blocks: [],
   };
 }
@@ -48,7 +47,6 @@ export function applyStreamEvent(
       return updateStreamingMessage(state, event, (message) => ({
         ...message,
         request_id: event.request_id ?? message.request_id,
-        retrievals: event.results,
         blocks: replaceRetrievalBlock(message.blocks, event.query, event.results),
       }));
     case "token":
@@ -80,18 +78,10 @@ export function applyStreamEvent(
           message.pendingTool?.runId === (event.run_id ?? event.tool)
             ? message.pendingTool
             : null;
-        const toolCall: ToolCall = {
-          tool: pending?.tool ?? event.tool,
-          input: pending?.input ?? "",
-          output: event.output,
-          run_id: event.run_id ?? event.tool,
-          result: event.result,
-        };
 
         return {
           ...message,
           request_id: event.request_id ?? message.request_id,
-          tool_calls: [...(message.tool_calls ?? []), toolCall],
           blocks: appendSessionBlock(message.blocks, {
             type: "tool_result",
             tool: pending?.tool ?? event.tool,
@@ -327,7 +317,7 @@ function appendTextBlock(
 function replaceRetrievalBlock(
   blocks: SessionContentBlock[] | undefined,
   query: string,
-  results: Message["retrievals"]
+  results: RetrievalResult[] | undefined
 ): SessionContentBlock[] {
   const next = [...(blocks ?? [])];
   const retrievalBlock: SessionContentBlock = {

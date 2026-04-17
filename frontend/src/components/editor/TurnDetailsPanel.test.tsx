@@ -11,7 +11,7 @@ function makeAssistantMessage(overrides: Partial<Message> = {}): Message {
     id: "assistant-1",
     role: "assistant",
     content: "",
-    tool_calls: [],
+    blocks: [],
     ...overrides,
   };
 }
@@ -76,38 +76,6 @@ describe("TurnDetailsPanel", () => {
     expect(screen.getAllByText("Read File")).toHaveLength(2);
     expect(screen.getByText("Read knowledge/study_protocol.md.")).toBeTruthy();
     expect(screen.getByText("Evidence and artifacts are ready.")).toBeTruthy();
-  });
-
-  it("falls back to legacy message fields when session blocks are absent", () => {
-    render(
-      <TurnDetailsPanel
-        messages={[
-          makeAssistantMessage({
-            content: "Legacy transcript content.",
-            retrievals: [
-              {
-                source: "knowledge/legacy_protocol.md",
-                score: 0.73,
-                text: "Legacy retrieval context.",
-              },
-            ],
-            tool_calls: [
-              {
-                tool: "python_repl",
-                input: "summarize cohort",
-                output: "done",
-              },
-            ],
-          }),
-        ]}
-      />
-    );
-
-    expect(screen.getByText("Knowledge retrieval")).toBeTruthy();
-    expect(screen.getByText(/Legacy retrieval context/i)).toBeTruthy();
-    expect(screen.getAllByText("Python Repl")).toHaveLength(2);
-    expect(screen.getByText("summarize cohort")).toBeTruthy();
-    expect(screen.getByText("Legacy transcript content.")).toBeTruthy();
   });
 
   it("renders helper-agent plan and verification blocks without breaking turn details", () => {
