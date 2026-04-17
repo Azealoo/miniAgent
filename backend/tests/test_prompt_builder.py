@@ -138,9 +138,15 @@ class TestBuildSystemPrompt:
         assert "memory/project/buffer-heuristic.md" in prompt
         assert "Never inline this whole note" not in prompt
 
-    def test_all_files_missing_returns_empty_string(self, tmp_path):
+    def test_all_files_missing_returns_only_static_guidance(self, tmp_path):
         prompt = build_system_prompt(tmp_path, rag_mode=False)
-        assert prompt == ""
+        # Workspace components and memory are absent; the only remaining block is
+        # the static Tool Result Error contract guidance that the wrapper relies on.
+        assert "<!-- Soul -->" not in prompt
+        assert "<!-- Identity -->" not in prompt
+        assert "<!-- Long-term Memory -->" not in prompt
+        assert "<!-- Tool Result Error Contract -->" in prompt
+        assert "execution_failure" in prompt
 
     def test_component_truncated_at_20k_chars(self, workspace):
         oversized = "A" * (MAX_COMPONENT_CHARS + 5000)
