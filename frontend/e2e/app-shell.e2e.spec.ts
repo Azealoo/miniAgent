@@ -140,6 +140,31 @@ test("renders the chat-only shell and streams a response", async ({ page }) => {
           }),
         },
         {
+          type: "plan_created",
+          summary: "Planner produced 2 steps.",
+          plan: {
+            goal: "Check readiness",
+            steps: [
+              { step_id: "collect", intent: "Collect readiness evidence" },
+              { step_id: "report", intent: "Report readiness" },
+            ],
+          },
+          request_id: "request-chat-only-1",
+        },
+        {
+          type: "plan_updated",
+          summary: "Planner refined the evidence step.",
+          plan: {
+            goal: "Check readiness",
+            steps: [
+              { step_id: "collect", intent: "Collect readiness evidence" },
+              { step_id: "verify", intent: "Verify readiness checklist" },
+              { step_id: "report", intent: "Report readiness outcome" },
+            ],
+          },
+          request_id: "request-chat-only-1",
+        },
+        {
           type: "verification_result",
           summary: "Verifier verdict: pass. Looks good.",
           verdict: "pass",
@@ -179,9 +204,20 @@ test("renders the chat-only shell and streams a response", async ({ page }) => {
   await page.getByRole("button", { name: "Send message" }).click();
 
   await expect(page.getByText("BioAPEX reviewed the request.")).toBeVisible();
-  await expect(page.getByText("Verification")).toBeVisible();
-  await expect(page.getByText("Checked readiness.")).toBeVisible();
-  await expect(page.getByText("Looks good.")).toBeVisible();
+
+  // Plan blocks land live in the same turn — plan_created arrives first and
+  // plan_updated replaces it, so the 3-step summary (from plan_updated) is
+  // what the UI shows before any reload.
+  await expect(page.getByText("Updated the 3-step plan.")).toBeVisible();
+  await expect(page.getByText("2. Verify readiness checklist.")).toBeVisible();
+  await expect(page.getByText("3. Report readiness outcome.")).toBeVisible();
+
+  // Verification block lands in the same turn.
+  await expect(page.getByText("Passed verification.")).toBeVisible();
+  await expect(
+    page.getByText("Readiness check passed: Core readiness items are covered.")
+  ).toBeVisible();
+
   await expect(
     page.getByRole("button", { name: /readiness-checklist\.md/i })
   ).toBeVisible();
