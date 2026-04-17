@@ -1,3 +1,10 @@
+---
+archived: true
+archived_on: 2026-04-18
+superseded_by: T_cell_rejuvenation_perturbation_hypothesis.md
+reason: Earlier, narrower draft (2026-02-03) superseded by the broader 2026-02-25 hypothesis covering SIRT1/CDKN2A/MTOR/IL6/PDCD1/TP53/TERT/FOXO1 targets.
+---
+
 # Perturbation Hypothesis: T-cell Rejuvenation
 
 **Date Generated**: 2026-02-03  
