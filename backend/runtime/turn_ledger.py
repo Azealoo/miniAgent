@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 
 @dataclass(frozen=True)
@@ -20,15 +20,33 @@ class TurnResult:
 
 
 class TurnLedger:
-    """Accumulates streamed runtime events into persisted assistant turn segments."""
+    """Accumulates streamed runtime events into persisted assistant turn segments.
 
-    def __init__(self) -> None:
+    When constructed with ``session_manager``/``session_id``/``request_id``/
+    ``user_message`` the ledger also owns finalize-time persistence: the user
+    message is written once on demand and assistant segments are written from
+    the ``TurnResult`` produced by ``finalize``.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_manager: Any = None,
+        session_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        user_message: Optional[str] = None,
+    ) -> None:
         self._segments: list[TurnSegment] = []
         self._current_content: list[str] = []
         self._current_tool_calls: list[dict[str, Any]] = []
         self._current_retrievals: list[dict[str, Any]] = []
         self._current_blocks: list[dict[str, Any]] = []
         self._pending_tools: dict[str, dict[str, Any]] = {}
+        self._session_manager = session_manager
+        self._session_id = session_id
+        self._request_id = request_id
+        self._user_message = user_message
+        self._user_message_saved = False
 
     def consume(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         event_type = event.get("type")
@@ -95,6 +113,41 @@ class TurnLedger:
             turn_status=turn_status,
             final_content=final_content,
         )
+
+    def persist_user_message(self) -> None:
+        """Write the accepted user message to the session store exactly once.
+
+        No-op when the ledger was constructed without a session binding or when
+        the user message has already been written in this turn.
+        """
+        if self._user_message_saved:
+            return
+        if self._session_manager is None or self._session_id is None:
+            return
+        if self._user_message is None:
+            return
+        self._session_manager.save_message(
+            self._session_id,
+            "user",
+            self._user_message,
+            request_id=self._request_id,
+        )
+        self._user_message_saved = True
+
+    def persist_segments(self, turn_result: TurnResult) -> None:
+        """Write the assistant segments produced by ``finalize`` to the session store."""
+        if self._session_manager is None or self._session_id is None:
+            return
+        for segment in turn_result.segments:
+            self._session_manager.save_message(
+                self._session_id,
+                "assistant",
+                segment.content,
+                segment.tool_calls or None,
+                segment.retrievals or None,
+                request_id=self._request_id,
+                blocks=segment.blocks or None,
+            )
 
     def _flush_segment(self) -> None:
         content = "".join(self._current_content)

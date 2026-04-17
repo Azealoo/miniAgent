@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass, replace
 from typing import Any, AsyncGenerator
 
 from config import get_max_tokens_per_turn, get_verification_settings
-from runtime.turn_ledger import TurnLedger
+from runtime.turn_ledger import TurnLedger, TurnResult
 
 
 def _count_tokens(value: Any) -> int:
@@ -32,6 +33,13 @@ class QueryEngine:
 
     def __init__(self, agent_manager) -> None:
         self.agent_manager = agent_manager
+
+    @staticmethod
+    def validate_session_id(session_id: str) -> None:
+        """Re-export session-id validation so the HTTP route can stay on ``runtime.*``."""
+        from graph.session_manager import _validate_session_id
+
+        _validate_session_id(session_id)
 
     @staticmethod
     def _extract_helper_tool_payload(
@@ -213,8 +221,11 @@ class QueryEngine:
     async def run_turn(
         self,
         turn: QueryTurnInput,
+        *,
+        ledger: TurnLedger | None = None,
     ) -> AsyncGenerator[dict, None]:
-        ledger = TurnLedger()
+        if ledger is None:
+            ledger = TurnLedger()
 
         for event in ledger.consume({"type": "persist_user_message"}):
             yield event
@@ -346,3 +357,134 @@ class QueryEngine:
             input_tokens += sum(
                 _count_tokens(message.get("content")) for message in current_turn.history
             )
+
+    @staticmethod
+    def _attach_policy_payload(
+        payload: dict[str, Any],
+        result: Any,
+    ) -> dict[str, Any]:
+        if isinstance(result, dict):
+            metadata = result.get("metadata")
+            if isinstance(metadata, dict):
+                policy = metadata.get("policy")
+                if isinstance(policy, dict):
+                    payload["policy"] = policy
+        return payload
+
+    @classmethod
+    def _shape_event_for_sse(cls, event: dict[str, Any]) -> dict[str, Any]:
+        event_type = event.get("type")
+        if event_type == "retrieval":
+            return {
+                "type": "retrieval",
+                "query": event["query"],
+                "results": event["results"],
+            }
+        if event_type == "token":
+            return {"type": "token", "content": event["content"]}
+        if event_type == "tool_start":
+            payload = dict(event)
+            payload["run_id"] = event.get("run_id", event["tool"])
+            return payload
+        if event_type == "tool_end":
+            payload = dict(event)
+            payload["run_id"] = event.get("run_id", event["tool"])
+            return cls._attach_policy_payload(payload, event.get("result"))
+        if event_type == "new_response":
+            return {"type": "new_response"}
+        return event
+
+    async def stream_turn_sse(
+        self,
+        *,
+        message: str,
+        session_id: str,
+    ) -> AsyncGenerator[str, None]:
+        """Run a turn and yield fully-shaped SSE payload strings.
+
+        Owns:
+          - per-turn ``request_id`` and monotonic ``event_index`` assignment
+          - tool policy context for the turn
+          - SSE envelope formatting for every runtime event
+          - persistence of the user message and assistant segments via ``TurnLedger``
+        """
+        # Deferred imports: ``tools`` pulls in langchain at module load time,
+        # which some QueryEngine unit tests avoid by importing the class
+        # without the full runtime. Keep the dependency scoped to SSE runs.
+        from tools.policy import tool_policy_context
+        from tools.policy_types import ToolPolicyExecutionContext
+
+        session_manager = self.agent_manager.session_manager
+        assert session_manager is not None
+
+        await session_manager.auto_compress_if_needed(
+            session_id,
+            self.agent_manager.llm,
+        )
+        history = session_manager.load_session_for_agent(session_id)
+
+        request_id = str(uuid.uuid4())
+        policy_context = ToolPolicyExecutionContext(
+            session_id=session_id,
+            request_id=request_id,
+            turn_id=request_id,
+        )
+        ledger = TurnLedger(
+            session_manager=session_manager,
+            session_id=session_id,
+            request_id=request_id,
+            user_message=message,
+        )
+
+        event_index = 0
+
+        def _sse(payload: dict[str, Any]) -> str:
+            nonlocal event_index
+            envelope = dict(payload)
+            event_index += 1
+            envelope.setdefault("request_id", request_id)
+            envelope.setdefault("event_index", event_index)
+            return f"data: {json.dumps(envelope, ensure_ascii=False)}\n\n"
+
+        turn = QueryTurnInput(
+            message=message,
+            history=list(history),
+            policy_context=policy_context,
+        )
+
+        with tool_policy_context(policy_context):
+            try:
+                async for event in self.run_turn(turn, ledger=ledger):
+                    event_type = event.get("type")
+
+                    if event_type == "persist_user_message":
+                        ledger.persist_user_message()
+                        continue
+
+                    if event_type == "done":
+                        turn_result = event.get("turn_result")
+                        if not isinstance(turn_result, TurnResult):
+                            raise RuntimeError("runtime done event missing turn_result")
+                        ledger.persist_user_message()
+                        ledger.persist_segments(turn_result)
+                        yield _sse(
+                            {
+                                "type": "done",
+                                "content": turn_result.final_content,
+                                "session_id": session_id,
+                            }
+                        )
+                        return
+
+                    if event_type == "error":
+                        ledger.persist_user_message()
+                        turn_result = event.get("turn_result")
+                        if isinstance(turn_result, TurnResult):
+                            ledger.persist_segments(turn_result)
+                        yield _sse({"type": "error", "error": event["error"]})
+                        return
+
+                    yield _sse(self._shape_event_for_sse(event))
+            except Exception as exc:
+                ledger.persist_user_message()
+                yield _sse({"type": "error", "error": str(exc)})

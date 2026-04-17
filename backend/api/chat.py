@@ -16,14 +16,16 @@ SSE event types emitted:
   new_response {type}
   done         {type, content, session_id}
   error        {type, error}
+
+Event shaping and persistence live in ``runtime.query_engine.QueryEngine``;
+this route is intentionally limited to request plumbing.
 """
 from access_control import require_execution_access
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from graph.session_manager import _validate_session_id
-from runtime.chat_runtime import ChatRuntime, ChatStreamInput
+from runtime.query_engine import QueryEngine
 
 router = APIRouter()
 
@@ -48,18 +50,16 @@ class ChatRequest(BaseModel):
 async def chat(request: ChatRequest, http_request: Request = None):
     require_execution_access(http_request)
     try:
-        _validate_session_id(request.session_id)
+        QueryEngine.validate_session_id(request.session_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid session_id")
 
     from graph.agent import agent_manager
 
-    runtime = ChatRuntime(agent_manager)
-    stream = runtime.stream_turn(
-        ChatStreamInput(
-            message=request.message,
-            session_id=request.session_id,
-        )
+    engine = QueryEngine(agent_manager)
+    stream = engine.stream_turn_sse(
+        message=request.message,
+        session_id=request.session_id,
     )
     return StreamingResponse(
         stream,

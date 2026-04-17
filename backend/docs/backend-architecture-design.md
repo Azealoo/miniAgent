@@ -53,7 +53,6 @@ flowchart TD
     UI[Frontend / SSE Client]
     API[FastAPI Routers]
     ACCESS[Access Control]
-    CHATRT[ChatRuntime]
     QUERY[QueryEngine]
     AGENT[AgentManager]
     PROMPT[Prompt Builder + Skill Router]
@@ -66,16 +65,13 @@ flowchart TD
 
     UI --> API
     API --> ACCESS
-    API --> CHATRT
-    CHATRT --> SESSIONS
-    CHATRT --> QUERY
+    API --> QUERY
     QUERY --> AGENT
     AGENT --> PROMPT
     AGENT --> MEMORY
     AGENT --> TOOLS
     TOOLS --> HELPER
     QUERY --> LEDGER
-    CHATRT --> LEDGER
     LEDGER --> SESSIONS
     SESSIONS --> FILES
     MEMORY --> FILES
@@ -88,32 +84,38 @@ flowchart TD
 
 The chat entrypoint is [`backend/api/chat.py`](../api/chat.py).
 
-- validates `session_id`
 - enforces execution access
-- constructs `ChatRuntime`
-- returns an SSE `StreamingResponse`
+- validates `session_id` via `QueryEngine.validate_session_id`
+- constructs a `QueryEngine` and returns an SSE `StreamingResponse` from
+  `QueryEngine.stream_turn_sse`
 
-The route intentionally does not decide how the turn is executed.
+The route does not own persistence or SSE payload assembly — those live in
+`runtime.query_engine` and `runtime.turn_ledger`.
 
 ### 2. Turn Lifecycle Ownership
 
-`ChatRuntime` in [`backend/runtime/chat_runtime.py`](../runtime/chat_runtime.py) owns transport-facing runtime concerns:
+`QueryEngine.stream_turn_sse` in
+[`backend/runtime/query_engine.py`](../runtime/query_engine.py) owns all
+transport-facing turn concerns:
 
 - auto-compresses long sessions before execution
 - loads session history
-- generates a per-turn `request_id`
+- generates a per-turn `request_id` and monotonic `event_index`
+- enters a tool policy context scoped to the turn
 - serializes typed runtime events into SSE
-- persists the accepted user message
-- persists assistant segments once the turn completes
-- emits the final `done` event
+- delegates persistence (accepted user message + assistant segments) to
+  `TurnLedger`
+- emits the final `done` (or `error`) event
 
-This keeps session persistence and stream formatting in one place.
+This keeps session persistence and stream formatting in one place behind the
+runtime boundary.
 
 ### 3. Turn Orchestration
 
-`QueryEngine` in [`backend/runtime/query_engine.py`](../runtime/query_engine.py) owns the internal execution loop:
+`QueryEngine.run_turn` / `QueryEngine.run_harness_turn` own the internal
+execution loop:
 
-- starts a `TurnLedger`
+- drives a `TurnLedger` as the authoritative accumulator of assistant segments
 - forwards ordinary events from the agent runtime
 - translates helper-agent tool results into first-class events:
   - `plan_created`
