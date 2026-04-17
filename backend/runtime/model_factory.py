@@ -21,6 +21,7 @@ class RoleModelConfig:
     base_url: str
     temperature: float
     streaming: bool
+    seed: int | None = None
 
 
 _ROLE_DEFAULTS: dict[ModelRole, dict[str, object]] = {
@@ -167,6 +168,11 @@ def get_role_model_config(role: ModelRole, *, streaming: bool | None = None) -> 
         )
     )
 
+    seed = config.get_deterministic_seed()
+    if seed is not None:
+        # Deterministic mode pins temperature to 0 regardless of per-role setting.
+        temperature = 0.0
+
     return RoleModelConfig(
         role=role,
         provider=provider,
@@ -175,6 +181,7 @@ def get_role_model_config(role: ModelRole, *, streaming: bool | None = None) -> 
         base_url=base_url,
         temperature=temperature,
         streaming=resolved_streaming,
+        seed=seed,
     )
 
 
@@ -184,20 +191,17 @@ def role_model_is_configured(role: ModelRole) -> bool:
 
 def build_chat_model(role: ModelRole, *, streaming: bool | None = None):
     settings = get_role_model_config(role, streaming=streaming)
+    kwargs: dict[str, object] = {
+        "model": settings.model,
+        "api_key": settings.api_key,
+        "base_url": settings.base_url,
+        "temperature": settings.temperature,
+        "streaming": settings.streaming,
+    }
+    if settings.seed is not None:
+        kwargs["seed"] = settings.seed
     if settings.provider == "deepseek":
-        return ChatDeepSeek(
-            model=settings.model,
-            api_key=settings.api_key,
-            base_url=settings.base_url,
-            temperature=settings.temperature,
-            streaming=settings.streaming,
-        )
+        return ChatDeepSeek(**kwargs)
     if settings.provider == "openai":
-        return ChatOpenAI(
-            model=settings.model,
-            api_key=settings.api_key,
-            base_url=settings.base_url,
-            temperature=settings.temperature,
-            streaming=settings.streaming,
-        )
+        return ChatOpenAI(**kwargs)
     raise ValueError(f"Unsupported provider for role {role!r}: {settings.provider!r}")

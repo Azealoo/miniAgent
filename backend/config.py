@@ -9,6 +9,7 @@ _CONFIG_FILE = Path(__file__).parent / "config.json"
 _DEFAULT_MEMORY_STALE_DAYS = 30
 _DEFAULT: dict = {
     "rag_mode": False,
+    "deterministic_seed": None,
     "prompt_context": {
         "include_git_context": False,
         "memory_stale_days": _DEFAULT_MEMORY_STALE_DAYS,
@@ -133,6 +134,23 @@ def get_execution_backend_settings() -> dict[str, Any]:
 
 def get_rag_mode() -> bool:
     return _load_runtime().get("rag_mode", False)
+
+
+def get_deterministic_seed() -> int | None:
+    """Return the configured deterministic seed, or None when disabled."""
+    raw = _load_runtime().get("deterministic_seed")
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return None
+    return None
 
 
 def get_skills_extra_dirs(base_dir: Path) -> list[Path]:
