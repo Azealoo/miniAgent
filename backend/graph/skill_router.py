@@ -345,33 +345,33 @@ def _path_hint_matches(path_hint: str, candidate_path: str) -> bool:
     )
 
 
-def _entry_declares_paths(entry: dict[str, Any]) -> bool:
-    path_hints = entry.get("paths", [])
-    if not isinstance(path_hints, list):
-        return False
-    return any(isinstance(p, str) and p.strip() for p in path_hints)
-
-
 def _score_path_activation(
     entry: dict[str, Any],
     *,
     query_paths: list[str],
     history_paths: list[str],
-) -> int:
+) -> tuple[int, bool]:
+    """Return (activation_score, declared).
+
+    `declared` is True iff the skill carries a non-empty `paths:` list;
+    when score == 0 this signals the skill is path-gated rather than
+    always-on.
+    """
     path_hints = entry.get("paths", [])
-    if not isinstance(path_hints, list) or not path_hints:
-        return 0
+    if not isinstance(path_hints, list):
+        return 0, False
+    valid_hints = [p for p in path_hints if isinstance(p, str) and p.strip()]
+    if not valid_hints:
+        return 0, False
 
     score = 0
-    for path_hint in path_hints:
-        if not isinstance(path_hint, str):
-            continue
+    for path_hint in valid_hints:
         specificity = _path_hint_specificity(path_hint)
         if any(_path_hint_matches(path_hint, candidate) for candidate in query_paths):
             score = max(score, _PATH_ACTIVATION_SCORE + specificity)
         if any(_path_hint_matches(path_hint, candidate) for candidate in history_paths):
             score = max(score, _HISTORY_PATH_ACTIVATION_SCORE + specificity)
-    return score
+    return score, True
 
 
 def select_skill_entries_for_query(
@@ -402,7 +402,7 @@ def select_skill_entries_for_query(
             normalized_query=normalized_query,
             query_tokens=query_tokens,
         )
-        path_score = _score_path_activation(
+        path_score, path_declared = _score_path_activation(
             entry,
             query_paths=query_paths,
             history_paths=history_paths,
@@ -412,7 +412,7 @@ def select_skill_entries_for_query(
         # working set. Empty/absent paths remain always-on. Explicit
         # name/alias invocations bypass this gate so users can still
         # summon a path-scoped skill off-path.
-        if not explicit and path_score == 0 and _entry_declares_paths(entry):
+        if not explicit and path_declared and path_score == 0:
             continue
         score = text_score + path_score
         if score > 0:
