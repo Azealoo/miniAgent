@@ -456,9 +456,21 @@ class SessionManager:
     def _write(self, session_id: str, data: dict) -> None:
         data.setdefault("schema_version", SESSION_SCHEMA_VERSION)
         data["updated_at"] = time.time()
+        self._stamp_deterministic_mode(data)
         self._path(session_id).write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+    @staticmethod
+    def _stamp_deterministic_mode(data: dict) -> None:
+        # Deferred import avoids a config ↔ session_manager circular import at module load.
+        import config
+
+        seed = config.get_deterministic_seed()
+        if seed is None:
+            data.pop("deterministic", None)
+        else:
+            data["deterministic"] = {"seed": seed}
 
     @staticmethod
     def _empty(session_id: str) -> dict:
@@ -480,9 +492,7 @@ class SessionManager:
     def create_session(self) -> str:
         session_id = str(uuid.uuid4())
         data = self._empty(session_id)
-        self._path(session_id).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        self._write(session_id, data)
         return session_id
 
     def list_sessions(self) -> list[dict]:
