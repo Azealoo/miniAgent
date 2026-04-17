@@ -527,6 +527,116 @@ async def test_query_engine_can_treat_repair_required_as_advisory():
 
 
 @pytest.mark.asyncio
+async def test_query_engine_stops_runaway_planner_when_budget_exceeded():
+    class _RunawayPlannerAgentManager(_FakeAgentManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tool_ends_emitted = 0
+
+        async def astream(self, message: str, history: list[dict]) -> AsyncGenerator[dict, None]:
+            for step in range(100):
+                self.tool_ends_emitted += 1
+                yield {
+                    "type": "tool_end",
+                    "tool": "plan_agent",
+                    "output": "planner chunk " * 500,
+                    "run_id": f"plan-run-{step}",
+                    "result": {
+                        "status": "success",
+                        "summary": f"Planner step {step}.",
+                        "structured_payload": {
+                            "agent_type": "plan",
+                            "plan": {"goal": "loop", "steps": []},
+                            "tool_trace": [],
+                        },
+                    },
+                }
+            yield {"type": "done"}
+
+    manager = _RunawayPlannerAgentManager()
+    engine = QueryEngine(manager)
+    turn = QueryTurnInput(message="hi", history=[])
+
+    with patch(
+        "runtime.query_engine.get_max_tokens_per_turn",
+        return_value=2000,
+    ):
+        events = [event async for event in engine.run_harness_turn(turn)]
+
+    error_events = [event for event in events if event.get("type") == "error"]
+    assert len(error_events) == 1
+    error = error_events[0]
+    assert error["error"].startswith("turn budget exceeded at ")
+    assert error["turn_status"] == "budget_exceeded"
+    assert events[-1] is error
+
+    tool_end_events = [event for event in events if event.get("type") == "tool_end"]
+    assert tool_end_events, "prior tool_end events must be preserved before error"
+
+    plan_events = [event for event in events if event.get("type") in {"plan_created", "plan_updated"}]
+    assert plan_events, "prior plan_* events must be preserved before error"
+
+    crossing_step = manager.tool_ends_emitted
+    assert crossing_step < 100, "runaway planner must terminate before exhausting its loop"
+    budget_crossing_tool_end = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "tool_end"
+        and event.get("run_id") == f"plan-run-{crossing_step - 1}"
+    )
+    remaining_tool_ends = [
+        event
+        for event in events[budget_crossing_tool_end + 1 :]
+        if event.get("type") == "tool_end"
+    ]
+    assert remaining_tool_ends == [], (
+        "runtime must terminate within one step after crossing the budget"
+    )
+
+
+@pytest.mark.asyncio
+async def test_query_engine_run_turn_attaches_turn_result_to_budget_error():
+    class _RunawayPlannerAgentManager(_FakeAgentManager):
+        async def astream(self, message: str, history: list[dict]) -> AsyncGenerator[dict, None]:
+            yield {"type": "token", "content": "partial draft "}
+            yield {
+                "type": "tool_end",
+                "tool": "plan_agent",
+                "output": "x" * 20000,
+                "run_id": "plan-run-1",
+                "result": {
+                    "status": "success",
+                    "summary": "big planner output",
+                    "structured_payload": {
+                        "agent_type": "plan",
+                        "plan": {"goal": "loop", "steps": []},
+                        "tool_trace": [],
+                    },
+                },
+            }
+            yield {"type": "done"}
+
+    engine = QueryEngine(_RunawayPlannerAgentManager())
+    turn = QueryTurnInput(message="hi", history=[])
+
+    with patch(
+        "runtime.query_engine.get_max_tokens_per_turn",
+        return_value=500,
+    ):
+        events = [event async for event in engine.run_turn(turn)]
+
+    error_events = [event for event in events if event.get("type") == "error"]
+    assert len(error_events) == 1
+    error = error_events[0]
+    assert error["error"].startswith("turn budget exceeded at ")
+    turn_result = error["turn_result"]
+    assert turn_result.turn_status == "budget_exceeded"
+    assert any(
+        "partial draft" in seg.content for seg in turn_result.segments
+    ), "partial streamed content must be preserved on budget error"
+
+
+@pytest.mark.asyncio
 async def test_query_engine_run_harness_turn_uses_agent_path_when_not_protocol_or_workflow():
     engine = QueryEngine(_FakeAgentManager())
     turn = QueryTurnInput(
