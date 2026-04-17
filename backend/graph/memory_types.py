@@ -11,6 +11,7 @@ TYPED_MEMORY_TYPE_VALUES = (
     "project_fact",
     "workflow_heuristic",
     "scientific_reference",
+    "session_distillation",
 )
 _MARKDOWN_MEMORY_SUFFIXES = {".md", ".markdown"}
 _TYPED_MEMORY_REQUIRED_FIELDS = ("type", "name", "description")
