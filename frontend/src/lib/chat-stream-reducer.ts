@@ -147,6 +147,15 @@ export function applyStreamEvent(
       return reduceDoneEvent(state, event, options.now);
     case "error":
       return reduceErrorEvent(state, event, options.now);
+    case "parse_error":
+      // Parse errors are surfaced through onParseError but should not mutate
+      // the message tree or end the stream — a single malformed SSE payload
+      // must not corrupt an otherwise healthy turn.
+      return {
+        messages: state.messages,
+        streamingMessageId: state.streamingMessageId,
+        finished: false,
+      };
   }
 }
 

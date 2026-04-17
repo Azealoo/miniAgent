@@ -2,6 +2,7 @@ import type {
   AccessProbeResponse,
   ChatStreamEvent,
   ChatStreamErrorEvent,
+  ChatStreamParseErrorEvent,
   ChatStreamPlanCreatedEvent,
   ChatStreamPlanUpdatedEvent,
   ChatStreamVerificationResultEvent,
@@ -1081,6 +1082,11 @@ export interface StreamCallbacks {
   onNewResponse?: () => void;
   onDone?: (content: string, requestId?: string) => void;
   onError?: (error: string, requestId?: string) => void;
+  /**
+   * Called when an incoming SSE payload fails RuntimeEvent validation. The
+   * stream keeps running — malformed events are surfaced, not terminal.
+   */
+  onParseError?: (event: ChatStreamParseErrorEvent) => void;
 }
 
 export async function streamChat(
@@ -1164,6 +1170,9 @@ export async function streamChat(
         break;
       case "error":
         callbacks.onError?.(event.error, event.request_id);
+        break;
+      case "parse_error":
+        callbacks.onParseError?.(event);
         break;
     }
   };

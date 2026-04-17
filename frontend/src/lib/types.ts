@@ -326,6 +326,16 @@ export interface ChatStreamErrorEvent extends ChatStreamEventBase {
   error: string;
 }
 
+/**
+ * Client-side synthetic event surfaced when an incoming SSE payload fails
+ * RuntimeEvent (zod) validation. Never emitted by the backend.
+ */
+export interface ChatStreamParseErrorEvent extends ChatStreamEventBase {
+  type: "parse_error";
+  error: string;
+  raw?: string;
+}
+
 export type ChatStreamEvent =
   | ChatStreamRetrievalEvent
   | ChatStreamTokenEvent
@@ -336,7 +346,8 @@ export type ChatStreamEvent =
   | ChatStreamVerificationResultEvent
   | ChatStreamNewResponseEvent
   | ChatStreamDoneEvent
-  | ChatStreamErrorEvent;
+  | ChatStreamErrorEvent
+  | ChatStreamParseErrorEvent;
 
 export type ChatStreamEventType = ChatStreamEvent["type"];
 
