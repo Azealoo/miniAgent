@@ -20,6 +20,7 @@ GENERATED_OUTPUTS_DIR = PurePosixPath("outputs/generated")
 STABLE_ARTIFACT_FILENAMES: dict[str, str] = {
     "workflow_run": RUN_RECORD_FILENAME,
     "run": RUN_RECORD_FILENAME,
+    "subagent_run": "subagent_run.json",
     "dataset_manifest": "dataset_manifest.yaml",
     "workflow_plan": "workflow_plan.json",
     "compliance_report": "compliance_report.json",

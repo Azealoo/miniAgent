@@ -9,9 +9,14 @@ from runtime.helper_agent_runner import (
     build_tool_catalog,
     extract_json_object,
     filter_tools_by_exposure,
-    run_scoped_agent,
 )
 from runtime.model_factory import role_model_is_configured
+from runtime.subagent import (
+    SubAgentContract,
+    default_max_steps,
+    default_token_budget,
+    run_subagent,
+)
 from tools.contracts import execution_error_result, invalid_input_result, success_result
 
 
@@ -62,7 +67,14 @@ class PlanAgentTool(BaseTool):
                 "Planner model is not configured. Set OPENAI_API_KEY or BIOAPEX_PLANNER_API_KEY.",
                 metadata={"role": "planner"},
             )
+        if agent_manager.base_dir is None:
+            return execution_error_result(
+                self.name,
+                "Planner cannot run before AgentManager is initialized (base_dir missing).",
+                metadata={"role": "planner"},
+            )
 
+        artifact = None
         try:
             llm = agent_manager.planner_llm
             tools = filter_tools_by_exposure(agent_manager.tools, "planner")
@@ -92,19 +104,39 @@ class PlanAgentTool(BaseTool):
                 "Return only JSON. Prefer concrete step order and tool order over vague advice."
             )
 
-            run = await run_scoped_agent(
-                llm=llm,
-                tools=tools,
+            contract = SubAgentContract(
+                name=self.name,
                 system_prompt=system_prompt,
-                user_prompt=user_prompt,
+                tools_allowed=tuple(tools),
+                max_steps=default_max_steps(),
+                token_budget=default_token_budget(),
             )
-            plan_payload = extract_json_object(run.response_text)
+            artifact = await run_subagent(
+                contract,
+                llm=llm,
+                user_prompt=user_prompt,
+                base_dir=agent_manager.base_dir,
+            )
+            if artifact.status != "ok":
+                return execution_error_result(
+                    self.name,
+                    f"Planner sub-agent exited with status {artifact.status}.",
+                    metadata={
+                        "subagent_status": artifact.status,
+                        "subagent_artifact_path": artifact.relative_path,
+                        "subagent_error": artifact.error,
+                    },
+                )
+            plan_payload = extract_json_object(artifact.response_text)
             plan = ExecutionPlan.model_validate(plan_payload)
         except ValidationError as exc:
             return invalid_input_result(
                 self.name,
                 f"Planner produced an invalid execution plan: {exc}",
-                metadata={"raw_response": run.response_text if 'run' in locals() else None},
+                metadata={
+                    "raw_response": artifact.response_text if artifact is not None else None,
+                    "subagent_artifact_path": artifact.relative_path if artifact is not None else None,
+                },
             )
         except Exception as exc:
             return execution_error_result(
@@ -120,8 +152,19 @@ class PlanAgentTool(BaseTool):
             structured_payload={
                 "agent_type": "plan",
                 "plan": plan.model_dump(mode="json"),
-                "tool_trace": list(run.tool_trace),
+                "tool_trace": list(artifact.tool_trace),
+                "subagent_run": {
+                    "run_id": artifact.run_id,
+                    "status": artifact.status,
+                    "artifact_path": artifact.relative_path,
+                    "tokens_used": artifact.tokens_used,
+                    "steps_used": artifact.steps_used,
+                },
             },
-            metadata={"step_count": len(plan.steps)},
-            source_payload={"raw_response": run.response_text},
+            metadata={
+                "step_count": len(plan.steps),
+                "subagent_artifact_path": artifact.relative_path,
+                "subagent_run_id": artifact.run_id,
+            },
+            source_payload={"raw_response": artifact.response_text},
         )

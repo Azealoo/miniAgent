@@ -54,10 +54,16 @@ _SCHEMA_ARTIFACT_TYPES = {
     "checklist_results",
     "reproducibility_drill_report",
 }
-_STRUCTURED_ROOT_ARTIFACT_TYPES = {"content_hash_manifest", "workflow_plan", "provenance"}
+_STRUCTURED_ROOT_ARTIFACT_TYPES = {
+    "content_hash_manifest",
+    "workflow_plan",
+    "provenance",
+    "subagent_run",
+}
 _ROOT_STABLE_FILENAMES_TO_TYPES: dict[str, str] = {
     RUN_RECORD_FILENAME: "workflow_run",
     CONTENT_HASH_MANIFEST_FILENAME: "content_hash_manifest",
+    "subagent_run.json": "subagent_run",
     "dataset_manifest.yaml": "dataset_manifest",
     "count_matrix.json": "count_matrix",
     "normalized_count_matrix.json": "normalized_count_matrix",

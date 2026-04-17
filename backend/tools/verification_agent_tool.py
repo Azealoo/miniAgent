@@ -10,9 +10,14 @@ from runtime.helper_agent_runner import (
     build_tool_catalog,
     extract_json_object,
     filter_tools_by_exposure,
-    run_scoped_agent,
 )
 from runtime.model_factory import role_model_is_configured
+from runtime.subagent import (
+    SubAgentContract,
+    default_max_steps,
+    default_token_budget,
+    run_subagent,
+)
 from tools.contracts import execution_error_result, invalid_input_result, success_result
 
 
@@ -66,7 +71,14 @@ class VerificationAgentTool(BaseTool):
                 "Verifier model is not configured. Set OPENAI_API_KEY or BIOAPEX_VERIFIER_API_KEY.",
                 metadata={"role": "verifier"},
             )
+        if agent_manager.base_dir is None:
+            return execution_error_result(
+                self.name,
+                "Verifier cannot run before AgentManager is initialized (base_dir missing).",
+                metadata={"role": "verifier"},
+            )
 
+        artifact = None
         try:
             llm = agent_manager.verifier_llm
             tools = filter_tools_by_exposure(agent_manager.tools, "verifier")
@@ -109,19 +121,39 @@ class VerificationAgentTool(BaseTool):
                 "Use the tool catalog you were given, stay concise, and return only JSON."
             )
 
-            run = await run_scoped_agent(
-                llm=llm,
-                tools=tools,
+            contract = SubAgentContract(
+                name=self.name,
                 system_prompt=system_prompt,
-                user_prompt=user_prompt,
+                tools_allowed=tuple(tools),
+                max_steps=default_max_steps(),
+                token_budget=default_token_budget(),
             )
-            verdict_payload = extract_json_object(run.response_text)
+            artifact = await run_subagent(
+                contract,
+                llm=llm,
+                user_prompt=user_prompt,
+                base_dir=agent_manager.base_dir,
+            )
+            if artifact.status != "ok":
+                return execution_error_result(
+                    self.name,
+                    f"Verifier sub-agent exited with status {artifact.status}.",
+                    metadata={
+                        "subagent_status": artifact.status,
+                        "subagent_artifact_path": artifact.relative_path,
+                        "subagent_error": artifact.error,
+                    },
+                )
+            verdict_payload = extract_json_object(artifact.response_text)
             verdict = VerificationVerdict.model_validate(verdict_payload)
         except ValidationError as exc:
             return invalid_input_result(
                 self.name,
                 f"Verifier produced an invalid verdict: {exc}",
-                metadata={"raw_response": run.response_text if 'run' in locals() else None},
+                metadata={
+                    "raw_response": artifact.response_text if artifact is not None else None,
+                    "subagent_artifact_path": artifact.relative_path if artifact is not None else None,
+                },
             )
         except Exception as exc:
             return execution_error_result(
@@ -137,11 +169,20 @@ class VerificationAgentTool(BaseTool):
             structured_payload={
                 "agent_type": "verification",
                 "verification": verdict.model_dump(mode="json"),
-                "tool_trace": list(run.tool_trace),
+                "tool_trace": list(artifact.tool_trace),
+                "subagent_run": {
+                    "run_id": artifact.run_id,
+                    "status": artifact.status,
+                    "artifact_path": artifact.relative_path,
+                    "tokens_used": artifact.tokens_used,
+                    "steps_used": artifact.steps_used,
+                },
             },
             metadata={
                 "verdict": verdict.verdict,
                 "check_count": len(verdict.checks),
+                "subagent_artifact_path": artifact.relative_path,
+                "subagent_run_id": artifact.run_id,
             },
-            source_payload={"raw_response": run.response_text},
+            source_payload={"raw_response": artifact.response_text},
         )
