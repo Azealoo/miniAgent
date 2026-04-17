@@ -863,76 +863,99 @@ class TestToolRegistry:
 
 class TestHelperAgentTools:
     @pytest.mark.asyncio
-    async def test_plan_agent_returns_structured_contract(self):
+    async def test_plan_agent_returns_structured_contract(self, tmp_path):
         from graph.agent import agent_manager
-        from runtime.helper_agent_runner import ScopedAgentRunResult
+        from runtime.subagent import SubAgentArtifact
         from tools.plan_agent_tool import PlanAgentTool
 
         original_planner_llm = agent_manager.planner_llm
         original_tools = agent_manager.tools
+        original_base_dir = agent_manager.base_dir
         agent_manager.planner_llm = object()
         agent_manager.tools = [type("DummyTool", (), {"name": "read_file"})()]
+        agent_manager.base_dir = tmp_path
 
         try:
             tool = PlanAgentTool()
+            fake_artifact = SubAgentArtifact(
+                run_id="run-20260101T000000Z-deadbeef",
+                name="plan_agent",
+                status="ok",
+                response_text=(
+                    '{"goal":"Investigate BRCA1 expression","assumptions":[],"constraints":[],'
+                    '"steps":[{"step_id":"step-1","intent":"Read the relevant file","allowed_tools":["read_file"],'
+                    '"preferred_tool_order":["read_file"],"exit_criteria":"Understand the current implementation"}],'
+                    '"success_criteria":["The implementation path is understood"],'
+                    '"verification_checks":["Confirm the selected file contains the entry point"]}'
+                ),
+                tool_trace=({"tool": "read_file", "input": "backend/api/chat.py"},),
+                verdict=None,
+                tokens_used=42,
+                steps_used=1,
+                relative_path="artifacts/subagent/2026-01-01/run-20260101T000000Z-deadbeef/subagent_run.json",
+                absolute_path=str(tmp_path / "subagent_run.json"),
+                payload={},
+            )
             with patch(
                 "tools.plan_agent_tool.role_model_is_configured",
                 return_value=True,
             ), patch(
-                "tools.plan_agent_tool.run_scoped_agent",
-                new=AsyncMock(
-                    return_value=ScopedAgentRunResult(
-                        response_text=(
-                            '{"goal":"Investigate BRCA1 expression","assumptions":[],"constraints":[],'  # noqa: E501
-                            '"steps":[{"step_id":"step-1","intent":"Read the relevant file","allowed_tools":["read_file"],'  # noqa: E501
-                            '"preferred_tool_order":["read_file"],"exit_criteria":"Understand the current implementation"}],'  # noqa: E501
-                            '"success_criteria":["The implementation path is understood"],'
-                            '"verification_checks":["Confirm the selected file contains the entry point"]}'
-                        ),
-                        tool_trace=({"tool": "read_file", "input": "backend/api/chat.py"},),
-                    )
-                ),
+                "tools.plan_agent_tool.run_subagent",
+                new=AsyncMock(return_value=fake_artifact),
             ):
                 summary, contract = await tool._arun("Investigate BRCA1 expression handling")
         finally:
             agent_manager.planner_llm = original_planner_llm
             agent_manager.tools = original_tools
+            agent_manager.base_dir = original_base_dir
 
         assert "Planner produced 1 step" in summary
         assert contract["tool_name"] == "plan_agent"
         assert contract["status"] == "success"
         assert contract["structured_payload"]["plan"]["steps"][0]["preferred_tool_order"] == ["read_file"]
         assert contract["structured_payload"]["tool_trace"][0]["tool"] == "read_file"
+        assert contract["structured_payload"]["subagent_run"]["run_id"].startswith("run-")
+        assert contract["metadata"]["subagent_artifact_path"].startswith("artifacts/subagent/")
 
     @pytest.mark.asyncio
-    async def test_verification_agent_returns_structured_contract(self):
+    async def test_verification_agent_returns_structured_contract(self, tmp_path):
         from graph.agent import agent_manager
-        from runtime.helper_agent_runner import ScopedAgentRunResult
+        from runtime.subagent import SubAgentArtifact
         from tools.verification_agent_tool import VerificationAgentTool
 
         original_verifier_llm = agent_manager.verifier_llm
         original_tools = agent_manager.tools
+        original_base_dir = agent_manager.base_dir
         agent_manager.verifier_llm = object()
         agent_manager.tools = [type("DummyTool", (), {"name": "read_file"})()]
+        agent_manager.base_dir = tmp_path
 
         try:
             tool = VerificationAgentTool()
-            run_agent = AsyncMock(
-                return_value=ScopedAgentRunResult(
-                    response_text=(
-                        '{"verdict":"repair_required","summary":"The answer lacks evidence grounding.",'
-                        '"checks":[{"name":"evidence-grounding","status":"fail","note":"No cited evidence review found."}],'
-                        '"issues":["The answer overstates certainty without evidence."],'
-                        '"repair_instructions":["Run evidence review before finalizing the answer."]}'
-                    ),
-                    tool_trace=(),
-                )
+            fake_artifact = SubAgentArtifact(
+                run_id="run-20260101T000000Z-cafebabe",
+                name="verification_agent",
+                status="ok",
+                response_text=(
+                    '{"verdict":"repair_required","summary":"The answer lacks evidence grounding.",'
+                    '"checks":[{"name":"evidence-grounding","status":"fail","note":"No cited evidence review found."}],'
+                    '"issues":["The answer overstates certainty without evidence."],'
+                    '"repair_instructions":["Run evidence review before finalizing the answer."]}'
+                ),
+                tool_trace=(),
+                verdict=None,
+                tokens_used=120,
+                steps_used=0,
+                relative_path="artifacts/subagent/2026-01-01/run-20260101T000000Z-cafebabe/subagent_run.json",
+                absolute_path=str(tmp_path / "subagent_run.json"),
+                payload={},
             )
+            run_agent = AsyncMock(return_value=fake_artifact)
             with patch(
                 "tools.verification_agent_tool.role_model_is_configured",
                 return_value=True,
             ), patch(
-                "tools.verification_agent_tool.run_scoped_agent",
+                "tools.verification_agent_tool.run_subagent",
                 new=run_agent,
             ):
                 summary, contract = await tool._arun(
@@ -942,11 +965,14 @@ class TestHelperAgentTools:
         finally:
             agent_manager.verifier_llm = original_verifier_llm
             agent_manager.tools = original_tools
+            agent_manager.base_dir = original_base_dir
 
         assert summary.startswith("Verifier verdict: repair_required.")
         assert contract["tool_name"] == "verification_agent"
         assert contract["structured_payload"]["verification"]["verdict"] == "repair_required"
         assert contract["metadata"]["verdict"] == "repair_required"
+        assert contract["structured_payload"]["subagent_run"]["run_id"].startswith("run-")
+        assert contract["metadata"]["subagent_artifact_path"].startswith("artifacts/subagent/")
         prompt = run_agent.await_args.kwargs["user_prompt"]
         assert 'Use "pass" when the draft is good enough to send as-is.' in prompt
         assert "Do not use repair_required for optional improvements" in prompt
