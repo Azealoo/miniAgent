@@ -138,6 +138,62 @@ class TestBuildSystemPrompt:
         assert "memory/project/buffer-heuristic.md" in prompt
         assert "Never inline this whole note" not in prompt
 
+    def test_non_rag_memory_filters_stale_unpinned_scoped_entries(self, workspace):
+        project_dir = workspace / "memory" / "project"
+        user_dir = workspace / "memory" / "user"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        user_dir.mkdir(parents=True, exist_ok=True)
+
+        (project_dir / "fresh-entry.md").write_text(
+            (
+                "---\n"
+                "type: project_fact\n"
+                "name: Fresh entry\n"
+                "description: Fresh scoped note\n"
+                "pinned: false\n"
+                "updated_at: 2099-01-01T00:00:00Z\n"
+                "---\n"
+                "# Fresh body\nFresh scoped body text.\n"
+            ),
+            encoding="utf-8",
+        )
+        (project_dir / "stale-unpinned.md").write_text(
+            (
+                "---\n"
+                "type: project_fact\n"
+                "name: Stale unpinned entry\n"
+                "description: Stale unpinned scoped note\n"
+                "pinned: false\n"
+                "updated_at: 2000-01-01T00:00:00Z\n"
+                "---\n"
+                "# Stale body\nStale scoped body text.\n"
+            ),
+            encoding="utf-8",
+        )
+        (user_dir / "stale-pinned.md").write_text(
+            (
+                "---\n"
+                "type: user_preference\n"
+                "name: Stale pinned entry\n"
+                "description: Stale but pinned scoped note\n"
+                "pinned: true\n"
+                "updated_at: 2000-01-01T00:00:00Z\n"
+                "---\n"
+                "# Stale pinned body\n"
+            ),
+            encoding="utf-8",
+        )
+
+        prompt = build_system_prompt(workspace, rag_mode=False)
+
+        assert "<!-- Scoped Memory (fresh or pinned) -->" in prompt
+        assert "memory/project/fresh-entry.md" in prompt
+        assert "memory/user/stale-pinned.md" in prompt
+        assert "memory/project/stale-unpinned.md" not in prompt
+        # Body content is never inlined, even for fresh/pinned entries.
+        assert "Fresh scoped body text" not in prompt
+        assert "Stale scoped body text" not in prompt
+
     def test_all_files_missing_returns_only_static_guidance(self, tmp_path):
         prompt = build_system_prompt(tmp_path, rag_mode=False)
         # Workspace components and memory are absent; the only remaining block is

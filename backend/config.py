@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Any
 
@@ -5,10 +6,12 @@ from hardening import ProductionHardeningPolicy
 from runtime_config import load_runtime_config
 
 _CONFIG_FILE = Path(__file__).parent / "config.json"
+_DEFAULT_MEMORY_STALE_DAYS = 30
 _DEFAULT: dict = {
     "rag_mode": False,
     "prompt_context": {
         "include_git_context": False,
+        "memory_stale_days": _DEFAULT_MEMORY_STALE_DAYS,
     },
     "agent_runtime": {
         "executor_recursion_limit": 1000,
@@ -73,6 +76,25 @@ def _load_runtime() -> dict:
 def get_prompt_context_settings() -> dict[str, Any]:
     prompt_context = _load_runtime().get("prompt_context", {})
     return dict(prompt_context) if isinstance(prompt_context, dict) else {}
+
+
+def get_memory_stale_days() -> int:
+    """Return the staleness threshold in days for scoped memory entries.
+
+    Resolution order: BIOAPEX_PROMPT_MEMORY_STALE_DAYS env var, runtime
+    `prompt_context.memory_stale_days`, then the built-in default.
+    """
+    env_override = os.getenv("BIOAPEX_PROMPT_MEMORY_STALE_DAYS", "").strip()
+    if env_override:
+        try:
+            return max(0, int(env_override))
+        except ValueError:
+            pass
+    raw = get_prompt_context_settings().get("memory_stale_days", _DEFAULT_MEMORY_STALE_DAYS)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return _DEFAULT_MEMORY_STALE_DAYS
 
 
 def get_agent_runtime_settings() -> dict[str, Any]:
