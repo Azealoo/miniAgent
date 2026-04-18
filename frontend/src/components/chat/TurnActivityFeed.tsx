@@ -7,9 +7,13 @@ import { buildFeedSections } from "./turn-activity-feed.helpers";
 
 interface TurnActivityFeedProps {
   message: Message;
+  sessionId?: string | null;
 }
 
-export default function TurnActivityFeed({ message }: TurnActivityFeedProps) {
+export default function TurnActivityFeed({
+  message,
+  sessionId = null,
+}: TurnActivityFeedProps) {
   const live = message.isStreaming === true;
   const sections = buildFeedSections(message, live);
 
@@ -32,6 +36,7 @@ export default function TurnActivityFeed({ message }: TurnActivityFeedProps) {
           live={live}
           title={section.title}
           entries={section.entries}
+          sessionId={sessionId}
         />
       ))}
     </section>

@@ -1,6 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
+import ApprovalGate from "../ApprovalGate";
 import FeedBlock from "./FeedBlock";
 import FeedLine from "./FeedLine";
 import FeedPlanning from "./FeedPlanning";
@@ -10,12 +11,14 @@ interface FeedSectionProps {
   live: boolean;
   title: string;
   entries: FeedEntryDescriptor[];
+  sessionId?: string | null;
 }
 
 export default function FeedSection({
   live,
   title,
   entries,
+  sessionId = null,
 }: FeedSectionProps) {
   const animated =
     live &&
@@ -30,18 +33,29 @@ export default function FeedSection({
       </div>
 
       <div className="space-y-1.5">
-        {entries.map((entry, index) =>
-          entry.kind === "block" ? (
-            <FeedBlock
-              key={`${title}-${entry.title}-${entry.badge ?? "none"}-${index}`}
-              {...entry}
-            />
-          ) : entry.kind === "planning" ? (
-            <FeedPlanning key={`${title}-planning-${index}`} {...entry} />
-          ) : (
-            <FeedLine key={`${title}-${entry.text}-${index}`} {...entry} />
-          )
-        )}
+        {entries.map((entry, index) => {
+          if (entry.kind === "block") {
+            return (
+              <FeedBlock
+                key={`${title}-${entry.title}-${entry.badge ?? "none"}-${index}`}
+                {...entry}
+              />
+            );
+          }
+          if (entry.kind === "planning") {
+            return <FeedPlanning key={`${title}-planning-${index}`} {...entry} />;
+          }
+          if (entry.kind === "gate") {
+            return (
+              <ApprovalGate
+                key={`${title}-gate-${entry.block.run_id}-${index}`}
+                block={entry.block}
+                sessionId={sessionId}
+              />
+            );
+          }
+          return <FeedLine key={`${title}-${entry.text}-${index}`} {...entry} />;
+        })}
       </div>
     </div>
   );

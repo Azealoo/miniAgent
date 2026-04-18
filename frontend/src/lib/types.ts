@@ -347,10 +347,17 @@ export interface ChatStreamCompactionEvent extends ChatStreamEventBase {
   saved_tokens: number;
 }
 
+export type TurnStatus =
+  | "ok"
+  | "awaiting_approval"
+  | "budget_exceeded"
+  | "error";
+
 export interface ChatStreamDoneEvent extends ChatStreamEventBase {
   type: "done";
   content: string;
   session_id?: string;
+  turn_status?: TurnStatus;
 }
 
 export interface ChatStreamErrorEvent extends ChatStreamEventBase {

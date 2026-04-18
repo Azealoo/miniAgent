@@ -239,8 +239,12 @@ class AgentManager:
                         if policy_dict is not None:
                             payload["policy"] = policy_dict
                         yield payload
-                        after_tool = True
-                        continue
+                        # Hard-stop the turn: the agent must not keep reasoning over a
+                        # gated ToolMessage, since that would either loop on the same
+                        # gate or paper over the human decision. The reviewer resumes
+                        # the turn via POST /api/chat/approval + a follow-up /api/chat.
+                        yield {"type": "done", "turn_status": "awaiting_approval"}
+                        return
 
                     payload = {
                         "type": "tool_end",

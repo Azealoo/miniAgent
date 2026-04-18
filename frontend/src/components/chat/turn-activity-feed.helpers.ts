@@ -704,6 +704,10 @@ export function buildFeedSections(
         }
         break;
       }
+      case "approval_gate": {
+        sections.thinking.push({ kind: "gate", block });
+        break;
+      }
       case "usage":
         break;
     }

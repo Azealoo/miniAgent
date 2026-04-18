@@ -22,6 +22,7 @@ vi.mock("@/lib/store", () => ({
     isStreaming: false,
     sendMessage: mockSendMessage,
   }),
+  useAppOptional: () => null,
 }));
 
 type MessageFixtureOverrides = Partial<Omit<Message, "blocks">> & {

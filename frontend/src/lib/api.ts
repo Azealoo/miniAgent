@@ -345,6 +345,31 @@ export const saveFile = (path: string, content: string) =>
     method: "POST",
   });
 
+export interface ApprovalDecisionPayload {
+  session_id: string;
+  run_id: string;
+  tool_name: string;
+  decision: "approve" | "deny";
+  actor?: string;
+  rationale?: string | null;
+}
+
+export interface ApprovalDecisionResponse {
+  recorded: boolean;
+  session_id: string;
+  run_id: string;
+  tool_name: string;
+  decision: "approve" | "deny";
+  actor: string;
+  recorded_at: string;
+}
+
+export const submitApprovalDecision = (payload: ApprovalDecisionPayload) =>
+  executeReq<ApprovalDecisionResponse>("/api/chat/approval", {
+    jsonBody: payload,
+    method: "POST",
+  });
+
 // Chat streaming (custom SSE parser — POST-based)
 
 export async function streamChat(

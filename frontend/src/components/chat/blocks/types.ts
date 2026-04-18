@@ -1,3 +1,5 @@
+import type { SessionApprovalGateBlock } from "@/lib/types";
+
 export type FeedTone = "default" | "active" | "success" | "warning" | "error";
 export type FeedSectionKey = "thinking" | "planning" | "verification";
 
@@ -21,10 +23,16 @@ export interface FeedLineDescriptor {
   tone?: FeedTone;
 }
 
+export interface FeedGateDescriptor {
+  kind: "gate";
+  block: SessionApprovalGateBlock;
+}
+
 export type FeedEntryDescriptor =
   | FeedBlockDescriptor
   | FeedPlanningDescriptor
-  | FeedLineDescriptor;
+  | FeedLineDescriptor
+  | FeedGateDescriptor;
 
 export interface FeedSectionDescriptor {
   key: FeedSectionKey;

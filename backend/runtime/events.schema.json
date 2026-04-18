@@ -120,6 +120,25 @@
           "default": null,
           "title": "Session Id"
         },
+        "turn_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "ok",
+                "awaiting_approval",
+                "budget_exceeded",
+                "error"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Terminal state of the turn. Absent or 'ok' means the turn completed normally; 'awaiting_approval' means the runtime paused on a gated tool and the client must call /api/chat/approval before the next turn.",
+          "title": "Turn Status"
+        },
         "type": {
           "const": "done",
           "default": "done",
