@@ -71,7 +71,7 @@ def test_save_file_rebuilds_memory_index_for_nested_memory_write(isolated_audit_
     )
 
     assert response["saved"] is True
-    agent_manager.memory_indexer.rebuild_index.assert_called_once()
+    agent_manager.memory_indexer._maybe_rebuild.assert_called_once()
 
 
 def test_save_file_logs_invalid_typed_memory_write(isolated_audit_state):

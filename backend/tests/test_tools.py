@@ -1233,7 +1233,7 @@ class TestWriteFileTool:
             result = tool._run("memory/project/notes.md", "# Updated\n")
             contract = _tool_contract(result)
         finally:
-            rebuilt = agent_manager.memory_indexer.rebuild_index.call_count
+            rebuilt = agent_manager.memory_indexer._maybe_rebuild.call_count
             agent_manager.memory_indexer = original_memory_indexer
 
         assert contract is not None
