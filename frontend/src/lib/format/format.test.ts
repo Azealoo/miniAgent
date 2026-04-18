@@ -31,6 +31,12 @@ describe("compactText", () => {
     expect(compactText("αβγδεζηθ", 4)).toMatchInlineSnapshot(`"αβγ…"`);
   });
 
+  it("trims trailing whitespace before appending the ellipsis", () => {
+    expect(compactText("hello world goodbye", 7)).toMatchInlineSnapshot(
+      `"hello…"`
+    );
+  });
+
   it("uses the default maxLength of 160", () => {
     const input = "x".repeat(200);
     const result = compactText(input);
