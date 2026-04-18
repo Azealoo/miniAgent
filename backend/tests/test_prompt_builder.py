@@ -3,6 +3,7 @@ Tests for prompt_builder — assembles system prompt from 6 components
 plus additive project instruction context.
 """
 import json
+import random
 import sys
 import subprocess
 from pathlib import Path
@@ -13,9 +14,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from graph.prompt_builder import (
+    EVICTION_ORDER,
     MAX_COMPONENT_CHARS,
     MAX_MEMORY_INDEX_CHARS,
     MAX_RETRIEVED_MEMORY_BLOCK_CHARS,
+    _apply_eviction,
     build_retrieved_memory_block,
     build_system_prompt,
 )
@@ -695,3 +698,256 @@ class TestRetrievedMemoryBlock:
             "\n...[retrieved memory truncated]"
         )
         assert "[retrieved memory truncated]" in block or len(block) <= MAX_RETRIEVED_MEMORY_BLOCK_CHARS
+
+
+# ── G2 property tests: prompt budget + eviction policy ────────────────────
+# Parameterized fuzz inputs (no `hypothesis` dependency — see backend/requirements.txt).
+# Each case seeds the workspace with oversized content for one or more
+# sections and asserts the budget invariants hold under the configured caps.
+
+
+def _populated_workspace(tmp_path: Path, *, oversize_factor: int) -> Path:
+    """Build a workspace where every section has content ``oversize_factor``
+    times the relevant cap, so per-section truncation always bites."""
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "memory").mkdir()
+    (tmp_path / "memory" / "project").mkdir()
+
+    big_component = "S" * (MAX_COMPONENT_CHARS * max(1, oversize_factor))
+    for name in ("SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md"):
+        (tmp_path / "workspace" / name).write_text(big_component, encoding="utf-8")
+
+    (tmp_path / "memory" / "MEMORY.md").write_text(
+        "# Memory Index\n" + ("- a stale narrative line\n" * 500),
+        encoding="utf-8",
+    )
+    (tmp_path / "memory" / "project" / "fresh-entry.md").write_text(
+        (
+            "---\n"
+            "type: project_fact\n"
+            "name: Fresh entry\n"
+            "description: " + ("padding " * 200) + "\n"
+            "pinned: true\n"
+            "updated_at: 2099-01-01T00:00:00Z\n"
+            "---\nbody\n"
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "AGENTS.md").write_text(
+        "Repo instructions\n" + ("- bullet line\n" * 1000),
+        encoding="utf-8",
+    )
+    (tmp_path / "SKILLS_SNAPSHOT.md").write_text(
+        "<available_skills>" + ("<skill><name>x</name></skill>" * 200) + "</available_skills>",
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+def _project_config(tmp_path: Path, prompt_budget: dict) -> Path:
+    cfg = tmp_path / "backend-config.json"
+    cfg.write_text(json.dumps({"prompt_budget": prompt_budget}), encoding="utf-8")
+    return cfg
+
+
+@pytest.mark.parametrize("seed", list(range(8)))
+def test_property_each_section_respects_its_configured_cap(tmp_path, seed):
+    """Per-section caps are honored across randomized cap configurations."""
+    rng = random.Random(seed)
+    workspace = _populated_workspace(tmp_path, oversize_factor=2)
+    budget = {
+        "component_max_chars": rng.randint(200, 5_000),
+        "project_instruction_file_max_chars": rng.randint(100, 1_500),
+        "project_instruction_total_max_chars": rng.randint(500, 6_000),
+        "git_context_max_chars": rng.randint(100, 1_500),
+        "retrieved_memory_block_max_chars": rng.randint(200, 1_200),
+        "retrieved_memory_item_max_chars": rng.randint(40, 200),
+        "scoped_memory_block_max_chars": rng.randint(200, 3_000),
+        "memory_index_max_chars": rng.randint(200, 1_500),
+        "total_max_chars": 0,
+    }
+
+    cfg = _project_config(tmp_path, budget)
+    with patch("config._CONFIG_FILE", cfg):
+        prompt = build_system_prompt(workspace, rag_mode=False)
+
+    truncate_marker = len("\n...[truncated]")
+
+    def _section_body(tag: str) -> str:
+        if tag not in prompt:
+            return ""
+        body = prompt.split(tag, 1)[1]
+        return body.split("\n\n", 1)[0]
+
+    for tag, cap_field in [
+        ("<!-- Soul -->\n", "component_max_chars"),
+        ("<!-- Identity -->\n", "component_max_chars"),
+        ("<!-- User Profile -->\n", "component_max_chars"),
+        ("<!-- Agents Guide -->\n", "component_max_chars"),
+        ("<!-- Long-term Memory -->\n", "memory_index_max_chars"),
+    ]:
+        body = _section_body(tag)
+        assert len(body) <= budget[cap_field] + truncate_marker, (
+            f"section {tag!r} exceeded cap {budget[cap_field]} (len={len(body)})"
+        )
+
+
+@pytest.mark.parametrize("seed", list(range(6)))
+def test_property_total_prompt_under_sum_of_section_budgets(tmp_path, seed):
+    """The total assembled prompt fits under the sum of per-section budgets
+    (excluding the static guidance block, which is pinned)."""
+    rng = random.Random(seed)
+    workspace = _populated_workspace(tmp_path, oversize_factor=3)
+    budget = {
+        "component_max_chars": rng.randint(500, 4_000),
+        "project_instruction_file_max_chars": rng.randint(200, 1_500),
+        "project_instruction_total_max_chars": rng.randint(800, 6_000),
+        "git_context_max_chars": rng.randint(200, 1_200),
+        "retrieved_memory_block_max_chars": rng.randint(200, 1_500),
+        "retrieved_memory_item_max_chars": rng.randint(60, 200),
+        "scoped_memory_block_max_chars": rng.randint(300, 2_500),
+        "memory_index_max_chars": rng.randint(200, 1_500),
+        "total_max_chars": 0,
+    }
+
+    cfg = _project_config(tmp_path, budget)
+    with patch("config._CONFIG_FILE", cfg):
+        prompt = build_system_prompt(workspace, rag_mode=False)
+
+    # Sum of evictable per-section caps (4 workspace components +
+    # project_instructions total + memory_index + scoped_memory).
+    sum_caps = (
+        4 * budget["component_max_chars"]
+        + budget["project_instruction_total_max_chars"]
+        + budget["memory_index_max_chars"]
+        + budget["scoped_memory_block_max_chars"]
+    )
+    # The static Tool Result Error Contract guidance is always present and
+    # never evicted; account for it explicitly so the bound is meaningful.
+    static_guidance_len = len(
+        "<!-- Tool Result Error Contract -->\n"
+    ) + 4_000  # generous upper bound for the guidance text.
+    truncation_slack = 200  # accommodates per-section truncate markers.
+
+    assert len(prompt) <= sum_caps + static_guidance_len + truncation_slack
+
+
+def test_property_total_max_chars_evicts_lowest_priority_first(workspace, monkeypatch):
+    """When total_max_chars is binding, sections drop in EVICTION_ORDER —
+    SOUL/IDENTITY/USER/AGENTS survive lower-priority sections."""
+    # Add a memory index and scoped memory entries that would otherwise be
+    # included in the prompt under the current defaults.
+    (workspace / "memory" / "MEMORY.md").write_text(
+        "# Memory Index\nlong narrative line " * 50, encoding="utf-8"
+    )
+    (workspace / "memory" / "project").mkdir(exist_ok=True)
+    (workspace / "memory" / "project" / "fresh-entry.md").write_text(
+        (
+            "---\n"
+            "type: project_fact\n"
+            "name: Fresh entry\n"
+            "description: scoped note\n"
+            "pinned: true\n"
+            "updated_at: 2099-01-01T00:00:00Z\n"
+            "---\nbody\n"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BIOAPEX_PROMPT_INCLUDE_GIT_CONTEXT", "0")
+
+    # Set a tight total cap that forces eviction. The SOUL/IDENTITY/USER/AGENTS
+    # blocks combined are well under 1 KiB in this fixture, so a 2 KiB cap
+    # leaves room for them but forces lower-priority sections out.
+    budget = {
+        "component_max_chars": 20_000,
+        "project_instruction_file_max_chars": 2_000,
+        "project_instruction_total_max_chars": 8_000,
+        "git_context_max_chars": 2_000,
+        "retrieved_memory_block_max_chars": 1_600,
+        "retrieved_memory_item_max_chars": 280,
+        "scoped_memory_block_max_chars": 4_000,
+        "memory_index_max_chars": 2_048,
+        "total_max_chars": 2_000,
+    }
+    cfg = workspace / "backend-config.json"
+    cfg.write_text(json.dumps({"prompt_budget": budget}), encoding="utf-8")
+
+    with patch("config._CONFIG_FILE", cfg):
+        prompt = build_system_prompt(workspace, rag_mode=False)
+
+    # High-priority workspace blocks survive.
+    assert "<!-- Soul -->" in prompt
+    assert "<!-- Identity -->" in prompt
+    assert "<!-- User Profile -->" in prompt
+    assert "<!-- Agents Guide -->" in prompt
+    # Lowest-priority sections are dropped first.
+    assert "<!-- Long-term Memory -->" not in prompt
+    assert "<!-- Scoped Memory" not in prompt
+    # The pinned static guidance block always remains.
+    assert "<!-- Tool Result Error Contract -->" in prompt
+
+
+def test_property_truncation_marker_present_when_per_section_cap_bites(workspace):
+    """Each truncation path emits a visible marker so the prompt isn't
+    silently snipped."""
+    big = "Z" * (MAX_COMPONENT_CHARS + 1_000)
+    (workspace / "workspace" / "IDENTITY.md").write_text(big, encoding="utf-8")
+    oversized_index = "# Memory Index\n" + ("- stale narrative line\n" * 500)
+    (workspace / "memory" / "MEMORY.md").write_text(oversized_index, encoding="utf-8")
+
+    prompt = build_system_prompt(workspace, rag_mode=False)
+    identity_body = prompt.split("<!-- Identity -->\n", 1)[1].split("\n\n", 1)[0]
+    memory_body = prompt.split("<!-- Long-term Memory -->\n", 1)[1].split("\n\n", 1)[0]
+
+    assert "[truncated]" in identity_body
+    assert "[truncated]" in memory_body
+
+
+def test_eviction_order_constant_keeps_protected_sections_last():
+    """SOUL/IDENTITY/USER/AGENTS must sit at the tail of EVICTION_ORDER so they
+    are dropped only after lower-priority context has already been evicted."""
+    protected = ("user_profile", "agents_guide", "identity", "soul")
+    for section in protected:
+        assert section in EVICTION_ORDER
+    tail = EVICTION_ORDER[-len(protected):]
+    assert set(tail) == set(protected)
+
+
+def test_apply_eviction_drops_in_documented_order():
+    """``_apply_eviction`` removes sections strictly in EVICTION_ORDER until
+    the cap is met, regardless of insertion order."""
+    sections = [
+        ("skills_snapshot", "S" * 100),
+        ("soul", "X" * 100),
+        ("identity", "X" * 100),
+        ("user_profile", "X" * 100),
+        ("agents_guide", "X" * 100),
+        ("project_instructions", "P" * 100),
+        ("git_context", "G" * 100),
+        ("_tool_result_error_contract", "T" * 50),
+        ("memory_index", "M" * 100),
+        ("scoped_memory", "C" * 100),
+    ]
+
+    # Cap big enough to keep most workspace blocks but small enough to evict
+    # git_context, retrieved_memory, scoped_memory, memory_index.
+    survived = _apply_eviction(sections, total_max_chars=600)
+    survived_ids = [sid for sid, _ in survived]
+
+    assert "git_context" not in survived_ids
+    assert "scoped_memory" not in survived_ids
+    assert "memory_index" not in survived_ids
+    # Pinned static guidance survives even though it has no priority slot.
+    assert "_tool_result_error_contract" in survived_ids
+    # SOUL/IDENTITY/USER/AGENTS still present.
+    for sid in ("soul", "identity", "user_profile", "agents_guide"):
+        assert sid in survived_ids
+
+
+def test_apply_eviction_disabled_when_total_zero():
+    sections = [
+        ("git_context", "G" * 5000),
+        ("soul", "S" * 5000),
+    ]
+    survived = _apply_eviction(sections, total_max_chars=0)
+    assert survived == sections
