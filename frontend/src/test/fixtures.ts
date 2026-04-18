@@ -122,7 +122,6 @@ export function makeGenericToolResultEnvelope(
     warnings: [],
     status: "success",
     outcome: "success",
-    error: null,
     metadata: {},
     source_payload: null,
     ...overrides,

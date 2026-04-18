@@ -1,0 +1,544 @@
+{
+  "composites": {
+    "SessionContentBlock": {
+      "kind": "union",
+      "members": [
+        "SessionTextBlock",
+        "SessionToolUseBlock",
+        "SessionToolResultBlock",
+        "SessionRetrievalBlock",
+        "SessionUsageBlock",
+        "SessionPlanBlock",
+        "SessionVerificationBlock"
+      ]
+    }
+  },
+  "models": {
+    "SessionPlanBlock": {
+      "properties": {
+        "event": {
+          "enum": [
+            "created",
+            "updated"
+          ],
+          "title": "Event",
+          "type": "string"
+        },
+        "plan": {
+          "additionalProperties": true,
+          "title": "Plan",
+          "type": "object"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "tool_trace": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Tool Trace",
+          "type": "array"
+        },
+        "type": {
+          "const": "plan",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "SessionPlanBlock",
+      "type": "object"
+    },
+    "SessionRetrievalBlock": {
+      "properties": {
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "results": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Results",
+          "type": "array"
+        },
+        "type": {
+          "const": "retrieval",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "SessionRetrievalBlock",
+      "type": "object"
+    },
+    "SessionTextBlock": {
+      "properties": {
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "type": {
+          "const": "text",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ],
+      "title": "SessionTextBlock",
+      "type": "object"
+    },
+    "SessionToolResultBlock": {
+      "properties": {
+        "output": {
+          "title": "Output",
+          "type": "string"
+        },
+        "result": {
+          "additionalProperties": true,
+          "title": "Result",
+          "type": "object"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool_result",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "SessionToolResultBlock",
+      "type": "object"
+    },
+    "SessionToolUseBlock": {
+      "properties": {
+        "input": {
+          "title": "Input",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool_use",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "SessionToolUseBlock",
+      "type": "object"
+    },
+    "SessionUsageBlock": {
+      "properties": {
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "type": {
+          "const": "usage",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "metadata"
+      ],
+      "title": "SessionUsageBlock",
+      "type": "object"
+    },
+    "SessionVerificationBlock": {
+      "properties": {
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "tool_trace": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Tool Trace",
+          "type": "array"
+        },
+        "type": {
+          "const": "verification",
+          "title": "Type",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "pass",
+            "repair_required",
+            "fail"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        },
+        "verification": {
+          "additionalProperties": true,
+          "title": "Verification",
+          "type": "object"
+        }
+      },
+      "title": "SessionVerificationBlock",
+      "type": "object"
+    },
+    "ToolArtifactRef": {
+      "properties": {
+        "artifact_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Type"
+        },
+        "identifier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Identifier"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        }
+      },
+      "title": "ToolArtifactRef",
+      "type": "object"
+    },
+    "ToolResultEnvelope": {
+      "$defs": {
+        "ToolArtifactRef": {
+          "properties": {
+            "artifact_type": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Type"
+            },
+            "identifier": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Identifier"
+            },
+            "label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Label"
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Path"
+            }
+          },
+          "title": "ToolArtifactRef",
+          "type": "object"
+        },
+        "ToolResultError": {
+          "properties": {
+            "code": {
+              "enum": [
+                "blocked",
+                "invalid_input",
+                "retriable_failure",
+                "execution_failure",
+                "needs_approval"
+              ],
+              "title": "Code",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "retriable": {
+              "default": false,
+              "title": "Retriable",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ToolResultError",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "artifact_refs": {
+          "items": {
+            "$ref": "#/$defs/ToolArtifactRef"
+          },
+          "title": "Artifact Refs",
+          "type": "array"
+        },
+        "contract_version": {
+          "default": "tool_result.v1",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolResultError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "metadata": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Metadata",
+          "type": "object"
+        },
+        "outcome": {
+          "default": "success",
+          "enum": [
+            "success",
+            "success_empty",
+            "blocked",
+            "invalid_input",
+            "retriable_failure",
+            "execution_failure",
+            "needs_approval",
+            "streaming_chunk"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "source_payload": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Payload"
+        },
+        "status": {
+          "default": "success",
+          "enum": [
+            "success",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "structured_payload": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Structured Payload"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "tool_name": {
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "tool_name",
+        "summary"
+      ],
+      "title": "ToolResultEnvelope",
+      "type": "object"
+    },
+    "ToolResultError": {
+      "properties": {
+        "code": {
+          "enum": [
+            "blocked",
+            "invalid_input",
+            "retriable_failure",
+            "execution_failure",
+            "needs_approval"
+          ],
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "retriable": {
+          "default": false,
+          "title": "Retriable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "ToolResultError",
+      "type": "object"
+    }
+  },
+  "schema_version": 1
+}
