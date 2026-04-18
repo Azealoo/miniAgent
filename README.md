@@ -458,7 +458,7 @@ Two repo areas matter for feature work and documentation:
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/api/chat` | SSE chat endpoint with typed events and per-turn `request_id` / `event_index` |
+| `POST` | `/api/chat` | SSE chat endpoint with typed events and per-turn `request_id` / `event_index`. Turns for the same `session_id` are serialized — a second request that arrives while one is still streaming fails fast with HTTP 409 rather than interleaving writes. |
 
 Current emitted SSE event types:
 

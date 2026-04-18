@@ -19,6 +19,11 @@ from graph.session.session_schema import SESSION_SCHEMA_VERSION, _validate_sessi
 # session simultaneously (which would double-archive messages).
 _compress_locks: dict[str, asyncio.Lock] = {}
 
+# Per-session turn locks serialize /api/chat execution for a single session id so
+# that two overlapping turns (e.g. a double-click or client retry) cannot
+# interleave writes to the session JSON, memory, or turn ledger.
+_turn_locks: dict[str, asyncio.Lock] = {}
+
 
 class SessionStore:
     def __init__(self, base_dir: Path) -> None:
@@ -233,14 +238,21 @@ class SessionStore:
                 archive_path.unlink()
             except FileNotFoundError:
                 continue
-        # Clean up the per-session lock to prevent unbounded memory growth
+        # Clean up the per-session locks to prevent unbounded memory growth
         _compress_locks.pop(session_id, None)
+        _turn_locks.pop(session_id, None)
 
     def get_or_create_compress_lock(self, session_id: str) -> asyncio.Lock:
         """Return (creating if needed) the asyncio.Lock for *session_id*."""
         if session_id not in _compress_locks:
             _compress_locks[session_id] = asyncio.Lock()
         return _compress_locks[session_id]
+
+    def get_or_create_turn_lock(self, session_id: str) -> asyncio.Lock:
+        """Return (creating if needed) the turn-serialization Lock for *session_id*."""
+        if session_id not in _turn_locks:
+            _turn_locks[session_id] = asyncio.Lock()
+        return _turn_locks[session_id]
 
     def get_session_meta(self, session_id: str) -> dict:
         data = self._read(session_id)
