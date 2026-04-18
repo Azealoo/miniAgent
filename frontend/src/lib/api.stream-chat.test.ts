@@ -338,4 +338,57 @@ describe("streamChat", () => {
     ]);
     expect(surfacedRequestIds).toEqual(["request-truncated-1"]);
   });
+
+  it("cancels the in-flight fetch when the AbortController is aborted", async () => {
+    let receivedSignal: AbortSignal | undefined;
+
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          receivedSignal = init?.signal as AbortSignal | undefined;
+          if (receivedSignal?.aborted) {
+            reject(new DOMException("Aborted", "AbortError"));
+            return;
+          }
+          receivedSignal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+          // Resolve never fires — the fetch stays in flight until aborted.
+        })
+      );
+
+    const controller = new AbortController();
+    const events: string[] = [];
+    const surfacedErrors: string[] = [];
+
+    const streamPromise = streamChat(
+      "Long-running request.",
+      "session-abort",
+      {
+        signal: controller.signal,
+        onEvent: (event) => {
+          events.push(event.type);
+        },
+        onError: (error) => {
+          surfacedErrors.push(error);
+        },
+      }
+    );
+
+    // Give the fetch mock a microtask to register the signal listener before
+    // aborting, so the abort actually fires inside the pending fetch promise.
+    await Promise.resolve();
+    controller.abort();
+
+    await expect(streamPromise).rejects.toThrow(/abort/i);
+
+    expect(receivedSignal).toBe(controller.signal);
+    expect(receivedSignal?.aborted).toBe(true);
+    // No events or synthetic error are dispatched — the abort propagates as a
+    // rejected promise instead of a fake terminal event.
+    expect(events).toEqual([]);
+    expect(surfacedErrors).toEqual([]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
 });
