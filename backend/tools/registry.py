@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from pydantic import BaseModel
 
@@ -20,13 +20,26 @@ __all__ = [
     "EvidenceRequirement",
     "SandboxSpec",
     "ToolAccessScope",
+    "ToolClassificationError",
     "ToolInterruptBehavior",
     "ToolManifestEntry",
     "ToolPolicyMetadata",
     "ToolRegistry",
     "build_tool_manifest_entry",
     "build_tool_registry",
+    "is_concurrency_safe_tier",
+    "partition_manifests_by_risk",
+    "validate_tool_classifications",
 ]
+
+
+class ToolClassificationError(ValueError):
+    """Raised when a tool manifest combines flags that contradict each other.
+
+    Surfaced at boot so a misclassified tool never reaches the runtime
+    dispatch path, where the read-only/destructive partition would silently
+    do the wrong thing.
+    """
 
 
 @dataclass(frozen=True)
@@ -284,3 +297,74 @@ def build_tool_manifest_entry(tool: Any) -> ToolManifestEntry:
 def build_tool_registry(base_dir: Path, tools: list[Any]) -> ToolRegistry:
     manifests = tuple(build_tool_manifest_entry(tool) for tool in tools)
     return ToolRegistry(tools=tuple(tools), manifests=manifests)
+
+
+def is_concurrency_safe_tier(manifest: ToolManifestEntry) -> bool:
+    """True when the manifest is safe to dispatch alongside others via gather.
+
+    The risk-tier rule is: read-only, concurrency-safe, and not destructive.
+    Any tool that fails this check runs in the serial (destructive) tier.
+    """
+    return (
+        manifest.read_only
+        and manifest.concurrency_safe
+        and not manifest.destructive
+    )
+
+
+def partition_manifests_by_risk(
+    manifests: Iterable[ToolManifestEntry],
+) -> tuple[tuple[ToolManifestEntry, ...], tuple[ToolManifestEntry, ...]]:
+    """Split manifests into (concurrency_safe_tier, destructive_tier).
+
+    Preserves input order within each tier so downstream dispatchers can
+    line results up against the original call list.
+    """
+    parallel: list[ToolManifestEntry] = []
+    serial: list[ToolManifestEntry] = []
+    for manifest in manifests:
+        if is_concurrency_safe_tier(manifest):
+            parallel.append(manifest)
+        else:
+            serial.append(manifest)
+    return tuple(parallel), tuple(serial)
+
+
+def validate_tool_classifications(
+    manifests: Iterable[ToolManifestEntry],
+) -> None:
+    """Refuse to accept a manifest set with contradictory risk flags.
+
+    Enforced invariants:
+
+    * ``destructive`` and ``read_only`` cannot both be true — a read-only
+      tool by definition has no side effects to roll back.
+    * ``destructive`` and ``concurrency_safe`` cannot both be true — the
+      parallel tier must never contain a tool that mutates shared state.
+    * ``concurrency_safe`` requires ``read_only`` — the batch dispatcher
+      only gathers reads; a concurrency-safe-but-not-read-only manifest
+      would be routed to parallel when it must not be.
+
+    Called at app startup (``backend/app.py`` lifespan) so a miscategorised
+    tool aborts boot rather than corrupting a live turn.
+    """
+    errors: list[str] = []
+    for manifest in manifests:
+        name = manifest.name
+        if manifest.destructive and manifest.read_only:
+            errors.append(
+                f"{name!r}: cannot be both destructive and read_only"
+            )
+        if manifest.destructive and manifest.concurrency_safe:
+            errors.append(
+                f"{name!r}: cannot be both destructive and concurrency_safe"
+            )
+        if manifest.concurrency_safe and not manifest.read_only:
+            errors.append(
+                f"{name!r}: concurrency_safe requires read_only=True"
+            )
+    if errors:
+        raise ToolClassificationError(
+            "Misclassified tool manifests detected:\n  - "
+            + "\n  - ".join(errors)
+        )

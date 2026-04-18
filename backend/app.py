@@ -64,6 +64,15 @@ async def lifespan(app: FastAPI):
     agent_manager.initialize(BASE_DIR)
     print("[startup] AgentManager initialised")
 
+    # Refuse to boot if any tool is misclassified. A contradictory manifest
+    # would silently route a destructive tool into the parallel tier — fail
+    # loudly at boot instead of corrupting a live turn.
+    from tools import get_tool_manifest_entries
+    from tools.registry import validate_tool_classifications
+
+    validate_tool_classifications(get_tool_manifest_entries(BASE_DIR))
+    print("[startup] Tool classifications validated")
+
     # ── 3. Build the memory/ retrieval index ──────────────────────
     try:
         agent_manager.memory_indexer.rebuild_index()

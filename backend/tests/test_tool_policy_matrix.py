@@ -40,7 +40,13 @@ from tools.policy_types import (  # noqa: E402
     ToolPolicyExecutionContext,
     ToolPolicyStatus,
 )
-from tools.registry import ToolManifestEntry  # noqa: E402
+from tools.registry import (  # noqa: E402
+    ToolClassificationError,
+    ToolManifestEntry,
+    is_concurrency_safe_tier,
+    partition_manifests_by_risk,
+    validate_tool_classifications,
+)
 
 
 # Maps posture's ``tools.*_enabled`` field to the registered tool names it
@@ -228,3 +234,118 @@ def test_policy_decision_for_tool_posture_matches_matrix(
         f"approval_reason={decision.approval_reason!r})"
     )
     assert decision.status in {"allow", "blocked", "needs_approval"}
+
+
+# ---------- Startup classification validator --------------------------------
+
+
+def _fake_manifest(
+    name: str,
+    *,
+    read_only: bool = False,
+    destructive: bool = False,
+    concurrency_safe: bool = False,
+) -> ToolManifestEntry:
+    return ToolManifestEntry(
+        name=name,
+        description=f"fake {name}",
+        args_schema=None,
+        response_format="content_and_artifact",
+        access_scope="inspection" if read_only else "execution",
+        evidence_requirement="none",
+        output_contract_version="tool_result.v1",
+        source_module="tests.test_tool_policy_matrix",
+        read_only=read_only,
+        destructive=destructive,
+        concurrency_safe=concurrency_safe,
+        planner_exposed=read_only,
+        verifier_exposed=read_only,
+        interrupt_behavior="restartable" if read_only else "avoid_interrupting",
+        tool_validates_input=False,
+        activity_summary_hint="inspect",
+        result_summary_hint="result",
+    )
+
+
+def test_validate_tool_classifications_accepts_runtime_registry():
+    """The shipped manifest set must pass the startup validator."""
+    # Should not raise; this pins the invariant across the real registry.
+    validate_tool_classifications(_MANIFESTS)
+
+
+def test_validate_tool_classifications_rejects_destructive_and_read_only():
+    bad = (
+        _fake_manifest("bad_dual_tool", read_only=True, destructive=True),
+    )
+    with pytest.raises(ToolClassificationError) as excinfo:
+        validate_tool_classifications(bad)
+    assert "bad_dual_tool" in str(excinfo.value)
+    assert "destructive and read_only" in str(excinfo.value)
+
+
+def test_validate_tool_classifications_rejects_destructive_and_concurrency_safe():
+    bad = (
+        _fake_manifest(
+            "bad_destructive_parallel",
+            destructive=True,
+            concurrency_safe=True,
+        ),
+    )
+    with pytest.raises(ToolClassificationError) as excinfo:
+        validate_tool_classifications(bad)
+    assert "bad_destructive_parallel" in str(excinfo.value)
+    assert "destructive and concurrency_safe" in str(excinfo.value)
+
+
+def test_validate_tool_classifications_rejects_concurrency_safe_without_read_only():
+    bad = (
+        _fake_manifest(
+            "bad_parallel_write",
+            read_only=False,
+            destructive=False,
+            concurrency_safe=True,
+        ),
+    )
+    with pytest.raises(ToolClassificationError) as excinfo:
+        validate_tool_classifications(bad)
+    assert "bad_parallel_write" in str(excinfo.value)
+    assert "concurrency_safe requires read_only" in str(excinfo.value)
+
+
+def test_validate_tool_classifications_reports_every_violation():
+    """A bad registry lists every offender in a single error."""
+    bad = (
+        _fake_manifest("first_bad", read_only=True, destructive=True),
+        _fake_manifest("good_read", read_only=True, concurrency_safe=True),
+        _fake_manifest(
+            "second_bad",
+            read_only=False,
+            concurrency_safe=True,
+        ),
+    )
+    with pytest.raises(ToolClassificationError) as excinfo:
+        validate_tool_classifications(bad)
+    message = str(excinfo.value)
+    assert "first_bad" in message
+    assert "second_bad" in message
+    assert "good_read" not in message
+
+
+def test_partition_manifests_by_risk_splits_tiers():
+    read_safe = _fake_manifest(
+        "read_safe", read_only=True, concurrency_safe=True
+    )
+    read_only_not_parallel = _fake_manifest(
+        "read_only_serial", read_only=True, concurrency_safe=False
+    )
+    write = _fake_manifest("write", destructive=True)
+
+    parallel, serial = partition_manifests_by_risk(
+        [read_safe, write, read_only_not_parallel]
+    )
+
+    assert parallel == (read_safe,)
+    assert serial == (write, read_only_not_parallel)
+    assert is_concurrency_safe_tier(read_safe) is True
+    assert is_concurrency_safe_tier(read_only_not_parallel) is False
+    assert is_concurrency_safe_tier(write) is False
