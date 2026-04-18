@@ -28,6 +28,7 @@ AuditEventType = Literal[
     "chat_request_received",
     "compliance_decision",
     "tool_invoked",
+    "tool_approval_decision",
     "file_written",
     "job_submitted",
     "export_generated",
@@ -287,6 +288,38 @@ def append_tool_invocation_event(
             "metadata": normalized_metadata,
         },
     )
+def append_tool_approval_decision_event(
+    base_dir: Path | str,
+    *,
+    session_id: str,
+    tool_name: str,
+    run_id: str,
+    decision: Literal["approve", "deny"],
+    actor: str,
+    rationale: str | None = None,
+    recorded_at: datetime | None = None,
+) -> Path | None:
+    summary = (
+        f"Human approval {'granted' if decision == 'approve' else 'denied'} "
+        f"for gated tool {tool_name} (run {run_id})."
+    )
+    return append_audit_event(
+        base_dir,
+        event_type="tool_approval_decision",
+        summary=summary,
+        outcome=decision,
+        session_id=session_id,
+        run_id=run_id,
+        tool_name=tool_name,
+        actor=actor,
+        recorded_at=recorded_at,
+        details={
+            "decision": decision,
+            "rationale": _clean_optional_text(rationale),
+        },
+    )
+
+
 def append_file_written_event(
     base_dir: Path | str,
     *,
@@ -531,6 +564,7 @@ __all__ = [
     "append_export_generated_event",
     "append_file_written_event",
     "append_job_submitted_event",
+    "append_tool_approval_decision_event",
     "append_tool_invocation_event",
     "audit_log_path",
     "audit_retention_policy",

@@ -6,7 +6,12 @@ import os
 from pathlib import Path
 from typing import Any
 
-from runtime_config_types import LoadedRuntimeConfig, RuntimeConfigLayer
+from runtime_config_types import (
+    LoadedRuntimeConfig,
+    RuntimeConfigFieldProvenance,
+    RuntimeConfigLayer,
+    RuntimeConfigLayerName,
+)
 
 USER_CONFIG_ENV_VAR = "BIOAPEX_USER_CONFIG"
 PROJECT_CONFIG_ENV_VAR = "BIOAPEX_PROJECT_CONFIG"
@@ -21,6 +26,66 @@ def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]
         else:
             merged[key] = copy.deepcopy(value)
     return merged
+
+
+def _iter_leaves(prefix: str, value: Any):
+    """Yield (dotted_path, leaf_value) for every leaf reachable from value."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            sub = f"{prefix}.{key}" if prefix else key
+            yield from _iter_leaves(sub, child)
+    else:
+        yield prefix, value
+
+
+def _apply_overlay_with_provenance(
+    merged: dict[str, Any],
+    overlay: dict[str, Any],
+    provenance: dict[str, RuntimeConfigFieldProvenance],
+    *,
+    layer_name: RuntimeConfigLayerName,
+    layer_path: str | None,
+    prefix: str = "",
+) -> None:
+    """Merge ``overlay`` into ``merged`` while recording leaf-level provenance.
+
+    A "leaf" is any non-dict value. When a later layer replaces a previous leaf
+    or a whole subtree, its provenance entries supersede the earlier layer's.
+    """
+
+    for key, overlay_value in overlay.items():
+        sub_prefix = f"{prefix}.{key}" if prefix else key
+        current = merged.get(key)
+
+        if isinstance(overlay_value, dict) and isinstance(current, dict):
+            _apply_overlay_with_provenance(
+                current,
+                overlay_value,
+                provenance,
+                layer_name=layer_name,
+                layer_path=layer_path,
+                prefix=sub_prefix,
+            )
+            continue
+
+        # The overlay replaces the current value wholesale. Drop any previous
+        # provenance entries rooted at this path so stale child leaves do not
+        # survive a type change (e.g. dict → scalar) or a scalar → dict swap.
+        provenance.pop(sub_prefix, None)
+        stale_children = [
+            existing for existing in provenance if existing.startswith(sub_prefix + ".")
+        ]
+        for existing in stale_children:
+            provenance.pop(existing, None)
+
+        merged[key] = copy.deepcopy(overlay_value)
+
+        for leaf_path, leaf_value in _iter_leaves(sub_prefix, overlay_value):
+            provenance[leaf_path] = RuntimeConfigFieldProvenance(
+                value=copy.deepcopy(leaf_value),
+                source_layer=layer_name,
+                path=layer_path,
+            )
 
 
 def _load_json_object(path: Path) -> dict[str, Any]:
@@ -61,7 +126,17 @@ def load_runtime_config(
     default_config: dict[str, Any],
     project_config_path: Path,
 ) -> LoadedRuntimeConfig:
-    merged = copy.deepcopy(default_config)
+    merged: dict[str, Any] = {}
+    provenance: dict[str, RuntimeConfigFieldProvenance] = {}
+
+    _apply_overlay_with_provenance(
+        merged,
+        default_config,
+        provenance,
+        layer_name="defaults",
+        layer_path=None,
+    )
+
     paths = resolve_runtime_config_paths(project_config_path)
     layers: list[RuntimeConfigLayer] = [
         RuntimeConfigLayer(
@@ -77,7 +152,13 @@ def load_runtime_config(
         path = paths[layer_name]
         payload = _load_json_object(path)
         if payload:
-            merged = _deep_merge(merged, payload)
+            _apply_overlay_with_provenance(
+                merged,
+                payload,
+                provenance,
+                layer_name=layer_name,  # type: ignore[arg-type]
+                layer_path=str(path),
+            )
         layers.append(
             RuntimeConfigLayer(
                 name=layer_name,  # type: ignore[arg-type]
@@ -88,4 +169,8 @@ def load_runtime_config(
             )
         )
 
-    return LoadedRuntimeConfig(data=merged, layers=tuple(layers))
+    return LoadedRuntimeConfig(
+        data=merged,
+        layers=tuple(layers),
+        field_provenance=provenance,
+    )

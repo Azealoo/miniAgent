@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import ChatMessage from "@/components/chat/ChatMessage";
 import * as api from "@/lib/api";
+import { compactText } from "@/lib/format";
 import {
   getMessageRetrievals,
   getMessageToolCalls,
@@ -39,14 +40,6 @@ interface ArchiveLoadState {
   error: string | null;
   messages: Message[];
   status: "idle" | "loading" | "ready" | "error";
-}
-
-function compactText(value?: string | null, maxLength = 132): string | null {
-  if (!value) return null;
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (!normalized) return null;
-  if (normalized.length <= maxLength) return normalized;
-  return `${normalized.slice(0, maxLength - 1)}…`;
 }
 
 function pluralize(count: number, noun: string): string {

@@ -26,6 +26,16 @@ export interface JsonObject {
  * Tool contracts and session content blocks
  * source: backend/codegen/shared_types.schema.json
  * ======================================================= */
+export interface SessionApprovalGateBlock {
+  input?: string;
+  message?: string;
+  policy?: JsonObject;
+  reason?: string;
+  result?: JsonObject;
+  run_id?: string;
+  tool?: string;
+  type: "approval_gate";
+}
 export interface SessionPlanBlock {
   event?: "created" | "updated";
   plan?: JsonObject;
@@ -99,7 +109,8 @@ export type SessionContentBlock =
   | SessionRetrievalBlock
   | SessionUsageBlock
   | SessionPlanBlock
-  | SessionVerificationBlock;
+  | SessionVerificationBlock
+  | SessionApprovalGateBlock;
 
 /* =========================================================
  * Runtime events (SSE / streaming)
@@ -121,6 +132,7 @@ export interface ChatStreamDoneEvent {
   request_id?: string;
   schema_version?: number;
   session_id?: string;
+  turn_status?: "ok" | "awaiting_approval" | "budget_exceeded" | "error";
   type: "done";
 }
 export interface ChatStreamErrorEvent {

@@ -126,6 +126,8 @@ class AgentManager:
 
         # ── RAG injection ──────────────────────────────────────────────
         if rag_mode and self.memory_indexer:
+            from runtime.metrics_collector import METRICS
+
             try:
                 results = self.memory_indexer.retrieve(message, top_k=3)
                 if results:
@@ -135,7 +137,10 @@ class AgentManager:
                     # provided context, not as something it previously said.
                     if rag_block:
                         history = history + [{"role": "system", "content": rag_block}]
+                else:
+                    METRICS.observe_retrieval(hit=False)
             except Exception:
+                METRICS.observe_retrieval(hit=False)
                 pass  # RAG failure is non-fatal
 
         # ── Build message list ─────────────────────────────────────────
@@ -239,8 +244,12 @@ class AgentManager:
                         if policy_dict is not None:
                             payload["policy"] = policy_dict
                         yield payload
-                        after_tool = True
-                        continue
+                        # Hard-stop the turn: the agent must not keep reasoning over a
+                        # gated ToolMessage, since that would either loop on the same
+                        # gate or paper over the human decision. The reviewer resumes
+                        # the turn via POST /api/chat/approval + a follow-up /api/chat.
+                        yield {"type": "done", "turn_status": "awaiting_approval"}
+                        return
 
                     payload = {
                         "type": "tool_end",

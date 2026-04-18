@@ -9,11 +9,53 @@
         "SessionRetrievalBlock",
         "SessionUsageBlock",
         "SessionPlanBlock",
-        "SessionVerificationBlock"
+        "SessionVerificationBlock",
+        "SessionApprovalGateBlock"
       ]
     }
   },
   "models": {
+    "SessionApprovalGateBlock": {
+      "properties": {
+        "input": {
+          "title": "Input",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "policy": {
+          "additionalProperties": true,
+          "title": "Policy",
+          "type": "object"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "result": {
+          "additionalProperties": true,
+          "title": "Result",
+          "type": "object"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        },
+        "type": {
+          "const": "approval_gate",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "SessionApprovalGateBlock",
+      "type": "object"
+    },
     "SessionPlanBlock": {
       "properties": {
         "event": {

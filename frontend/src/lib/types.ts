@@ -63,6 +63,7 @@ import type {
   SessionToolUseBlock as GeneratedSessionToolUseBlock,
   SessionToolResultBlock as GeneratedSessionToolResultBlock,
   SessionRetrievalBlock as GeneratedSessionRetrievalBlock,
+  SessionApprovalGateBlock as GeneratedSessionApprovalGateBlock,
 } from "./types.generated";
 
 // ────────────────────────────────────────────────────────────────────────
@@ -171,17 +172,20 @@ export type SessionRetrievalBlock = Omit<
   results: RetrievalResult[];
 };
 
-// Frontend-only block not yet represented in backend/graph/session/session_schema.py.
-export interface SessionApprovalGateBlock {
-  type: "approval_gate";
+// Backend always populates tool/input/run_id/reason/message when it writes
+// an approval_gate block, and ``result`` is a generic dict on the wire — we
+// tighten both so the inspector UI can render without undefined-checks.
+export type SessionApprovalGateBlock = Omit<
+  GeneratedSessionApprovalGateBlock,
+  "tool" | "input" | "run_id" | "reason" | "message" | "result"
+> & {
   tool: string;
   input: string;
   run_id: string;
   reason: string;
   message: string;
   result?: ToolResultEnvelope;
-  policy?: JsonObject;
-}
+};
 
 export type SessionContentBlock =
   | SessionTextBlock

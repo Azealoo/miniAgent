@@ -23,6 +23,7 @@ from typing import Any
 from pydantic import TypeAdapter
 
 from graph.session.session_schema import (
+    SessionApprovalGateBlock,
     SessionPlanBlock,
     SessionRetrievalBlock,
     SessionTextBlock,
@@ -58,6 +59,7 @@ _MODEL_SOURCES: tuple[tuple[str, Any], ...] = (
     ("SessionUsageBlock", SessionUsageBlock),
     ("SessionPlanBlock", SessionPlanBlock),
     ("SessionVerificationBlock", SessionVerificationBlock),
+    ("SessionApprovalGateBlock", SessionApprovalGateBlock),
 )
 
 # Composite types the codegen assembles on the TypeScript side from the
@@ -74,6 +76,7 @@ _COMPOSITE_TYPES: dict[str, dict[str, Any]] = {
             "SessionUsageBlock",
             "SessionPlanBlock",
             "SessionVerificationBlock",
+            "SessionApprovalGateBlock",
         ],
     },
 }

@@ -323,3 +323,347 @@ describe("applyStreamEvent", () => {
     }
   });
 });
+
+describe("applyStreamEvent per-event coverage", () => {
+  function freshState(): StreamReducerState {
+    return {
+      messages: [createOptimisticAssistantMessage("assistant-1", 100)],
+      streamingMessageId: "assistant-1",
+    };
+  }
+
+  it("retrieval appends a retrieval block and replaces an existing one", () => {
+    let state = freshState();
+
+    state = reduceEvent(
+      state,
+      {
+        type: "retrieval",
+        query: "first",
+        results: [{ source: "doc.md", score: 0.5, text: "one" }],
+        request_id: "request-r",
+      },
+      110
+    );
+    let assistant = state.messages[0];
+    expect(assistant.request_id).toBe("request-r");
+    expect(assistant.blocks).toHaveLength(1);
+    expect(assistant.blocks?.[0].type).toBe("retrieval");
+
+    state = reduceEvent(
+      state,
+      {
+        type: "retrieval",
+        query: "second",
+        results: [{ source: "doc.md", score: 0.9, text: "two" }],
+      },
+      120
+    );
+    assistant = state.messages[0];
+    const retrievalBlocks = assistant.blocks?.filter(
+      (b) => b.type === "retrieval"
+    );
+    expect(retrievalBlocks).toHaveLength(1);
+    if (retrievalBlocks?.[0].type === "retrieval") {
+      expect(retrievalBlocks[0].query).toBe("second");
+    }
+  });
+
+  it("token appends text and merges consecutive token events", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      { type: "token", content: "Hello ", request_id: "request-t" },
+      110
+    );
+    state = reduceEvent(state, { type: "token", content: "world." }, 115);
+    const assistant = state.messages[0];
+    expect(assistant.content).toBe("Hello world.");
+    expect(assistant.blocks).toEqual([{ type: "text", text: "Hello world." }]);
+    expect(assistant.request_id).toBe("request-t");
+  });
+
+  it("tool_start records a pending tool and appends a tool_use block", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      {
+        type: "tool_start",
+        tool: "read_file",
+        input: "knowledge/a.md",
+        run_id: "run-1",
+      },
+      110
+    );
+    const assistant = state.messages[0];
+    expect(assistant.pendingTool?.runId).toBe("run-1");
+    expect(assistant.blocks?.[0]).toMatchObject({
+      type: "tool_use",
+      tool: "read_file",
+      run_id: "run-1",
+    });
+  });
+
+  it("tool_end clears pending tool and appends a tool_result block", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      { type: "tool_start", tool: "read_file", input: "a.md", run_id: "run-1" },
+      110
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "tool_end",
+        tool: "read_file",
+        output: "done",
+        run_id: "run-1",
+      },
+      120
+    );
+    const assistant = state.messages[0];
+    expect(assistant.pendingTool).toBeUndefined();
+    const result = assistant.blocks?.find((b) => b.type === "tool_result");
+    expect(result).toBeDefined();
+    if (result?.type === "tool_result") {
+      expect(result.output).toBe("done");
+      expect(result.run_id).toBe("run-1");
+    }
+  });
+
+  it("tool_awaiting_approval converts a pending tool into an approval_gate block", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      {
+        type: "tool_start",
+        tool: "terminal",
+        input: "rm -rf /tmp",
+        run_id: "run-apr",
+      },
+      110
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "tool_awaiting_approval",
+        tool: "terminal",
+        input: "rm -rf /tmp",
+        run_id: "run-apr",
+        reason: "requires_approval",
+        message: "Awaiting approval",
+      },
+      120
+    );
+    const assistant = state.messages[0];
+    expect(assistant.pendingTool).toBeUndefined();
+    const gate = assistant.blocks?.find((b) => b.type === "approval_gate");
+    expect(gate).toBeDefined();
+    if (gate?.type === "approval_gate") {
+      expect(gate.run_id).toBe("run-apr");
+      expect(gate.reason).toBe("requires_approval");
+    }
+  });
+
+  it("tool_chunk accumulates buffers without mutating the block list", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      { type: "tool_start", tool: "sh", input: "x", run_id: "run-c" },
+      110
+    );
+    const blocksBefore = state.messages[0].blocks?.length ?? 0;
+    state = reduceEvent(
+      state,
+      {
+        type: "tool_chunk",
+        tool: "sh",
+        run_id: "run-c",
+        chunk_index: 0,
+        chunk: "partial",
+        terminal: false,
+      },
+      120
+    );
+    const assistant = state.messages[0];
+    expect(assistant.blocks?.length).toBe(blocksBefore);
+    expect(assistant.toolChunkBuffers?.["run-c"]).toBeDefined();
+    expect(assistant.toolChunkBuffers?.["run-c"].chunks[0].text).toBe(
+      "partial"
+    );
+  });
+
+  it("plan_created appends a plan block tagged 'created'", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      {
+        type: "plan_created",
+        summary: "Plan ready",
+        plan: { goal: "g", steps: [] },
+        request_id: "request-p",
+      },
+      110
+    );
+    const assistant = state.messages[0];
+    const plan = assistant.blocks?.find((b) => b.type === "plan");
+    expect(plan).toBeDefined();
+    if (plan?.type === "plan") {
+      expect(plan.event).toBe("created");
+      expect(plan.summary).toBe("Plan ready");
+    }
+  });
+
+  it("plan_updated appends a plan block tagged 'updated'", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      {
+        type: "plan_updated",
+        summary: "Plan changed",
+        plan: { goal: "g", steps: [] },
+      },
+      110
+    );
+    const assistant = state.messages[0];
+    const plan = assistant.blocks?.find((b) => b.type === "plan");
+    expect(plan).toBeDefined();
+    if (plan?.type === "plan") {
+      expect(plan.event).toBe("updated");
+    }
+  });
+
+  it("verification_result appends a verification block with verdict", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      {
+        type: "verification_result",
+        summary: "ok",
+        verdict: "pass",
+        verification: { verdict: "pass", summary: "ok" },
+      },
+      110
+    );
+    const assistant = state.messages[0];
+    const verification = assistant.blocks?.find(
+      (b) => b.type === "verification"
+    );
+    expect(verification).toBeDefined();
+    if (verification?.type === "verification") {
+      expect(verification.verdict).toBe("pass");
+    }
+  });
+
+  it("new_response closes the streaming message and opens a fresh one", () => {
+    let state = freshState();
+    state = reduceEvent(state, { type: "new_response" }, 120);
+    expect(state.messages).toHaveLength(2);
+    expect(state.messages[0].isStreaming).toBe(false);
+    expect(state.messages[0].endedAtMs).toBe(120);
+    expect(state.messages[1].isStreaming).toBe(true);
+    expect(state.streamingMessageId).toBe(state.messages[1].id);
+  });
+
+  it("compaction_event is a no-op for the live message tree", () => {
+    const state = freshState();
+    const result = applyStreamEvent(
+      state,
+      {
+        type: "compaction_event",
+        from_turn: 1,
+        to_turn: 2,
+        summary: "compacted",
+        saved_tokens: 100,
+      },
+      { createMessageId: () => "new", now: 200 }
+    );
+    expect(result.finished).toBe(false);
+    expect(result.messages).toBe(state.messages);
+    expect(result.streamingMessageId).toBe(state.streamingMessageId);
+  });
+
+  it("done finalizes the streaming message and backfills missing content", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      { type: "done", content: "final answer", request_id: "request-d" },
+      200
+    );
+    const assistant = state.messages[0];
+    expect(state.streamingMessageId).toBeNull();
+    expect(assistant.isStreaming).toBe(false);
+    expect(assistant.content).toBe("final answer");
+    expect(assistant.endedAtMs).toBe(200);
+    expect(assistant.request_id).toBe("request-d");
+  });
+
+  it("done does not overwrite existing streamed content", () => {
+    let state = freshState();
+    state = reduceEvent(state, { type: "token", content: "streamed" }, 110);
+    state = reduceEvent(
+      state,
+      { type: "done", content: "different final" },
+      200
+    );
+    const assistant = state.messages[0];
+    expect(assistant.content).toBe("streamed");
+  });
+
+  it("error appends an error block and ends the turn", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      { type: "error", error: "the runtime crashed" },
+      210
+    );
+    const assistant = state.messages[0];
+    expect(state.streamingMessageId).toBeNull();
+    expect(assistant.isStreaming).toBe(false);
+    expect(assistant.endedAtMs).toBe(210);
+    expect(assistant.content).toContain("the runtime crashed");
+    const lastBlock = assistant.blocks?.at(-1);
+    expect(lastBlock?.type).toBe("text");
+    if (lastBlock?.type === "text") {
+      expect(lastBlock.text).toContain("the runtime crashed");
+    }
+  });
+
+  it("parse_error does not mutate the message tree or end the stream", () => {
+    const state = freshState();
+    const result = applyStreamEvent(
+      state,
+      {
+        type: "parse_error",
+        error: "bad payload",
+        raw: "{oops",
+      },
+      { createMessageId: () => "new", now: 300 }
+    );
+    expect(result.finished).toBe(false);
+    expect(result.messages).toBe(state.messages);
+    expect(result.streamingMessageId).toBe(state.streamingMessageId);
+  });
+
+  it("returns state unchanged when no streaming message is active", () => {
+    const state: StreamReducerState = {
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          content: "hi",
+          blocks: [{ type: "text", text: "hi" }],
+        },
+      ],
+      streamingMessageId: null,
+    };
+    const result = applyStreamEvent(
+      state,
+      { type: "token", content: "ignored" },
+      { createMessageId: () => "new", now: 400 }
+    );
+    expect(result.messages).toBe(state.messages);
+    expect(result.streamingMessageId).toBeNull();
+    expect(result.finished).toBe(false);
+  });
+});

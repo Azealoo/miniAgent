@@ -62,6 +62,17 @@ class SessionVerificationBlock(TypedDict, total=False):
     tool_trace: list[dict[str, Any]]
 
 
+class SessionApprovalGateBlock(TypedDict, total=False):
+    type: Literal["approval_gate"]
+    tool: str
+    input: str
+    run_id: str
+    reason: str
+    message: str
+    result: dict[str, Any]
+    policy: dict[str, Any]
+
+
 class SessionArchiveIndexEntry(TypedDict):
     archive_id: str | None
     message_count: int
@@ -75,6 +86,7 @@ SessionContentBlock = (
     | SessionUsageBlock
     | SessionPlanBlock
     | SessionVerificationBlock
+    | SessionApprovalGateBlock
 )
 
 

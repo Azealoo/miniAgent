@@ -201,6 +201,9 @@ const DoneRuntimeEventSchema = z
     event_index: eventIndexField,
     content: z.string(),
     session_id: z.string().nullish(),
+    turn_status: z
+      .enum(["ok", "awaiting_approval", "budget_exceeded", "error"])
+      .nullish(),
   })
   .strict();
 
