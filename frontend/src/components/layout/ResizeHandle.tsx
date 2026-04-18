@@ -35,8 +35,14 @@ export default function ResizeHandle({ onResize }: ResizeHandleProps) {
 
   return (
     <div
-      className="w-[3px] flex-shrink-0 cursor-col-resize bg-gray-200 hover:bg-[#002FA7]/30 active:bg-[#002FA7]/50 transition-colors"
+      className="group relative w-3 flex-shrink-0 cursor-col-resize"
       onMouseDown={onMouseDown}
-    />
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize panel"
+    >
+      <div className="apex-divider absolute inset-y-5 left-1/2 w-px -translate-x-1/2 rounded-full transition-colors group-hover:bg-[var(--apex-accent-glow)] group-active:bg-[var(--apex-accent)]" />
+      <div className="absolute inset-y-9 left-1/2 w-1.5 -translate-x-1/2 rounded-full bg-transparent transition-colors group-hover:bg-[rgba(47,122,95,0.12)] group-active:bg-[rgba(47,122,95,0.18)]" />
+    </div>
   );
 }

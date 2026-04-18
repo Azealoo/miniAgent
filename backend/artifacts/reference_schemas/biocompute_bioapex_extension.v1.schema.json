@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "http://localhost:8002/api/files/raw?path=artifacts/reference_schemas/biocompute_bioapex_extension.v1.schema.json",
+  "title": "BioAPEX BioCompute Extension v1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "export_status",
+    "export_warnings",
+    "workflow_run",
+    "provenance_exports",
+    "internal_references"
+  ],
+  "properties": {
+    "export_status": {
+      "type": "string",
+      "enum": ["full", "partial"]
+    },
+    "export_warnings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "workflow_run": {
+      "$ref": "#/$defs/artifactReference"
+    },
+    "provenance_exports": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "provenance_artifact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/artifactReference"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "internal_references": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/artifactReference"
+      }
+    }
+  },
+  "$defs": {
+    "artifactReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_type", "path"],
+      "properties": {
+        "artifact_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

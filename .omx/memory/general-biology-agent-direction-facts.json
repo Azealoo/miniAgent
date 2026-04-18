@@ -1,0 +1,28 @@
+{
+  "updated_at": "2026-04-01T00:00:00Z",
+  "topic": "general_biology_agent_direction",
+  "facts": [
+    "BioAPEX already supports general-agent turns in the backend because selected_workflow is optional and the generic agent path runs when no workflow is selected.",
+    "The main blocker to a general biology agent experience is frontend emphasis: the composer, quick actions, and Flows navigation still make workflows feel like the primary product mode.",
+    "BioAPEX already implements several of the strongest reusable claw-code runtime ideas, including prompt context discovery with budgets, typed session blocks, and manifest-like tool policy metadata.",
+    "The right modernization move is to reposition BioAPEX as a general biology agent first while keeping explicit workflows as optional reproducible execution paths.",
+    "The best first slice is a General Biology Agent Shell: update composer copy, quick actions, and navigation emphasis before attempting deeper backend changes."
+  ],
+  "sources": [
+    ".omx/research/general-biology-agent-direction-2026-04-01.md",
+    ".omx/research/summary.md",
+    "backend/api/chat.py",
+    "backend/graph/session_manager.py",
+    "backend/graph/prompt_builder.py",
+    "backend/tools/registry.py",
+    "frontend/src/components/chat/ChatInput.tsx",
+    "frontend/src/components/layout/workspace-data.ts",
+    "frontend/src/lib/store.tsx",
+    "https://github.com/Azealoo/claw-code/blob/main/README.md",
+    "https://github.com/Azealoo/claw-code/blob/main/rust/crates/runtime/src/session.rs",
+    "https://github.com/Azealoo/claw-code/blob/main/rust/crates/runtime/src/conversation.rs",
+    "https://github.com/Azealoo/claw-code/blob/main/rust/crates/runtime/src/prompt.rs",
+    "https://github.com/Azealoo/claw-code/blob/main/rust/crates/runtime/src/config.rs",
+    "https://github.com/Azealoo/claw-code/blob/main/rust/crates/tools/src/lib.rs"
+  ]
+}

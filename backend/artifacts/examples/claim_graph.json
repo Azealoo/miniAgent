@@ -1,0 +1,243 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "claim_graph",
+  "id": "claim-graph-run-20260318t193000z-facefeed",
+  "run_id": "run-20260318T193000Z-facefeed",
+  "created_at": "2026-03-18T19:30:00Z",
+  "source_workflow": "claim-graph",
+  "related_artifacts": [
+    {
+      "artifact_type": "evidence_card",
+      "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/evidence_card.yaml",
+      "id": "evidence-pmid-12345678",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "evidence_review",
+      "path": "artifacts/evidence-review/2026-03-18/run-20260318T193000Z-deadbeef/evidence_review.json",
+      "id": "evidence-review-run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "source_artifacts": [
+    {
+      "artifact_type": "evidence_card",
+      "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/evidence_card.yaml",
+      "id": "evidence-pmid-12345678",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "evidence_review",
+      "path": "artifacts/evidence-review/2026-03-18/run-20260318T193000Z-deadbeef/evidence_review.json",
+      "id": "evidence-review-run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "contradiction_rule_set": "claim_graph_contradiction_v1",
+  "claim_nodes": [
+    {
+      "node_id": "claim-evidence-pmid-12345678-interferon-program-shared-across-donors",
+      "node_type": "claim",
+      "statement": "Donor-matched perturb-seq profiles preserved a shared interferon-response program across replicates.",
+      "confidence": "high",
+      "status": "proposed",
+      "provenance": [
+        {
+          "source_type": "evidence_card_claim",
+          "artifact": {
+            "artifact_type": "evidence_card",
+            "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/evidence_card.yaml",
+            "id": "evidence-pmid-12345678",
+            "run_id": "run-20260318T193000Z-deadbeef"
+          },
+          "source_identifier": "interferon-program-shared-across-donors"
+        }
+      ]
+    },
+    {
+      "node_id": "claim-evidence-review-run-20260318t193000z-deadbeef-conclusion-1",
+      "node_type": "claim",
+      "statement": "For the review question 'What evidence supports a shared interferon-response program across donors?', the retrieved evidence supports a medium-confidence conclusion consistent with the included source facts.",
+      "confidence": "medium",
+      "status": "supported",
+      "provenance": [
+        {
+          "source_type": "evidence_review_conclusion",
+          "artifact": {
+            "artifact_type": "evidence_review",
+            "path": "artifacts/evidence-review/2026-03-18/run-20260318T193000Z-deadbeef/evidence_review.json",
+            "id": "evidence-review-run-20260318t193000z-deadbeef",
+            "run_id": "run-20260318T193000Z-deadbeef"
+          },
+          "source_identifier": "conclusion-1"
+        }
+      ]
+    }
+  ],
+  "evidence_card_nodes": [
+    {
+      "node_id": "evidence-card-evidence-pmid-12345678",
+      "node_type": "evidence_card",
+      "artifact": {
+        "artifact_type": "evidence_card",
+        "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/evidence_card.yaml",
+        "id": "evidence-pmid-12345678",
+        "run_id": "run-20260318T193000Z-deadbeef"
+      },
+      "stable_identifier": "pmid:12345678",
+      "source_database": "pubmed",
+      "title": "Perturb-seq reveals reproducible interferon-response programs across donors",
+      "confidence": "high"
+    }
+  ],
+  "entity_nodes": [
+    {
+      "node_id": "entity-ensembl:ensg00000111537",
+      "node_type": "entity",
+      "entity_type": "gene",
+      "source_database": "ensembl",
+      "stable_identifier": "ensembl:ENSG00000111537",
+      "preferred_label": "IFNG",
+      "aliases": [
+        "IFNG",
+        "interferon gamma"
+      ],
+      "species": "Homo sapiens",
+      "taxon_id": "taxonomy:9606"
+    }
+  ],
+  "workflow_result_nodes": [
+    {
+      "node_id": "workflow-result-evidence_review-evidence-review-run-20260318t193000z-deadbeef",
+      "node_type": "workflow_result",
+      "artifact": {
+        "artifact_type": "evidence_review",
+        "path": "artifacts/evidence-review/2026-03-18/run-20260318T193000Z-deadbeef/evidence_review.json",
+        "id": "evidence-review-run-20260318t193000z-deadbeef",
+        "run_id": "run-20260318T193000Z-deadbeef"
+      },
+      "artifact_type": "evidence_review",
+      "label": "What evidence supports a shared interferon-response program across donors?",
+      "workflow_name": "Evidence Review",
+      "workflow_slug": "evidence-review",
+      "result_status": "supported",
+      "confidence": "medium"
+    }
+  ],
+  "edges": [
+    {
+      "id": "supports-evidence-card-evidence-pmid-12345678-claim-evidence-pmid-12345678-interferon-program-shared-across-donors",
+      "edge_type": "supports",
+      "source_node_id": "evidence-card-evidence-pmid-12345678",
+      "source_node_type": "evidence_card",
+      "target_node_id": "claim-evidence-pmid-12345678-interferon-program-shared-across-donors",
+      "target_node_type": "claim",
+      "provenance_artifact": {
+        "artifact_type": "evidence_card",
+        "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/evidence_card.yaml",
+        "id": "evidence-pmid-12345678",
+        "run_id": "run-20260318T193000Z-deadbeef"
+      },
+      "rationale": "Evidence card contains the extracted claim statement."
+    },
+    {
+      "id": "derived-from-claim-evidence-pmid-12345678-interferon-program-shared-across-donors-evidence-card-evidence-pmid-12345678",
+      "edge_type": "derived_from",
+      "source_node_id": "claim-evidence-pmid-12345678-interferon-program-shared-across-donors",
+      "source_node_type": "claim",
+      "target_node_id": "evidence-card-evidence-pmid-12345678",
+      "target_node_type": "evidence_card",
+      "provenance_artifact": {
+        "artifact_type": "evidence_card",
+        "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/evidence_card.yaml",
+        "id": "evidence-pmid-12345678",
+        "run_id": "run-20260318T193000Z-deadbeef"
+      },
+      "rationale": "Claim text was extracted from the evidence card artifact."
+    },
+    {
+      "id": "mentions-claim-evidence-pmid-12345678-interferon-program-shared-across-donors-entity-ensembl:ensg00000111537",
+      "edge_type": "mentions",
+      "source_node_id": "claim-evidence-pmid-12345678-interferon-program-shared-across-donors",
+      "source_node_type": "claim",
+      "target_node_id": "entity-ensembl:ensg00000111537",
+      "target_node_type": "entity",
+      "provenance_artifact": {
+        "artifact_type": "evidence_card",
+        "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/evidence_card.yaml",
+        "id": "evidence-pmid-12345678",
+        "run_id": "run-20260318T193000Z-deadbeef"
+      },
+      "rationale": "The evidence card links this claim to the grounded entity context."
+    },
+    {
+      "id": "derived-from-claim-evidence-review-run-20260318t193000z-deadbeef-conclusion-1-workflow-result-evidence_review-evidence-review-run-20260318t193000z-deadbeef",
+      "edge_type": "derived_from",
+      "source_node_id": "claim-evidence-review-run-20260318t193000z-deadbeef-conclusion-1",
+      "source_node_type": "claim",
+      "target_node_id": "workflow-result-evidence_review-evidence-review-run-20260318t193000z-deadbeef",
+      "target_node_type": "workflow_result",
+      "provenance_artifact": {
+        "artifact_type": "evidence_review",
+        "path": "artifacts/evidence-review/2026-03-18/run-20260318T193000Z-deadbeef/evidence_review.json",
+        "id": "evidence-review-run-20260318t193000z-deadbeef",
+        "run_id": "run-20260318T193000Z-deadbeef"
+      },
+      "rationale": "The synthesized conclusion was generated by the evidence-review workflow."
+    },
+    {
+      "id": "evaluated-by-claim-evidence-review-run-20260318t193000z-deadbeef-conclusion-1-workflow-result-evidence_review-evidence-review-run-20260318t193000z-deadbeef",
+      "edge_type": "evaluated_by",
+      "source_node_id": "claim-evidence-review-run-20260318t193000z-deadbeef-conclusion-1",
+      "source_node_type": "claim",
+      "target_node_id": "workflow-result-evidence_review-evidence-review-run-20260318t193000z-deadbeef",
+      "target_node_type": "workflow_result",
+      "provenance_artifact": {
+        "artifact_type": "evidence_review",
+        "path": "artifacts/evidence-review/2026-03-18/run-20260318T193000Z-deadbeef/evidence_review.json",
+        "id": "evidence-review-run-20260318t193000z-deadbeef",
+        "run_id": "run-20260318T193000Z-deadbeef"
+      },
+      "rationale": "The evidence-review workflow evaluated this claim."
+    },
+    {
+      "id": "supports-evidence-card-evidence-pmid-12345678-claim-evidence-review-run-20260318t193000z-deadbeef-conclusion-1",
+      "edge_type": "supports",
+      "source_node_id": "evidence-card-evidence-pmid-12345678",
+      "source_node_type": "evidence_card",
+      "target_node_id": "claim-evidence-review-run-20260318t193000z-deadbeef-conclusion-1",
+      "target_node_type": "claim",
+      "provenance_artifact": {
+        "artifact_type": "evidence_card",
+        "path": "artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/evidence_card.yaml",
+        "id": "evidence-pmid-12345678",
+        "run_id": "run-20260318T193000Z-deadbeef"
+      },
+      "rationale": "The evidence review cites this evidence card as supporting evidence."
+    },
+    {
+      "id": "mentions-claim-evidence-review-run-20260318t193000z-deadbeef-conclusion-1-entity-ensembl:ensg00000111537",
+      "edge_type": "mentions",
+      "source_node_id": "claim-evidence-review-run-20260318t193000z-deadbeef-conclusion-1",
+      "source_node_type": "claim",
+      "target_node_id": "entity-ensembl:ensg00000111537",
+      "target_node_type": "entity",
+      "provenance_artifact": {
+        "artifact_type": "evidence_review",
+        "path": "artifacts/evidence-review/2026-03-18/run-20260318T193000Z-deadbeef/evidence_review.json",
+        "id": "evidence-review-run-20260318t193000z-deadbeef",
+        "run_id": "run-20260318T193000Z-deadbeef"
+      },
+      "rationale": "The review conclusion inherits grounded entity context from its supporting evidence."
+    }
+  ],
+  "summary": {
+    "claim_count": 2,
+    "evidence_card_count": 1,
+    "entity_count": 1,
+    "workflow_result_count": 1,
+    "edge_count": 7,
+    "contradiction_count": 0,
+    "source_artifact_count": 2
+  }
+}

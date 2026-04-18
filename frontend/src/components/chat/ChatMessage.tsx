@@ -3,127 +3,211 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
+import {
+  messageHasProcessTrail,
+  normalizeMessageContent,
+} from "@/lib/message-blocks";
+import { completedElapsedLabel } from "@/lib/message-duration";
+import { splitStreamingMarkdown } from "@/lib/streaming-markdown";
 import { cn } from "@/lib/utils";
-import ThoughtChain from "./ThoughtChain";
-import RetrievalCard from "./RetrievalCard";
+import TurnActivityFeed from "./TurnActivityFeed";
 import type { Message } from "@/lib/types";
 
 interface ChatMessageProps {
   message: Message;
 }
 
-export default function ChatMessage({ message }: ChatMessageProps) {
+function MessageMarker() {
+  return (
+    <span
+      aria-hidden="true"
+      className="mt-[0.45rem] flex h-4 w-4 flex-shrink-0 items-center justify-center"
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-[var(--apex-accent-strong)] shadow-[0_0_0_1px_rgba(23,97,61,0.1)]" />
+    </span>
+  );
+}
+
+function MarkdownContent({
+  content,
+  isStreaming,
+}: {
+  content: string;
+  isStreaming?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "apex-chat-prose prose prose-sm max-w-none prose-pre:bg-[#1e1e1e] prose-pre:text-gray-100",
+        isStreaming && "streaming-cursor"
+      )}
+    >
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeHighlight]}
+        components={{
+          code({ className, children, ...props }) {
+            const match = /language-(\w+)/.exec(className ?? "");
+            if (!match) {
+              return (
+                <code
+                  className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[0.8em] text-[#c7254e]"
+                  {...props}
+                >
+                  {children}
+                </code>
+              );
+            }
+            return (
+              <code className={className} {...props}>
+                {children}
+              </code>
+            );
+          },
+          table({ children }) {
+            return (
+              <div className="my-3 overflow-x-auto">
+                <table className="min-w-full overflow-hidden rounded-lg border border-slate-200 text-xs">
+                  {children}
+                </table>
+              </div>
+            );
+          },
+          th({ children }) {
+            return (
+              <th className="border-b border-slate-200 bg-slate-50 px-3 py-2 text-left font-semibold text-slate-700">
+                {children}
+              </th>
+            );
+          },
+          td({ children }) {
+            return (
+              <td className="border-b border-slate-100 px-3 py-2 text-slate-600">
+                {children}
+              </td>
+            );
+          },
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function StreamingMarkdownContent({
+  content,
+  isStreaming,
+}: {
+  content: string;
+  isStreaming?: boolean;
+}) {
+  if (!isStreaming) {
+    return <MarkdownContent content={content} />;
+  }
+
+  const { committed, pending } = splitStreamingMarkdown(content);
+  const hasCommitted = committed.trim().length > 0;
+  const hasPending = pending.trim().length > 0;
+
+  if (!hasCommitted && !hasPending) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-2">
+      {hasCommitted ? (
+        <MarkdownContent content={committed} isStreaming={!hasPending} />
+      ) : null}
+
+      {hasPending ? (
+        <div className="apex-streaming-draft streaming-cursor whitespace-pre-wrap rounded-[14px] border px-3 py-2">
+          {pending}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export default function ChatMessage({
+  message,
+}: ChatMessageProps) {
   const isUser = message.role === "user";
+  const normalizedContent = normalizeMessageContent(message);
+  const displayContent = normalizedContent.content;
+  const hasContent = Boolean(displayContent);
+  const hasPlanningBlock = normalizedContent.blocks.some(
+    (block) => block.type === "plan"
+  );
+  const hasVerificationBlock = normalizedContent.blocks.some(
+    (block) => block.type === "verification"
+  );
+  const hasVerificationActivity = normalizedContent.blocks.some(
+    (block) =>
+      (block.type === "tool_use" || block.type === "tool_result") &&
+      block.tool === "verification_agent"
+  );
+  const hasProcessTrail = messageHasProcessTrail(message);
+  const showTurnActivityBeforeContent =
+    message.isStreaming || hasProcessTrail || hasPlanningBlock;
+  const showTurnActivityAfterContent = false;
+  const showStreamingContent = hasContent;
+  const completedDuration = !message.isStreaming ? completedElapsedLabel(message) : null;
 
   if (isUser) {
     return (
-      <div className="flex justify-end mb-4">
-        <div className="max-w-[70%] bg-[#002FA7] text-white rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm leading-relaxed shadow-sm">
-          {message.content}
+      <article aria-label="User prompt" className="flex justify-end">
+        <div className="max-w-[min(42rem,88%)] rounded-[22px] border border-[rgba(208,216,209,0.92)] bg-[rgba(248,250,246,0.96)] px-4 py-3 shadow-[0_10px_24px_rgba(29,42,33,0.04)]">
+          <p className="whitespace-pre-wrap text-[0.92rem] leading-[1.72] text-slate-700">
+            {message.content}
+          </p>
         </div>
-      </div>
+      </article>
     );
   }
 
-  // Assistant message
+  if (
+    !hasContent &&
+    !showTurnActivityBeforeContent
+  ) {
+    return null;
+  }
+
+  if (
+    !message.isStreaming &&
+    !hasContent &&
+    !hasVerificationBlock &&
+    !hasPlanningBlock &&
+    !hasVerificationActivity
+  ) {
+    return null;
+  }
+
   return (
-    <div className="flex gap-3 mb-4">
-      {/* Avatar */}
-      <div className="w-7 h-7 rounded-full bg-gradient-to-br from-[#002FA7] to-blue-400 flex items-center justify-center text-white text-xs font-bold flex-shrink-0 mt-0.5 shadow-sm">
-        C
-      </div>
+    <article
+      aria-label="Assistant response"
+      className="apex-transcript-enter grid grid-cols-[1rem,minmax(0,1fr)] gap-3 sm:gap-4"
+    >
+      <MessageMarker />
 
-      <div className="flex-1 min-w-0">
-        {/* RAG retrieval results */}
-        {message.retrievals && message.retrievals.length > 0 && (
-          <RetrievalCard results={message.retrievals} />
-        )}
+      <div className="min-w-0 pt-0.5">
+        {showTurnActivityBeforeContent ? <TurnActivityFeed message={message} /> : null}
 
-        {/* Tool calls (thought chain) */}
-        {((message.tool_calls && message.tool_calls.length > 0) ||
-          message.pendingTool) && (
-          <ThoughtChain
-            toolCalls={message.tool_calls ?? []}
-            pendingTool={message.pendingTool}
+        {hasContent && completedDuration ? (
+          <p className="mb-2 pl-[1px] font-mono text-[10px] italic leading-5 text-slate-400">
+            {completedDuration}
+          </p>
+        ) : null}
+
+        {showStreamingContent ? (
+          <StreamingMarkdownContent
+            content={displayContent}
+            isStreaming={message.isStreaming}
           />
-        )}
+        ) : null}
 
-        {/* Text content */}
-        {(message.content || message.isStreaming) && (
-          <div
-            className={cn(
-              "mt-2 text-sm text-gray-800",
-              message.isStreaming && !message.content && "h-5"
-            )}
-          >
-            {message.content ? (
-              <div
-                className={cn(
-                  "prose prose-sm max-w-none prose-pre:bg-[#1e1e1e] prose-pre:text-gray-100",
-                  message.isStreaming && "streaming-cursor"
-                )}
-              >
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  rehypePlugins={[rehypeHighlight]}
-                  components={{
-                    // Inline code
-                    code({ className, children, ...props }) {
-                      const match = /language-(\w+)/.exec(className ?? "");
-                      if (!match) {
-                        return (
-                          <code
-                            className="bg-gray-100 text-[#c7254e] px-1 py-0.5 rounded text-[0.8em] font-mono"
-                            {...props}
-                          >
-                            {children}
-                          </code>
-                        );
-                      }
-                      return (
-                        <code className={className} {...props}>
-                          {children}
-                        </code>
-                      );
-                    },
-                    // Tables
-                    table({ children }) {
-                      return (
-                        <div className="overflow-x-auto my-3">
-                          <table className="min-w-full border border-gray-200 rounded-lg overflow-hidden text-xs">
-                            {children}
-                          </table>
-                        </div>
-                      );
-                    },
-                    th({ children }) {
-                      return (
-                        <th className="bg-gray-50 border-b border-gray-200 px-3 py-2 text-left font-semibold text-gray-700">
-                          {children}
-                        </th>
-                      );
-                    },
-                    td({ children }) {
-                      return (
-                        <td className="border-b border-gray-100 px-3 py-2 text-gray-600">
-                          {children}
-                        </td>
-                      );
-                    },
-                  }}
-                >
-                  {message.content}
-                </ReactMarkdown>
-              </div>
-            ) : (
-              // Empty streaming state — show blinking cursor
-              message.isStreaming && (
-                <span className="inline-block w-0.5 h-4 bg-[#002FA7] animate-blink" />
-              )
-            )}
-          </div>
-        )}
+        {showTurnActivityAfterContent ? <TurnActivityFeed message={message} /> : null}
       </div>
-    </div>
+    </article>
   );
 }

@@ -1,0 +1,33 @@
+checklist_id: miqe_qpcr_completeness
+family: miqe
+label: MIQE-style qPCR completeness
+version: "1.0.0"
+description: Minimum structured qPCR reporting checks for future BioAPEX assay workflows.
+items:
+  - item_id: study_name_recorded
+    description: The experiment or study name is recorded.
+    severity: required
+    pass_criteria: dataset_manifest.design.study_name is present.
+    remediation_guidance: Record the qPCR study name in the dataset manifest before finalization.
+    rule:
+      rule_type: field_present
+      source: dataset_manifest
+      field_path: design.study_name
+  - item_id: organism_recorded
+    description: The organism is specified.
+    severity: required
+    pass_criteria: dataset_manifest.organism is present.
+    remediation_guidance: Record the organism for the qPCR dataset before QA review.
+    rule:
+      rule_type: field_present
+      source: dataset_manifest
+      field_path: organism
+  - item_id: sample_sheet_recorded
+    description: Sample-sheet style metadata is available for traceable inputs.
+    severity: best_practice
+    pass_criteria: dataset_manifest.sample_sheet_path is present.
+    remediation_guidance: Provide a sample-sheet style metadata file so qPCR sample handling remains auditable.
+    rule:
+      rule_type: field_present
+      source: dataset_manifest
+      field_path: sample_sheet_path

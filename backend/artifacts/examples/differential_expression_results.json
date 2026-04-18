@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "differential_expression_results",
+  "id": "differential-expression-results-rnaseq-qc-de-differential-expression-run-20260319t210000z-deadbeef",
+  "run_id": "run-20260319T210000Z-deadbeef",
+  "created_at": "2026-03-19T21:12:10Z",
+  "source_workflow": "rnaseq_qc_de",
+  "related_artifacts": [
+    {
+      "artifact_type": "count_matrix",
+      "path": "backend/artifacts/examples/count_matrix.json",
+      "run_id": "run-20260319T210000Z-deadbeef"
+    }
+  ],
+  "engine_name": "bioapex_mean_centered_t_test",
+  "engine_version": "1.0.0",
+  "design": {
+    "design_formula": "~ batch + condition",
+    "modeled_factors": [
+      "batch",
+      "condition"
+    ],
+    "batch_fields_expected": [
+      "batch"
+    ],
+    "batch_fields_modeled": [
+      "batch"
+    ],
+    "missing_batch_fields": [],
+    "replicate_counts": {
+      "control": 3,
+      "treated": 3
+    },
+    "minimum_condition_replicates": 3
+  },
+  "contrast": {
+    "contrast_label": "treated-vs-control",
+    "condition_field": "condition",
+    "baseline_condition": "control",
+    "comparison_condition": "treated"
+  },
+  "source_count_matrix": {
+    "artifact_type": "count_matrix",
+    "path": "backend/artifacts/examples/count_matrix.json",
+    "run_id": "run-20260319T210000Z-deadbeef"
+  },
+  "normalized_count_matrix": {
+    "artifact_type": "normalized_count_matrix",
+    "path": "backend/artifacts/examples/normalized_count_matrix.json",
+    "run_id": "run-20260319T210000Z-deadbeef"
+  },
+  "results_path": "backend/artifacts/examples/rnaseq/treated-vs-control.tsv",
+  "result_format": "tsv",
+  "tested_gene_count": 2,
+  "significant_gene_count": 1,
+  "significance_threshold": 0.05,
+  "diagnostic_plots": [
+    {
+      "artifact_type": "volcano_plot",
+      "path": "backend/artifacts/examples/rnaseq/treated-vs-control.volcano.svg",
+      "run_id": "run-20260319T210000Z-deadbeef"
+    },
+    {
+      "artifact_type": "mean_difference_plot",
+      "path": "backend/artifacts/examples/rnaseq/treated-vs-control.mean-difference.svg",
+      "run_id": "run-20260319T210000Z-deadbeef"
+    }
+  ],
+  "warnings": []
+}

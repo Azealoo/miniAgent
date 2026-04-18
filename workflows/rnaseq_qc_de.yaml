@@ -1,0 +1,530 @@
+schema_version: "1.0.0"
+kind: workflow_spec
+workflow_id: rnaseq_qc_de
+version: "1.0.0"
+name: RNA-seq QC and Differential Expression Workflow
+purpose: Define an explicit end-to-end RNA-seq workflow contract with dataset intake, compliance preflight, concrete FastQC raw-read QC, concrete MultiQC aggregation, deterministic count-matrix generation, explicit differential expression outputs, and report-bundle handoff artifacts.
+engine: internal_dag_runner_v1
+required_inputs:
+  - name: dataset_manifest
+    kind: artifact
+    artifact_type: dataset_manifest
+    schema_ref: artifact_schema:dataset_manifest@1.0.0
+    description: Dataset intake artifact describing the RNA-seq study design, reference build, and source files.
+  - name: condition_field
+    kind: metadata
+    data_type: string
+    description: Sample-sheet field used to define the comparison groups for downstream differential expression.
+  - name: baseline_condition
+    kind: metadata
+    data_type: string
+    description: Reference condition label used as the baseline for the stubbed differential expression stage.
+  - name: comparison_condition
+    kind: metadata
+    data_type: string
+    description: Comparison condition label used as the numerator for the stubbed differential expression stage.
+optional_inputs:
+  - name: checklist_ids
+    kind: metadata
+    data_type: array
+    default: []
+    description: Optional additional checklist definition IDs to evaluate for the terminal report bundle alongside any automatic defaults.
+runtime:
+  provided_inputs:
+    - dataset_manifest
+    - condition_field
+    - baseline_condition
+    - comparison_condition
+    - checklist_ids
+  allowed_parameter_overrides: []
+  generated_state:
+    - run_id
+    - created_at
+    - resolved_input_paths
+    - step_statuses
+    - artifact_paths
+    - qc_status
+    - warnings
+  state_artifact: workflow_run
+  artifact_root_template: artifacts/{workflow_id}/{date}/{run_id}
+outputs:
+  - name: fastqc_run
+    kind: artifact
+    artifact_type: fastqc_run
+    schema_ref: artifact_schema:fastqc_run@1.0.0
+    description: Durable FastQC execution artifact capturing command provenance, input hashes, and raw report paths.
+    source:
+      step_id: raw_qc
+      output_name: fastqc_run
+  - name: fastqc_metrics
+    kind: artifact
+    artifact_type: fastqc_metrics
+    schema_ref: artifact_schema:fastqc_metrics@1.0.0
+    description: Normalized FastQC metrics artifact extracted from the raw FastQC report archives.
+    source:
+      step_id: raw_qc
+      output_name: fastqc_metrics
+  - name: multiqc_run
+    kind: artifact
+    artifact_type: multiqc_run
+    schema_ref: artifact_schema:multiqc_run@1.0.0
+    description: Durable MultiQC execution artifact capturing the aggregated report, source FastQC artifacts, and command provenance.
+    source:
+      step_id: aggregated_qc
+      output_name: multiqc_run
+  - name: multiqc_metrics
+    kind: artifact
+    artifact_type: multiqc_metrics
+    schema_ref: artifact_schema:multiqc_metrics@1.0.0
+    description: Normalized MultiQC summary artifact extracted from the aggregated QC stage and copied into workflow-level outputs.
+    source:
+      step_id: aggregated_qc
+      output_name: multiqc_metrics
+  - name: quantification_bundle
+    kind: value
+    description: Structured handle describing the concrete count-matrix outputs and quantification assumptions used for downstream DE.
+    source:
+      step_id: quantification
+      output_name: quantification_bundle
+  - name: count_matrix
+    kind: artifact
+    artifact_type: count_matrix
+    schema_ref: artifact_schema:count_matrix@1.0.0
+    description: Durable count-matrix artifact describing the materialized gene-count TSV used as the DE source matrix.
+    source:
+      step_id: quantification
+      output_name: count_matrix
+  - name: differential_expression_bundle
+    kind: value
+    description: Structured differential-expression handoff bundle describing the concrete DE outputs, design metadata, and design-quality checks.
+    source:
+      step_id: differential_expression
+      output_name: differential_expression_bundle
+  - name: normalized_count_matrix
+    kind: artifact
+    artifact_type: normalized_count_matrix
+    schema_ref: artifact_schema:normalized_count_matrix@1.0.0
+    description: Durable normalized-count matrix artifact persisted for downstream review and reproducibility checks.
+    source:
+      step_id: differential_expression
+      output_name: normalized_count_matrix
+  - name: differential_expression_results
+    kind: artifact
+    artifact_type: differential_expression_results
+    schema_ref: artifact_schema:differential_expression_results@1.0.0
+    description: Durable differential-expression results artifact capturing the canonical results table, contrast metadata, and diagnostic plots.
+    source:
+      step_id: differential_expression
+      output_name: differential_expression_results
+  - name: differential_expression_run
+    kind: artifact
+    artifact_type: differential_expression_run
+    schema_ref: artifact_schema:differential_expression_run@1.0.0
+    description: Step-level summary artifact capturing the DE engine, design model, parameters, and result summary.
+    source:
+      step_id: differential_expression
+      output_name: differential_expression_run
+  - name: report_bundle_manifest
+    kind: value
+    description: Structured manifest describing the final report bundle sections and the expected artifacts it should gather.
+    source:
+      step_id: report_bundle
+      output_name: report_bundle_manifest
+  - name: checklist_results
+    kind: artifact
+    artifact_type: checklist_results
+    schema_ref: artifact_schema:checklist_results@1.0.0
+    description: Structured checklist gate results captured before QA finalization.
+    source:
+      step_id: report_bundle
+      output_name: checklist_results
+  - name: qa_report
+    kind: artifact
+    artifact_type: qa_report
+    schema_ref: artifact_schema:qa_report@1.0.0
+    description: Structured QA report that records which RNA-seq outputs are still stubbed in this skeleton workflow.
+    source:
+      step_id: report_bundle
+      output_name: qa_report
+qc_gates:
+  - id: dataset-manifest-required
+    label: Dataset manifest must be present
+    when: before_execution
+    target:
+      source_type: workflow_input
+      input_name: dataset_manifest
+    failure_policy: block
+    description: Block execution before any compliance or workflow work begins when the required intake artifact is missing.
+  - id: raw-qc-floor
+    label: Raw QC must satisfy minimum FastQC quality thresholds
+    when: after_step
+    target:
+      source_type: step_output
+      step_id: raw_qc
+      output_name: raw_qc_bundle
+    failure_policy: block
+    policy:
+      policy_id: rnaseq-raw-qc
+      label: RNA-seq raw QC floor
+      version: "1.0.0"
+      assay_type: bulk_rna_seq
+      required_upstream_tools:
+        - fastqc
+      checks:
+        - id: minimum-per-base-quality
+          label: Minimum per-base quality
+          metric_name: min_per_base_quality
+          category: technical
+          comparison: minimum
+          pass_threshold: 28
+          warn_threshold: 25
+          description: FastQC-derived base-quality summaries below this floor should stop the workflow before count generation is interpreted.
+    description: Block the workflow when the FastQC raw-QC stage reports base-quality metrics below the documented RNA-seq floor.
+  - id: aggregated-qc-floor
+    label: Aggregated QC must satisfy MultiQC summary thresholds
+    when: after_step
+    target:
+      source_type: step_output
+      step_id: aggregated_qc
+      output_name: aggregated_qc_bundle
+    failure_policy: block
+    policy:
+      policy_id: rnaseq-aggregated-qc
+      label: RNA-seq aggregated QC floor
+      version: "1.0.0"
+      assay_type: bulk_rna_seq
+      required_upstream_tools:
+        - fastqc
+        - multiqc
+      checks:
+        - id: fastqc-pass-rate
+          label: FastQC pass rate across libraries
+          metric_name: fastqc_pass_rate
+          category: technical
+          comparison: minimum
+          pass_threshold: 0.95
+          warn_threshold: 0.8
+          description: The aggregated QC summary should show that nearly all libraries passed upstream FastQC checks before downstream planning is trusted.
+    description: Block the workflow when aggregated QC indicates the upstream FastQC results are not analysis-ready.
+  - id: differential-expression-design
+    label: Differential expression design must satisfy minimum design-readiness checks
+    when: after_step
+    target:
+      source_type: step_output
+      step_id: differential_expression
+      output_name: differential_expression_bundle
+    failure_policy: block
+    policy:
+      policy_id: rnaseq-de-design
+      label: RNA-seq differential expression design readiness
+      version: "1.0.0"
+      assay_type: bulk_rna_seq
+      required_upstream_tools:
+        - bioapex_deterministic_quantification
+        - bioapex_mean_centered_t_test
+      checks:
+        - id: minimum-condition-replicates
+          label: Minimum condition replicates
+          metric_name: minimum_condition_replicates
+          category: experimental_design
+          comparison: minimum
+          pass_threshold: 3
+          warn_threshold: 2
+          description: Differential expression should use at least three replicates per condition for routine interpretation.
+        - id: missing-expected-batch-fields
+          label: Missing expected batch fields
+          metric_name: missing_expected_batch_fields
+          category: batch_effect
+          comparison: maximum
+          pass_threshold: 0
+          warn_threshold: 1
+          description: Expected batch fields should be present and populated so the DE stage can model them explicitly.
+    description: Surface design-quality warnings or blocks after the DE step without treating them as opaque execution failures.
+compliance_hooks:
+  - id: privacy-preflight
+    stage: before_execution
+    tool: compliance_preflight
+    required: true
+    inputs:
+      - name: dataset_manifest
+        source:
+          source_type: workflow_input
+          input_name: dataset_manifest
+    description: Run deterministic compliance screening before any RNA-seq workflow stage is allowed to start.
+steps:
+  - id: dataset_intake
+    label: Dataset intake and manifest validation
+    executor:
+      executor_type: python
+      module: workflows.runners.rnaseq_qc_de
+      function: validate_inputs
+    inputs:
+      - name: dataset_manifest
+        source:
+          source_type: workflow_input
+          input_name: dataset_manifest
+      - name: condition_field
+        source:
+          source_type: workflow_input
+          input_name: condition_field
+      - name: baseline_condition
+        source:
+          source_type: workflow_input
+          input_name: baseline_condition
+      - name: comparison_condition
+        source:
+          source_type: workflow_input
+          input_name: comparison_condition
+    outputs:
+      - name: validated_manifest
+        kind: artifact
+        artifact_type: dataset_manifest
+        schema_ref: artifact_schema:dataset_manifest@1.0.0
+        description: Validated RNA-seq dataset manifest passed forward to all later stages.
+    prerequisites: []
+    retry_policy:
+      max_attempts: 1
+      backoff_seconds: 0
+    failure_policy: block_workflow
+  - id: raw_qc
+    label: FastQC raw-read QC stage
+    executor:
+      executor_type: python
+      module: workflows.runners.rnaseq_qc_de
+      function: run_raw_qc
+    inputs:
+      - name: dataset_manifest
+        source:
+          source_type: step_output
+          step_id: dataset_intake
+          output_name: validated_manifest
+    outputs:
+      - name: raw_qc_bundle
+        kind: value
+        description: Structured FastQC stage output describing generated artifacts, normalized QC metrics, and raw-QC evidence for gating.
+      - name: fastqc_run
+        kind: artifact
+        artifact_type: fastqc_run
+        schema_ref: artifact_schema:fastqc_run@1.0.0
+        description: Durable FastQC execution artifact capturing command provenance, input hashes, and raw report paths.
+      - name: fastqc_metrics
+        kind: artifact
+        artifact_type: fastqc_metrics
+        schema_ref: artifact_schema:fastqc_metrics@1.0.0
+        description: Normalized FastQC metrics artifact extracted from the raw FastQC report archives.
+    prerequisites:
+      - dataset_intake
+    retry_policy:
+      max_attempts: 1
+      backoff_seconds: 0
+    failure_policy: block_workflow
+  - id: aggregated_qc
+    label: MultiQC aggregated QC stage
+    executor:
+      executor_type: python
+      module: workflows.runners.rnaseq_qc_de
+      function: aggregate_qc
+    inputs:
+      - name: dataset_manifest
+        source:
+          source_type: step_output
+          step_id: dataset_intake
+          output_name: validated_manifest
+      - name: raw_qc_bundle
+        source:
+          source_type: step_output
+          step_id: raw_qc
+          output_name: raw_qc_bundle
+    outputs:
+      - name: aggregated_qc_bundle
+        kind: value
+        description: Structured MultiQC stage output describing generated artifacts, normalized summary metrics, and aggregated-QC evidence for gating.
+      - name: multiqc_run
+        kind: artifact
+        artifact_type: multiqc_run
+        schema_ref: artifact_schema:multiqc_run@1.0.0
+        description: Durable MultiQC execution artifact capturing command provenance and aggregated report paths.
+      - name: multiqc_metrics
+        kind: artifact
+        artifact_type: multiqc_metrics
+        schema_ref: artifact_schema:multiqc_metrics@1.0.0
+        description: Normalized MultiQC metrics artifact extracted from the aggregated report and linked upstream FastQC artifacts.
+    prerequisites:
+      - dataset_intake
+      - raw_qc
+    retry_policy:
+      max_attempts: 1
+      backoff_seconds: 0
+    failure_policy: block_workflow
+  - id: quantification
+    label: Quantification count-matrix stage
+    executor:
+      executor_type: python
+      module: workflows.runners.rnaseq_qc_de
+      function: plan_quantification
+    inputs:
+      - name: dataset_manifest
+        source:
+          source_type: step_output
+          step_id: dataset_intake
+          output_name: validated_manifest
+      - name: aggregated_qc_bundle
+        source:
+          source_type: step_output
+          step_id: aggregated_qc
+          output_name: aggregated_qc_bundle
+      - name: condition_field
+        source:
+          source_type: workflow_input
+          input_name: condition_field
+      - name: baseline_condition
+        source:
+          source_type: workflow_input
+          input_name: baseline_condition
+      - name: comparison_condition
+        source:
+          source_type: workflow_input
+          input_name: comparison_condition
+    outputs:
+      - name: quantification_bundle
+        kind: value
+        description: Structured handle describing the concrete count-matrix output and quantification assumptions.
+      - name: count_matrix
+        kind: artifact
+        artifact_type: count_matrix
+        schema_ref: artifact_schema:count_matrix@1.0.0
+        description: Durable count-matrix artifact for downstream DE and report assembly.
+    prerequisites:
+      - dataset_intake
+      - aggregated_qc
+    retry_policy:
+      max_attempts: 1
+      backoff_seconds: 0
+    failure_policy: fail_workflow
+  - id: differential_expression
+    label: Differential expression analysis stage
+    executor:
+      executor_type: python
+      module: workflows.runners.rnaseq_qc_de
+      function: plan_differential_expression
+    inputs:
+      - name: dataset_manifest
+        source:
+          source_type: step_output
+          step_id: dataset_intake
+          output_name: validated_manifest
+      - name: quantification_bundle
+        source:
+          source_type: step_output
+          step_id: quantification
+          output_name: quantification_bundle
+      - name: condition_field
+        source:
+          source_type: workflow_input
+          input_name: condition_field
+      - name: baseline_condition
+        source:
+          source_type: workflow_input
+          input_name: baseline_condition
+      - name: comparison_condition
+        source:
+          source_type: workflow_input
+          input_name: comparison_condition
+    outputs:
+      - name: differential_expression_bundle
+        kind: value
+        description: Structured differential-expression bundle for the concrete DE outputs, contrast metadata, and design-quality checks.
+      - name: normalized_count_matrix
+        kind: artifact
+        artifact_type: normalized_count_matrix
+        schema_ref: artifact_schema:normalized_count_matrix@1.0.0
+        description: Durable normalized-count matrix artifact for downstream review and reproducibility.
+      - name: differential_expression_results
+        kind: artifact
+        artifact_type: differential_expression_results
+        schema_ref: artifact_schema:differential_expression_results@1.0.0
+        description: Durable differential-expression results artifact for the canonical results table and plots.
+      - name: differential_expression_run
+        kind: artifact
+        artifact_type: differential_expression_run
+        schema_ref: artifact_schema:differential_expression_run@1.0.0
+        description: Durable DE step summary artifact capturing the engine, design model, and result summary.
+    prerequisites:
+      - dataset_intake
+      - quantification
+    retry_policy:
+      max_attempts: 1
+      backoff_seconds: 0
+    failure_policy: fail_workflow
+  - id: report_bundle
+    label: Report bundle stage
+    executor:
+      executor_type: python
+      module: workflows.runners.rnaseq_qc_de
+      function: build_report_bundle
+    inputs:
+      - name: dataset_manifest
+        source:
+          source_type: step_output
+          step_id: dataset_intake
+          output_name: validated_manifest
+      - name: raw_qc_bundle
+        source:
+          source_type: step_output
+          step_id: raw_qc
+          output_name: raw_qc_bundle
+      - name: aggregated_qc_bundle
+        source:
+          source_type: step_output
+          step_id: aggregated_qc
+          output_name: aggregated_qc_bundle
+      - name: quantification_bundle
+        source:
+          source_type: step_output
+          step_id: quantification
+          output_name: quantification_bundle
+      - name: differential_expression_bundle
+        source:
+          source_type: step_output
+          step_id: differential_expression
+          output_name: differential_expression_bundle
+      - name: condition_field
+        source:
+          source_type: workflow_input
+          input_name: condition_field
+      - name: baseline_condition
+        source:
+          source_type: workflow_input
+          input_name: baseline_condition
+      - name: comparison_condition
+        source:
+          source_type: workflow_input
+          input_name: comparison_condition
+      - name: checklist_ids
+        source:
+          source_type: workflow_input
+          input_name: checklist_ids
+    outputs:
+      - name: report_bundle_manifest
+        kind: value
+        description: Structured manifest describing the report bundle sections and the expected artifacts it should gather.
+      - name: checklist_results
+        kind: artifact
+        artifact_type: checklist_results
+        schema_ref: artifact_schema:checklist_results@1.0.0
+        description: Structured checklist gate results captured before QA finalization.
+      - name: qa_report
+        kind: artifact
+        artifact_type: qa_report
+        schema_ref: artifact_schema:qa_report@1.0.0
+        description: Structured QA record documenting the concrete RNA-seq outputs and any DE design warnings that remain for review.
+    prerequisites:
+      - dataset_intake
+      - raw_qc
+      - aggregated_qc
+      - quantification
+      - differential_expression
+    retry_policy:
+      max_attempts: 1
+      backoff_seconds: 0
+    failure_policy: fail_workflow

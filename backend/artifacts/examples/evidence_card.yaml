@@ -1,0 +1,61 @@
+schema_version: "1.0.0"
+artifact_type: evidence_card
+id: evidence-pmid-12345678
+run_id: run-20260318T193000Z-deadbeef
+created_at: 2026-03-18T19:30:00Z
+source_workflow: literature-retrieval
+related_artifacts:
+  - artifact_type: workflow_run
+    path: artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/run.json
+    id: workflow-run-literature-retrieval-20260318
+    run_id: run-20260318T193000Z-deadbeef
+source_database: pubmed
+stable_identifier: pmid:12345678
+title: Perturb-seq reveals reproducible interferon-response programs across donors
+study_type: screening_study
+claims:
+  - id: interferon-program-shared-across-donors
+    statement: Donor-matched perturb-seq profiles preserved a shared interferon-response program across replicates.
+    confidence: high
+  - id: non-targeting-controls-anchor-baseline
+    statement: Non-targeting controls defined a stable baseline for downstream differential comparisons.
+    confidence: medium
+confidence: high
+limitations:
+  - Cohort size was limited and not all perturbations replicated equally across batches.
+entity_tags:
+  - label: IFN response
+    entity_type: pathway
+    identifier: GO:0060337
+  - label: donor effect
+    entity_type: study_factor
+grounded_entities:
+  - entity_type: gene
+    source_database: ensembl
+    stable_identifier: ensembl:ENSG00000111537
+    preferred_label: IFNG
+    aliases:
+      - IFNG
+      - interferon gamma
+    species: Homo sapiens
+    taxon_id: taxonomy:9606
+grounding_results:
+  - input_mention: IFNG
+    requested_entity_types:
+      - gene
+    status: resolved
+    grounded_entity:
+      entity_type: gene
+      source_database: ensembl
+      stable_identifier: ensembl:ENSG00000111537
+      preferred_label: IFNG
+      aliases:
+        - IFNG
+        - interferon gamma
+      species: Homo sapiens
+      taxon_id: taxonomy:9606
+    candidate_entities: []
+    cached_source_payload_paths:
+      - artifacts/literature-retrieval/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/entity-grounding-cache/ifng__gene__human__ensembl__lookup_symbol.json
+grounding_requires_clarification: false
+cached_raw_payload_path: backend/knowledge/cache/pubmed/12345678.md

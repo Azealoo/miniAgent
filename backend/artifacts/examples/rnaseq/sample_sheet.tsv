@@ -1,0 +1,7 @@
+sample_id	condition	batch	fastq_r1	fastq_r2
+control_rep1	control	batch_a	backend/artifacts/examples/rnaseq/control_rep1_R1.fastq	backend/artifacts/examples/rnaseq/control_rep1_R2.fastq
+control_rep2	control	batch_a	backend/artifacts/examples/rnaseq/control_rep2_R1.fastq	backend/artifacts/examples/rnaseq/control_rep2_R2.fastq
+control_rep3	control	batch_b	backend/artifacts/examples/rnaseq/control_rep3_R1.fastq	backend/artifacts/examples/rnaseq/control_rep3_R2.fastq
+treated_rep1	treated	batch_a	backend/artifacts/examples/rnaseq/treated_rep1_R1.fastq	backend/artifacts/examples/rnaseq/treated_rep1_R2.fastq
+treated_rep2	treated	batch_b	backend/artifacts/examples/rnaseq/treated_rep2_R1.fastq	backend/artifacts/examples/rnaseq/treated_rep2_R2.fastq
+treated_rep3	treated	batch_b	backend/artifacts/examples/rnaseq/treated_rep3_R1.fastq	backend/artifacts/examples/rnaseq/treated_rep3_R2.fastq

@@ -1,0 +1,131 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "provenance",
+  "id": "provenance-rnaseq_qc_de-run-20260318t193000z-deadbeef",
+  "run_id": "run-20260318T193000Z-deadbeef",
+  "created_at": "2026-03-18T19:37:00Z",
+  "source_workflow": "rnaseq_qc_de",
+  "related_artifacts": [
+    {
+      "artifact_type": "workflow_run",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/run.json",
+      "id": "workflow_run:run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "content_hash_manifest",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/content_hashes.json",
+      "id": "content-hashes-rnaseq_qc_de-run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "bundle_format": {
+    "primary_package": "ro_crate",
+    "ro_crate_version": "1.2",
+    "lineage_model": "prov_compatible"
+  },
+  "workflow": {
+    "workflow_id": "rnaseq_qc_de",
+    "name": "RNA-seq QC and Differential Expression",
+    "slug": "rnaseq_qc_de",
+    "version": "1.0.0",
+    "engine": "internal_dag_runner_v1",
+    "run_record_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/run.json",
+    "lifecycle_status": "completed",
+    "qc_status": "passed"
+  },
+  "terminal_state": {
+    "lifecycle_status": "completed",
+    "representation": "Completed runs include persisted inputs, outputs, and step lineage.",
+    "is_partial": false
+  },
+  "environment": {
+    "conda_env": "miniAgent",
+    "platform": "linux",
+    "python_version": "3.11.11"
+  },
+  "tool_versions": [
+    {
+      "name": "internal_dag_runner_v1",
+      "version": "1.0.0",
+      "agent_id": "agent-workflow-engine-internal_dag_runner_v1",
+      "source_artifact_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/run.json"
+    }
+  ],
+  "exports": {
+    "provenance_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/prov.json",
+    "ro_crate_metadata_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/ro-crate/ro-crate-metadata.json",
+    "exported_at": "2026-03-18T19:37:00Z"
+  },
+  "entity": {
+    "entity-run-record": {
+      "artifact_type": "workflow_run",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/run.json",
+      "artifact_id": "workflow_run:run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef",
+      "roles": [
+        "workflow_run",
+        "run_record"
+      ],
+      "hash": {
+        "algorithm": "sha256",
+        "digest": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "source_workflow": "rnaseq_qc_de"
+    },
+    "entity-content-hashes": {
+      "artifact_type": "content_hash_manifest",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/content_hashes.json",
+      "artifact_id": "content-hashes-rnaseq_qc_de-run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef",
+      "roles": [
+        "content_hash_manifest"
+      ],
+      "hash": null,
+      "source_workflow": "rnaseq_qc_de"
+    }
+  },
+  "activity": {
+    "activity-workflow-rnaseq_qc_de-run-20260318t193000z-deadbeef": {
+      "type": "workflow_run",
+      "workflow_id": "rnaseq_qc_de",
+      "workflow_name": "RNA-seq QC and Differential Expression",
+      "workflow_slug": "rnaseq_qc_de",
+      "workflow_version": "1.0.0",
+      "status": "completed",
+      "started_at": "2026-03-18T19:30:00Z",
+      "ended_at": "2026-03-18T19:37:00Z",
+      "used_entities": [],
+      "generated_entities": [
+        "entity-run-record"
+      ],
+      "warnings": [],
+      "errors": []
+    }
+  },
+  "agent": {
+    "agent-workflow-engine-internal_dag_runner_v1": {
+      "type": "software",
+      "name": "internal_dag_runner_v1",
+      "version": "1.0.0"
+    }
+  },
+  "used": [],
+  "wasGeneratedBy": [
+    {
+      "entity": "entity-run-record",
+      "activity": "activity-workflow-rnaseq_qc_de-run-20260318t193000z-deadbeef"
+    }
+  ],
+  "wasAssociatedWith": [
+    {
+      "activity": "activity-workflow-rnaseq_qc_de-run-20260318t193000z-deadbeef",
+      "agent": "agent-workflow-engine-internal_dag_runner_v1",
+      "role": "workflow_engine"
+    }
+  ],
+  "conforms_to": {
+    "ro_crate": "https://w3id.org/ro/crate/1.2",
+    "prov": "https://www.w3.org/TR/prov-overview/"
+  }
+}

@@ -1,436 +1,599 @@
-# miniOpenClaw
+# BioAPEX
 
-A lightweight, fully transparent AI Agent system. Built around file-first design (Markdown/JSON instead of vector databases), instruction-driven skills (plain Markdown instead of Python functions), and full visibility into every agent operation.
+BioAPEX is a transparent, file-first biologist-assistant system for scientific workflows, evidence synthesis, protocol support, compliance gating, and reproducible computational biology.
 
----
+This repository is no longer just a lightweight chat-agent prototype. The current codebase includes:
+
+- a typed SSE chat runtime with plan and verification helper-agent events
+- process-first turn rendering that stays consistent across live chat, reopened history, and turn inspection
+- policy-wrapped execution and inspection tools
+- multi-file memory with on-disk indexing
+- durable artifact schemas, registry, provenance, and audit layers
+- authored workflow specs and workflow runners
+- session token accounting plus a live usage inspector with tracked and in-flight estimates
+- a three-panel Next.js workspace for chat, files, sources, memory, skills, usage, and turn inspection
+- OMX v2 durable planning and execution state under `.omx/`
 
 ## Table of Contents
 
-- [Tech Stack](#tech-stack)
-- [Project Structure](#project-structure)
-- [Environment Setup](#environment-setup)
-- [Running the App](#running-the-app)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Path Conventions](#path-conventions)
+- [Repository Map](#repository-map)
 - [Backend Architecture](#backend-architecture)
 - [Frontend Architecture](#frontend-architecture)
-- [Core Data Flows](#core-data-flows)
-- [Key Design Decisions](#key-design-decisions)
-- [API Reference](#api-reference)
+- [Workflows Artifacts And Specs](#workflows-artifacts-and-specs)
+- [API Surface](#api-surface)
+- [Verification](#verification)
 
----
+## Quick Start
 
-## Tech Stack
+### Recommended helper scripts
 
-| Layer | Technology | Notes |
-|---|---|---|
-| Backend | FastAPI + Uvicorn | Async HTTP + SSE streaming |
-| Agent engine | LangChain 1.x `create_agent` | Not `AgentExecutor`; returns `CompiledStateGraph` |
-| LLM | DeepSeek via `ChatDeepSeek` | `langchain-deepseek` package |
-| RAG | LlamaIndex Core | Vector + BM25 hybrid search |
-| Embeddings | OpenAI `text-embedding-3-small` | Swappable via `OPENAI_BASE_URL` |
-| Token counting | tiktoken `cl100k_base` | Accurate token stats |
-| Frontend | Next.js 14 App Router | TypeScript + React 18 |
-| UI | Tailwind CSS + Shadcn/UI | Frosted glass / Apple aesthetic |
-| Code editor | Monaco Editor | In-browser editing of Memory/Skill files |
-| State | React Context | Single `AppProvider`, no Redux |
-| Storage | Local filesystem | JSON sessions + Markdown files, no database |
-
----
-
-## Project Structure
-
-```
-miniOpenClaw/
-├── backend/
-│   ├── app.py                    # FastAPI entry point, route registration, startup init
-│   ├── config.py                 # RAG mode config (config.json persistence)
-│   ├── requirements.txt
-│   ├── .env.example
-│   │
-│   ├── api/                      # Route layer
-│   │   ├── chat.py               # POST /api/chat — SSE streaming chat
-│   │   ├── sessions.py           # Session CRUD + title generation
-│   │   ├── files.py              # File read/write + skill listing
-│   │   ├── tokens.py             # Token counting
-│   │   ├── compress.py           # Manual conversation compression
-│   │   └── config_api.py         # RAG mode toggle
-│   │
-│   ├── graph/                    # Agent core
-│   │   ├── agent.py              # AgentManager — build & stream
-│   │   ├── session_manager.py    # Session persistence (JSON files) + auto-compression
-│   │   ├── prompt_builder.py     # System prompt assembler (6 components)
-│   │   └── memory_indexer.py     # MEMORY.md vector index with MD5-based persistence
-│   │
-│   ├── tools/                    # 5 core tools
-│   │   ├── __init__.py           # Tool factory — get_all_tools(base_dir)
-│   │   ├── terminal_tool.py      # Sandboxed shell execution
-│   │   ├── python_repl_tool.py   # Python interpreter
-│   │   ├── fetch_url_tool.py     # Web fetching (HTML → Markdown)
-│   │   ├── read_file_tool.py     # Sandboxed file reading
-│   │   ├── search_knowledge_tool.py  # Knowledge base hybrid search
-│   │   └── skills_scanner.py     # Skill directory scanner → SKILLS_SNAPSHOT.md
-│   │
-│   ├── workspace/                # System prompt components (editable)
-│   │   ├── SOUL.md               # Personality, tone, boundaries
-│   │   ├── IDENTITY.md           # Name, style
-│   │   ├── USER.md               # User profile
-│   │   └── AGENTS.md             # Operational protocols (memory & skill protocols)
-│   │
-│   ├── skills/                   # Skill directory (one subdirectory per skill)
-│   │   └── <name>/SKILL.md
-│   ├── memory/MEMORY.md          # Cross-session long-term memory
-│   ├── knowledge/                # Knowledge base documents (for RAG retrieval)
-│   ├── sessions/                 # Session JSON files (runtime, gitignored)
-│   │   └── archive/              # Compressed message archives
-│   ├── storage/                  # LlamaIndex persistent indexes (runtime, gitignored)
-│   │   └── memory_index/
-│   └── SKILLS_SNAPSHOT.md        # Auto-generated on startup (gitignored)
-│
-└── frontend/
-    └── src/
-        ├── app/
-        │   ├── layout.tsx
-        │   ├── page.tsx           # Main page (three-column layout)
-        │   └── globals.css
-        ├── lib/
-        │   ├── store.tsx          # React Context state management
-        │   ├── api.ts             # Backend API client (custom SSE parser)
-        │   ├── types.ts           # Shared TypeScript types
-        │   └── utils.ts           # Utility helpers
-        └── components/
-            ├── chat/
-            │   ├── ChatPanel.tsx
-            │   ├── ChatMessage.tsx
-            │   ├── ChatInput.tsx
-            │   ├── ThoughtChain.tsx    # Collapsible tool call visualization
-            │   └── RetrievalCard.tsx   # RAG retrieval result cards
-            ├── layout/
-            │   ├── Navbar.tsx
-            │   ├── Sidebar.tsx         # Session list + Raw Messages view
-            │   └── ResizeHandle.tsx    # Draggable panel dividers
-            └── editor/
-                └── InspectorPanel.tsx  # Monaco editor (Memory / Skills files)
-```
-
----
-
-## Environment Setup
-
-Copy `.env.example` to `.env` and fill in your API keys:
+The repo includes helper scripts that activate the `miniAgent` conda environment and start each app:
 
 ```bash
-cd backend
-cp .env.example .env
+./start-backend.sh
+./start-frontend.sh
 ```
 
-```env
-# DeepSeek — main agent LLM
-DEEPSEEK_API_KEY=sk-xxx
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-chat
-
-# OpenAI — embeddings only (can point to any compatible proxy)
-OPENAI_API_KEY=sk-xxx
-OPENAI_BASE_URL=https://api.openai.com/v1
-EMBEDDING_MODEL=text-embedding-3-small
-```
-
-`OPENAI_BASE_URL` can be pointed at any OpenAI-compatible embedding proxy.
-
----
-
-## Running the App
+### Manual startup
 
 ```bash
-# Backend (port 8002)
+conda activate miniAgent
+
+# Backend
 cd backend
 pip install -r requirements.txt
-uvicorn app:app --port 8002 --host 0.0.0.0 --reload
+# The uvicorn --host value is driven by the active production-hardening
+# posture: dev/hosted-strict → 127.0.0.1, trusted-lab → 0.0.0.0.
+uvicorn app:app --port 8002 \
+    --host "$(python -c 'import config; print(config.get_production_hardening_policy().host_binding)')" \
+    --reload
 
-# Frontend (port 3000)
+# Frontend
 cd frontend
 npm install
 npm run dev
 ```
 
-Access locally at `http://localhost:3000`, or from other devices on the same network at `http://<your-ip>:3000`.
+Frontend: `http://localhost:3000`
 
----
+Backend health check: `http://localhost:8002/`
+
+## Configuration
+
+### Environment variables
+
+Create `backend/.env` and provide the model credentials you want to use.
+
+The default runtime model split is:
+
+- executor: DeepSeek chat model
+- planner: OpenAI model
+- verifier: OpenAI model
+- title generation: OpenAI model
+- embeddings: OpenAI-compatible embedding endpoint
+
+Minimal example:
+
+```env
+DEEPSEEK_API_KEY=...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
+
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=https://api.openai.com/v1
+EMBEDDING_MODEL=text-embedding-3-small
+```
+
+Role-specific overrides follow the pattern:
+
+```text
+BIOAPEX_<ROLE>_PROVIDER
+BIOAPEX_<ROLE>_MODEL
+BIOAPEX_<ROLE>_API_KEY
+BIOAPEX_<ROLE>_BASE_URL
+BIOAPEX_<ROLE>_TEMPERATURE
+BIOAPEX_<ROLE>_STREAMING
+```
+
+Where `<ROLE>` is one of `EXECUTOR`, `PLANNER`, `VERIFIER`, or `TITLE`.
+
+### Runtime config
+
+`backend/config.json` controls repo-local runtime behavior such as:
+
+- `rag_mode`
+- prompt-context options such as optional git-context injection
+- tool policy settings
+- skill enablement and extra skill directories
+- read-file extra roots
+- per-role execution backend settings
+- production hardening and access defaults
+
+## Path Conventions
+
+Important: the running backend treats `backend/` as its project root.
+
+That means relative paths emitted in tool results and API payloads such as:
+
+- `artifacts/...`
+- `memory/...`
+- `skills/...`
+- `knowledge/...`
+- `storage/...`
+
+resolve on disk under `backend/`, for example:
+
+- `artifacts/...` -> `backend/artifacts/...`
+- `storage/...` -> `backend/storage/...`
+
+This is why artifact references inside session history and tool payloads look backend-relative even though the repo itself has a higher-level root.
+
+## Repository Map
+
+```text
+.
+├── backend/                 FastAPI app, runtime, tools, memory, artifacts, tests
+├── frontend/                Next.js app, React state, inspector and chat UI
+├── workflows/               Authored workflow specs and workflow runners
+├── context/                 Product context, feature specs, roadmaps, checklists
+├── .omx/                    OMX v2 plans, research, session, task, and review state
+├── start-backend.sh         Backend helper launcher
+├── start-frontend.sh        Frontend helper launcher
+└── AGENTS.md                Repo operating instructions
+```
+
+### Notable backend directories
+
+- `backend/api/`: HTTP routes for chat, access probing, sessions, files, token usage, and skill registry access
+- `backend/graph/`: agent manager, prompt building, session management, skill routing, memory indexing
+- `backend/runtime/`: query engine, turn ledger, model factory, session continuity and runtime helpers
+- `backend/tools/`: policy-wrapped tool implementations and tool registry metadata
+- `backend/skills/`: Markdown skill directories consumed by the runtime skill registry
+- `backend/memory/`: project, user, and agent memory files indexed for retrieval
+- `backend/knowledge/`: local knowledge base, caches, and authored scientific guidance
+- `backend/artifacts/`: artifact schemas, registry helpers, provenance/export logic, examples, and runtime outputs
+- `backend/storage/`: persisted indexes, audit logs, compliance logs, and artifact registry snapshots
+- `backend/tests/`: backend pytest coverage across runtime, artifacts, workflows, tools, and compliance
+- `backend/workspace/`: prompt-building documents such as `SOUL.md`, `IDENTITY.md`, `USER.md`, and `AGENTS.md`
+
+### Notable frontend directories
+
+- `frontend/src/app/`: Next.js app entrypoints
+- `frontend/src/components/chat/`: chat transcript, input, and process rail UI
+- `frontend/src/components/layout/`: app shell, navbar, sidebar, workspace panel, resize handles
+- `frontend/src/components/editor/`: inspector panel and turn details
+- `frontend/src/components/session/`: archived-turn and continuity summary UI
+- `frontend/src/components/preview/`: raw and structured file preview surfaces
+- `frontend/src/lib/`: API client, SSE parsing, reducers, shared types, store, and utilities
+- `frontend/src/test/`: contract and state-level tests
+- `frontend/e2e/`: Playwright end-to-end tests
 
 ## Backend Architecture
 
-### Startup sequence (`app.py` lifespan)
+### Startup flow
 
-1. Configure LlamaIndex embedding model (`text-embedding-3-small`)
-2. `skills_scanner.scan_skills()` — scans `skills/**/SKILL.md`, generates `SKILLS_SNAPSHOT.md`
-3. `agent_manager.initialize()` — creates `ChatDeepSeek` LLM instance, registers 5 tools
-4. `memory_indexer.rebuild_index()` — builds or loads the `MEMORY.md` vector index
+`backend/app.py` does four important things on startup:
 
-### Agent engine (`graph/`)
+1. loads `.env`
+2. configures the LlamaIndex embedding model
+3. scans skills and regenerates `backend/SKILLS_SNAPSHOT.md`
+4. initializes the agent manager and rebuilds the memory index
 
-#### `agent.py` — AgentManager
+### Core runtime layers
 
-The core singleton. The agent is **rebuilt on every request** via `_build_agent()` so that live workspace edits are always reflected in the system prompt.
+#### `backend/graph/agent.py`
 
-Key methods:
+`AgentManager` owns the role-based chat models, runtime tools, session manager, and memory indexer.
 
-| Method | Description |
-|---|---|
-| `initialize(base_dir)` | Creates `ChatDeepSeek` LLM, registers 5 tools, wires dependencies |
-| `_build_agent(rag_mode)` | Calls `build_system_prompt()` then `create_agent(llm, tools, system_prompt=…)` |
-| `astream(message, history)` | Streams typed event dicts; `history` is pre-loaded by `chat.py` |
+Key current behavior:
 
-`astream()` yields 7 SSE event types in order:
+- builds separate models for executor, planner, verifier, and title generation
+- rebuilds the LangChain agent on every request so prompt context and skill state stay fresh
+- injects retrieved memory in RAG mode
+- routes skill selection through the skill registry before building the system prompt
+- normalizes structured tool results before they enter the stream or session history
 
-```
-[RAG mode]   retrieval → token... → tool_start → tool_end → new_response → token... → done
-[Normal mode]            token... → tool_start → tool_end → new_response → token... → done
-```
+#### `backend/runtime/query_engine.py`
 
-#### `session_manager.py` — Session persistence
+`QueryEngine` is the turn-level runtime boundary between HTTP transport and model execution.
 
-Manages each session as a JSON file under `sessions/`. Key methods:
+It is responsible for:
 
-| Method | Description |
-|---|---|
-| `load_session(id)` | Returns the raw message array |
-| `load_session_for_agent(id)` | LLM-optimized: merges consecutive assistant messages, prepends `compressed_context` as a synthetic assistant message |
-| `save_message(id, role, content, tool_calls)` | Appends a message to the JSON file |
-| `compress_history(id, summary, n)` | Archives first n messages to `sessions/archive/`, stores summary in `compressed_context` |
-| `auto_compress_if_needed(id, llm, threshold=40)` | Compresses oldest 50% when message count ≥ threshold |
+- persisting the user message at the start of the turn
+- turning raw helper-tool completions into typed `plan_created`, `plan_updated`, and `verification_result` events
+- performing a single runtime-managed repair retry when verification asks for repair and config allows it
+- producing a finalized turn ledger for persistence
 
-#### `prompt_builder.py` — System prompt assembly
+#### `backend/runtime/chat_runtime.py`
 
-Six components assembled in order, each capped at 20,000 chars:
+`ChatRuntime` wraps the query engine for the SSE route.
 
-```
-① SKILLS_SNAPSHOT.md    — available skills list (auto-generated)
-② workspace/SOUL.md     — personality, tone, boundaries
-③ workspace/IDENTITY.md — name, style
-④ workspace/USER.md     — user profile
-⑤ workspace/AGENTS.md   — operational protocols
-⑥ memory/MEMORY.md      — long-term memory (replaced by RAG guidance string in RAG mode)
-```
+It currently:
 
-#### `memory_indexer.py` — MEMORY.md vector index
+- auto-compresses long sessions before the turn runs
+- loads LLM-optimized session history
+- assigns `request_id` and monotonic `event_index`
+- streams typed SSE payloads
+- persists assistant segments with typed blocks when the turn completes
 
-LlamaIndex index dedicated to `memory/MEMORY.md`, persisted to `storage/memory_index/`.
+### Prompt assembly
 
-- **Fast path**: on startup, if a `md5.txt` checksum matches the current file, loads the persisted index from disk (no re-embedding).
-- **Slow path**: if the file has changed, chunks the content, re-embeds, persists the new index and updates `md5.txt`.
-- **Runtime**: `_maybe_rebuild()` is called before every `retrieve()` — if MEMORY.md was edited (e.g. via the Monaco editor or `terminal`/`python_repl`), the index is automatically rebuilt.
+`backend/graph/prompt_builder.py` builds the system prompt from disk, not hidden in code.
 
-### 5 core tools (`tools/`)
+It pulls from:
 
-All inherit `BaseTool` and are registered via `get_all_tools(base_dir)`.
+- the generated skills snapshot
+- `workspace/SOUL.md`
+- `workspace/IDENTITY.md`
+- `workspace/USER.md`
+- `workspace/AGENTS.md`
+- project-level instruction files such as repo `AGENTS.md` and referenced context files
+- optional git status context
+- either direct memory content or RAG memory guidance, depending on `rag_mode`
 
-| Tool | File | Function | Safety |
-|---|---|---|---|
-| `terminal` | `terminal_tool.py` | Shell execution | Destructive command blacklist; CWD locked to project root; 30s timeout; 5,000 char output cap |
-| `python_repl` | `python_repl_tool.py` | Python execution | Wraps `langchain_experimental.tools.PythonREPLTool`; 5,000 char output cap |
-| `fetch_url` | `fetch_url_tool.py` | Web fetching | HTML→Markdown via `html2text`; 15s timeout; 5,000 char cap |
-| `read_file` | `read_file_tool.py` | File reading | `root_dir` path traversal protection; 10,000 char cap |
-| `search_knowledge_base` | `search_knowledge_tool.py` | Knowledge base search | Lazy index load; top-3 hybrid BM25+vector retrieval; persisted index |
+Important limits and behavior:
 
-### Skills system
+- prompt components are truncated to bounded sizes
+- project instruction context is additive and discovered from ancestor instruction files
+- retrieved memory is injected as background context rather than as verified current state
 
-Skills are pure Markdown instruction files (`skills/<name>/SKILL.md`) with YAML frontmatter. The agent reads a skill's `SKILL.md` via `read_file` at runtime — there are no Python functions per skill.
+### Tools
 
-On startup, `skills_scanner.py` scans all skills and generates `SKILLS_SNAPSHOT.md`, which is injected as the first component of the system prompt.
+The current default runtime toolset contains 15 tools:
 
-**SKILL.md format:**
-```yaml
----
-name: my_skill
-description: What this skill does
-version: 1.0
----
+- `terminal`
+- `python_repl`
+- `fetch_url`
+- `http_json`
+- `ncbi_eutils`
+- `evidence_retrieval`
+- `evidence_review`
+- `entity_grounding`
+- `plan_agent`
+- `verification_agent`
+- `uniprot_api`
+- `ensembl_api`
+- `read_file`
+- `write_file`
+- `search_knowledge_base`
 
-## Steps
-1. Use `fetch_url` to retrieve ...
-2. Parse the result with `python_repl` ...
-3. Reply to the user ...
-```
+The tool registry tracks structured policy metadata such as:
 
-The agent can create new skills autonomously via `terminal` or `python_repl` (e.g. `python -c "open('skills/new/SKILL.md','w').write(...)"`). New skills are picked up on the next request without a server restart.
+- access scope: `inspection`, `execution`, or `admin`
+- read-only vs destructive behavior
+- planner and verifier exposure
+- concurrency and interrupt behavior
+- output contract version
+- evidence expectations and activity/result summary hints
 
-### Session storage format
+### Skills
 
-`sessions/{session_id}.json`:
+Skills are Markdown-first and live under `backend/skills/<skill>/SKILL.md`.
 
-```json
-{
-  "title": "Weather query",
-  "created_at": 1706000000.0,
-  "updated_at": 1706000100.0,
-  "compressed_context": "User previously asked about weather...",
-  "messages": [
-    { "role": "user", "content": "What's the weather in Seattle?" },
-    {
-      "role": "assistant",
-      "content": "Let me check...",
-      "tool_calls": [
-        { "tool": "terminal", "input": "curl wttr.in/Seattle", "output": "..." }
-      ]
-    },
-    { "role": "assistant", "content": "Seattle is 58°F and cloudy." }
-  ]
-}
-```
+The runtime supports:
 
-Legacy v1 format (plain array) is auto-migrated to v2 on load.
+- an active skill summary at `/api/skills`
+- a richer registry with metadata at `/api/skills/registry`
+- config-driven skill enablement
+- optional extra skill directories
+- category and stage metadata in the registry
 
-### API layer (`api/`)
+#### Skill frontmatter schema
 
-#### `chat.py` — SSE streaming chat
+Every `SKILL.md` starts with a YAML frontmatter block. The scanner
+(`backend/tools/skills_scanner.py`) normalizes, validates, and surfaces
+the following fields in `SKILLS_SNAPSHOT.md`; fields marked "enforced"
+are also checked at tool dispatch time by `backend/tools/policy.py`.
 
-`POST /api/chat` is the core endpoint. Internal flow:
+Identity and routing:
 
-1. Check if this is the session's first message (for title generation)
-2. Auto-compress session if ≥ 40 messages (`auto_compress_if_needed`)
-3. Load and prepare history for the LLM (`load_session_for_agent`)
-4. Stream events from `agent_manager.astream(message, history)`
-5. On `done`: persist user message + each assistant segment to the session file
-6. On first message: generate a short English title via a second LLM call, emit `title` event
+- `name` (string) — unique skill identifier.
+- `description` (string) — one-line summary shown to the model.
+- `category` (string) — e.g. `bio/literature`, `bio/compute`.
+- `tags`, `aliases` (list[str]) — free-form routing hints.
+- `paths` (list[str]) — path globs that activate the skill when matched
+  against the current query or recent turn artifacts.
+- `effort` (enum: `low` | `medium` | `high`).
+- `version` (string).
 
-SSE event types:
+Biology metadata (required for `bio/*` user-invocable skills):
 
-| Event | Payload fields | When |
-|---|---|---|
-| `retrieval` | `query`, `results` | RAG retrieval complete (RAG mode only) |
-| `token` | `content` | Each LLM output token |
-| `tool_start` | `tool`, `input` | Before a tool call |
-| `tool_end` | `tool`, `output` | After a tool returns |
-| `new_response` | — | Agent starts new text segment after tool use |
-| `done` | `content`, `session_id` | Full turn complete |
-| `title` | `session_id`, `title` | Auto-generated title (first message only) |
-| `error` | `error` | Unhandled exception |
+- `species`, `modality`, `stage`.
+- `stability` (enum: `stable` | `evolving` | `experimental`).
+- `safety_level` (enum: `low` | `medium` | `high`).
 
----
+Tool surface:
+
+- `requires_tools` (list[str]) — *declared* tools the skill uses. Used
+  for documentation, routing, and to assert the skill doesn't depend on
+  tools that don't exist in this build.
+- `tools_allowed` (list[str], **enforced**) — allowlist that restricts
+  the tool surface for the duration a skill is active. When at least
+  one active skill declares a non-empty `tools_allowed`, tool dispatch
+  is confined to the union of declarations across active skills; calls
+  outside that union are blocked with
+  `block_reason="skill_tools_allowed_violation"`. Skills that omit
+  `tools_allowed` contribute nothing to the union and impose no
+  restriction on their own.
+
+Exposure (advisory, surfaced in `SKILLS_SNAPSHOT.md`):
+
+- `planner_visible` (bool, default `true`) — set `false` to hide the
+  skill from the planner helper.
+- `verifier_visible` (bool, default `true`) — set `false` to hide the
+  skill from the verifier helper.
+- `user_invocable` (bool, default `true`).
+
+Runtime gating:
+
+- `required_env` (list[str]) — environment variable names whose
+  presence (non-empty) is a precondition for routing. If any are
+  missing the skill is dropped from selection at turn time; the skill
+  never becomes active and its `tools_allowed` contract is not
+  consulted. Provide names only, not `NAME=value` pairs.
+- `requires_network` (bool).
+- `min_posture` (enum: `inspection` | `execution` | `admin`) —
+  declarative metadata describing the minimum runtime posture a skill
+  expects. Currently advisory and surfaced in the snapshot.
+- `risk_tier` (enum: `low` | `medium` | `high`) — declarative blast
+  radius hint for review tooling; surfaced in the snapshot.
+
+### Memory and knowledge
+
+The memory layer is now multi-file rather than a single `MEMORY.md` only.
+
+Important pieces:
+
+- `backend/memory/project/`
+- `backend/memory/user/`
+- `backend/memory/agent/`
+- `backend/memory/MEMORY.md` as a compatibility and shared-memory surface
+
+Any write under `memory/` triggers a rebuild of the memory index.
+
+The knowledge layer lives under `backend/knowledge/` and includes local scientific guidance plus cached retrieval content such as PubMed and UniProt material.
+
+### Sessions and continuity
+
+Sessions are stored as JSON under `backend/sessions/`.
+
+Current session behavior:
+
+- raw history is persisted with additive typed content blocks
+- consecutive assistant messages are merged before prompt assembly
+- saved history is normalized with the same process-first helper-text cleanup used for live turns
+- verification-retry assistant clusters collapse into one visible final response while preserving process artifacts
+- older history is auto-compressed when the session reaches 40 messages
+- compressed history is summarized into a structured scientific continuity block
+- archived raw message batches are stored under `backend/sessions/archive/`
+- archived summaries can be reopened later through the UI and session APIs
+- the first completed turn in a default-titled session can trigger background title generation
+
+This replaces the older README story about a manual `/compress` endpoint. The current app uses auto-compression plus continuity and archive inspection endpoints.
+
+### Access control
+
+The backend now has explicit route access scopes.
+
+When production hardening is configured, routes may require:
+
+- loopback access
+- inspection bearer token
+- execution bearer token
+- admin bearer token
+
+The frontend probes access modes through `/api/access/probe`.
 
 ## Frontend Architecture
 
-Three-column IDE layout with draggable dividers:
+The frontend is a Next.js 14 App Router application with React Context for runtime state.
 
-```
-┌────────────────────────────────────────────────────────┐
-│                      Navbar                            │
-├──────────┬─────────────────────────┬───────────────────┤
-│          │                         │                   │
-│ Sidebar  │      ChatPanel          │  InspectorPanel   │
-│          │                         │                   │
-│ Sessions │  Message bubbles        │  Memory / Skills  │
-│          │  ├─ ThoughtChain        │  file list        │
-│ Raw Msgs │  ├─ RetrievalCard       │  Monaco editor    │
-│ RAG mode │  └─ Markdown content   │  Token stats      │
-│          │                         │                   │
-│          │  ChatInput              │                   │
-├──────────┴─────────────────────────┴───────────────────┤
-│                  ResizeHandle (draggable)               │
-└────────────────────────────────────────────────────────┘
-```
+### Main UI shell
 
-- **`store.tsx`**: Single React Context (`AppProvider`) — sessions, messages, streaming state, RAG mode, panel widths
-- **`api.ts`**: Custom SSE parser for `POST /api/chat` (the browser's `EventSource` only supports GET); `API_BASE` uses `window.location.hostname` for automatic LAN/local adaptation
-- **`types.ts`**: Shared TypeScript interfaces (`Message`, `Session`, `ToolCall`, etc.)
-- **`utils.ts`**: Utility helpers (class merging, formatting)
+`frontend/src/components/layout/AppShell.tsx` renders a three-panel workspace:
 
----
+- left sidebar: sessions and workspace navigation
+- center workspace: live chat and session history
+- right inspector: files, sources, memory, skills, usage, and turn details
 
-## Core Data Flows
+The sidebar and inspector widths are draggable.
 
-### Sending a message
+### State and API client
 
-```
-Frontend                              Backend
-│
-├─ store.sendMessage(text)
-│   └─ streamChat(text, sessionId) ──→ POST /api/chat
-│                                       │
-│                                       ├─ auto_compress_if_needed()
-│                                       ├─ load_session_for_agent()
-│                                       └─ agent_manager.astream(message, history)
-│                                           │
-│                                           ├─ [RAG] memory_indexer.retrieve()
-│                                           │   └─ yield retrieval event
-│                                           ├─ _build_agent()
-│                                           │   ├─ build_system_prompt()
-│                                           │   └─ create_agent(llm, tools, system_prompt)
-│                                           └─ agent.astream_events(messages)
-│ ← SSE: token ──────────────────────────────  ├─ yield token / tool_start / tool_end
-│ ← SSE: tool_start / tool_end ─────────────   └─ yield done
-│ ← SSE: done ───────────────────────────── save_message()
-│ ← SSE: title ──────────────────────────── [first msg] _generate_title()
-│
-└─ update messages state + refresh sessions
-```
+The main frontend runtime lives in:
 
-### Conversation compression
+- `frontend/src/lib/store.tsx`
+- `frontend/src/lib/api.ts`
+- `frontend/src/lib/types.ts`
+- `frontend/src/lib/chat-stream-reducer.ts`
+- `frontend/src/lib/message-blocks.ts`
 
-```
-User clicks compress ──→ POST /api/sessions/{id}/compress
-                          │
-                          ├─ Take first 50% of messages (min 4)
-                          ├─ DeepSeek generates English summary (≤500 chars)
-                          ├─ Archive originals → sessions/archive/{id}_{ts}.json
-                          └─ Store summary in compressed_context
+Current responsibilities include:
 
-Next agent call ──→ load_session_for_agent()
-                    └─ Prepend synthetic assistant message:
-                       "[Summary of previous conversation]\n{summary}"
-```
+- access-scope bootstrapping and bearer-token handling
+- session list, session history, and continuity-summary loading
+- abortable custom POST-based SSE parsing for `/api/chat`
+- optimistic live assistant messages
+- typed stream-event reduction into process-first UI state
+- live session-usage summary fetching and tracked-plus-estimated aggregation
+- file preview and inspector path state
 
-### Agent self-updating memory and skills
+### Chat UX
 
-```
-Update memory:
-  Agent reads  → read_file("memory/MEMORY.md")
-  Agent writes → terminal("python -c \"open('memory/MEMORY.md','w').write(...)\"")
-               → memory_indexer MD5 check detects change on next retrieve()
-               → index rebuilt automatically
+The current chat surface is process-first rather than terminal-log style.
 
-Create a skill:
-  Agent writes → terminal("mkdir -p skills/<name> && cat > skills/<name>/SKILL.md << 'EOF' ...")
-               → new skill picked up on next request (agent rebuilt per request)
-```
+The composer can stop an in-flight response, and saved or retried assistant turns are normalized so planning and verification activity stays visible without duplicating final answers.
 
----
+Important surfaces:
 
-## Key Design Decisions
+- `ChatMessage.tsx`: markdown answer rendering plus normalized process rail handling
+- `TurnActivityFeed.tsx`: live tool, retrieval, plan, verification, and helper-trace activity
+- `SessionHistorySummary.tsx`: compacted older turns plus reopenable archived summaries with the same process-first normalization as live chat
+- `TurnDetailsPanel.tsx`: request-scoped deep inspection with a single normalized response view per assistant turn
 
-| Decision | Rationale |
-|---|---|
-| `create_agent` instead of `AgentExecutor` | LangChain 1.x recommended API; returns `CompiledStateGraph` with native `astream_events` support |
-| Agent rebuilt on every request | Ensures system prompt always reflects live workspace edits with zero extra infrastructure |
-| 5 tools, no dedicated `write_file` | Agent uses `terminal` or `python_repl` for writes — more flexible and consistent with shell-first philosophy |
-| File-first instead of database | Zero deployment friction; all state is human-readable and version-controllable |
-| Skills = Markdown instructions | Agent reads and follows them autonomously — no new Python code per skill |
-| MD5-based memory index persistence | Avoids re-embedding on every startup; stale index auto-rebuilt when file changes |
-| Multi-segment responses stored separately | Faithfully preserves tool-call context; Raw Messages view shows full detail |
-| System prompt components capped at 20K chars | Prevents `MEMORY.md` bloat from overflowing the context window |
-| RAG results not persisted | Avoids session file bloat; retrieval context is per-request only |
-| Path whitelists + traversal detection | Double protection on both `read_file` tool and the `/api/files` endpoint |
-| `window.location.hostname` for API base | Single build works for both localhost and LAN access without configuration |
-| Auto-compression at 40 messages | Keeps active context manageable; older history archived with English summary |
+### Inspector UX
 
----
+`InspectorPanel.tsx` now exposes dedicated tabs for:
 
-## API Reference
+- Files
+- Sources
+- Memory
+- Skills
+- Usage
+- Turns
 
-| Path | Method | Description |
+This panel handles:
+
+- raw file reads and saves through `/api/files`
+- structured file previews
+- source and compliance inspection
+- memory editing
+- skill registry inspection
+- live token totals, input/output/tool breakdowns, context-window pressure, and tokenizer provenance
+- transcript export
+
+## Workflows Artifacts And Specs
+
+### Workflow specs
+
+Authored workflow specs live under the repo-root `workflows/` directory.
+
+Current examples include:
+
+- `workflows/rna-seq-qc.yaml`
+- `workflows/rnaseq_qc_de.yaml`
+- `workflows/perturb-seq-nextflow.yaml`
+
+Supporting runners and templates live under:
+
+- `workflows/runners/`
+- `workflows/report_templates/`
+
+### Artifact and storage model
+
+BioAPEX is intentionally file-first.
+
+The artifact layer covers:
+
+- canonical run-directory naming
+- artifact registry updates
+- provenance export
+- BioCompute export
+- ELN export
+- schema-backed artifact documents
+
+Operationally, live outputs and registries are stored under backend-relative paths such as:
+
+- `backend/artifacts/...`
+- `backend/storage/artifact_registry/...`
+- `backend/storage/audit/...`
+- `backend/storage/compliance_audit/...`
+- `backend/storage/memory_index/...`
+
+### Specs and durable project context
+
+Two repo areas matter for feature work and documentation:
+
+- `context/features/`: numbered feature specs that describe the intended product surface
+- `.omx/`: OMX v2 plans, research notes, tasks, reviews, and team state
+
+## API Surface
+
+### Root
+
+| Method | Path | Notes |
 |---|---|---|
-| `/api/chat` | POST | SSE streaming chat |
-| `/api/sessions` | GET | List all sessions |
-| `/api/sessions` | POST | Create new session |
-| `/api/sessions/{id}` | PUT | Rename session |
-| `/api/sessions/{id}` | DELETE | Delete session |
-| `/api/sessions/{id}/messages` | GET | Full messages (including system prompt) |
-| `/api/sessions/{id}/history` | GET | Conversation history (with tool calls) |
-| `/api/sessions/{id}/generate-title` | POST | AI-generated English title |
-| `/api/sessions/{id}/compress` | POST | Manually compress conversation history |
-| `/api/files?path=` | GET | Read file (whitelist-protected) |
-| `/api/files` | POST | Save file — triggers memory index rebuild if `MEMORY.md` |
-| `/api/skills` | GET | List available skills |
-| `/api/tokens/session/{id}` | GET | Session token count (system + messages) |
-| `/api/tokens/files` | POST | Batch file token count |
-| `/api/config/rag-mode` | GET | Get RAG mode status |
-| `/api/config/rag-mode` | PUT | Toggle RAG mode |
+| `GET` | `/` | Health check returning backend status |
+
+### Access
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/access/probe?scope=inspection|execution|admin` | Returns how the current request is authorized |
+
+### Chat
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/api/chat` | SSE chat endpoint with typed events and per-turn `request_id` / `event_index` |
+
+Current emitted SSE event types:
+
+- `retrieval`
+- `token`
+- `tool_start`
+- `tool_end`
+- `plan_created`
+- `plan_updated`
+- `verification_result`
+- `new_response`
+- `done`
+- `error`
+
+### Sessions
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/sessions` | List sessions |
+| `POST` | `/api/sessions` | Create a session |
+| `PUT` | `/api/sessions/{session_id}` | Rename a session |
+| `DELETE` | `/api/sessions/{session_id}` | Delete a session and clear runtime state |
+| `GET` | `/api/sessions/{session_id}/history` | Raw stored history with typed content blocks |
+| `GET` | `/api/sessions/{session_id}/continuity` | Structured summaries for compressed older history |
+| `GET` | `/api/sessions/{session_id}/archives/{archive_id}` | Load one archived history batch |
+| `GET` | `/api/sessions/{session_id}/files/summary` | Session-scoped file workspace summary |
+| `POST` | `/api/sessions/{session_id}/generate-title` | Generate a title from the first user prompt |
+
+### Files and skills
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/files?path=...` | Read whitelisted file content |
+| `GET` | `/api/files/raw?path=...` | Read raw file bytes or rewritten schema JSON |
+| `POST` | `/api/files` | Save allowed files under workspace, memory, skills, or knowledge |
+| `GET` | `/api/skills` | Active runtime-selected skill summary |
+| `GET` | `/api/skills/registry` | Full runtime skill registry with metadata |
+
+### Tokens
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/tokens/session/{session_id}` | Session-level token stats with system, input, output, tool, context-window, and tokenizer metadata |
+| `POST` | `/api/tokens/files` | Batch token counts for whitelisted repo-relative workspace, memory, skill, or knowledge paths |
+
+## Verification
+
+### Backend
+
+```bash
+conda activate miniAgent
+cd backend
+python -m pytest
+```
+
+### Frontend
+
+```bash
+conda activate miniAgent
+cd frontend
+npm run typecheck
+npm test
+npm run lint
+```
+
+### End-to-end
+
+```bash
+conda activate miniAgent
+cd frontend
+npm run test:e2e
+```
+
+## Notes For Contributors
+
+- Prefer the repo context files under `context/` over stale mental models.
+- Treat `backend/` as the runtime root when debugging file paths.
+- Keep `README.md` aligned with `backend/app.py`, `backend/api/*`, `backend/tools/*`, `backend/graph/*`, `frontend/package.json`, and the current workflow/spec layout.

@@ -22,3 +22,8 @@ html2text>=2020.1.16
 httpx>=0.27.0
 pydantic>=2.0.0
 PyYAML>=6.0
+
+# BioCompute reference-schema validation uses the modern jsonschema registry API
+# and imports `referencing` directly.
+jsonschema>=4.18.0
+referencing>=0.28.4

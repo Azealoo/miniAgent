@@ -1,0 +1,35 @@
+id: data_file_parsing
+name: Data file parsing
+description: >-
+  Agent should parse a concrete data file from disk and report structural
+  facts about it, using a file-reading or compute tool rather than guessing.
+tags: [data, parsing]
+
+input:
+  prompt: >-
+    Open the file `workflows/rna-seq-qc.yaml` in this repository. Report:
+    the top-level keys in the YAML, how many steps the workflow defines,
+    and the name of each step in execution order. If the file does not
+    exist at that path, say so explicitly and list the YAML files that do
+    exist under `workflows/`.
+
+expected_tool_sequence:
+  # Parsing a concrete file requires read_file (to pull the bytes) or
+  # python_repl (to parse them). Either alone is acceptable.
+  regex: "(^|\\b)(read_file|python_repl)(\\b|$)"
+  description: Uses read_file and/or python_repl to open and parse the file.
+
+rubric:
+  - id: grounded_in_file
+    question: >-
+      Does the answer describe the file's actual contents (real top-level
+      keys, a real step count, real step names as they appear in the file)
+      rather than a plausible-sounding but generic schema?
+    max_score: 5
+  - id: handles_missing_file_cleanly
+    question: >-
+      If the agent reports that the file is missing, does it back the
+      claim with a concrete tool result (e.g. an error output from
+      read_file, or a listing of the workflows/ directory) rather than
+      just asserting absence?
+    max_score: 3

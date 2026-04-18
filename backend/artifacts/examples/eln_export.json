@@ -1,0 +1,183 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "eln_export",
+  "id": "eln-export-rnaseq_qc_de-run-20260318t193000z-deadbeef",
+  "run_id": "run-20260318T193000Z-deadbeef",
+  "created_at": "2026-03-18T19:37:00Z",
+  "source_workflow": "rnaseq_qc_de",
+  "related_artifacts": [
+    {
+      "artifact_type": "workflow_run",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/run.json",
+      "id": "workflow_run:run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "dataset_manifest",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+      "id": "dataset-manifest-rnaseq-qc-de-run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "report_bundle_manifest",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/report-bundle/report_bundle_manifest.json",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "report_bundle",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/report-bundle/rnaseq_report_bundle.md",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "provenance",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/prov.json",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "ro_crate_metadata",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/ro-crate/ro-crate-metadata.json",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "evidence_review",
+      "path": "artifacts/evidence-review/2026-03-18/run-20260318T193000Z-deadbeef/evidence_review.json",
+      "id": "evidence-review-run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "bundle_version": "1.0.0",
+  "scope": "workflow_run_bundle",
+  "package_root": "bioapex-eln-export",
+  "workflow_version": "1.0.0",
+  "lifecycle_status": "completed",
+  "qc_status": "passed",
+  "workflow_run": {
+    "artifact_type": "workflow_run",
+    "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/run.json",
+    "id": "workflow_run:run-20260318t193000z-deadbeef",
+    "run_id": "run-20260318T193000Z-deadbeef"
+  },
+  "dataset_manifest": {
+    "artifact_type": "dataset_manifest",
+    "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+    "id": "dataset-manifest-rnaseq-qc-de-run-20260318t193000z-deadbeef",
+    "run_id": "run-20260318T193000Z-deadbeef"
+  },
+  "report_bundle_manifest": {
+    "artifact_type": "report_bundle_manifest",
+    "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/report-bundle/report_bundle_manifest.json",
+    "run_id": "run-20260318T193000Z-deadbeef"
+  },
+  "report_bundle": {
+    "artifact_type": "report_bundle",
+    "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/report-bundle/rnaseq_report_bundle.md",
+    "run_id": "run-20260318T193000Z-deadbeef"
+  },
+  "protocol_run": null,
+  "provenance_exports": [
+    {
+      "artifact_type": "provenance",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/prov.json",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "ro_crate_metadata",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/ro-crate/ro-crate-metadata.json",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "biocompute_exports": [
+    {
+      "artifact_type": "biocompute",
+      "path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/biocompute.json",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "evidence_review_artifacts": [
+    {
+      "artifact_type": "evidence_review",
+      "path": "artifacts/evidence-review/2026-03-18/run-20260318T193000Z-deadbeef/evidence_review.json",
+      "id": "evidence-review-run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "included_artifacts": [
+    {
+      "role": "workflow_run",
+      "artifact_type": "workflow_run",
+      "source_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/run.json",
+      "package_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/run.json",
+      "id": "workflow_run:run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "role": "content_hash_manifest",
+      "artifact_type": "content_hash_manifest",
+      "source_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/content_hashes.json",
+      "package_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/content_hashes.json",
+      "id": "content-hashes-rnaseq_qc_de-run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "role": "dataset_manifest",
+      "artifact_type": "dataset_manifest",
+      "source_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+      "package_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+      "id": "dataset-manifest-rnaseq-qc-de-run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef",
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    {
+      "role": "report_bundle_manifest",
+      "artifact_type": "report_bundle_manifest",
+      "source_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/report-bundle/report_bundle_manifest.json",
+      "package_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/report-bundle/report_bundle_manifest.json",
+      "run_id": "run-20260318T193000Z-deadbeef",
+      "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+    },
+    {
+      "role": "report_bundle",
+      "artifact_type": "report_bundle",
+      "source_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/report-bundle/rnaseq_report_bundle.md",
+      "package_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/report-bundle/rnaseq_report_bundle.md",
+      "run_id": "run-20260318T193000Z-deadbeef",
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    {
+      "role": "provenance_export",
+      "artifact_type": "provenance",
+      "source_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/prov.json",
+      "package_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/prov.json",
+      "run_id": "run-20260318T193000Z-deadbeef",
+      "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+    },
+    {
+      "role": "provenance_export",
+      "artifact_type": "ro_crate_metadata",
+      "source_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/ro-crate/ro-crate-metadata.json",
+      "package_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/ro-crate/ro-crate-metadata.json",
+      "run_id": "run-20260318T193000Z-deadbeef",
+      "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+    }
+  ],
+  "missing_artifacts": [
+    {
+      "artifact_type": "protocol_run",
+      "expected_source_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/protocol_run.yaml",
+      "expected_package_path": "artifacts/rnaseq_qc_de/2026-03-18/run-20260318T193000Z-deadbeef/protocol_run.yaml",
+      "reason": "No protocol_run artifact was available for this workflow run."
+    }
+  ],
+  "unsupported_fields": [
+    {
+      "field_name": "vendor_specific_eln_metadata",
+      "reason": "ELN Export V1 uses a portable bundle and does not emit vendor-specific notebook fields."
+    }
+  ],
+  "notes": [
+    "The archive preserves canonical artifacts/... paths so linked manifests stay portable without rewrite logic.",
+    "Only persisted on-disk artifacts are packaged into ELN Export V1."
+  ]
+}

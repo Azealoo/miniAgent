@@ -1,0 +1,25 @@
+{
+  "updated_at": "2026-04-02T00:00:00Z",
+  "topic": "backend_harness_leverage",
+  "facts": [
+    "The backend app surface is now intentionally chat-engine-only: app.py keeps only chat, access, sessions, and files routers.",
+    "QueryEngine is now the main ordinary-turn runtime boundary for compliance preflight, evidence gating, helper-agent event extraction, and the harness loop.",
+    "TurnLedger is now the best persistence boundary for assistant segments and typed transcript blocks.",
+    "Layered runtime config already exists across defaults, user, project, and local files, but its provenance is not yet exposed operationally.",
+    "PythonReplTool now keys interpreter state by session id, which fixes the earlier process-global REPL leakage risk.",
+    "The biggest remaining harness concentration point is backend/api/chat.py, which still owns SSE shaping, tool audit emission, final turn persistence, and observability."
+  ],
+  "sources": [
+    "backend/app.py",
+    "backend/runtime/query_engine.py",
+    "backend/runtime/turn_ledger.py",
+    "backend/api/chat.py",
+    "backend/runtime_config.py",
+    "backend/config.py",
+    "backend/tools/policy.py",
+    "backend/tools/registry.py",
+    "backend/runtime/helper_agent_runner.py",
+    "backend/tools/python_repl_tool.py",
+    "backend/tests/test_chat_engine_health.py"
+  ]
+}

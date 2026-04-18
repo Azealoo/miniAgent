@@ -1,0 +1,283 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "workflow_run",
+  "id": "workflow-run-rna-seq-qc-20260318",
+  "run_id": "run-20260318T193000Z-deadbeef",
+  "created_at": "2026-03-18T19:30:00Z",
+  "source_workflow": "internal-dag-runner",
+  "related_artifacts": [
+    {
+      "artifact_type": "dataset_manifest",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+      "id": "ds-norman-perturb-seq-v1",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "workflow": {
+    "name": "RNA Seq QC",
+    "slug": "rna-seq-qc"
+  },
+  "lifecycle_status": "completed",
+  "qc_status": "warning",
+  "engine": "internal_dag_runner_v1",
+  "parameters": {
+    "min_genes": 200,
+    "doublet_method": "scrublet"
+  },
+  "environment": {
+    "conda_env": "miniAgent",
+    "python_version": "3.11",
+    "platform": "linux"
+  },
+  "inputs": [
+    {
+      "artifact_type": "dataset_manifest",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+      "id": "ds-norman-perturb-seq-v1",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "outputs": [
+    {
+      "artifact_type": "checklist_results",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/checklist_results.json",
+      "id": "checklist-results-rna-seq-qc-20260318",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "qa_report",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/qa_report.json",
+      "id": "qa-rna-seq-qc-20260318",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "steps": [
+    {
+      "id": "preflight-check",
+      "name": "Preflight Check",
+      "status": "preflight_checked",
+      "start_time": "2026-03-18T19:30:00Z",
+      "end_time": "2026-03-18T19:31:00Z",
+      "inputs_resolved": [
+        {
+          "artifact_type": "dataset_manifest",
+          "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+          "id": "ds-norman-perturb-seq-v1",
+          "run_id": "run-20260318T193000Z-deadbeef"
+        }
+      ],
+      "outputs_produced": [],
+      "warnings": [],
+      "errors": []
+    },
+    {
+      "id": "qc-summary",
+      "name": "QC Summary",
+      "status": "completed",
+      "start_time": "2026-03-18T19:31:00Z",
+      "end_time": "2026-03-18T19:36:00Z",
+      "inputs_resolved": [
+        {
+          "artifact_type": "dataset_manifest",
+          "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+          "id": "ds-norman-perturb-seq-v1",
+          "run_id": "run-20260318T193000Z-deadbeef"
+        }
+      ],
+      "outputs_produced": [
+        {
+          "artifact_type": "checklist_results",
+          "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/checklist_results.json",
+          "id": "checklist-results-rna-seq-qc-20260318",
+          "run_id": "run-20260318T193000Z-deadbeef"
+        },
+        {
+          "artifact_type": "qa_report",
+          "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/qa_report.json",
+          "id": "qa-rna-seq-qc-20260318",
+          "run_id": "run-20260318T193000Z-deadbeef"
+        }
+      ],
+      "warnings": [
+        "median UMI count trended below reference baseline"
+      ],
+      "errors": [],
+      "external_execution": {
+        "adapter_version": "external_workflow_adapter_v1",
+        "engine_name": "command",
+        "engine_version": "qc-summary-tool 1.2.0",
+        "execution_profile": "local",
+        "entrypoint": "workflows/runners/rna_seq_qc.py",
+        "command": "python -m workflows.runners.rna_seq_qc --dataset_manifest artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml",
+        "argv": [
+          "python",
+          "-m",
+          "workflows.runners.rna_seq_qc",
+          "--dataset_manifest",
+          "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml"
+        ],
+        "working_directory": ".",
+        "input_bindings": {
+          "dataset_manifest": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/dataset_manifest.yaml"
+        },
+        "output_locations": [
+          "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/checklist_results.json",
+          "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/qa_report.json"
+        ],
+        "environment_references": [
+          "profile:local"
+        ],
+        "environment_keys": [
+          "BIOAPEX_RUN_ID",
+          "BIOAPEX_INPUT_DATASET_MANIFEST"
+        ],
+        "job_records": [],
+        "normalized_status": "completed",
+        "return_code": 0
+      }
+    }
+  ],
+  "provenance_exports": [
+    "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/prov.json",
+    "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/ro-crate/ro-crate-metadata.json"
+  ],
+  "biocompute_exports": [],
+  "eln_exports": [],
+  "qc_policies": [
+    {
+      "policy_id": "scrna-default-qc",
+      "label": "Single-cell default QC policy",
+      "version": "1.0.0",
+      "assay_type": "scrna_seq",
+      "required_upstream_tools": [
+        "fastqc",
+        "multiqc"
+      ],
+      "checks": [
+        {
+          "id": "median-genes-per-cell",
+          "label": "Median genes per cell",
+          "metric_name": "median_genes_per_cell",
+          "category": "technical",
+          "comparison": "minimum",
+          "pass_threshold": 300.0,
+          "warn_threshold": 200.0,
+          "description": "Single-cell libraries should retain enough detected genes per cell for downstream interpretation."
+        },
+        {
+          "id": "mitochondrial-percentage",
+          "label": "Mitochondrial fraction",
+          "metric_name": "pct_counts_mito",
+          "category": "technical",
+          "comparison": "maximum",
+          "pass_threshold": 20.0,
+          "warn_threshold": 25.0,
+          "description": "High mitochondrial content can indicate damaged or dying cells."
+        },
+        {
+          "id": "donor-balance",
+          "label": "Donor balance ratio",
+          "metric_name": "donor_balance_ratio",
+          "category": "batch_effect",
+          "comparison": "minimum",
+          "pass_threshold": 0.8,
+          "warn_threshold": 0.6,
+          "description": "Strong donor imbalance should be surfaced distinctly from technical QC failures."
+        }
+      ],
+      "assay_overrides": [
+        {
+          "assay_type": "perturb_seq",
+          "check_overrides": [
+            {
+              "check_id": "median-genes-per-cell",
+              "pass_threshold": 350.0,
+              "warn_threshold": 250.0
+            }
+          ]
+        }
+      ],
+      "notes": "Starting-point thresholds should be reviewed against assay-specific distributions before hard filtering."
+    }
+  ],
+  "qc_policy_results": [
+    {
+      "policy_id": "scrna-default-qc",
+      "label": "Single-cell default QC policy",
+      "version": "1.0.0",
+      "assay_type": "perturb_seq",
+      "applied_assay_override": "perturb_seq",
+      "gate_id": "evaluate-scrna-policy",
+      "stage": "after_step",
+      "required_upstream_tools": [
+        "fastqc",
+        "multiqc"
+      ],
+      "missing_upstream_tools": [],
+      "overall_status": "warn",
+      "checks": [
+        {
+          "check_id": "median-genes-per-cell",
+          "label": "Median genes per cell",
+          "metric_name": "median_genes_per_cell",
+          "category": "technical",
+          "status": "pass",
+          "observed_value": 412,
+          "threshold": ">= 350 pass; >= 250 warn",
+          "source_artifact": {
+            "artifact_type": "qa_report",
+            "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/qa_report.json"
+          },
+          "message": "median_genes_per_cell=412 met >= 350."
+        },
+        {
+          "check_id": "mitochondrial-percentage",
+          "label": "Mitochondrial fraction",
+          "metric_name": "pct_counts_mito",
+          "category": "technical",
+          "status": "pass",
+          "observed_value": 18.4,
+          "threshold": "<= 20 pass; <= 25 warn",
+          "source_artifact": {
+            "artifact_type": "qa_report",
+            "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/qa_report.json"
+          },
+          "message": "pct_counts_mito=18.4 met <= 20."
+        },
+        {
+          "check_id": "donor-balance",
+          "label": "Donor balance ratio",
+          "metric_name": "donor_balance_ratio",
+          "category": "batch_effect",
+          "status": "warn",
+          "observed_value": 0.74,
+          "threshold": ">= 0.8 pass; >= 0.6 warn",
+          "source_artifact": {
+            "artifact_type": "qa_report",
+            "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/qa_report.json"
+          },
+          "message": "donor_balance_ratio=0.74 did not meet >= 0.8."
+        }
+      ],
+      "summary": "Single-cell default QC policy [warn] Batch-effect warnings: donor_balance_ratio=0.74 did not meet >= 0.8."
+    }
+  ],
+  "qc_summary": "Single-cell default QC policy [warn] Batch-effect warnings: donor_balance_ratio=0.74 did not meet >= 0.8.",
+  "deviations": [
+    {
+      "run_id": "run-20260318T193000Z-deadbeef",
+      "step_id": "qc-summary",
+      "severity": "major",
+      "origin": "automatic",
+      "logged_at": "2026-03-18T19:36:00Z",
+      "original_expected_behavior": "The QC summary stage should complete without donor-balance or ambient-RNA warnings that require explicit downstream review.",
+      "actual_behavior": "The QC summary completed, but donor balance remained below the preferred threshold and one donor replicate exceeded the ambient RNA warning threshold.",
+      "reason": "Observed QC metrics fell outside the workflow's preferred pass thresholds while remaining within the configured warning tolerance.",
+      "impact_assessment": "The run remained usable, but publication or biological interpretation should wait until the warning-state QC deviation is reviewed and documented.",
+      "author_or_agent": "system:workflow_runner"
+    }
+  ],
+  "warnings": [
+    "qc warning threshold exceeded for one donor replicate"
+  ]
+}

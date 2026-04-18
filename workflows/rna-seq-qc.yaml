@@ -1,0 +1,143 @@
+schema_version: "1.0.0"
+kind: workflow_spec
+workflow_id: rna-seq-qc
+version: "1.0.0"
+name: RNA Seq QC
+purpose: Run an explicit RNA-seq QC workflow from dataset intake through structured QA reporting.
+engine: internal_dag_runner_v1
+required_inputs:
+  - name: dataset_manifest
+    kind: artifact
+    artifact_type: dataset_manifest
+    schema_ref: artifact_schema:dataset_manifest@1.0.0
+    description: Dataset intake artifact describing assay metadata, reference build, and source files.
+optional_inputs:
+  - name: qc_summary_template
+    kind: template
+    template_path: workflows/report_templates/rna_seq_qc_summary.md.j2
+    description: Optional markdown template used when rendering a human-readable QC summary.
+  - name: min_genes
+    kind: parameter
+    data_type: integer
+    default: 200
+    description: Minimum genes threshold forwarded to the QC summarization step.
+runtime:
+  provided_inputs:
+    - dataset_manifest
+    - qc_summary_template
+    - min_genes
+  allowed_parameter_overrides:
+    - min_genes
+  generated_state:
+    - run_id
+    - created_at
+    - resolved_input_paths
+    - step_statuses
+    - artifact_paths
+    - qc_status
+    - warnings
+  state_artifact: workflow_run
+  artifact_root_template: artifacts/{workflow_id}/{date}/{run_id}
+outputs:
+  - name: qa_report
+    kind: artifact
+    artifact_type: qa_report
+    schema_ref: artifact_schema:qa_report@1.0.0
+    description: Structured QA report emitted for artifact registration and downstream review.
+    source:
+      step_id: summarize_qc
+      output_name: qa_report
+    report_template_path: workflows/report_templates/rna_seq_qc_summary.md.j2
+qc_gates:
+  - id: dataset-manifest-required
+    label: Dataset manifest must be present
+    when: before_execution
+    target:
+      source_type: workflow_input
+      input_name: dataset_manifest
+    failure_policy: block
+    description: Block execution when the required intake artifact is missing.
+  - id: preflight-manifest-validation
+    label: Preflight validation must finish before QC summarization
+    when: after_step
+    target:
+      source_type: step_output
+      step_id: preflight_check
+      output_name: validated_manifest
+    failure_policy: block
+    description: Downstream QC can only run after a declared validated_manifest output exists.
+  - id: dataset-qc-policy-review
+    label: Evaluate attached dataset QC policy before interpretation
+    when: after_step
+    target:
+      source_type: step_output
+      step_id: preflight_check
+      output_name: validated_manifest
+    failure_policy: block
+    description: When the dataset manifest carries a reusable qc_policy plus qc_evidence, evaluate it and block interpretation on QC failures while preserving structured warnings.
+compliance_hooks:
+  - id: privacy-preflight
+    stage: before_execution
+    tool: compliance_preflight
+    required: true
+    inputs:
+      - name: dataset_manifest
+        source:
+          source_type: workflow_input
+          input_name: dataset_manifest
+    description: Run deterministic compliance screening before any biology workflow execution begins.
+steps:
+  - id: preflight_check
+    label: Validate dataset manifest
+    executor:
+      executor_type: python
+      module: workflows.runners.rna_seq_qc
+      function: validate_manifest
+    inputs:
+      - name: dataset_manifest
+        source:
+          source_type: workflow_input
+          input_name: dataset_manifest
+    outputs:
+      - name: validated_manifest
+        kind: artifact
+        artifact_type: dataset_manifest
+        schema_ref: artifact_schema:dataset_manifest@1.0.0
+        description: Normalized dataset manifest passed forward to execution steps.
+    prerequisites: []
+    retry_policy:
+      max_attempts: 1
+      backoff_seconds: 0
+    failure_policy: block_workflow
+  - id: summarize_qc
+    label: Summarize QC metrics
+    executor:
+      executor_type: python
+      module: workflows.runners.rna_seq_qc
+      function: summarize_qc
+    inputs:
+      - name: dataset_manifest
+        source:
+          source_type: step_output
+          step_id: preflight_check
+          output_name: validated_manifest
+      - name: min_genes
+        source:
+          source_type: workflow_input
+          input_name: min_genes
+      - name: qc_summary_template
+        source:
+          source_type: workflow_input
+          input_name: qc_summary_template
+    outputs:
+      - name: qa_report
+        kind: artifact
+        artifact_type: qa_report
+        schema_ref: artifact_schema:qa_report@1.0.0
+        description: Structured QA report emitted for artifact registration and review.
+    prerequisites:
+      - preflight_check
+    retry_policy:
+      max_attempts: 2
+      backoff_seconds: 30
+    failure_policy: fail_workflow

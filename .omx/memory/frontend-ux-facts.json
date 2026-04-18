@@ -1,0 +1,15 @@
+{
+  "updated_at": "2026-04-01T00:00:00Z",
+  "topic": "frontend_compliance_ux",
+  "facts": [
+    "BioAPEX should keep modern live activity surfaces during streaming, but the final transcript should stay clean.",
+    "Compliance should not be shown as a default main-chat card for every successful turn.",
+    "Compliance must still surface prominently in the primary UI for warning, approval-required, and blocked states because BioAPEX's product contract makes safety gating non-optional.",
+    "Full compliance detail should remain available in secondary inspector/workspace/artifact surfaces even when main chat stays minimal.",
+    "Azealoo/claw-code is a useful reference for compact live activity and hiding raw thinking from final output, but not for BioAPEX's compliance product boundary."
+  ],
+  "sources": [
+    "context/project-overview.md",
+    ".omx/research/frontend-compliance-ux-2026-04-01.md"
+  ]
+}

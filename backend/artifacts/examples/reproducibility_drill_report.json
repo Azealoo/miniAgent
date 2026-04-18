@@ -1,0 +1,143 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "reproducibility_drill_report",
+  "id": "reproducibility-drill-rnaseq-replay-run-20260320t223000z-feedbeef",
+  "run_id": "run-20260320T223000Z-feedbeef",
+  "created_at": "2026-03-20T22:35:00Z",
+  "source_workflow": "rnaseq_qc_de",
+  "related_artifacts": [
+    {
+      "artifact_type": "workflow_run",
+      "path": "artifacts/rnaseq-qc-de/2026-03-20/run-20260320T223000Z-feedbeef/run.json",
+      "id": "workflow-run-rnaseq-qc-de-run-20260320t223000z-feedbeef",
+      "run_id": "run-20260320T223000Z-feedbeef"
+    },
+    {
+      "artifact_type": "provenance",
+      "path": "artifacts/rnaseq-qc-de/2026-03-20/run-20260320T223000Z-feedbeef/prov.json",
+      "run_id": "run-20260320T223000Z-feedbeef"
+    },
+    {
+      "artifact_type": "report_bundle_manifest",
+      "path": "artifacts/rnaseq-qc-de/2026-03-20/run-20260320T223000Z-feedbeef/outputs/generated/report-bundle/report_bundle_manifest.json",
+      "run_id": "run-20260320T223000Z-feedbeef"
+    },
+    {
+      "artifact_type": "compliance_report",
+      "path": "artifacts/compliance-preflight/2026-03-20/run-20260320T222500Z-c0ffee00/compliance_report.json",
+      "run_id": "run-20260320T222500Z-c0ffee00"
+    }
+  ],
+  "drill_id": "rnaseq-replay",
+  "label": "RNA-seq Reference Replay",
+  "execution_tier": "ci",
+  "status": "passed",
+  "workflow_spec_path": "workflows/rnaseq_qc_de.yaml",
+  "workflow_parameters": {
+    "condition_field": "condition",
+    "baseline_condition": "control",
+    "comparison_condition": "treated"
+  },
+  "environment_references": [
+    "platform:linux",
+    "python_version:3.11.11"
+  ],
+  "reproduced_run": {
+    "artifact_type": "workflow_run",
+    "path": "artifacts/rnaseq-qc-de/2026-03-20/run-20260320T223000Z-feedbeef/run.json",
+    "id": "workflow-run-rnaseq-qc-de-run-20260320t223000z-feedbeef",
+    "run_id": "run-20260320T223000Z-feedbeef"
+  },
+  "source_inputs": [
+    {
+      "artifact_type": "dataset_manifest",
+      "path": "manifests/rnaseq_dataset_manifest.yaml"
+    }
+  ],
+  "checked_artifacts": [
+    {
+      "artifact_type": "provenance",
+      "path": "artifacts/rnaseq-qc-de/2026-03-20/run-20260320T223000Z-feedbeef/prov.json",
+      "run_id": "run-20260320T223000Z-feedbeef"
+    },
+    {
+      "artifact_type": "report_bundle",
+      "path": "artifacts/rnaseq-qc-de/2026-03-20/run-20260320T223000Z-feedbeef/outputs/generated/report-bundle/rnaseq_report_bundle.md",
+      "run_id": "run-20260320T223000Z-feedbeef"
+    },
+    {
+      "artifact_type": "report_bundle_manifest",
+      "path": "artifacts/rnaseq-qc-de/2026-03-20/run-20260320T223000Z-feedbeef/outputs/generated/report-bundle/report_bundle_manifest.json",
+      "run_id": "run-20260320T223000Z-feedbeef"
+    },
+    {
+      "artifact_type": "compliance_report",
+      "path": "artifacts/compliance-preflight/2026-03-20/run-20260320T222500Z-c0ffee00/compliance_report.json",
+      "run_id": "run-20260320T222500Z-c0ffee00"
+    }
+  ],
+  "comparisons": [
+    {
+      "comparison_id": "quantification-gene-count",
+      "description": "Quantification gene count remains deterministic across replay.",
+      "target_type": "summary_metric",
+      "comparison_mode": "exact",
+      "passed": true,
+      "expected_value": 10,
+      "actual_value": 10,
+      "stage": "quantification",
+      "metric_name": "gene_count",
+      "artifact_type": "count_matrix",
+      "artifact_path": "artifacts/rnaseq-qc-de/2026-03-20/run-20260320T223000Z-feedbeef/count_matrix.json"
+    },
+    {
+      "comparison_id": "aggregated-total-reads",
+      "description": "Aggregated total reads remain within the accepted replay tolerance.",
+      "target_type": "summary_metric",
+      "comparison_mode": "absolute_tolerance",
+      "passed": true,
+      "expected_value": 14.4,
+      "actual_value": 14.4,
+      "stage": "aggregated_qc",
+      "metric_name": "total_reads_millions",
+      "artifact_type": "multiqc_metrics",
+      "artifact_path": "artifacts/rnaseq-qc-de/2026-03-20/run-20260320T223000Z-feedbeef/multiqc_metrics.json",
+      "absolute_tolerance": 0.01,
+      "observed_difference": 0.0
+    }
+  ],
+  "checks": [
+    {
+      "check_id": "environment_references_present",
+      "description": "Required stored environment references are present in the rerun record and provenance export.",
+      "passed": true,
+      "severity": "error",
+      "issues": []
+    },
+    {
+      "check_id": "provenance_completeness",
+      "description": "Required lineage fields and export files are present for the reproduced run.",
+      "passed": true,
+      "severity": "error",
+      "issues": []
+    },
+    {
+      "check_id": "report_bundle_completeness",
+      "description": "Report bundle outputs and referenced bundle artifacts are complete on disk.",
+      "passed": true,
+      "severity": "error",
+      "issues": []
+    },
+    {
+      "check_id": "compliance_artifact_presence",
+      "description": "The reproduced run includes a persisted compliance_report artifact.",
+      "passed": true,
+      "severity": "error",
+      "issues": []
+    }
+  ],
+  "notes": [
+    "Executed through InternalDAGRunner without interactive chat/session state.",
+    "Reference replay drill stored alongside the reproduced run for auditability."
+  ]
+}

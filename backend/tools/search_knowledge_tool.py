@@ -8,7 +8,21 @@ from typing import Any, Optional, Type
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr
 
+from .contracts import empty_result, success_result
+from .untrusted_wrapper import wrap_untrusted
+
 _TOP_K = 3
+_SUPPORTED_EXTS = {".md", ".txt", ".pdf"}
+# Any file under a directory segment matching one of these names is excluded
+# from the default index. Callers that explicitly want archived content can
+# set include_archive=True on the tool.
+# TODO: surface include_archive through the tool args_schema if callers ever
+# need to flip this at query time rather than at tool-construction time.
+_ARCHIVE_SEGMENTS = {"archive"}
+
+
+def _is_archived(path: Path) -> bool:
+    return any(part in _ARCHIVE_SEGMENTS for part in path.parts)
 
 
 class SearchKnowledgeInput(BaseModel):
@@ -24,30 +38,72 @@ class SearchKnowledgeBaseTool(BaseTool):
         "Input: a search query string."
     )
     args_schema: Type[BaseModel] = SearchKnowledgeInput
+    response_format: str = "content_and_artifact"
     knowledge_dir: str = ""
     storage_dir: str = ""
+    # When False (default), files under any 'archive' directory are excluded
+    # from indexing and retrieval — superseded docs stay addressable on disk
+    # but do not pollute retrieval results.
+    include_archive: bool = False
 
     _index: Optional[Any] = PrivateAttr(default=None)
     _nodes: list = PrivateAttr(default_factory=list)
     _built: bool = PrivateAttr(default=False)
+    _last_mtime: float = PrivateAttr(default=0.0)
+
+    def _dir_mtime(self) -> float:
+        """Return the latest modification time of any supported file in knowledge_dir."""
+        knowledge_path = Path(self.knowledge_dir)
+        if not knowledge_path.exists():
+            return 0.0
+        latest = 0.0
+        for f in knowledge_path.rglob("*"):
+            if not (f.is_file() and f.suffix.lower() in _SUPPORTED_EXTS):
+                continue
+            if not self.include_archive and _is_archived(f.relative_to(knowledge_path)):
+                continue
+            try:
+                latest = max(latest, f.stat().st_mtime)
+            except OSError:
+                pass
+        return latest
 
     def _ensure_index(self) -> None:
-        if self._built:
+        current_mtime = self._dir_mtime()
+        # Short-circuit when nothing has changed since the last successful build.
+        # We do NOT require _index is not None here: an empty knowledge dir is a
+        # legitimate "built" state (index=None) and should not trigger a rebuild
+        # on every call just because the index is absent.
+        if self._built and current_mtime <= self._last_mtime:
             return
-        self._built = True
+
+        # Reset state — do NOT mark _built=True until build succeeds
+        self._index = None
+        self._nodes = []
 
         knowledge_path = Path(self.knowledge_dir)
         storage_path = Path(self.storage_dir) / "knowledge_index"
 
         if not knowledge_path.exists():
+            # Nothing to index — record mtime so we don't retry on every call
+            self._built = True
+            self._last_mtime = current_mtime
             return
 
-        # Check for any supported files
-        supported_exts = {".md", ".txt", ".pdf"}
+        # Check for any supported files (excluding archived unless opted in)
         files = [
-            f for f in knowledge_path.rglob("*") if f.suffix.lower() in supported_exts
+            f
+            for f in knowledge_path.rglob("*")
+            if f.is_file()
+            and f.suffix.lower() in _SUPPORTED_EXTS
+            and (
+                self.include_archive
+                or not _is_archived(f.relative_to(knowledge_path))
+            )
         ]
         if not files:
+            self._built = True
+            self._last_mtime = current_mtime
             return
 
         try:
@@ -61,21 +117,34 @@ class SearchKnowledgeBaseTool(BaseTool):
 
             storage_path.mkdir(parents=True, exist_ok=True)
 
-            # Try loading persisted index
-            try:
-                storage_context = StorageContext.from_defaults(
-                    persist_dir=str(storage_path)
-                )
-                self._index = load_index_from_storage(storage_context)
-                # Rebuild nodes list for BM25
-                self._nodes = list(self._index.docstore.docs.values())
-                return
-            except Exception:
-                pass
+            # Only load the persisted index when mtime has NOT changed (cold start).
+            # If mtime DID change (files added/modified) we skip the stale persisted
+            # index and always do a full rebuild so new content is included.
+            if self._last_mtime == 0.0 or current_mtime <= self._last_mtime:
+                try:
+                    storage_context = StorageContext.from_defaults(
+                        persist_dir=str(storage_path)
+                    )
+                    self._index = load_index_from_storage(storage_context)
+                    # Rebuild nodes list for BM25
+                    self._nodes = list(self._index.docstore.docs.values())
+                    self._built = True
+                    self._last_mtime = current_mtime
+                    return
+                except Exception:
+                    pass
 
-            # Build fresh
+            # Fresh build (first build or mtime changed) — wipe stale persisted index
+            import shutil
+            if storage_path.exists():
+                try:
+                    shutil.rmtree(str(storage_path))
+                except Exception:
+                    pass
+            storage_path.mkdir(parents=True, exist_ok=True)
+
             reader = SimpleDirectoryReader(
-                str(knowledge_path), recursive=True
+                input_files=[str(f) for f in files],
             )
             docs = reader.load_data()
             splitter = SentenceSplitter(chunk_size=512, chunk_overlap=64)
@@ -86,19 +155,32 @@ class SearchKnowledgeBaseTool(BaseTool):
                 self._nodes, storage_context=storage_context
             )
             self._index.storage_context.persist(persist_dir=str(storage_path))
+            self._built = True
+            self._last_mtime = current_mtime
 
-        except Exception as exc:
+        except Exception:
+            # Build failed — leave _built=False and _last_mtime unchanged so the
+            # next call will retry instead of permanently skipping the rebuild.
             self._index = None
             self._nodes = []
 
-    def _run(self, query: str) -> str:
+    def _run(self, query: str) -> tuple[str, dict]:
         self._ensure_index()
 
         if self._index is None:
-            return "The knowledge base is empty or could not be loaded."
+            return empty_result(
+                self.name,
+                "The knowledge base is empty or could not be loaded.",
+                structured_payload={"query": query, "results": []},
+                metadata={
+                    "knowledge_dir": self.knowledge_dir,
+                    "storage_dir": self.storage_dir,
+                    "index_status": "empty_or_unavailable",
+                },
+            )
 
         seen: set[str] = set()
-        results: list[str] = []
+        results: list[dict[str, str]] = []
 
         # Vector retrieval
         try:
@@ -108,7 +190,14 @@ class SearchKnowledgeBaseTool(BaseTool):
                 if nid not in seen:
                     seen.add(nid)
                     src = node.metadata.get("file_name", "document")
-                    results.append(f"[Source: {src}]\n{node.text}")
+                    results.append(
+                        {
+                            "source": src,
+                            "text": node.text,
+                            "retrieval_mode": "vector",
+                            "node_id": nid,
+                        }
+                    )
         except Exception:
             pass
 
@@ -125,15 +214,50 @@ class SearchKnowledgeBaseTool(BaseTool):
                     if nid not in seen:
                         seen.add(nid)
                         src = node.metadata.get("file_name", "document")
-                        results.append(f"[Source: {src}]\n{node.text}")
+                        results.append(
+                            {
+                                "source": src,
+                                "text": node.text,
+                                "retrieval_mode": "bm25",
+                                "node_id": nid,
+                            }
+                        )
         except Exception:
             pass
 
         if not results:
-            return "No relevant results found in the knowledge base."
+            return empty_result(
+                self.name,
+                "No relevant results found in the knowledge base.",
+                structured_payload={"query": query, "results": []},
+                metadata={
+                    "knowledge_dir": self.knowledge_dir,
+                    "storage_dir": self.storage_dir,
+                    "index_status": "ready",
+                },
+            )
 
-        output = "\n\n---\n\n".join(results[:_TOP_K])
-        return output
+        top_results = results[:_TOP_K]
+        output = "\n\n---\n\n".join(
+            f"[Source: {result['source']}]\n"
+            + wrap_untrusted(
+                result["text"],
+                source=result["source"],
+                tool_name=self.name,
+            )
+            for result in top_results
+        )
+        return success_result(
+            self.name,
+            output,
+            structured_payload={"query": query, "results": top_results},
+            metadata={
+                "knowledge_dir": self.knowledge_dir,
+                "storage_dir": self.storage_dir,
+                "index_status": "ready",
+                "result_count": len(top_results),
+            },
+        )
 
-    async def _arun(self, query: str) -> str:  # type: ignore[override]
+    async def _arun(self, query: str) -> tuple[str, dict]:  # type: ignore[override]
         return self._run(query)

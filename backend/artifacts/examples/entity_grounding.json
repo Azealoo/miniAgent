@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "entity_grounding",
+  "id": "entity-grounding-tp53-run-20260318t193000z-deadbeef",
+  "run_id": "run-20260318T193000Z-deadbeef",
+  "created_at": "2026-03-18T19:30:00Z",
+  "source_workflow": "entity-grounding",
+  "related_artifacts": [
+    {
+      "artifact_type": "grounding_source_payload",
+      "path": "artifacts/entity-grounding/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/entity-grounding-cache/tp53__gene__human__ensembl__lookup_symbol.json",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "input_mentions": [
+    "TP53"
+  ],
+  "requested_species": "human",
+  "requested_entity_types": [
+    "gene"
+  ],
+  "requires_clarification": false,
+  "results": [
+    {
+      "input_mention": "TP53",
+      "requested_entity_types": [
+        "gene"
+      ],
+      "status": "resolved",
+      "grounded_entity": {
+        "entity_type": "gene",
+        "source_database": "ensembl",
+        "stable_identifier": "ensembl:ENSG00000141510",
+        "identifier_version": "15",
+        "preferred_label": "TP53",
+        "aliases": [
+          "TP53",
+          "P53"
+        ],
+        "species": "Homo sapiens",
+        "taxon_id": "taxonomy:9606"
+      },
+      "candidate_entities": [],
+      "cached_source_payload_paths": [
+        "artifacts/entity-grounding/2026-03-18/run-20260318T193000Z-deadbeef/outputs/generated/entity-grounding-cache/tp53__gene__human__ensembl__lookup_symbol.json"
+      ]
+    }
+  ]
+}

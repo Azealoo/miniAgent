@@ -1,9 +1,16 @@
 """
-miniOpenClaw backend entry point.
+BioAPEX backend entry point.
 
 Run with:
     cd backend
-    uvicorn app:app --port 8002 --host 0.0.0.0 --reload
+    uvicorn app:app --port 8002 \\
+        --host "$(python -c 'import config; print(config.get_production_hardening_policy().host_binding)')" \\
+        --reload
+
+The ``--host`` value is driven by the active production-hardening posture
+(see ``hardening.py``): ``dev`` and ``hosted-strict`` bind loopback
+(``127.0.0.1``) while ``trusted-lab`` binds the lab network (``0.0.0.0``).
+``start-backend.sh`` resolves this for you.
 """
 import os
 import sys
@@ -19,6 +26,7 @@ load_dotenv()  # Load .env before any other imports that read env vars
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import config as cfg
 
 BASE_DIR = Path(__file__).parent
 
@@ -56,7 +64,7 @@ async def lifespan(app: FastAPI):
     agent_manager.initialize(BASE_DIR)
     print("[startup] AgentManager initialised")
 
-    # ── 3. Build MEMORY.md vector index ───────────────────────────
+    # ── 3. Build the memory/ retrieval index ──────────────────────
     try:
         agent_manager.memory_indexer.rebuild_index()
         print("[startup] Memory index built")
@@ -72,36 +80,39 @@ async def lifespan(app: FastAPI):
 # ------------------------------------------------------------------ #
 
 app = FastAPI(
-    title="miniOpenClaw",
-    description="Lightweight, transparent AI Agent system",
+    title="BioAPEX",
+    description="Transparent, file-first biologist-assistant backend",
     version="0.1.0",
     lifespan=lifespan,
 )
 
+_production_hardening_policy = cfg.get_production_hardening_policy()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_production_hardening_policy.api.cors_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── Register routers ───────────────────────────────────────────────
+# ── Register chat-engine routers only ──────────────────────────────
+from api.access import router as access_router
 from api.chat import router as chat_router
-from api.compress import router as compress_router
-from api.config_api import router as config_router
+from api.config import router as config_router
+from api.debug import router as debug_router
 from api.files import router as files_router
 from api.sessions import router as sessions_router
 from api.tokens import router as tokens_router
 
 app.include_router(chat_router, prefix="/api")
+app.include_router(access_router, prefix="/api")
+app.include_router(config_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
 app.include_router(tokens_router, prefix="/api")
-app.include_router(compress_router, prefix="/api")
-app.include_router(config_router, prefix="/api")
+app.include_router(debug_router, prefix="/api")
 
 
 @app.get("/")
 def health():
-    return {"status": "ok", "service": "miniOpenClaw"}
+    return {"status": "ok", "service": "BioAPEX"}

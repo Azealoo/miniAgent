@@ -1,0 +1,153 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "checklist_results",
+  "id": "checklist-results-rnaseq-qc-de-report-bundle-run-20260318t193000z-deadbeef",
+  "run_id": "run-20260318T193000Z-deadbeef",
+  "created_at": "2026-03-18T19:41:00Z",
+  "source_workflow": "rnaseq_qc_de",
+  "related_artifacts": [
+    {
+      "artifact_type": "workflow_run",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/run.json",
+      "id": "workflow-run-rna-seq-qc-20260318",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "subject_type": "report_bundle",
+  "subject_label": "RNA-seq report bundle",
+  "evaluated_artifacts": [
+    {
+      "artifact_type": "dataset_manifest",
+      "path": "backend/artifacts/examples/dataset_manifest.yaml",
+      "id": "dataset-demo-rnaseq-v1",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "workflow_run",
+      "path": "artifacts/rna-seq-qc/2026-03-18/run-20260318T193000Z-deadbeef/run.json",
+      "id": "workflow-run-rna-seq-qc-20260318",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    },
+    {
+      "artifact_type": "evidence_review",
+      "path": "backend/artifacts/examples/evidence_review.json",
+      "id": "evidence-review-run-20260318t193000z-deadbeef",
+      "run_id": "run-20260318T193000Z-deadbeef"
+    }
+  ],
+  "overall_status": "passed",
+  "evaluations": [
+    {
+      "checklist_id": "prisma_literature_screening_completeness",
+      "family": "prisma",
+      "label": "PRISMA-style literature screening completeness",
+      "version": "1.0.0",
+      "definition_path": "backend/checklists/definitions/prisma_literature_screening_completeness.yaml",
+      "overall_status": "passed",
+      "items": [
+        {
+          "item_id": "evidence_review_artifact_present",
+          "description": "At least one evidence_review artifact is available for checklist scoring.",
+          "severity": "required",
+          "pass_criteria": "An evidence_review artifact is linked into the evaluated report or run.",
+          "remediation_guidance": "Materialize an evidence_review artifact before finalizing literature-grounded outputs.",
+          "status": "pass",
+          "rationale": "Found 1 evidence_review artifact; required at least 1.",
+          "evidence_artifacts": [
+            {
+              "artifact_type": "evidence_review",
+              "path": "backend/artifacts/examples/evidence_review.json",
+              "id": "evidence-review-run-20260318t193000z-deadbeef",
+              "run_id": "run-20260318T193000Z-deadbeef"
+            }
+          ]
+        },
+        {
+          "item_id": "review_question_recorded",
+          "description": "Each linked evidence review records the explicit review question.",
+          "severity": "required",
+          "pass_criteria": "evidence_review.review_question is present in each checked evidence_review artifact.",
+          "remediation_guidance": "Record the exact literature review question in every evidence_review artifact.",
+          "status": "pass",
+          "rationale": "Field 'review_question' was present in 1 of 1 checked source records.",
+          "evidence_artifacts": [
+            {
+              "artifact_type": "evidence_review",
+              "path": "backend/artifacts/examples/evidence_review.json",
+              "id": "evidence-review-run-20260318t193000z-deadbeef",
+              "run_id": "run-20260318T193000Z-deadbeef"
+            }
+          ]
+        },
+        {
+          "item_id": "included_evidence_logged",
+          "description": "Each linked evidence review records at least one included evidence artifact.",
+          "severity": "required",
+          "pass_criteria": "evidence_review.evidence_included contains at least one entry in each checked evidence_review artifact.",
+          "remediation_guidance": "Link at least one included evidence artifact into each evidence_review before publication.",
+          "status": "pass",
+          "rationale": "List field 'evidence_included' met the minimum length in 1 of 1 checked source records.",
+          "evidence_artifacts": [
+            {
+              "artifact_type": "evidence_review",
+              "path": "backend/artifacts/examples/evidence_review.json",
+              "id": "evidence-review-run-20260318t193000z-deadbeef",
+              "run_id": "run-20260318T193000Z-deadbeef"
+            }
+          ]
+        },
+        {
+          "item_id": "limitations_noted",
+          "description": "Each linked evidence review records at least one limitation.",
+          "severity": "required",
+          "pass_criteria": "evidence_review.limitations contains at least one entry in each checked evidence_review artifact.",
+          "remediation_guidance": "Record at least one evidence limitation so downstream users can assess scope and uncertainty.",
+          "status": "pass",
+          "rationale": "List field 'limitations' met the minimum length in 1 of 1 checked source records.",
+          "evidence_artifacts": [
+            {
+              "artifact_type": "evidence_review",
+              "path": "backend/artifacts/examples/evidence_review.json",
+              "id": "evidence-review-run-20260318t193000z-deadbeef",
+              "run_id": "run-20260318T193000Z-deadbeef"
+            }
+          ]
+        },
+        {
+          "item_id": "exclusion_log_present",
+          "description": "At least one linked evidence review preserves a structured exclusion log.",
+          "severity": "best_practice",
+          "pass_criteria": "evidence_review.evidence_excluded contains at least one entry in at least one checked evidence_review artifact.",
+          "remediation_guidance": "Record excluded evidence items and reasons so screening decisions remain inspectable.",
+          "status": "pass",
+          "rationale": "List field 'evidence_excluded' met the minimum length in 1 of 1 checked source records.",
+          "evidence_artifacts": [
+            {
+              "artifact_type": "evidence_review",
+              "path": "backend/artifacts/examples/evidence_review.json",
+              "id": "evidence-review-run-20260318t193000z-deadbeef",
+              "run_id": "run-20260318T193000Z-deadbeef"
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "total_items": 5,
+        "passed_items": 5,
+        "failed_required_items": 0,
+        "failed_best_practice_items": 0,
+        "not_applicable_items": 0
+      }
+    }
+  ],
+  "summary": {
+    "evaluated_checklist_count": 1,
+    "passed_checklist_count": 1,
+    "warning_checklist_count": 0,
+    "blocked_checklist_count": 0,
+    "not_applicable_checklist_count": 0,
+    "failed_required_item_count": 0,
+    "failed_best_practice_item_count": 0
+  },
+  "notes": []
+}

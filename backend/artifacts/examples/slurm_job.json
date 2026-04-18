@@ -1,0 +1,110 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_type": "slurm_job",
+  "id": "slurm-job-12345-run-20260320t120000z-deadbeef",
+  "run_id": "run-20260320T120000Z-deadbeef",
+  "created_at": "2026-03-20T12:00:00Z",
+  "source_tool": "slurm_tool",
+  "related_artifacts": [
+    {
+      "artifact_type": "workflow_run",
+      "path": "artifacts/slurm-jobs/2026-03-20/run-20260320T120000Z-deadbeef/run.json",
+      "run_id": "run-20260320T120000Z-deadbeef"
+    },
+    {
+      "artifact_type": "sbatch_script",
+      "path": "workflows/engines/perturb_seq/launch_pipeline.sh"
+    },
+    {
+      "artifact_type": "log_file",
+      "path": "artifacts/slurm-jobs/2026-03-20/run-20260320T120000Z-deadbeef/outputs/generated/slurm/launch-pipeline-12345.stdout.log"
+    },
+    {
+      "artifact_type": "log_file",
+      "path": "artifacts/slurm-jobs/2026-03-20/run-20260320T120000Z-deadbeef/outputs/generated/slurm/launch-pipeline-12345.stderr.log"
+    }
+  ],
+  "job_id": "12345",
+  "job_name": "launch-pipeline",
+  "script_path": "workflows/engines/perturb_seq/launch_pipeline.sh",
+  "working_directory": ".",
+  "submission_command": [
+    "sbatch",
+    "--job-name",
+    "launch-pipeline",
+    "--cpus-per-task",
+    "16",
+    "--mem",
+    "128G",
+    "--time",
+    "08:00:00",
+    "--output",
+    "artifacts/slurm-jobs/2026-03-20/run-20260320T120000Z-deadbeef/outputs/generated/slurm/launch-pipeline-%j.stdout.log",
+    "--error",
+    "artifacts/slurm-jobs/2026-03-20/run-20260320T120000Z-deadbeef/outputs/generated/slurm/launch-pipeline-%j.stderr.log",
+    "--export",
+    "ALL",
+    "--chdir",
+    ".",
+    "workflows/engines/perturb_seq/launch_pipeline.sh"
+  ],
+  "environment_keys": [
+    "BIOAPEX_INPUT_DATASET_MANIFEST",
+    "BIOAPEX_RUN_DIR",
+    "BIOAPEX_RUN_ID",
+    "BIOAPEX_STEP_ID",
+    "BIOAPEX_WORKFLOW_ID"
+  ],
+  "resource_request": {
+    "cpus": 16,
+    "memory": "128G",
+    "wall_time": "08:00:00",
+    "gpus": 0,
+    "partition": "cpu"
+  },
+  "status": "completed",
+  "submitted_at": "2026-03-20T12:00:00Z",
+  "completed_at": "2026-03-20T12:41:00Z",
+  "latest_status": {
+    "observed_at": "2026-03-20T12:41:00Z",
+    "source": "sacct",
+    "normalized_status": "completed",
+    "raw_state": "COMPLETED",
+    "raw_reason": "None",
+    "exit_code": "0:0"
+  },
+  "status_history": [
+    {
+      "observed_at": "2026-03-20T12:00:00Z",
+      "source": "submission",
+      "normalized_status": "pending",
+      "raw_state": "SUBMITTED",
+      "raw_reason": null,
+      "exit_code": null
+    },
+    {
+      "observed_at": "2026-03-20T12:05:00Z",
+      "source": "squeue",
+      "normalized_status": "running",
+      "raw_state": "RUNNING",
+      "raw_reason": "None",
+      "exit_code": null
+    },
+    {
+      "observed_at": "2026-03-20T12:41:00Z",
+      "source": "sacct",
+      "normalized_status": "completed",
+      "raw_state": "COMPLETED",
+      "raw_reason": "None",
+      "exit_code": "0:0"
+    }
+  ],
+  "logs": {
+    "stdout_path": "artifacts/slurm-jobs/2026-03-20/run-20260320T120000Z-deadbeef/outputs/generated/slurm/launch-pipeline-12345.stdout.log",
+    "stderr_path": "artifacts/slurm-jobs/2026-03-20/run-20260320T120000Z-deadbeef/outputs/generated/slurm/launch-pipeline-12345.stderr.log",
+    "submission_stdout": "Submitted batch job 12345\n",
+    "submission_stderr": null,
+    "runtime_stdout": "Pipeline completed successfully.\nPublished outputs to outputs/final.\n",
+    "runtime_stderr": "Minor scheduler note: job used 94% of requested wall time.\n"
+  }
+}

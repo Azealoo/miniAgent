@@ -1,183 +1,71 @@
 """
 POST /api/chat — SSE streaming conversation endpoint.
 
+All emitted events include:
+  request_id   stable per-turn identifier
+  event_index  monotonic 1-based sequence number within the stream
+
 SSE event types emitted:
   retrieval    {type, query, results}
   token        {type, content}
-  tool_start   {type, tool, input}
-  tool_end     {type, tool, output}
+  tool_start   {type, tool, input, run_id}
+  tool_end     {type, tool, output, result, run_id}
+  plan_created {type, summary, plan, tool_trace?, run_id?}
+  plan_updated {type, summary, plan, tool_trace?, run_id?}
+  verification_result {type, summary, verdict, verification, tool_trace?, run_id?}
   new_response {type}
   done         {type, content, session_id}
-  title        {type, session_id, title}   (first message only)
   error        {type, error}
-"""
-import json
 
-from fastapi import APIRouter
+Event shaping and persistence live in ``runtime.query_engine.QueryEngine``;
+this route is intentionally limited to request plumbing.
+"""
+from access_control import require_execution_access
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, field_validator
+
+from runtime.query_engine import QueryEngine
 
 router = APIRouter()
 
+_MAX_MESSAGE_LEN = 32_000  # ~8 k tokens; prevents context blowout and large session files
+
 
 class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     message: str
     session_id: str
-    stream: bool = True
+
+    @field_validator("message")
+    @classmethod
+    def _check_message_length(cls, value: str) -> str:
+        if len(value) > _MAX_MESSAGE_LEN:
+            raise ValueError(f"message too long (max {_MAX_MESSAGE_LEN} characters)")
+        return value
 
 
 @router.post("/chat")
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, http_request: Request = None):
+    require_execution_access(http_request)
+    try:
+        QueryEngine.validate_session_id(request.session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+
     from graph.agent import agent_manager
 
-    session_manager = agent_manager.session_manager  # type: ignore[union-attr]
-
-    # Is this the first message in the session?
-    existing = session_manager.load_session(request.session_id)
-    is_first_message = len(existing) == 0
-
-    # Auto-compress if history is too long (≥ 40 messages)
-    await session_manager.auto_compress_if_needed(  # type: ignore[union-attr]
-        request.session_id, agent_manager.llm
+    engine = QueryEngine(agent_manager)
+    stream = engine.stream_turn_sse(
+        message=request.message,
+        session_id=request.session_id,
     )
-
-    # Load and prepare history for the agent
-    history = session_manager.load_session_for_agent(request.session_id)  # type: ignore[union-attr]
-
-    async def event_generator():
-        # Per-request accumulators
-        segments: list[dict] = []          # [{content, tool_calls}]
-        current_content: list[str] = []
-        current_tool_calls: list[dict] = []
-        pending_tools: dict[str, dict] = {}  # run_id → {tool, input}
-
-        def _flush_segment() -> None:
-            content = "".join(current_content)
-            if content or current_tool_calls:
-                segments.append(
-                    {"content": content, "tool_calls": list(current_tool_calls)}
-                )
-            current_content.clear()
-            current_tool_calls.clear()
-
-        def _sse(payload: dict) -> str:
-            return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-        # Persist user message immediately so it is saved even if the agent errors
-        session_manager.save_message(
-            request.session_id, "user", request.message
-        )
-
-        try:
-            async for ev in agent_manager.astream(request.message, history):
-                t = ev["type"]
-
-                if t == "retrieval":
-                    yield _sse(
-                        {
-                            "type": "retrieval",
-                            "query": ev["query"],
-                            "results": ev["results"],
-                        }
-                    )
-
-                elif t == "token":
-                    current_content.append(ev["content"])
-                    yield _sse({"type": "token", "content": ev["content"]})
-
-                elif t == "tool_start":
-                    run_id = ev.get("run_id", ev["tool"])
-                    pending_tools[run_id] = {"tool": ev["tool"], "input": ev["input"]}
-                    yield _sse(
-                        {"type": "tool_start", "tool": ev["tool"], "input": ev["input"]}
-                    )
-
-                elif t == "tool_end":
-                    run_id = ev.get("run_id", ev["tool"])
-                    started = pending_tools.pop(run_id, {"tool": ev["tool"], "input": ""})
-                    call = {
-                        "tool": started["tool"],
-                        "input": started["input"],
-                        "output": ev["output"],
-                    }
-                    current_tool_calls.append(call)
-                    yield _sse({"type": "tool_end", "tool": ev["tool"], "output": ev["output"]})
-
-                elif t == "new_response":
-                    _flush_segment()
-                    yield _sse({"type": "new_response"})
-
-                elif t == "done":
-                    _flush_segment()
-
-                    # Persist each assistant segment (user message already saved above)
-                    for seg in segments:
-                        session_manager.save_message(
-                            request.session_id,
-                            "assistant",
-                            seg["content"],
-                            seg["tool_calls"] or None,
-                        )
-
-                    final_content = " ".join(
-                        s["content"] for s in segments if s["content"]
-                    )
-                    yield _sse(
-                        {
-                            "type": "done",
-                            "content": final_content,
-                            "session_id": request.session_id,
-                        }
-                    )
-
-                    # Auto-generate title on first message
-                    if is_first_message and final_content:
-                        title = await _generate_title(
-                            agent_manager, request.message
-                        )
-                        session_manager.rename_session(request.session_id, title)
-                        yield _sse(
-                            {
-                                "type": "title",
-                                "session_id": request.session_id,
-                                "title": title,
-                            }
-                        )
-
-                elif t == "error":
-                    yield _sse({"type": "error", "error": ev["error"]})
-
-        except Exception as exc:
-            yield _sse({"type": "error", "error": str(exc)})
-
     return StreamingResponse(
-        event_generator(),
+        stream,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
     )
-
-
-async def _generate_title(agent_manager, first_message: str) -> str:
-    try:
-        from langchain_core.messages import HumanMessage, SystemMessage
-
-        resp = await agent_manager.llm.ainvoke(
-            [
-                SystemMessage(
-                    content="You generate concise chat titles. Reply with ONLY the title."
-                ),
-                HumanMessage(
-                    content=(
-                        f"Generate a short English title for a conversation that starts with: "
-                        f"'{first_message[:200]}'. "
-                        "Maximum 10 words. No punctuation, no quotes."
-                    )
-                ),
-            ]
-        )
-        return resp.content.strip()[:60]
-    except Exception:
-        return "New Chat"

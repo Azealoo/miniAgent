@@ -1,0 +1,26 @@
+{
+  "updated_at": "2026-04-01T00:00:00Z",
+  "topic": "codebase_redundancy_review",
+  "facts": [
+    "Assistant session messages are currently maintained in dual shapes: legacy arrays (`tool_calls`, `workflow_events`, `retrievals`) and structured `blocks`, with both backend and frontend keeping them in sync.",
+    "The main chat route repeats tool lifecycle bookkeeping for compliance preflight, protocol execution, the evidence-review gate, and generic streamed tool events instead of using one shared helper.",
+    "Frontend display formatting has drift-prone duplication across major surfaces, especially workflow-label formatting, token humanization, text compaction, and identifier shortening.",
+    "The knowledge base contains two competing T-cell rejuvenation hypothesis documents, and the recursive knowledge indexer will consider both during retrieval."
+  ],
+  "sources": [
+    "backend/api/chat.py",
+    "backend/graph/session_manager.py",
+    "frontend/src/lib/store.tsx",
+    "frontend/src/components/editor/TurnDetailsPanel.tsx",
+    "frontend/src/components/layout/workspace-data.ts",
+    "frontend/src/components/layout/Navbar.tsx",
+    "frontend/src/components/chat/ChatInput.tsx",
+    "frontend/src/components/editor/InspectorPanel.tsx",
+    "frontend/src/components/layout/WorkspacePanel.tsx",
+    "frontend/src/components/layout/OpsWorkspace.tsx",
+    "frontend/src/lib/surface-errors.ts",
+    "backend/tools/search_knowledge_tool.py",
+    "backend/knowledge/hypotheses/T_cell_rejuvenation_perturbation_hypothesis.md",
+    "backend/knowledge/hypotheses/Tcell_rejuvenation_perturbation_hypothesis.md"
+  ]
+}

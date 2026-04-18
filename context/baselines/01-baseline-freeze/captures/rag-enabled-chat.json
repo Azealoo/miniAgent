@@ -1,0 +1,45 @@
+{
+  "scenario": "rag-enabled-chat",
+  "request": {
+    "message": "What do you remember about my main project?",
+    "session_id": "61d31ec4-7c05-42e6-8ca9-8353dd3cc182",
+    "stream": true
+  },
+  "sse_events": [
+    {
+      "type": "retrieval",
+      "query": "What do you remember about my main project?",
+      "results": [
+        {
+          "text": "Main project is Perturb-seq on T cells.",
+          "score": 0.91,
+          "source": "memory/MEMORY.md"
+        }
+      ]
+    },
+    {
+      "type": "token",
+      "content": "Based on memory, your main project is Perturb-seq on T cells."
+    },
+    {
+      "type": "done",
+      "content": "Based on memory, your main project is Perturb-seq on T cells.",
+      "session_id": "61d31ec4-7c05-42e6-8ca9-8353dd3cc182"
+    },
+    {
+      "type": "title",
+      "session_id": "61d31ec4-7c05-42e6-8ca9-8353dd3cc182",
+      "title": "Captured Baseline Title"
+    }
+  ],
+  "stored_history": [
+    {
+      "role": "user",
+      "content": "What do you remember about my main project?"
+    },
+    {
+      "role": "assistant",
+      "content": "Based on memory, your main project is Perturb-seq on T cells."
+    }
+  ]
+}
