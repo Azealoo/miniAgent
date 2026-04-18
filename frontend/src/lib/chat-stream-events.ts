@@ -1,7 +1,11 @@
 import { parseRuntimeEvent } from "./runtime-events";
+import { parseSseChunk } from "./sse-parser";
 import type {
   ChatStreamEvent,
   ChatStreamParseErrorEvent,
+  ChatStreamPlanCreatedEvent,
+  ChatStreamPlanUpdatedEvent,
+  ChatStreamVerificationResultEvent,
   JsonObject,
   RetrievalResult,
   ToolResultEnvelope,
@@ -183,48 +187,150 @@ function buildParseErrorEvent(
   return event;
 }
 
+/**
+ * Turn a single raw `data:` payload string into a `ChatStreamEvent`, including
+ * the JSON.parse step. Malformed JSON becomes a `parse_error` event rather
+ * than being silently dropped.
+ */
+export function parseChatStreamDataPayload(data: string): ChatStreamEvent {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return {
+      type: "parse_error",
+      error: "SSE chunk was not valid JSON.",
+      raw: data.length > 2000 ? `${data.slice(0, 2000)}…` : data,
+    };
+  }
+  return parseChatStreamEventPayload(parsed);
+}
+
 export function parseChatStreamChunk(
   previousBuffer: string,
   decodedChunk: string,
   options: ParseChatStreamChunkOptions = {}
 ): ParsedChatStreamChunk {
-  const rawBuffer = previousBuffer + decodedChunk;
-  const rawEvents = rawBuffer.split("\n\n");
-  const bufferedRemainder = rawEvents.pop() ?? "";
-  const events: ChatStreamEvent[] = [];
+  const { bufferedRemainder, payloads } = parseSseChunk(
+    previousBuffer,
+    decodedChunk,
+    options
+  );
+  return {
+    bufferedRemainder,
+    events: payloads.map(parseChatStreamDataPayload),
+  };
+}
 
-  const eventsToParse =
-    options.flush && bufferedRemainder.trim().length > 0
-      ? [...rawEvents, bufferedRemainder]
-      : rawEvents;
+export interface StreamCallbacks {
+  signal?: AbortSignal;
+  onEvent?: (event: ChatStreamEvent) => void;
+  onRetrieval?: (query: string, results: RetrievalResult[]) => void;
+  onToken?: (content: string) => void;
+  onToolStart?: (
+    tool: string,
+    input: string,
+    runId: string,
+    requestId?: string
+  ) => void;
+  onToolEnd?: (
+    tool: string,
+    output: string,
+    runId: string,
+    result?: ToolResultEnvelope,
+    requestId?: string
+  ) => void;
+  onPlanCreated?: (event: ChatStreamPlanCreatedEvent) => void;
+  onPlanUpdated?: (event: ChatStreamPlanUpdatedEvent) => void;
+  onVerificationResult?: (event: ChatStreamVerificationResultEvent) => void;
+  onNewResponse?: () => void;
+  onDone?: (content: string, requestId?: string) => void;
+  onError?: (error: string, requestId?: string) => void;
+  /**
+   * Called when an incoming SSE payload fails RuntimeEvent validation. The
+   * stream keeps running — malformed events are surfaced, not terminal.
+   */
+  onParseError?: (event: ChatStreamParseErrorEvent) => void;
+}
 
-  for (const rawEvent of eventsToParse) {
-    for (const line of rawEvent.split("\n")) {
-      if (!line.startsWith("data: ")) {
-        continue;
-      }
+export interface ChatStreamDispatcher {
+  dispatch: (event: ChatStreamEvent) => void;
+  sawTerminalEvent: () => boolean;
+  lastRequestId: () => string | undefined;
+}
 
-      const dataLine = line.slice(6);
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(dataLine);
-      } catch {
-        events.push({
-          type: "parse_error",
-          error: "SSE chunk was not valid JSON.",
-          raw: dataLine.length > 2000 ? `${dataLine.slice(0, 2000)}…` : dataLine,
-        });
-        continue;
-      }
-      events.push(parseChatStreamEventPayload(parsed));
+/**
+ * Build a dispatcher that fans a `ChatStreamEvent` out to the matching
+ * `StreamCallbacks` and tracks whether a terminal event has been seen. The
+ * transport layer in `api.ts` uses this so it can stay focused on the fetch
+ * + reader loop.
+ */
+export function createChatStreamDispatcher(
+  callbacks: StreamCallbacks
+): ChatStreamDispatcher {
+  let sawTerminalEvent = false;
+  let lastRequestId: string | undefined;
+
+  const dispatch = (event: ChatStreamEvent) => {
+    if (event.request_id) {
+      lastRequestId = event.request_id;
     }
-  }
+    if (event.type === "done" || event.type === "error") {
+      sawTerminalEvent = true;
+    }
+
+    callbacks.onEvent?.(event);
+    switch (event.type) {
+      case "retrieval":
+        callbacks.onRetrieval?.(event.query, event.results);
+        break;
+      case "token":
+        callbacks.onToken?.(event.content);
+        break;
+      case "tool_start":
+        callbacks.onToolStart?.(
+          event.tool,
+          event.input,
+          event.run_id ?? event.tool,
+          event.request_id
+        );
+        break;
+      case "tool_end":
+        callbacks.onToolEnd?.(
+          event.tool,
+          event.output,
+          event.run_id ?? event.tool,
+          event.result,
+          event.request_id
+        );
+        break;
+      case "plan_created":
+        callbacks.onPlanCreated?.(event);
+        break;
+      case "plan_updated":
+        callbacks.onPlanUpdated?.(event);
+        break;
+      case "verification_result":
+        callbacks.onVerificationResult?.(event);
+        break;
+      case "new_response":
+        callbacks.onNewResponse?.();
+        break;
+      case "done":
+        callbacks.onDone?.(event.content, event.request_id);
+        break;
+      case "error":
+        callbacks.onError?.(event.error, event.request_id);
+        break;
+      case "parse_error":
+        callbacks.onParseError?.(event);
+        break;
+    }
+  };
 
   return {
-    bufferedRemainder:
-      options.flush && bufferedRemainder.trim().length > 0
-        ? ""
-        : bufferedRemainder,
-    events,
+    dispatch,
+    sawTerminalEvent: () => sawTerminalEvent,
+    lastRequestId: () => lastRequestId,
   };
 }
