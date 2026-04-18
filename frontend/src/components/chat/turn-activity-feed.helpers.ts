@@ -5,6 +5,7 @@ import type {
   RetrievalResult,
   SessionContentBlock,
   ToolResultEnvelope,
+  WorkflowStepState,
 } from "@/lib/types";
 import type {
   FeedEntryDescriptor,
@@ -606,6 +607,35 @@ function makeEmptySections(): Record<FeedSectionKey, FeedEntryDescriptor[]> {
     thinking: [],
     planning: [],
     verification: [],
+    workflow: [],
+  };
+}
+
+function summarizeWorkflowStep(step: WorkflowStepState): FeedLineDescriptor {
+  const position = `${step.step_index}/${step.total_steps}`;
+  const label = step.label ?? step.step_id;
+  const attemptSuffix = step.attempt > 1 ? ` (attempt ${step.attempt})` : "";
+  if (step.status === "running") {
+    return {
+      kind: "line",
+      text: `Step ${position}: ${label} — running${attemptSuffix}`,
+      tone: "active",
+    };
+  }
+  if (step.status === "ok") {
+    const duration =
+      typeof step.duration_ms === "number" ? ` in ${step.duration_ms} ms` : "";
+    return {
+      kind: "line",
+      text: `Step ${position}: ${label} — done${duration}${attemptSuffix}`,
+      tone: "success",
+    };
+  }
+  const errorSuffix = step.error ? `: ${step.error}` : "";
+  return {
+    kind: "line",
+    text: `Step ${position}: ${label} — failed${attemptSuffix}${errorSuffix}`,
+    tone: "error",
   };
 }
 
@@ -727,10 +757,18 @@ export function buildFeedSections(
     }
   }
 
+  const workflowSteps = message.workflowSteps ?? [];
+  if (workflowSteps.length > 0) {
+    sections.workflow.push(
+      ...workflowSteps.map((step) => summarizeWorkflowStep(step))
+    );
+  }
+
   if (
     live &&
     sections.thinking.length === 0 &&
-    sections.verification.length === 0
+    sections.verification.length === 0 &&
+    sections.workflow.length === 0
   ) {
     sections.thinking.push(summarizeFallback(message));
   }
@@ -738,6 +776,7 @@ export function buildFeedSections(
   const order: Array<{ key: FeedSectionKey; title: string }> = [
     { key: "thinking", title: "Thinking" },
     { key: "planning", title: "Planning" },
+    { key: "workflow", title: "Workflow" },
     { key: "verification", title: "Verification" },
   ];
 

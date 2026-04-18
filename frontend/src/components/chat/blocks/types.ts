@@ -1,7 +1,11 @@
 import type { SessionApprovalGateBlock } from "@/lib/types";
 
 export type FeedTone = "default" | "active" | "success" | "warning" | "error";
-export type FeedSectionKey = "thinking" | "planning" | "verification";
+export type FeedSectionKey =
+  | "thinking"
+  | "planning"
+  | "verification"
+  | "workflow";
 
 export interface FeedBlockDescriptor {
   kind: "block";

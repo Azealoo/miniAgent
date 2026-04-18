@@ -2,9 +2,13 @@ import type {
   ChatStreamDoneEvent,
   ChatStreamErrorEvent,
   ChatStreamEvent,
+  ChatStreamWorkflowStepEndedEvent,
+  ChatStreamWorkflowStepFailedEvent,
+  ChatStreamWorkflowStepStartedEvent,
   Message,
   RetrievalResult,
   SessionContentBlock,
+  WorkflowStepState,
 } from "./types";
 
 export interface StreamReducerState {
@@ -169,6 +173,24 @@ export function applyStreamEvent(
           verification: event.verification,
           tool_trace: event.tool_trace,
         }),
+      }));
+    case "workflow_step_started":
+      return updateStreamingMessage(state, event, (message) => ({
+        ...message,
+        request_id: event.request_id ?? message.request_id,
+        workflowSteps: applyWorkflowStepStarted(message.workflowSteps, event),
+      }));
+    case "workflow_step_ended":
+      return updateStreamingMessage(state, event, (message) => ({
+        ...message,
+        request_id: event.request_id ?? message.request_id,
+        workflowSteps: applyWorkflowStepEnded(message.workflowSteps, event),
+      }));
+    case "workflow_step_failed":
+      return updateStreamingMessage(state, event, (message) => ({
+        ...message,
+        request_id: event.request_id ?? message.request_id,
+        workflowSteps: applyWorkflowStepFailed(message.workflowSteps, event),
       }));
     case "new_response":
       return reduceNewResponseEvent(state, event, options);
@@ -397,6 +419,89 @@ function takeChunkBuffer(
     text,
     next: Object.keys(next).length > 0 ? next : undefined,
   };
+}
+
+function workflowStepKey(runId: string, stepId: string): string {
+  return `${runId}:${stepId}`;
+}
+
+function upsertWorkflowStep(
+  steps: WorkflowStepState[] | undefined,
+  next: WorkflowStepState
+): WorkflowStepState[] {
+  const list = [...(steps ?? [])];
+  const key = workflowStepKey(next.run_id, next.step_id);
+  const index = list.findIndex(
+    (entry) => workflowStepKey(entry.run_id, entry.step_id) === key
+  );
+  if (index >= 0) {
+    list[index] = { ...list[index], ...next };
+    return list;
+  }
+  list.push(next);
+  return list;
+}
+
+function applyWorkflowStepStarted(
+  steps: WorkflowStepState[] | undefined,
+  event: ChatStreamWorkflowStepStartedEvent
+): WorkflowStepState[] {
+  return upsertWorkflowStep(steps, {
+    workflow_id: event.workflow_id,
+    run_id: event.run_id,
+    step_id: event.step_id,
+    step_index: event.step_index,
+    total_steps: event.total_steps,
+    status: "running",
+    label: event.label ?? undefined,
+    attempt: event.attempt ?? 1,
+  });
+}
+
+function applyWorkflowStepEnded(
+  steps: WorkflowStepState[] | undefined,
+  event: ChatStreamWorkflowStepEndedEvent
+): WorkflowStepState[] {
+  const existing = (steps ?? []).find(
+    (entry) =>
+      workflowStepKey(entry.run_id, entry.step_id) ===
+      workflowStepKey(event.run_id, event.step_id)
+  );
+  return upsertWorkflowStep(steps, {
+    workflow_id: event.workflow_id,
+    run_id: event.run_id,
+    step_id: event.step_id,
+    step_index: event.step_index,
+    total_steps: event.total_steps,
+    status: "ok",
+    label: existing?.label,
+    attempt: existing?.attempt ?? 1,
+    duration_ms: event.duration_ms,
+  });
+}
+
+function applyWorkflowStepFailed(
+  steps: WorkflowStepState[] | undefined,
+  event: ChatStreamWorkflowStepFailedEvent
+): WorkflowStepState[] {
+  const existing = (steps ?? []).find(
+    (entry) =>
+      workflowStepKey(entry.run_id, entry.step_id) ===
+      workflowStepKey(event.run_id, event.step_id)
+  );
+  return upsertWorkflowStep(steps, {
+    workflow_id: event.workflow_id,
+    run_id: event.run_id,
+    step_id: event.step_id,
+    step_index: event.step_index,
+    total_steps: event.total_steps,
+    status: "failed",
+    label: existing?.label,
+    attempt: event.attempt ?? existing?.attempt ?? 1,
+    duration_ms: event.duration_ms,
+    error: event.error,
+    failure_policy: event.failure_policy,
+  });
 }
 
 function replaceRetrievalBlock(

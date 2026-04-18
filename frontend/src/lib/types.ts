@@ -36,6 +36,9 @@ export type {
   ChatStreamErrorEvent,
   ChatStreamToolStartEvent,
   ChatStreamToolChunkEvent,
+  ChatStreamWorkflowStepStartedEvent,
+  ChatStreamWorkflowStepEndedEvent,
+  ChatStreamWorkflowStepFailedEvent,
 } from "./types.generated";
 
 import type {
@@ -56,6 +59,9 @@ import type {
   ChatStreamCompactionEvent,
   ChatStreamDoneEvent,
   ChatStreamErrorEvent,
+  ChatStreamWorkflowStepStartedEvent,
+  ChatStreamWorkflowStepEndedEvent,
+  ChatStreamWorkflowStepFailedEvent,
   SessionTextBlock,
   SessionUsageBlock,
   SessionPlanBlock as GeneratedSessionPlanBlock,
@@ -235,6 +241,9 @@ export type ChatStreamEvent =
   | ChatStreamCompactionEvent
   | ChatStreamDoneEvent
   | ChatStreamErrorEvent
+  | ChatStreamWorkflowStepStartedEvent
+  | ChatStreamWorkflowStepEndedEvent
+  | ChatStreamWorkflowStepFailedEvent
   | ChatStreamParseErrorEvent;
 
 export type ChatStreamEventType = ChatStreamEvent["type"];
@@ -242,6 +251,25 @@ export type ChatStreamEventType = ChatStreamEvent["type"];
 // ────────────────────────────────────────────────────────────────────────
 // Hybrid chat Message — backend shape + client-side streaming fields
 // ────────────────────────────────────────────────────────────────────────
+
+export type WorkflowStepStatus = "running" | "ok" | "failed";
+
+export interface WorkflowStepState {
+  workflow_id: string;
+  run_id: string;
+  step_id: string;
+  step_index: number;
+  total_steps: number;
+  status: WorkflowStepStatus;
+  label?: string;
+  attempt: number;
+  duration_ms?: number;
+  error?: string;
+  failure_policy?:
+    | "fail_workflow"
+    | "block_workflow"
+    | "continue_with_warning";
+}
 
 export interface Message {
   id: string;
@@ -259,6 +287,12 @@ export interface Message {
    * `tool_end` arrives and the buffer is flushed into the persisted block.
    */
   toolChunkBuffers?: Record<string, { chunks: { index: number; text: string }[] }>;
+  /**
+   * Live workflow step list, ordered by first-seen ``started`` event. Keyed by
+   * ``${run_id}:${step_id}`` so repeated attempts collapse into a single row.
+   * Transport-only state — not persisted in session JSON.
+   */
+  workflowSteps?: WorkflowStepState[];
 }
 
 export interface SessionHistoryMessage {
