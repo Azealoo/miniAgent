@@ -12,17 +12,11 @@ import {
   route,
 } from "./support/mock-api";
 
-// SSE contract test for issue #60. A dedicated, deterministic fixture drives
-// the full event sequence the runtime emits from a single turn — retrieval,
-// token, tool_start, tool_end, plan_created, plan_updated, verification_result,
-// done — and the test asserts both wire-level order/count (parsed out of the
-// mocked SSE response body) and that every event renders in the UI.
-//
-// "Boot backend" in the issue is interpreted via the existing frontend e2e
-// convention: Playwright route interception feeds a canned SSE stream to the
-// real chat pipeline (POST /api/chat → streamChat → chat-stream-reducer →
-// ChatMessage). Booting the FastAPI service from Playwright would reintroduce
-// model/tool nondeterminism and defeat the "deterministic fixture" criterion.
+// SSE contract test for issue #60: a canned fixture drives the full runtime
+// event sequence and the test asserts both wire-level order/count and UI
+// rendering. Uses the mocked-SSE convention already established in
+// app-shell.e2e.spec.ts — booting the real FastAPI service from Playwright
+// would reintroduce model/tool nondeterminism the fixture has to exclude.
 const CANNED_MESSAGE = "Stream every runtime event type for the contract test.";
 const REQUEST_ID = "request-chat-stream-contract-1";
 const RUN_ID = "tool-contract-1";
@@ -142,17 +136,8 @@ function parseSseEventTypes(rawBody: string): string[] {
     if (!trimmed.startsWith("data:")) continue;
     const payload = trimmed.slice("data:".length).trim();
     if (!payload) continue;
-    try {
-      const parsed = JSON.parse(payload) as { type?: unknown };
-      if (typeof parsed.type === "string") {
-        types.push(parsed.type);
-      }
-    } catch {
-      // Malformed payloads are not expected in a canned fixture — surface them
-      // by pushing a sentinel so the assertion fails loudly instead of hiding
-      // the drift.
-      types.push("__parse_error__");
-    }
+    const parsed = JSON.parse(payload) as { type: string };
+    types.push(parsed.type);
   }
   return types;
 }
@@ -211,8 +196,8 @@ test("streams every runtime event in contract order exactly once", async ({
     }),
   ]);
 
-  // Capture the mocked SSE response body so the test can assert wire-level
-  // event order and count, independent of what the reducer chooses to render.
+  // Capture the mocked SSE body so the test can assert wire-level order/count
+  // independently of what the reducer chooses to render.
   const chatResponsePromise = page.waitForResponse(
     (response) =>
       response.url().endsWith("/api/chat") && response.request().method() === "POST"
@@ -231,31 +216,22 @@ test("streams every runtime event in contract order exactly once", async ({
   const rawBody = await chatResponse.text();
   const receivedEventTypes = parseSseEventTypes(rawBody);
 
-  // Wire-level contract: every expected event type arrived, in order, exactly
-  // once — no drops, no duplicates, no unexpected extras.
   expect(receivedEventTypes).toEqual([...EXPECTED_EVENT_TYPES]);
-  expect(receivedEventTypes).toHaveLength(EXPECTED_EVENT_TYPES.length);
 
-  // Rendering contract: each event type the reducer branches on surfaces a
-  // visible artifact in the chat timeline once the stream completes.
-
-  // token + done → the assistant message content renders.
   await expect(
     page.getByText("Streaming every runtime event for the contract.")
   ).toBeVisible();
 
-  // tool_end → the tool result's artifact chip renders.
   await expect(
     page.getByRole("button", { name: /sse-contract\.md/i })
   ).toBeVisible();
 
-  // plan_created + plan_updated → the live plan block reflects the latest
-  // 3-step plan (plan_updated supersedes plan_created in the same turn).
+  // plan_updated supersedes plan_created live in the same turn, so the UI
+  // settles on the 3-step summary rather than the initial 2-step draft.
   await expect(page.getByText("Updated the 3-step plan.")).toBeVisible();
   await expect(page.getByText("2. Verify the contract plan.")).toBeVisible();
   await expect(page.getByText("3. Report the contract outcome.")).toBeVisible();
 
-  // verification_result → the verification block renders with its pass note.
   await expect(page.getByText("Passed verification.")).toBeVisible();
   await expect(
     page.getByText(
@@ -263,8 +239,6 @@ test("streams every runtime event in contract order exactly once", async ({
     )
   ).toBeVisible();
 
-  // Title generation fires after `done`, confirming the terminal event was
-  // processed and the turn completed cleanly.
   await expect(
     page.getByRole("banner").getByText(generatedTitle)
   ).toBeVisible();
