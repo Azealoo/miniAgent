@@ -965,6 +965,98 @@
       "title": "VerificationResultRuntimeEvent",
       "type": "object"
     },
+    "WarningRuntimeEvent": {
+      "additionalProperties": false,
+      "description": "Non-fatal diagnostic surfaced to the user during a turn.\n\nEmitted just before ``done`` when a runtime check finds a condition the\nreviewer should see but that does not interrupt response delivery. The\ncanonical use case is ``kind == \"citation_mismatch\"``: the final answer\ncited PMIDs that are not present on any evidence card included in this\nturn's ``evidence_review`` artifact.",
+      "properties": {
+        "cited": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Cited",
+          "type": "array"
+        },
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
+        },
+        "included": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Included",
+          "type": "array"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "missing": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing",
+          "type": "array"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
+        },
+        "review_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review Path"
+        },
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "type": {
+          "const": "warning",
+          "default": "warning",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "title": "WarningRuntimeEvent",
+      "type": "object"
+    },
     "WorkflowStepEndedRuntimeEvent": {
       "additionalProperties": false,
       "properties": {
@@ -1271,6 +1363,7 @@
       "tool_end": "#/$defs/ToolEndRuntimeEvent",
       "tool_start": "#/$defs/ToolStartRuntimeEvent",
       "verification_result": "#/$defs/VerificationResultRuntimeEvent",
+      "warning": "#/$defs/WarningRuntimeEvent",
       "workflow_step_ended": "#/$defs/WorkflowStepEndedRuntimeEvent",
       "workflow_step_failed": "#/$defs/WorkflowStepFailedRuntimeEvent",
       "workflow_step_started": "#/$defs/WorkflowStepStartedRuntimeEvent"
@@ -1310,6 +1403,9 @@
     },
     {
       "$ref": "#/$defs/CompactionRuntimeEvent"
+    },
+    {
+      "$ref": "#/$defs/WarningRuntimeEvent"
     },
     {
       "$ref": "#/$defs/DoneRuntimeEvent"

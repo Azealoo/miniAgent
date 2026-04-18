@@ -193,6 +193,16 @@ export type SessionApprovalGateBlock = Omit<
   result?: ToolResultEnvelope;
 };
 
+export interface SessionWarningBlock {
+  type: "warning";
+  kind: string;
+  message: string;
+  missing?: string[];
+  cited?: string[];
+  included?: string[];
+  review_path?: string;
+}
+
 export type SessionContentBlock =
   | SessionTextBlock
   | SessionToolUseBlock
@@ -201,7 +211,8 @@ export type SessionContentBlock =
   | SessionUsageBlock
   | SessionPlanBlock
   | SessionVerificationBlock
-  | SessionApprovalGateBlock;
+  | SessionApprovalGateBlock
+  | SessionWarningBlock;
 
 export interface ToolCall {
   tool: string;
@@ -227,6 +238,18 @@ export interface ChatStreamParseErrorEvent {
   raw?: string;
 }
 
+export interface ChatStreamWarningEvent {
+  request_id?: string;
+  event_index?: number;
+  type: "warning";
+  kind: string;
+  message: string;
+  missing: string[];
+  cited: string[];
+  included: string[];
+  review_path?: string | null;
+}
+
 export type ChatStreamEvent =
   | ChatStreamRetrievalEvent
   | ChatStreamTokenEvent
@@ -239,6 +262,7 @@ export type ChatStreamEvent =
   | ChatStreamVerificationResultEvent
   | ChatStreamNewResponseEvent
   | ChatStreamCompactionEvent
+  | ChatStreamWarningEvent
   | ChatStreamDoneEvent
   | ChatStreamErrorEvent
   | ChatStreamWorkflowStepStartedEvent

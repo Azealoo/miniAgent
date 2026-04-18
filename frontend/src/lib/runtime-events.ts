@@ -26,6 +26,7 @@ export const RUNTIME_EVENT_TYPES = [
   "verification_result",
   "new_response",
   "compaction_event",
+  "warning",
   "done",
   "error",
   "workflow_step_started",
@@ -196,6 +197,21 @@ const CompactionRuntimeEventSchema = z
   })
   .strict();
 
+const WarningRuntimeEventSchema = z
+  .object({
+    type: z.literal("warning"),
+    schema_version: schemaVersionField,
+    request_id: requestIdField,
+    event_index: eventIndexField,
+    kind: z.string(),
+    message: z.string(),
+    missing: z.array(z.string()).default([]),
+    cited: z.array(z.string()).default([]),
+    included: z.array(z.string()).default([]),
+    review_path: z.string().nullish(),
+  })
+  .strict();
+
 const DoneRuntimeEventSchema = z
   .object({
     type: z.literal("done"),
@@ -286,6 +302,7 @@ export const RuntimeEventSchema = z.discriminatedUnion("type", [
   VerificationResultRuntimeEventSchema,
   NewResponseRuntimeEventSchema,
   CompactionRuntimeEventSchema,
+  WarningRuntimeEventSchema,
   DoneRuntimeEventSchema,
   ErrorRuntimeEventSchema,
   WorkflowStepStartedRuntimeEventSchema,
@@ -310,6 +327,7 @@ export const RUNTIME_EVENT_SCHEMAS: Record<
   verification_result: VerificationResultRuntimeEventSchema,
   new_response: NewResponseRuntimeEventSchema,
   compaction_event: CompactionRuntimeEventSchema,
+  warning: WarningRuntimeEventSchema,
   done: DoneRuntimeEventSchema,
   error: ErrorRuntimeEventSchema,
   workflow_step_started: WorkflowStepStartedRuntimeEventSchema,

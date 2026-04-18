@@ -146,6 +146,17 @@ export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent {
         saved_tokens: event.saved_tokens,
         ...base,
       };
+    case "warning":
+      return {
+        type: "warning",
+        kind: event.kind,
+        message: event.message,
+        missing: event.missing,
+        cited: event.cited,
+        included: event.included,
+        review_path: event.review_path ?? null,
+        ...base,
+      };
     case "done":
       return {
         type: "done",

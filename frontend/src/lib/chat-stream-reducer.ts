@@ -200,6 +200,20 @@ export function applyStreamEvent(
         streamingMessageId: state.streamingMessageId,
         finished: false,
       };
+    case "warning":
+      return updateStreamingMessage(state, event, (message) => ({
+        ...message,
+        request_id: event.request_id ?? message.request_id,
+        blocks: appendSessionBlock(message.blocks, {
+          type: "warning",
+          kind: event.kind,
+          message: event.message,
+          missing: event.missing,
+          cited: event.cited,
+          included: event.included,
+          review_path: event.review_path ?? undefined,
+        }),
+      }));
     case "done":
       return reduceDoneEvent(state, event, options.now);
     case "error":

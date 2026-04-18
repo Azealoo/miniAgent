@@ -419,6 +419,20 @@ function summarizeVerificationBlock(
   ];
 }
 
+function summarizeWarningBlock(
+  block: Extract<SessionContentBlock, { type: "warning" }>
+): FeedLineDescriptor | null {
+  const message = compactInline(block.message, 160);
+  if (!message) {
+    return null;
+  }
+  return {
+    kind: "line",
+    text: message,
+    tone: "warning",
+  };
+}
+
 function toolPhrase(tool: string): string {
   switch (tool) {
     case "plan_agent":
@@ -736,6 +750,13 @@ export function buildFeedSections(
       }
       case "approval_gate": {
         sections.thinking.push({ kind: "gate", block });
+        break;
+      }
+      case "warning": {
+        const line = summarizeWarningBlock(block);
+        if (line) {
+          sections.thinking.push(line);
+        }
         break;
       }
       case "usage":

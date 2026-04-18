@@ -73,6 +73,16 @@ class SessionApprovalGateBlock(TypedDict, total=False):
     policy: dict[str, Any]
 
 
+class SessionWarningBlock(TypedDict, total=False):
+    type: Literal["warning"]
+    kind: str
+    message: str
+    missing: list[str]
+    cited: list[str]
+    included: list[str]
+    review_path: str
+
+
 class SessionArchiveIndexEntry(TypedDict):
     archive_id: str | None
     message_count: int
@@ -87,6 +97,7 @@ SessionContentBlock = (
     | SessionPlanBlock
     | SessionVerificationBlock
     | SessionApprovalGateBlock
+    | SessionWarningBlock
 )
 
 

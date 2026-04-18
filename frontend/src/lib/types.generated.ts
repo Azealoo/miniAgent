@@ -240,6 +240,19 @@ export interface ChatStreamVerificationResultEvent {
   verdict: "pass" | "repair_required" | "fail";
   verification: JsonObject;
 }
+/** Non-fatal diagnostic surfaced to the user during a turn. */
+export interface WarningRuntimeEvent {
+  cited?: string[];
+  event_index?: number;
+  included?: string[];
+  kind: string;
+  message: string;
+  missing?: string[];
+  request_id?: string;
+  review_path?: string;
+  schema_version?: number;
+  type: "warning";
+}
 export interface ChatStreamWorkflowStepEndedEvent {
   duration_ms: number;
   event_index?: number;
@@ -295,6 +308,7 @@ export type ChatStreamEventDTO =
   | ChatStreamVerificationResultEvent
   | ChatStreamNewResponseEvent
   | ChatStreamCompactionEvent
+  | WarningRuntimeEvent
   | ChatStreamDoneEvent
   | ChatStreamErrorEvent
   | ChatStreamWorkflowStepStartedEvent
