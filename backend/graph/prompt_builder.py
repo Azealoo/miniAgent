@@ -23,6 +23,25 @@ from __future__ import annotations
 # SOUL/IDENTITY/AGENTS are dropped only as a last resort. See
 # ``context/ai-interaction.md`` for the rationale and configuration surface.
 # ─────────────────────────────────────────────────────────────────────────
+#
+# ─── Prompt-cache friendly ordering ──────────────────────────────────────
+# The assembled prompt is split into a *stable prefix* (identical across turns
+# as long as workspace + skill registry + ancestor AGENTS.md + CLAW.md are
+# unchanged) followed by a *volatile suffix* (per-turn state: memory index,
+# scoped-memory listing, git working-tree snapshot). Keeping the stable prefix
+# byte-identical across turns is what lets providers reuse the server-side
+# attention KV cache:
+#
+#   • DeepSeek and OpenAI perform automatic prefix caching on prompts whose
+#     leading tokens match the previous request byte-for-byte.
+#   • Anthropic requires an explicit ``cache_control`` breakpoint at the end
+#     of the stable prefix (see ``build_anthropic_system_blocks`` below).
+#
+# SECTIONS_IN_STABLE_PREFIX documents which section ids live in the stable
+# portion. ``build_system_prompt_blocks`` returns the split explicitly so
+# downstream call sites (``graph.agent._build_agent``) can pass structured
+# message blocks to providers that need the breakpoint marker.
+# ─────────────────────────────────────────────────────────────────────────
 
 import os
 import re
@@ -60,6 +79,21 @@ EVICTION_ORDER: tuple[str, ...] = (
     "identity",
     "soul",
 )
+
+# Sections that belong to the prompt's stable prefix for prefix-cache reuse.
+# Anything not in this set is treated as volatile (per-turn state) and placed
+# after the cache breakpoint. Static guidance blocks (``_rag_memory_guidance``,
+# ``_tool_result_error_contract``) are pinned stable and never evicted.
+SECTIONS_IN_STABLE_PREFIX: frozenset[str] = frozenset({
+    "skills_snapshot",
+    "soul",
+    "identity",
+    "user_profile",
+    "agents_guide",
+    "project_instructions",
+    "_tool_result_error_contract",
+    "_rag_memory_guidance",
+})
 
 _MEMORY_SCOPE_DIRS = ("project", "user", "agent")
 
@@ -503,29 +537,21 @@ def _apply_eviction(
     return remaining
 
 
-def build_system_prompt(
+def _assemble_sections(
     base_dir: Path,
-    rag_mode: bool = False,
+    rag_mode: bool,
     *,
-    skill_entries: list[dict[str, Any]] | None = None,
-) -> str:
-    """
-    Assemble the system prompt from the ordered workspace components and any
-    additive project context discovered around the workspace root.
-
-    Per-section character budgets come from ``config.get_prompt_budget()``;
-    individual sections exceeding their cap are truncated in place with a
-    visible marker. When the optional ``total_max_chars`` global cap is set,
-    sections are dropped wholesale in the documented EVICTION_ORDER (least
-    load-bearing first) so SOUL/IDENTITY/USER/AGENTS survive as long as
-    possible. The static Tool Result Error Contract guidance is never evicted.
-    """
+    skill_entries: list[dict[str, Any]] | None,
+) -> list[tuple[str, str]]:
+    """Collect all section ``(id, content)`` pairs in prompt-cache friendly
+    order: stable-prefix sections first, volatile per-turn sections last."""
     budget = config.get_prompt_budget()
     component_cap = budget["component_max_chars"]
     memory_index_cap = budget["memory_index_max_chars"]
 
     sections: list[tuple[str, str]] = []
 
+    # ── Stable prefix ──────────────────────────────────────────────────
     snap = _build_skills_snapshot_context(
         base_dir,
         skill_entries=skill_entries,
@@ -554,16 +580,14 @@ def build_system_prompt(
     if project_instructions:
         sections.append(("project_instructions", project_instructions))
 
-    git_context = _build_git_context(base_dir, budget=budget)
-    if git_context:
-        sections.append(("git_context", git_context))
-
-    # Static guidance — pinned, not subject to eviction.
+    # Static guidance — pinned and stable, so it lives in the cache prefix.
     sections.append(("_tool_result_error_contract", _TOOL_RESULT_ERROR_GUIDANCE))
 
     if rag_mode:
         sections.append(("_rag_memory_guidance", _RAG_MEMORY_GUIDANCE))
-    else:
+
+    # ── Volatile suffix (per-turn state) ───────────────────────────────
+    if not rag_mode:
         # MEMORY.md is intentionally loaded as a concise curated index rather
         # than durable content. The tight char budget prevents the prompt from
         # silently bloating if someone starts accumulating narrative here —
@@ -579,9 +603,102 @@ def build_system_prompt(
         if scoped_memory:
             sections.append(("scoped_memory", scoped_memory))
 
-    sections = _apply_eviction(
+    git_context = _build_git_context(base_dir, budget=budget)
+    if git_context:
+        sections.append(("git_context", git_context))
+
+    return _apply_eviction(
         sections,
         total_max_chars=budget.get("total_max_chars", 0),
     )
 
-    return "\n\n".join(content for _, content in sections)
+
+def build_system_prompt_blocks(
+    base_dir: Path,
+    rag_mode: bool = False,
+    *,
+    skill_entries: list[dict[str, Any]] | None = None,
+) -> tuple[str, str]:
+    """Assemble the system prompt and return ``(stable_prefix, volatile_suffix)``.
+
+    The stable prefix contains sections that are byte-identical across turns
+    given a stable workspace and skill registry (SKILLS_SNAPSHOT,
+    workspace/SOUL|IDENTITY|USER|AGENTS.md, ancestor AGENTS.md / CLAW.md, the
+    pinned Tool Result Error Contract guidance, and — in RAG mode — the RAG
+    memory guidance). The volatile suffix contains per-turn state: the
+    long-term memory index, the scoped-memory listing, and the git working-tree
+    snapshot. The split matches ``SECTIONS_IN_STABLE_PREFIX``.
+
+    Callers targeting Anthropic can feed ``stable_prefix`` through
+    ``build_anthropic_system_blocks`` to attach a ``cache_control`` breakpoint.
+    Callers targeting DeepSeek / OpenAI can simply concatenate the two — server
+    side prefix caching will match the stable leading bytes automatically.
+    """
+    sections = _assemble_sections(base_dir, rag_mode, skill_entries=skill_entries)
+    stable_parts = [
+        content for sid, content in sections if sid in SECTIONS_IN_STABLE_PREFIX
+    ]
+    volatile_parts = [
+        content for sid, content in sections if sid not in SECTIONS_IN_STABLE_PREFIX
+    ]
+    return "\n\n".join(stable_parts), "\n\n".join(volatile_parts)
+
+
+def build_system_prompt(
+    base_dir: Path,
+    rag_mode: bool = False,
+    *,
+    skill_entries: list[dict[str, Any]] | None = None,
+) -> str:
+    """
+    Assemble the system prompt from the ordered workspace components and any
+    additive project context discovered around the workspace root.
+
+    Per-section character budgets come from ``config.get_prompt_budget()``;
+    individual sections exceeding their cap are truncated in place with a
+    visible marker. When the optional ``total_max_chars`` global cap is set,
+    sections are dropped wholesale in the documented EVICTION_ORDER (least
+    load-bearing first) so SOUL/IDENTITY/USER/AGENTS survive as long as
+    possible. The static Tool Result Error Contract guidance is never evicted.
+
+    Sections are emitted in prompt-cache friendly order: the stable prefix
+    first (SKILLS_SNAPSHOT, workspace/*.md, ancestor AGENTS.md / CLAW.md,
+    Tool Result Error Contract, RAG memory guidance), followed by the
+    volatile suffix (memory index, scoped-memory listing, git context). This
+    lets DeepSeek / OpenAI automatic prefix caching match the leading bytes
+    across turns; ``build_system_prompt_blocks`` exposes the split explicitly
+    for Anthropic ``cache_control`` breakpoints.
+    """
+    stable_prefix, volatile_suffix = build_system_prompt_blocks(
+        base_dir,
+        rag_mode,
+        skill_entries=skill_entries,
+    )
+    if stable_prefix and volatile_suffix:
+        return f"{stable_prefix}\n\n{volatile_suffix}"
+    return stable_prefix or volatile_suffix
+
+
+def build_anthropic_system_blocks(
+    stable_prefix: str,
+    volatile_suffix: str,
+) -> list[dict[str, Any]]:
+    """Render the split prompt as Anthropic system-message content blocks with
+    a ``cache_control`` breakpoint at the end of the stable prefix.
+
+    This is a pure helper: it does not import or depend on the Anthropic SDK,
+    so the rest of the runtime can remain provider-agnostic. Call sites that
+    build a ChatAnthropic model can pass the returned list directly as the
+    ``system`` argument; other providers should keep using
+    ``build_system_prompt`` and rely on automatic prefix caching.
+    """
+    blocks: list[dict[str, Any]] = []
+    if stable_prefix:
+        blocks.append({
+            "type": "text",
+            "text": stable_prefix,
+            "cache_control": {"type": "ephemeral"},
+        })
+    if volatile_suffix:
+        blocks.append({"type": "text", "text": volatile_suffix})
+    return blocks
