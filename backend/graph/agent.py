@@ -3,6 +3,7 @@ AgentManager — singleton that owns the LLM, tools, session manager,
 and memory indexer. Rebuilds the agent on every request via create_agent
 so that live workspace edits are always reflected in the system prompt.
 """
+from contextlib import nullcontext
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
@@ -16,6 +17,12 @@ from .prompt_builder import build_retrieved_memory_block, build_system_prompt
 from .session_manager import SessionManager
 from .skill_router import select_skill_entries_for_query
 from tools.contracts import normalize_tool_output
+from tools.policy import get_tool_policy_context
+from tools.speculation import (
+    SpeculationSession,
+    speculation_enabled,
+    speculation_session,
+)
 
 _HARNESS_GUIDANCE = """
 <!-- Runtime Harness Guidance -->
@@ -173,101 +180,150 @@ class AgentManager:
                 1000,
             )
         }
+
+        # Speculative read-only tool execution: as soon as the model emits
+        # a fully parsed tool_use block, wrapped PolicyWrappedTools that
+        # are read_only + concurrency_safe can begin executing in the
+        # background. The formal dispatch inside `_arun` consumes the
+        # cached result if the args digest matches, otherwise discards it.
+        if speculation_enabled():
+            policy_context = get_tool_policy_context()
+            spec_session: SpeculationSession | None = SpeculationSession(
+                session_id=policy_context.session_id if policy_context else None,
+                turn_id=policy_context.turn_id if policy_context else None,
+            )
+            tool_lookup = {
+                getattr(tool, "name", ""): tool for tool in self.tools
+            }
+        else:
+            spec_session = None
+            tool_lookup = {}
+
+        def _schedule_speculations(event: dict) -> None:
+            if not tool_lookup:
+                return
+            output = event.get("data", {}).get("output")
+            tool_calls = getattr(output, "tool_calls", None) or []
+            for call in tool_calls:
+                call_name = call.get("name") if isinstance(call, dict) else None
+                call_args = call.get("args") if isinstance(call, dict) else None
+                wrapped = tool_lookup.get(call_name) if call_name else None
+                scheduler = getattr(wrapped, "schedule_speculation", None) if wrapped else None
+                if scheduler is None:
+                    continue
+                try:
+                    scheduler(call_args if isinstance(call_args, dict) else {})
+                except Exception:  # pragma: no cover - scheduling must never break the turn
+                    pass
+
+        spec_cm = (
+            speculation_session(spec_session)
+            if spec_session is not None
+            else nullcontext()
+        )
         try:
-            async for event in agent.astream_events(
-                {"messages": lc_messages},
-                version="v2",
-                config=run_config,
-            ):
-                kind = event["event"]
+            with spec_cm:
+                try:
+                    async for event in agent.astream_events(
+                        {"messages": lc_messages},
+                        version="v2",
+                        config=run_config,
+                    ):
+                        kind = event["event"]
 
-                if kind == "on_chat_model_stream":
-                    chunk = event["data"]["chunk"]
-                    if chunk.content:
-                        if after_tool:
-                            yield {"type": "new_response"}
-                            after_tool = False
-                        yield {"type": "token", "content": chunk.content}
+                        if kind == "on_chat_model_end":
+                            _schedule_speculations(event)
 
-                elif kind == "on_tool_start":
-                    run_id = event["run_id"]
-                    tool_name = event["name"]
-                    raw_input = event["data"].get("input", {})
+                        if kind == "on_chat_model_stream":
+                            chunk = event["data"]["chunk"]
+                            if chunk.content:
+                                if after_tool:
+                                    yield {"type": "new_response"}
+                                    after_tool = False
+                                yield {"type": "token", "content": chunk.content}
 
-                    # Flatten single-key dict inputs for readability
-                    if isinstance(raw_input, dict) and len(raw_input) == 1:
-                        tool_input_str = str(next(iter(raw_input.values())))
-                    else:
-                        tool_input_str = str(raw_input)
+                        elif kind == "on_tool_start":
+                            run_id = event["run_id"]
+                            tool_name = event["name"]
+                            raw_input = event["data"].get("input", {})
 
-                    yield {
-                        "type": "tool_start",
-                        "tool": tool_name,
-                        "input": tool_input_str,
-                        "run_id": run_id,
-                    }
+                            # Flatten single-key dict inputs for readability
+                            if isinstance(raw_input, dict) and len(raw_input) == 1:
+                                tool_input_str = str(next(iter(raw_input.values())))
+                            else:
+                                tool_input_str = str(raw_input)
 
-                elif kind == "on_tool_end":
-                    run_id = event["run_id"]
-                    raw_output = event["data"].get("output", "")
-                    result = normalize_tool_output(event["name"], raw_output)
-                    raw_input = event["data"].get("input", {})
-                    if isinstance(raw_input, dict) and len(raw_input) == 1:
-                        tool_input_str = str(next(iter(raw_input.values())))
-                    else:
-                        tool_input_str = str(raw_input)
+                            yield {
+                                "type": "tool_start",
+                                "tool": tool_name,
+                                "input": tool_input_str,
+                                "run_id": run_id,
+                            }
 
-                    result_dict = result.model_dump(mode="json")
-                    policy = result.metadata.get("policy")
-                    policy_dict = policy if isinstance(policy, dict) else None
+                        elif kind == "on_tool_end":
+                            run_id = event["run_id"]
+                            raw_output = event["data"].get("output", "")
+                            result = normalize_tool_output(event["name"], raw_output)
+                            raw_input = event["data"].get("input", {})
+                            if isinstance(raw_input, dict) and len(raw_input) == 1:
+                                tool_input_str = str(next(iter(raw_input.values())))
+                            else:
+                                tool_input_str = str(raw_input)
 
-                    if result.outcome == "needs_approval":
-                        approval_message = (
-                            result.error.message
-                            if result.error is not None
-                            else result.summary
-                        )
-                        approval_reason = (
-                            policy_dict.get("approval_reason")
-                            if isinstance(policy_dict, dict)
-                            else None
-                        ) or "requires_approval"
-                        payload = {
-                            "type": "tool_awaiting_approval",
-                            "tool": event["name"],
-                            "input": tool_input_str,
-                            "run_id": run_id,
-                            "reason": approval_reason,
-                            "message": approval_message,
-                            "result": result_dict,
-                        }
-                        if policy_dict is not None:
-                            payload["policy"] = policy_dict
-                        yield payload
-                        # Hard-stop the turn: the agent must not keep reasoning over a
-                        # gated ToolMessage, since that would either loop on the same
-                        # gate or paper over the human decision. The reviewer resumes
-                        # the turn via POST /api/chat/approval + a follow-up /api/chat.
-                        yield {"type": "done", "turn_status": "awaiting_approval"}
-                        return
+                            result_dict = result.model_dump(mode="json")
+                            policy = result.metadata.get("policy")
+                            policy_dict = policy if isinstance(policy, dict) else None
 
-                    payload = {
-                        "type": "tool_end",
-                        "tool": event["name"],
-                        "output": result.summary,
-                        "result": result_dict,
-                        "run_id": run_id,
-                    }
-                    if policy_dict is not None:
-                        payload["policy"] = policy_dict
-                    yield payload
-                    after_tool = True
+                            if result.outcome == "needs_approval":
+                                approval_message = (
+                                    result.error.message
+                                    if result.error is not None
+                                    else result.summary
+                                )
+                                approval_reason = (
+                                    policy_dict.get("approval_reason")
+                                    if isinstance(policy_dict, dict)
+                                    else None
+                                ) or "requires_approval"
+                                payload = {
+                                    "type": "tool_awaiting_approval",
+                                    "tool": event["name"],
+                                    "input": tool_input_str,
+                                    "run_id": run_id,
+                                    "reason": approval_reason,
+                                    "message": approval_message,
+                                    "result": result_dict,
+                                }
+                                if policy_dict is not None:
+                                    payload["policy"] = policy_dict
+                                yield payload
+                                # Hard-stop the turn: the agent must not keep reasoning over a
+                                # gated ToolMessage, since that would either loop on the same
+                                # gate or paper over the human decision. The reviewer resumes
+                                # the turn via POST /api/chat/approval + a follow-up /api/chat.
+                                yield {"type": "done", "turn_status": "awaiting_approval"}
+                                return
 
-        except Exception as exc:
-            yield {"type": "error", "error": str(exc)}
-            return
+                            payload = {
+                                "type": "tool_end",
+                                "tool": event["name"],
+                                "output": result.summary,
+                                "result": result_dict,
+                                "run_id": run_id,
+                            }
+                            if policy_dict is not None:
+                                payload["policy"] = policy_dict
+                            yield payload
+                            after_tool = True
 
-        yield {"type": "done"}
+                except Exception as exc:
+                    yield {"type": "error", "error": str(exc)}
+                    return
+
+                yield {"type": "done"}
+        finally:
+            if spec_session is not None:
+                await spec_session.discard_pending("stream_ended")
 
 
 # Module-level singleton
