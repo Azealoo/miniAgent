@@ -45,6 +45,16 @@ import type {
 
 const DEFAULT_SESSION_TITLE = "New Chat";
 
+export interface ApprovalDecisionInput {
+  sessionId: string;
+  runId: string;
+  toolName: string;
+  decision: "approve" | "deny";
+  rationale?: string | null;
+  actor?: string;
+  resumeMessage?: string;
+}
+
 // ────────────────────────────────────────────────────────────────
 // Context shape
 // ────────────────────────────────────────────────────────────────
@@ -82,6 +92,7 @@ interface AppContextValue {
   stopStreaming: () => void;
   primeDraftMessage: (text: string) => void;
   clearDraftMessage: () => void;
+  submitApprovalDecision: (input: ApprovalDecisionInput) => Promise<void>;
   setAccessToken: (scope: AccessScope, token: string) => void;
   clearAccessTokens: () => void;
   setInspectorTab: (tab: InspectorTab) => void;
@@ -95,6 +106,15 @@ export function useApp(): AppContextValue {
   const ctx = useContext(AppContext);
   if (!ctx) throw new Error("useApp must be used inside AppProvider");
   return ctx;
+}
+
+/**
+ * Non-throwing variant for components rendered by unit tests that don't wrap
+ * the tree in an AppProvider (e.g., ChatMessage snapshot tests). Callers that
+ * need the context must handle the null case explicitly.
+ */
+export function useAppOptional(): AppContextValue | null {
+  return useContext(AppContext);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -671,6 +691,38 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     streamAbortControllerRef.current.abort();
   }, []);
 
+  // Ref indirection breaks the sendMessage <-> submitApprovalDecision callback
+  // cycle — otherwise declaring either first would reference the other before
+  // it is initialized.
+  const sendMessageRef = useRef<((content: string) => Promise<void>) | null>(null);
+
+  const submitApprovalDecisionAction = useCallback(
+    async (input: ApprovalDecisionInput) => {
+      if (!hasExecutionAccess) return;
+      await api.submitApprovalDecision({
+        session_id: input.sessionId,
+        run_id: input.runId,
+        tool_name: input.toolName,
+        decision: input.decision,
+        rationale: input.rationale ?? null,
+        actor: input.actor ?? "ui-user",
+      });
+      // Reload the session so the approval_gate block reflects the persisted
+      // decision (the backend records it on disk, not in the live message tree).
+      await reloadCurrentSession();
+
+      // On approve, auto-resume the turn with the reviewer-supplied message (or
+      // a minimal "continue" nudge so the agent picks up the newly approved
+      // tool). On deny we leave the turn paused — the reviewer can author a
+      // follow-up message or cancel.
+      if (input.decision === "approve" && !isStreaming) {
+        const resume = (input.resumeMessage ?? "continue").trim() || "continue";
+        await sendMessageRef.current?.(resume);
+      }
+    },
+    [hasExecutionAccess, isStreaming, reloadCurrentSession]
+  );
+
   // ── Send message ─────────────────────────────────────────────
 
   const sendMessage = useCallback(
@@ -785,6 +837,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     ]
   );
 
+  useEffect(() => {
+    sendMessageRef.current = sendMessage;
+    return () => {
+      sendMessageRef.current = null;
+    };
+  }, [sendMessage]);
+
   return (
     <AppContext.Provider
       value={{
@@ -818,6 +877,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         stopStreaming,
         primeDraftMessage,
         clearDraftMessage,
+        submitApprovalDecision: submitApprovalDecisionAction,
         setAccessToken,
         clearAccessTokens,
         setInspectorTab,

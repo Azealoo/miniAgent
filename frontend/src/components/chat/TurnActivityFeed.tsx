@@ -8,12 +8,15 @@ import { cn } from "@/lib/utils";
 import type {
   Message,
   RetrievalResult,
+  SessionApprovalGateBlock,
   SessionContentBlock,
   ToolResultEnvelope,
 } from "@/lib/types";
+import ApprovalGate from "./ApprovalGate";
 
 interface TurnActivityFeedProps {
   message: Message;
+  sessionId?: string | null;
 }
 
 type FeedTone = "default" | "active" | "success" | "warning" | "error";
@@ -39,10 +42,16 @@ interface FeedLineDescriptor {
   tone?: FeedTone;
 }
 
+interface FeedGateDescriptor {
+  kind: "gate";
+  block: SessionApprovalGateBlock;
+}
+
 type FeedEntryDescriptor =
   | FeedBlockDescriptor
   | FeedPlanningDescriptor
-  | FeedLineDescriptor;
+  | FeedLineDescriptor
+  | FeedGateDescriptor;
 
 interface FeedSectionDescriptor {
   key: FeedSectionKey;
@@ -779,6 +788,10 @@ function buildFeedSections(message: Message, live: boolean): FeedSectionDescript
         }
         break;
       }
+      case "approval_gate": {
+        sections.thinking.push({ kind: "gate", block });
+        break;
+      }
       case "usage":
         break;
     }
@@ -879,10 +892,12 @@ function FeedSection({
   live,
   title,
   entries,
+  sessionId,
 }: {
   live: boolean;
   title: string;
   entries: FeedEntryDescriptor[];
+  sessionId: string | null;
 }) {
   const animated =
     live &&
@@ -899,21 +914,40 @@ function FeedSection({
       </div>
 
       <div className="space-y-1.5">
-        {entries.map((entry, index) =>
-          entry.kind === "block" ? (
-            <FeedBlock key={`${title}-${entry.title}-${entry.badge ?? "none"}-${index}`} {...entry} />
-          ) : entry.kind === "planning" ? (
-            <FeedPlanning key={`${title}-planning-${index}`} {...entry} />
-          ) : (
+        {entries.map((entry, index) => {
+          if (entry.kind === "block") {
+            return (
+              <FeedBlock
+                key={`${title}-${entry.title}-${entry.badge ?? "none"}-${index}`}
+                {...entry}
+              />
+            );
+          }
+          if (entry.kind === "planning") {
+            return <FeedPlanning key={`${title}-planning-${index}`} {...entry} />;
+          }
+          if (entry.kind === "gate") {
+            return (
+              <ApprovalGate
+                key={`${title}-gate-${entry.block.run_id}-${index}`}
+                block={entry.block}
+                sessionId={sessionId}
+              />
+            );
+          }
+          return (
             <FeedLine key={`${title}-${entry.text}-${index}`} {...entry} />
-          )
-        )}
+          );
+        })}
       </div>
     </div>
   );
 }
 
-export default function TurnActivityFeed({ message }: TurnActivityFeedProps) {
+export default function TurnActivityFeed({
+  message,
+  sessionId = null,
+}: TurnActivityFeedProps) {
   const live = message.isStreaming === true;
   const sections = buildFeedSections(message, live);
 
@@ -936,6 +970,7 @@ export default function TurnActivityFeed({ message }: TurnActivityFeedProps) {
           live={live}
           title={section.title}
           entries={section.entries}
+          sessionId={sessionId}
         />
       ))}
     </section>

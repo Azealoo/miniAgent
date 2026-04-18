@@ -63,6 +63,10 @@ class ToolPolicyExecutionContext:
     # already approved this turn. The runtime is responsible for populating
     # this from the approval API; the policy layer only consults it.
     approved_tool_runs: frozenset[str] = frozenset()
+    # Tool names the reviewer explicitly denied for this turn. Denied tools
+    # hard-block (rather than re-prompt) so the agent sees a blocked envelope
+    # and routes around the capability instead of spinning on the same gate.
+    denied_tool_runs: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

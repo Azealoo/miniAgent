@@ -420,6 +420,7 @@ class QueryEngine:
         # Deferred imports: ``tools`` pulls in langchain at module load time,
         # which some QueryEngine unit tests avoid by importing the class
         # without the full runtime. Keep the dependency scoped to SSE runs.
+        from graph import approval_store
         from runtime.compaction import maybe_compact_turn_boundary
         from tools.policy import tool_policy_context
         from tools.policy_types import ToolPolicyExecutionContext
@@ -439,10 +440,27 @@ class QueryEngine:
         history = session_manager.load_session_for_agent(session_id)
 
         request_id = str(uuid.uuid4())
+        base_dir = getattr(self.agent_manager, "base_dir", None)
+        approved_tool_runs: frozenset[str] = frozenset()
+        denied_tool_runs: frozenset[str] = frozenset()
+        if base_dir is not None:
+            try:
+                approved_tool_runs = approval_store.approved_tool_names(
+                    base_dir, session_id
+                )
+                denied_tool_runs = frozenset(
+                    record["tool_name"]
+                    for record in approval_store.denied_records(base_dir, session_id)
+                )
+            except Exception:
+                approved_tool_runs = frozenset()
+                denied_tool_runs = frozenset()
         policy_context = ToolPolicyExecutionContext(
             session_id=session_id,
             request_id=request_id,
             turn_id=request_id,
+            approved_tool_runs=approved_tool_runs,
+            denied_tool_runs=denied_tool_runs,
         )
         ledger = TurnLedger(
             session_manager=session_manager,
@@ -488,13 +506,23 @@ class QueryEngine:
                             raise RuntimeError("runtime done event missing turn_result")
                         ledger.persist_user_message()
                         ledger.persist_segments(turn_result)
-                        yield _sse(
-                            {
-                                "type": "done",
-                                "content": turn_result.final_content,
-                                "session_id": session_id,
-                            }
-                        )
+                        turn_status = getattr(turn_result, "turn_status", None)
+                        done_payload: dict[str, Any] = {
+                            "type": "done",
+                            "content": turn_result.final_content,
+                            "session_id": session_id,
+                        }
+                        if isinstance(turn_status, str) and turn_status not in {"", "ok"}:
+                            done_payload["turn_status"] = turn_status
+                        if (
+                            base_dir is not None
+                            and turn_status != "awaiting_approval"
+                        ):
+                            try:
+                                approval_store.consume(base_dir, session_id)
+                            except Exception:
+                                pass
+                        yield _sse(done_payload)
                         return
 
                     if event_type == "error":
