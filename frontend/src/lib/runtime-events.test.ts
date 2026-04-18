@@ -104,6 +104,12 @@ function minimalPayloadFor(eventType: string): Record<string, unknown> {
         summary: "Compacted early turns.",
         saved_tokens: 1200,
       };
+    case "warning":
+      return {
+        type: "warning",
+        kind: "citation_mismatch",
+        message: "Answer cites PMID 12345 but it is not in the evidence review.",
+      };
     case "done":
       return { type: "done", content: "final answer" };
     case "error":

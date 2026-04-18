@@ -3,22 +3,10 @@
     "CompactionRuntimeEvent": {
       "additionalProperties": false,
       "properties": {
-        "event_index": {
-          "anyOf": [
-            {
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Monotonic 1-based sequence number within a single turn.",
-          "title": "Event Index"
-        },
-        "from_turn": {
-          "title": "From Turn",
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
           "type": "integer"
         },
         "request_id": {
@@ -34,29 +22,41 @@
           "description": "Stable per-turn identifier stamped by the transport adapter.",
           "title": "Request Id"
         },
-        "saved_tokens": {
-          "title": "Saved Tokens",
-          "type": "integer"
-        },
-        "schema_version": {
-          "default": 1,
-          "description": "Version of the RuntimeEvent schema this event conforms to.",
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "summary": {
-          "title": "Summary",
-          "type": "string"
-        },
-        "to_turn": {
-          "title": "To Turn",
-          "type": "integer"
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
         },
         "type": {
           "const": "compaction_event",
           "default": "compaction_event",
           "title": "Type",
           "type": "string"
+        },
+        "from_turn": {
+          "title": "From Turn",
+          "type": "integer"
+        },
+        "to_turn": {
+          "title": "To Turn",
+          "type": "integer"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "saved_tokens": {
+          "title": "Saved Tokens",
+          "type": "integer"
         }
       },
       "required": [
@@ -71,9 +71,24 @@
     "DoneRuntimeEvent": {
       "additionalProperties": false,
       "properties": {
-        "content": {
-          "title": "Content",
-          "type": "string"
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
         },
         "event_index": {
           "anyOf": [
@@ -89,24 +104,15 @@
           "description": "Monotonic 1-based sequence number within a single turn.",
           "title": "Event Index"
         },
-        "request_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Stable per-turn identifier stamped by the transport adapter.",
-          "title": "Request Id"
+        "type": {
+          "const": "done",
+          "default": "done",
+          "title": "Type",
+          "type": "string"
         },
-        "schema_version": {
-          "default": 1,
-          "description": "Version of the RuntimeEvent schema this event conforms to.",
-          "title": "Schema Version",
-          "type": "integer"
+        "content": {
+          "title": "Content",
+          "type": "string"
         },
         "session_id": {
           "anyOf": [
@@ -138,12 +144,6 @@
           "default": null,
           "description": "Terminal state of the turn. Absent or 'ok' means the turn completed normally; 'awaiting_approval' means the runtime paused on a gated tool and the client must call /api/chat/approval before the next turn.",
           "title": "Turn Status"
-        },
-        "type": {
-          "const": "done",
-          "default": "done",
-          "title": "Type",
-          "type": "string"
         }
       },
       "required": [
@@ -155,9 +155,24 @@
     "ErrorRuntimeEvent": {
       "additionalProperties": false,
       "properties": {
-        "error": {
-          "title": "Error",
-          "type": "string"
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
         },
         "event_index": {
           "anyOf": [
@@ -173,29 +188,14 @@
           "description": "Monotonic 1-based sequence number within a single turn.",
           "title": "Event Index"
         },
-        "request_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Stable per-turn identifier stamped by the transport adapter.",
-          "title": "Request Id"
-        },
-        "schema_version": {
-          "default": 1,
-          "description": "Version of the RuntimeEvent schema this event conforms to.",
-          "title": "Schema Version",
-          "type": "integer"
-        },
         "type": {
           "const": "error",
           "default": "error",
           "title": "Type",
+          "type": "string"
+        },
+        "error": {
+          "title": "Error",
           "type": "string"
         }
       },
@@ -208,19 +208,11 @@
     "NewResponseRuntimeEvent": {
       "additionalProperties": false,
       "properties": {
-        "event_index": {
-          "anyOf": [
-            {
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Monotonic 1-based sequence number within a single turn.",
-          "title": "Event Index"
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
         },
         "request_id": {
           "anyOf": [
@@ -235,11 +227,19 @@
           "description": "Stable per-turn identifier stamped by the transport adapter.",
           "title": "Request Id"
         },
-        "schema_version": {
-          "default": 1,
-          "description": "Version of the RuntimeEvent schema this event conforms to.",
-          "title": "Schema Version",
-          "type": "integer"
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
         },
         "type": {
           "const": "new_response",
@@ -254,24 +254,11 @@
     "PlanCreatedRuntimeEvent": {
       "additionalProperties": false,
       "properties": {
-        "event_index": {
-          "anyOf": [
-            {
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Monotonic 1-based sequence number within a single turn.",
-          "title": "Event Index"
-        },
-        "plan": {
-          "additionalProperties": true,
-          "title": "Plan",
-          "type": "object"
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
         },
         "request_id": {
           "anyOf": [
@@ -286,6 +273,35 @@
           "description": "Stable per-turn identifier stamped by the transport adapter.",
           "title": "Request Id"
         },
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
+        },
+        "type": {
+          "const": "plan_created",
+          "default": "plan_created",
+          "title": "Type",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "plan": {
+          "additionalProperties": true,
+          "title": "Plan",
+          "type": "object"
+        },
         "run_id": {
           "anyOf": [
             {
@@ -297,16 +313,6 @@
           ],
           "default": null,
           "title": "Run Id"
-        },
-        "schema_version": {
-          "default": 1,
-          "description": "Version of the RuntimeEvent schema this event conforms to.",
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "summary": {
-          "title": "Summary",
-          "type": "string"
         },
         "tool_trace": {
           "anyOf": [
@@ -323,12 +329,6 @@
           ],
           "default": null,
           "title": "Tool Trace"
-        },
-        "type": {
-          "const": "plan_created",
-          "default": "plan_created",
-          "title": "Type",
-          "type": "string"
         }
       },
       "required": [
@@ -341,24 +341,11 @@
     "PlanUpdatedRuntimeEvent": {
       "additionalProperties": false,
       "properties": {
-        "event_index": {
-          "anyOf": [
-            {
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Monotonic 1-based sequence number within a single turn.",
-          "title": "Event Index"
-        },
-        "plan": {
-          "additionalProperties": true,
-          "title": "Plan",
-          "type": "object"
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
         },
         "request_id": {
           "anyOf": [
@@ -373,6 +360,35 @@
           "description": "Stable per-turn identifier stamped by the transport adapter.",
           "title": "Request Id"
         },
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
+        },
+        "type": {
+          "const": "plan_updated",
+          "default": "plan_updated",
+          "title": "Type",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "plan": {
+          "additionalProperties": true,
+          "title": "Plan",
+          "type": "object"
+        },
         "run_id": {
           "anyOf": [
             {
@@ -384,16 +400,6 @@
           ],
           "default": null,
           "title": "Run Id"
-        },
-        "schema_version": {
-          "default": 1,
-          "description": "Version of the RuntimeEvent schema this event conforms to.",
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "summary": {
-          "title": "Summary",
-          "type": "string"
         },
         "tool_trace": {
           "anyOf": [
@@ -410,12 +416,6 @@
           ],
           "default": null,
           "title": "Tool Trace"
-        },
-        "type": {
-          "const": "plan_updated",
-          "default": "plan_updated",
-          "title": "Type",
-          "type": "string"
         }
       },
       "required": [
@@ -428,23 +428,11 @@
     "RetrievalRuntimeEvent": {
       "additionalProperties": false,
       "properties": {
-        "event_index": {
-          "anyOf": [
-            {
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Monotonic 1-based sequence number within a single turn.",
-          "title": "Event Index"
-        },
-        "query": {
-          "title": "Query",
-          "type": "string"
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
         },
         "request_id": {
           "anyOf": [
@@ -459,6 +447,30 @@
           "description": "Stable per-turn identifier stamped by the transport adapter.",
           "title": "Request Id"
         },
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
+        },
+        "type": {
+          "const": "retrieval",
+          "default": "retrieval",
+          "title": "Type",
+          "type": "string"
+        },
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
         "results": {
           "items": {
             "additionalProperties": true,
@@ -466,18 +478,6 @@
           },
           "title": "Results",
           "type": "array"
-        },
-        "schema_version": {
-          "default": 1,
-          "description": "Version of the RuntimeEvent schema this event conforms to.",
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "type": {
-          "const": "retrieval",
-          "default": "retrieval",
-          "title": "Type",
-          "type": "string"
         }
       },
       "required": [
@@ -490,9 +490,24 @@
     "TokenRuntimeEvent": {
       "additionalProperties": false,
       "properties": {
-        "content": {
-          "title": "Content",
-          "type": "string"
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
         },
         "event_index": {
           "anyOf": [
@@ -508,29 +523,14 @@
           "description": "Monotonic 1-based sequence number within a single turn.",
           "title": "Event Index"
         },
-        "request_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Stable per-turn identifier stamped by the transport adapter.",
-          "title": "Request Id"
-        },
-        "schema_version": {
-          "default": 1,
-          "description": "Version of the RuntimeEvent schema this event conforms to.",
-          "title": "Schema Version",
-          "type": "integer"
-        },
         "type": {
           "const": "token",
           "default": "token",
           "title": "Type",
+          "type": "string"
+        },
+        "content": {
+          "title": "Content",
           "type": "string"
         }
       },
@@ -544,6 +544,25 @@
       "additionalProperties": false,
       "description": "Emitted when policy gates a tool call pending human approval.\n\nReplaces (does not accompany) the `tool_end` event for that run_id; the\nunderlying tool was not invoked. The frontend renders an inline gate so a\nreviewer can approve or deny the call before the turn resumes.",
       "properties": {
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
+        },
         "event_index": {
           "anyOf": [
             {
@@ -558,43 +577,31 @@
           "description": "Monotonic 1-based sequence number within a single turn.",
           "title": "Event Index"
         },
+        "type": {
+          "const": "tool_awaiting_approval",
+          "default": "tool_awaiting_approval",
+          "title": "Type",
+          "type": "string"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        },
         "input": {
           "title": "Input",
           "type": "string"
         },
-        "message": {
-          "title": "Message",
+        "run_id": {
+          "title": "Run Id",
           "type": "string"
-        },
-        "policy": {
-          "anyOf": [
-            {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Policy"
         },
         "reason": {
           "title": "Reason",
           "type": "string"
         },
-        "request_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Stable per-turn identifier stamped by the transport adapter.",
-          "title": "Request Id"
+        "message": {
+          "title": "Message",
+          "type": "string"
         },
         "result": {
           "anyOf": [
@@ -609,25 +616,18 @@
           "default": null,
           "title": "Result"
         },
-        "run_id": {
-          "title": "Run Id",
-          "type": "string"
-        },
-        "schema_version": {
-          "default": 1,
-          "description": "Version of the RuntimeEvent schema this event conforms to.",
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "tool": {
-          "title": "Tool",
-          "type": "string"
-        },
-        "type": {
-          "const": "tool_awaiting_approval",
-          "default": "tool_awaiting_approval",
-          "title": "Type",
-          "type": "string"
+        "policy": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Policy"
         }
       },
       "required": [
@@ -644,14 +644,24 @@
       "additionalProperties": false,
       "description": "Mid-tool partial output for streaming-capable tools.\n\nAlways followed by a terminal `tool_end` for the same `run_id`. Chunks are\ntransport-only \u2014 they are not persisted in session JSON; only the final\n`tool_end` envelope is.",
       "properties": {
-        "chunk": {
-          "title": "Chunk",
-          "type": "string"
-        },
-        "chunk_index": {
-          "minimum": 0,
-          "title": "Chunk Index",
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
           "type": "integer"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
         },
         "event_index": {
           "anyOf": [
@@ -667,43 +677,33 @@
           "description": "Monotonic 1-based sequence number within a single turn.",
           "title": "Event Index"
         },
-        "request_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Stable per-turn identifier stamped by the transport adapter.",
-          "title": "Request Id"
-        },
-        "run_id": {
-          "title": "Run Id",
-          "type": "string"
-        },
-        "schema_version": {
-          "default": 1,
-          "description": "Version of the RuntimeEvent schema this event conforms to.",
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "terminal": {
-          "default": false,
-          "title": "Terminal",
-          "type": "boolean"
-        },
-        "tool": {
-          "title": "Tool",
-          "type": "string"
-        },
         "type": {
           "const": "tool_chunk",
           "default": "tool_chunk",
           "title": "Type",
           "type": "string"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "chunk_index": {
+          "minimum": 0,
+          "title": "Chunk Index",
+          "type": "integer"
+        },
+        "chunk": {
+          "title": "Chunk",
+          "type": "string"
+        },
+        "terminal": {
+          "default": false,
+          "title": "Terminal",
+          "type": "boolean"
         }
       },
       "required": [
@@ -718,6 +718,25 @@
     "ToolEndRuntimeEvent": {
       "additionalProperties": false,
       "properties": {
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
+        },
         "event_index": {
           "anyOf": [
             {
@@ -732,35 +751,23 @@
           "description": "Monotonic 1-based sequence number within a single turn.",
           "title": "Event Index"
         },
+        "type": {
+          "const": "tool_end",
+          "default": "tool_end",
+          "title": "Type",
+          "type": "string"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        },
         "output": {
           "title": "Output",
           "type": "string"
         },
-        "policy": {
-          "anyOf": [
-            {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Policy"
-        },
-        "request_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Stable per-turn identifier stamped by the transport adapter.",
-          "title": "Request Id"
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
         },
         "result": {
           "anyOf": [
@@ -775,25 +782,18 @@
           "default": null,
           "title": "Result"
         },
-        "run_id": {
-          "title": "Run Id",
-          "type": "string"
-        },
-        "schema_version": {
-          "default": 1,
-          "description": "Version of the RuntimeEvent schema this event conforms to.",
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "tool": {
-          "title": "Tool",
-          "type": "string"
-        },
-        "type": {
-          "const": "tool_end",
-          "default": "tool_end",
-          "title": "Type",
-          "type": "string"
+        "policy": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Policy"
         }
       },
       "required": [
@@ -807,23 +807,11 @@
     "ToolStartRuntimeEvent": {
       "additionalProperties": false,
       "properties": {
-        "event_index": {
-          "anyOf": [
-            {
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Monotonic 1-based sequence number within a single turn.",
-          "title": "Event Index"
-        },
-        "input": {
-          "title": "Input",
-          "type": "string"
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
         },
         "request_id": {
           "anyOf": [
@@ -838,24 +826,36 @@
           "description": "Stable per-turn identifier stamped by the transport adapter.",
           "title": "Request Id"
         },
-        "run_id": {
-          "title": "Run Id",
-          "type": "string"
-        },
-        "schema_version": {
-          "default": 1,
-          "description": "Version of the RuntimeEvent schema this event conforms to.",
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "tool": {
-          "title": "Tool",
-          "type": "string"
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
         },
         "type": {
           "const": "tool_start",
           "default": "tool_start",
           "title": "Type",
+          "type": "string"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        },
+        "input": {
+          "title": "Input",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
           "type": "string"
         }
       },
@@ -870,19 +870,11 @@
     "VerificationResultRuntimeEvent": {
       "additionalProperties": false,
       "properties": {
-        "event_index": {
-          "anyOf": [
-            {
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Monotonic 1-based sequence number within a single turn.",
-          "title": "Event Index"
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
         },
         "request_id": {
           "anyOf": [
@@ -897,6 +889,44 @@
           "description": "Stable per-turn identifier stamped by the transport adapter.",
           "title": "Request Id"
         },
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
+        },
+        "type": {
+          "const": "verification_result",
+          "default": "verification_result",
+          "title": "Type",
+          "type": "string"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "pass",
+            "repair_required",
+            "fail"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        },
+        "verification": {
+          "additionalProperties": true,
+          "title": "Verification",
+          "type": "object"
+        },
         "run_id": {
           "anyOf": [
             {
@@ -908,16 +938,6 @@
           ],
           "default": null,
           "title": "Run Id"
-        },
-        "schema_version": {
-          "default": 1,
-          "description": "Version of the RuntimeEvent schema this event conforms to.",
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "summary": {
-          "title": "Summary",
-          "type": "string"
         },
         "tool_trace": {
           "anyOf": [
@@ -934,26 +954,6 @@
           ],
           "default": null,
           "title": "Tool Trace"
-        },
-        "type": {
-          "const": "verification_result",
-          "default": "verification_result",
-          "title": "Type",
-          "type": "string"
-        },
-        "verdict": {
-          "enum": [
-            "pass",
-            "repair_required",
-            "fail"
-          ],
-          "title": "Verdict",
-          "type": "string"
-        },
-        "verification": {
-          "additionalProperties": true,
-          "title": "Verification",
-          "type": "object"
         }
       },
       "required": [
@@ -962,6 +962,98 @@
         "verification"
       ],
       "title": "VerificationResultRuntimeEvent",
+      "type": "object"
+    },
+    "WarningRuntimeEvent": {
+      "additionalProperties": false,
+      "description": "Non-fatal diagnostic surfaced to the user during a turn.\n\nEmitted just before ``done`` when a runtime check finds a condition the\nreviewer should see but that does not interrupt response delivery. The\ncanonical use case is ``kind == \"citation_mismatch\"``: the final answer\ncited PMIDs that are not present on any evidence card included in this\nturn's ``evidence_review`` artifact.",
+      "properties": {
+        "schema_version": {
+          "default": 1,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
+        },
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
+        },
+        "type": {
+          "const": "warning",
+          "default": "warning",
+          "title": "Type",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "missing": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing",
+          "type": "array"
+        },
+        "cited": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Cited",
+          "type": "array"
+        },
+        "included": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Included",
+          "type": "array"
+        },
+        "review_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review Path"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "title": "WarningRuntimeEvent",
       "type": "object"
     }
   },
@@ -979,7 +1071,8 @@
       "tool_chunk": "#/$defs/ToolChunkRuntimeEvent",
       "tool_end": "#/$defs/ToolEndRuntimeEvent",
       "tool_start": "#/$defs/ToolStartRuntimeEvent",
-      "verification_result": "#/$defs/VerificationResultRuntimeEvent"
+      "verification_result": "#/$defs/VerificationResultRuntimeEvent",
+      "warning": "#/$defs/WarningRuntimeEvent"
     },
     "propertyName": "type"
   },
@@ -1016,6 +1109,9 @@
     },
     {
       "$ref": "#/$defs/CompactionRuntimeEvent"
+    },
+    {
+      "$ref": "#/$defs/WarningRuntimeEvent"
     },
     {
       "$ref": "#/$defs/DoneRuntimeEvent"

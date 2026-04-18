@@ -347,6 +347,16 @@ export interface ChatStreamCompactionEvent extends ChatStreamEventBase {
   saved_tokens: number;
 }
 
+export interface ChatStreamWarningEvent extends ChatStreamEventBase {
+  type: "warning";
+  kind: string;
+  message: string;
+  missing: string[];
+  cited: string[];
+  included: string[];
+  review_path?: string | null;
+}
+
 export type TurnStatus =
   | "ok"
   | "awaiting_approval"
@@ -387,6 +397,7 @@ export type ChatStreamEvent =
   | ChatStreamVerificationResultEvent
   | ChatStreamNewResponseEvent
   | ChatStreamCompactionEvent
+  | ChatStreamWarningEvent
   | ChatStreamDoneEvent
   | ChatStreamErrorEvent
   | ChatStreamParseErrorEvent;
@@ -453,6 +464,16 @@ export interface SessionApprovalGateBlock {
   policy?: JsonObject;
 }
 
+export interface SessionWarningBlock {
+  type: "warning";
+  kind: string;
+  message: string;
+  missing?: string[];
+  cited?: string[];
+  included?: string[];
+  review_path?: string;
+}
+
 export type SessionContentBlock =
   | SessionTextBlock
   | SessionToolUseBlock
@@ -461,7 +482,8 @@ export type SessionContentBlock =
   | SessionUsageBlock
   | SessionPlanBlock
   | SessionVerificationBlock
-  | SessionApprovalGateBlock;
+  | SessionApprovalGateBlock
+  | SessionWarningBlock;
 
 export interface Message {
   id: string;

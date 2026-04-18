@@ -3,6 +3,8 @@ AgentManager — singleton that owns the LLM, tools, session manager,
 and memory indexer. Rebuilds the agent on every request via create_agent
 so that live workspace edits are always reflected in the system prompt.
 """
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
@@ -10,12 +12,18 @@ from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from config import get_agent_runtime_limit
+from evidence.integrity import (
+    build_citation_mismatch_event,
+    check_citation_integrity,
+)
 from runtime.model_factory import build_chat_model
 from .memory_indexer import MemoryIndexer
 from .prompt_builder import build_retrieved_memory_block, build_system_prompt
 from .session_manager import SessionManager
 from .skill_router import select_skill_entries_for_query
 from tools.contracts import normalize_tool_output
+
+logger = logging.getLogger(__name__)
 
 _HARNESS_GUIDANCE = """
 <!-- Runtime Harness Guidance -->
@@ -159,6 +167,8 @@ class AgentManager:
 
         # ── Stream events ──────────────────────────────────────────────
         after_tool = False
+        answer_segments: list[str] = []
+        turn_started_at = datetime.now(timezone.utc)
 
         # Biology requests with retrieval and multi-step reasoning often need
         # far more graph turns than LangGraph's small default budget.
@@ -182,6 +192,8 @@ class AgentManager:
                         if after_tool:
                             yield {"type": "new_response"}
                             after_tool = False
+                        if isinstance(chunk.content, str):
+                            answer_segments.append(chunk.content)
                         yield {"type": "token", "content": chunk.content}
 
                 elif kind == "on_tool_start":
@@ -262,7 +274,41 @@ class AgentManager:
             yield {"type": "error", "error": str(exc)}
             return
 
+        warning_event = self._maybe_build_citation_warning(
+            "".join(answer_segments),
+            turn_started_at=turn_started_at,
+        )
+        if warning_event is not None:
+            yield warning_event
+
         yield {"type": "done"}
+
+    def _maybe_build_citation_warning(
+        self,
+        answer_text: str,
+        *,
+        turn_started_at: datetime,
+    ) -> dict | None:
+        """Run the citation-integrity check; return a warning event on mismatch."""
+        if self.base_dir is None or not answer_text:
+            return None
+        try:
+            result = check_citation_integrity(
+                self.base_dir,
+                answer_text,
+                turn_started_at=turn_started_at,
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("citation integrity check raised", exc_info=True)
+            return None
+        if result is None or not result.has_mismatch:
+            return None
+        logger.warning(
+            "citation_mismatch: answer cites PMIDs %s missing from evidence_review %s",
+            result.missing_pmids,
+            result.review_artifact_relpath,
+        )
+        return build_citation_mismatch_event(result)
 
 
 # Module-level singleton

@@ -104,6 +104,10 @@ class TurnLedger:
             self._append_verification_event(event)
             return [event]
 
+        if event_type == "warning":
+            self._append_warning_event(event)
+            return [event]
+
         if event_type == "new_response":
             self._flush_segment()
             return [event]
@@ -251,6 +255,21 @@ class TurnLedger:
         policy = event.get("policy")
         if isinstance(policy, dict):
             block["policy"] = dict(policy)
+        self._current_blocks.append(block)
+
+    def _append_warning_event(self, event: dict[str, Any]) -> None:
+        block: dict[str, Any] = {
+            "type": "warning",
+            "kind": event.get("kind", "warning"),
+            "message": event.get("message", ""),
+        }
+        for field in ("missing", "cited", "included"):
+            value = event.get(field)
+            if isinstance(value, list):
+                block[field] = [str(item) for item in value if isinstance(item, str)]
+        review_path = event.get("review_path")
+        if isinstance(review_path, str) and review_path:
+            block["review_path"] = review_path
         self._current_blocks.append(block)
 
     def _append_verification_event(self, event: dict[str, Any]) -> None:

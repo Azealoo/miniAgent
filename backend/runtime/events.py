@@ -136,6 +136,25 @@ class CompactionRuntimeEvent(_RuntimeEventBase):
     saved_tokens: int
 
 
+class WarningRuntimeEvent(_RuntimeEventBase):
+    """Non-fatal diagnostic surfaced to the user during a turn.
+
+    Emitted just before ``done`` when a runtime check finds a condition the
+    reviewer should see but that does not interrupt response delivery. The
+    canonical use case is ``kind == "citation_mismatch"``: the final answer
+    cited PMIDs that are not present on any evidence card included in this
+    turn's ``evidence_review`` artifact.
+    """
+
+    type: Literal["warning"] = "warning"
+    kind: str
+    message: str
+    missing: list[str] = Field(default_factory=list)
+    cited: list[str] = Field(default_factory=list)
+    included: list[str] = Field(default_factory=list)
+    review_path: Optional[str] = None
+
+
 class DoneRuntimeEvent(_RuntimeEventBase):
     type: Literal["done"] = "done"
     content: str
@@ -168,6 +187,7 @@ RuntimeEvent = Annotated[
         VerificationResultRuntimeEvent,
         NewResponseRuntimeEvent,
         CompactionRuntimeEvent,
+        WarningRuntimeEvent,
         DoneRuntimeEvent,
         ErrorRuntimeEvent,
     ],
@@ -186,6 +206,7 @@ RUNTIME_EVENT_TYPES: tuple[str, ...] = (
     "verification_result",
     "new_response",
     "compaction_event",
+    "warning",
     "done",
     "error",
 )

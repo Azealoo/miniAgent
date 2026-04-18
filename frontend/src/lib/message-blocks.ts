@@ -974,6 +974,7 @@ export function normalizeMessageContent(
       case "plan":
       case "verification":
       case "approval_gate":
+      case "warning":
         break;
     }
   });
