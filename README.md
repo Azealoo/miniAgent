@@ -281,6 +281,66 @@ The runtime supports:
 - optional extra skill directories
 - category and stage metadata in the registry
 
+#### Skill frontmatter schema
+
+Every `SKILL.md` starts with a YAML frontmatter block. The scanner
+(`backend/tools/skills_scanner.py`) normalizes, validates, and surfaces
+the following fields in `SKILLS_SNAPSHOT.md`; fields marked "enforced"
+are also checked at tool dispatch time by `backend/tools/policy.py`.
+
+Identity and routing:
+
+- `name` (string) — unique skill identifier.
+- `description` (string) — one-line summary shown to the model.
+- `category` (string) — e.g. `bio/literature`, `bio/compute`.
+- `tags`, `aliases` (list[str]) — free-form routing hints.
+- `paths` (list[str]) — path globs that activate the skill when matched
+  against the current query or recent turn artifacts.
+- `effort` (enum: `low` | `medium` | `high`).
+- `version` (string).
+
+Biology metadata (required for `bio/*` user-invocable skills):
+
+- `species`, `modality`, `stage`.
+- `stability` (enum: `stable` | `evolving` | `experimental`).
+- `safety_level` (enum: `low` | `medium` | `high`).
+
+Tool surface:
+
+- `requires_tools` (list[str]) — *declared* tools the skill uses. Used
+  for documentation, routing, and to assert the skill doesn't depend on
+  tools that don't exist in this build.
+- `tools_allowed` (list[str], **enforced**) — allowlist that restricts
+  the tool surface for the duration a skill is active. When at least
+  one active skill declares a non-empty `tools_allowed`, tool dispatch
+  is confined to the union of declarations across active skills; calls
+  outside that union are blocked with
+  `block_reason="skill_tools_allowed_violation"`. Skills that omit
+  `tools_allowed` contribute nothing to the union and impose no
+  restriction on their own.
+
+Exposure (advisory, surfaced in `SKILLS_SNAPSHOT.md`):
+
+- `planner_visible` (bool, default `true`) — set `false` to hide the
+  skill from the planner helper.
+- `verifier_visible` (bool, default `true`) — set `false` to hide the
+  skill from the verifier helper.
+- `user_invocable` (bool, default `true`).
+
+Runtime gating:
+
+- `required_env` (list[str]) — environment variable names whose
+  presence (non-empty) is a precondition for routing. If any are
+  missing the skill is dropped from selection at turn time; the skill
+  never becomes active and its `tools_allowed` contract is not
+  consulted. Provide names only, not `NAME=value` pairs.
+- `requires_network` (bool).
+- `min_posture` (enum: `inspection` | `execution` | `admin`) —
+  declarative metadata describing the minimum runtime posture a skill
+  expects. Currently advisory and surfaced in the snapshot.
+- `risk_tier` (enum: `low` | `medium` | `high`) — declarative blast
+  radius hint for review tooling; surfaced in the snapshot.
+
 ### Memory and knowledge
 
 The memory layer is now multi-file rather than a single `MEMORY.md` only.

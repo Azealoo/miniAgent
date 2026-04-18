@@ -12,6 +12,7 @@ import config
 
 from .contracts import ToolResultEnvelope
 from .policy_types import (
+    ActiveSkillSpec,
     SandboxSpec,
     ToolPolicyAnnotation,
     ToolPolicyDecision,
@@ -51,6 +52,47 @@ def get_tool_policy_context() -> ToolPolicyExecutionContext | None:
     return _TOOL_POLICY_CONTEXT.get()
 
 
+def active_skill_specs_from_entries(
+    skill_entries: list[dict] | None,
+) -> tuple[ActiveSkillSpec, ...]:
+    """Project skill entries into the policy layer's ActiveSkillSpec tuples."""
+    if not skill_entries:
+        return ()
+    specs: list[ActiveSkillSpec] = []
+    for entry in skill_entries:
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        tools_allowed = tuple(
+            tool for tool in entry.get("tools_allowed", []) or () if isinstance(tool, str) and tool
+        )
+        specs.append(
+            ActiveSkillSpec(
+                name=name,
+                tools_allowed=tools_allowed,
+                planner_visible=bool(entry.get("planner_visible", True)),
+                verifier_visible=bool(entry.get("verifier_visible", True)),
+            )
+        )
+    return tuple(specs)
+
+
+def set_active_skills_on_current_context(
+    skill_entries: list[dict] | None,
+) -> None:
+    """Attach the routed skill set to the in-flight policy context.
+
+    ``tool_policy_context`` installs a mutable ``ToolPolicyExecutionContext``
+    for the duration of a turn; this helper lets the runtime update the
+    ``active_skills`` attribute after the skill router has run, without
+    having to re-enter the contextvar.
+    """
+    context = _TOOL_POLICY_CONTEXT.get()
+    if context is None:
+        return
+    context.active_skills = active_skill_specs_from_entries(skill_entries)
+
+
 def evaluate_pre_tool_policy(
     manifest: ToolManifestEntry,
     context: ToolPolicyExecutionContext | None,
@@ -87,6 +129,10 @@ def evaluate_pre_tool_policy(
             block_message="Execution-scoped tool execution is not allowed in this runtime context.",
         )
 
+    skill_violation = _first_skill_tools_allowed_violation(manifest, context)
+    if skill_violation is not None:
+        return skill_violation
+
     if manifest.requires_approval and not _user_has_approved(manifest, context):
         return ToolPolicyDecision(
             status="needs_approval",
@@ -100,6 +146,49 @@ def evaluate_pre_tool_policy(
         return ToolPolicyDecision(status="allow_with_warning", warnings=tuple(warnings))
 
     return ToolPolicyDecision(status="allow")
+
+
+def _first_skill_tools_allowed_violation(
+    manifest: ToolManifestEntry,
+    context: ToolPolicyExecutionContext,
+) -> ToolPolicyDecision | None:
+    """Deny tool dispatch when no active skill permits ``manifest.name``.
+
+    Semantics (union across active skills):
+
+    * If no active skill declares a ``tools_allowed`` list the allowlist
+      mechanism is inactive and this returns ``None``.
+    * Otherwise the set of permitted tools is the union of
+      ``tools_allowed`` across every active skill that declares one; tools
+      outside that union are blocked with reason
+      ``skill_tools_allowed_violation``.
+    * Active skills that declare an empty/absent ``tools_allowed`` list
+      contribute nothing — they neither widen nor narrow the allowlist.
+    """
+
+    active_skills = context.active_skills
+    if not active_skills:
+        return None
+
+    declaring_skills = [skill for skill in active_skills if skill.tools_allowed]
+    if not declaring_skills:
+        return None
+
+    permitted: set[str] = set()
+    for skill in declaring_skills:
+        permitted.update(skill.tools_allowed)
+    if manifest.name in permitted:
+        return None
+
+    declaring_names = ", ".join(skill.name for skill in declaring_skills)
+    return ToolPolicyDecision(
+        status="blocked",
+        block_reason="skill_tools_allowed_violation",
+        block_message=(
+            f"Tool '{manifest.name}' is not in the tools_allowed surface of any "
+            f"active skill ({declaring_names})."
+        ),
+    )
 
 
 def evaluate_sandbox_arguments(

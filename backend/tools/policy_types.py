@@ -53,6 +53,21 @@ class SandboxSpec:
     max_output_bytes: int | None = None
 
 
+@dataclass(frozen=True)
+class ActiveSkillSpec:
+    """Snapshot of a routed skill's policy-relevant frontmatter.
+
+    Carried on ``ToolPolicyExecutionContext.active_skills`` so the tool
+    policy layer can enforce skill-scoped guardrails (notably the
+    ``tools_allowed`` allowlist) for the duration of a turn.
+    """
+
+    name: str
+    tools_allowed: tuple[str, ...] = ()
+    planner_visible: bool = True
+    verifier_visible: bool = True
+
+
 @dataclass
 class ToolPolicyExecutionContext:
     session_id: str | None = None
@@ -63,6 +78,10 @@ class ToolPolicyExecutionContext:
     # already approved this turn. The runtime is responsible for populating
     # this from the approval API; the policy layer only consults it.
     approved_tool_runs: frozenset[str] = frozenset()
+    # Skills the router selected for this turn. When any active skill
+    # declares a non-empty ``tools_allowed`` list, tool dispatch is
+    # restricted to the union of those allowlists across active skills.
+    active_skills: tuple[ActiveSkillSpec, ...] = ()
 
 
 @dataclass(frozen=True)
