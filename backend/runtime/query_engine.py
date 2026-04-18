@@ -314,6 +314,12 @@ class QueryEngine:
                     yield event
                     continue
 
+                # Prompt-cache usage samples are internal: the metrics
+                # collector records them against the Prometheus gauges but
+                # they should not reach the SSE wire.
+                if event_type == "llm_usage":
+                    continue
+
                 if event_type == "tool_start":
                     input_tokens += _count_tokens(event.get("input"))
                 elif event_type == "tool_end":
