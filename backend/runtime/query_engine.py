@@ -1,14 +1,62 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from dataclasses import dataclass, replace
-from typing import Any, AsyncGenerator
+from typing import Any, Awaitable, Callable, AsyncGenerator, Sequence
 
 from config import get_max_tokens_per_turn, get_verification_settings
 from runtime.events import dump_runtime_event
 from runtime.metrics_collector import METRICS
 from runtime.turn_ledger import TurnLedger, TurnResult
+from tools.registry import ToolManifestEntry, is_concurrency_safe_tier
+
+
+@dataclass(frozen=True)
+class ToolBatchCall:
+    """A single resolved tool call pending dispatch.
+
+    ``invoke`` is a zero-argument coroutine factory so the dispatcher can
+    await it at the point it chooses (gathered vs. serial). ``manifest``
+    tells the dispatcher which tier the call belongs to.
+    """
+
+    manifest: ToolManifestEntry
+    invoke: Callable[[], Awaitable[Any]]
+
+
+async def dispatch_tool_batch(
+    calls: Sequence[ToolBatchCall],
+) -> list[Any]:
+    """Partition resolved tool calls by risk tier and dispatch them.
+
+    Read-only/concurrency-safe calls are launched together through
+    ``asyncio.gather`` so their I/O overlaps. Destructive calls run
+    serially in input order so their side effects happen one at a time.
+    Results are returned in the original input order regardless of tier.
+    """
+    results: list[Any] = [None] * len(calls)
+    parallel_indices: list[int] = []
+    parallel_awaitables: list[Awaitable[Any]] = []
+    serial_indices: list[int] = []
+
+    for idx, call in enumerate(calls):
+        if is_concurrency_safe_tier(call.manifest):
+            parallel_indices.append(idx)
+            parallel_awaitables.append(call.invoke())
+        else:
+            serial_indices.append(idx)
+
+    if parallel_awaitables:
+        gathered = await asyncio.gather(*parallel_awaitables)
+        for idx, value in zip(parallel_indices, gathered):
+            results[idx] = value
+
+    for idx in serial_indices:
+        results[idx] = await calls[idx].invoke()
+
+    return results
 
 
 def _count_tokens(value: Any) -> int:
