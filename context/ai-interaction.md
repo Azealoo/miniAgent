@@ -29,6 +29,55 @@ When implementing features, optimize for these principles:
 - Prefer traceable evidence over unsupported synthesis.
 - Prefer safe blocking behavior over risky silent execution.
 
+## Prompt Budget and Eviction Policy
+
+The system prompt assembled by `backend/graph/prompt_builder.py` is governed by
+explicit per-section character budgets. Each section is truncated in place to
+its own cap with a visible truncation marker. When the optional global cap
+`prompt_budget.total_max_chars` is set (> 0), sections are dropped wholesale in
+the order below — least load-bearing first — until the prompt fits.
+
+| Priority (drop first → drop last) | Section | Source |
+|---|---|---|
+| 1 | `git_context` | working-tree snapshot (env/runtime gated) |
+| 2 | `retrieved_memory` | RAG retrieval block |
+| 3 | `scoped_memory` | typed-note index from `memory/{project,user,agent}/` |
+| 4 | `memory_index` | curated `memory/MEMORY.md` |
+| 5 | `project_instructions` | `AGENTS.md` / `CLAW.md` and referenced files |
+| 6 | `skills_snapshot` | available-skills registry snapshot |
+| 7 | `user_profile` | `workspace/USER.md` |
+| 8 | `agents_guide` | `workspace/AGENTS.md` |
+| 9 | `identity` | `workspace/IDENTITY.md` |
+| 10 | `soul` | `workspace/SOUL.md` |
+
+`SOUL`, `IDENTITY`, `USER`, and `AGENTS` are evicted only as a last resort.
+The static Tool Result Error Contract guidance is pinned and never evicted.
+
+### Configuration
+
+Per-section budgets live under `prompt_budget` in
+`backend/config.json` (and merge from any user/local layers). Defaults mirror
+the historical hardcoded values, so behavior is unchanged when the block is
+absent. Budget fields:
+
+- `component_max_chars` — workspace component truncation cap
+  (`SOUL/IDENTITY/USER/AGENTS`, plus the snapshot fallback file).
+- `project_instruction_file_max_chars` /
+  `project_instruction_total_max_chars` — per-file and combined caps for
+  `AGENTS.md`/`CLAW.md` and their `@`-referenced context files.
+- `git_context_max_chars` — cap for the working-tree snapshot block.
+- `retrieved_memory_block_max_chars` /
+  `retrieved_memory_item_max_chars` — outer block and per-item caps for the
+  RAG retrieved-memory block.
+- `scoped_memory_block_max_chars` — cap for the typed-note listing.
+- `memory_index_max_chars` — tight cap for `memory/MEMORY.md`.
+- `total_max_chars` — optional global ceiling. `0` disables eviction (only
+  per-section caps apply).
+
+Existing env overrides (`BIOAPEX_PROMPT_INCLUDE_GIT_CONTEXT`,
+`BIOAPEX_PROMPT_MEMORY_STALE_DAYS`) and the streaming/session contracts are
+unchanged.
+
 ## Workflow
 
 This is the default workflow for every feature or fix:

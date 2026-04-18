@@ -1,5 +1,29 @@
 from __future__ import annotations
 
+# ─── Prompt budget + eviction policy ─────────────────────────────────────
+# Per-section character budgets are loaded from the runtime config block
+# ``prompt_budget`` (see ``config.get_prompt_budget``). Each section is
+# truncated in place to its own cap with a visible truncation marker. When the
+# optional ``prompt_budget.total_max_chars`` global cap is set (> 0), sections
+# are dropped wholesale in the order below — least-load-bearing first — until
+# the assembled prompt fits under the cap. The static Tool Result Error
+# Contract guidance is never evicted.
+#
+#   1. git_context           (transient working-tree snapshot)
+#   2. retrieved_memory      (RAG pulls; can be re-fetched next turn)
+#   3. scoped_memory         (typed-note index; recoverable from disk)
+#   4. memory_index          (curated MEMORY.md pointer file)
+#   5. project_instructions  (AGENTS.md / CLAW.md and references)
+#   6. skills_snapshot       (registry snapshot of available skills)
+#   7. user_profile          (workspace/USER.md)
+#   8. agents_guide          (workspace/AGENTS.md)
+#   9. identity              (workspace/IDENTITY.md)
+#  10. soul                  (workspace/SOUL.md — the durable agent contract)
+#
+# SOUL/IDENTITY/AGENTS are dropped only as a last resort. See
+# ``context/ai-interaction.md`` for the rationale and configuration surface.
+# ─────────────────────────────────────────────────────────────────────────
+
 import os
 import re
 import subprocess
@@ -11,6 +35,9 @@ import yaml
 
 import config
 
+# Module-level defaults mirror ``config._DEFAULT_PROMPT_BUDGET`` so callers and
+# tests that import these constants continue to work. The runtime values used
+# by ``build_system_prompt`` come from ``config.get_prompt_budget()``.
 MAX_COMPONENT_CHARS = 20_000
 MAX_PROJECT_INSTRUCTION_FILE_CHARS = 2_000
 MAX_PROJECT_INSTRUCTION_TOTAL_CHARS = 8_000
@@ -19,6 +46,20 @@ MAX_RETRIEVED_MEMORY_BLOCK_CHARS = 1_600
 MAX_RETRIEVED_MEMORY_ITEM_CHARS = 280
 MAX_SCOPED_MEMORY_BLOCK_CHARS = 4_000
 MAX_MEMORY_INDEX_CHARS = 2_048
+
+# Section identifiers used for eviction. Order is least- to most-load-bearing.
+EVICTION_ORDER: tuple[str, ...] = (
+    "git_context",
+    "retrieved_memory",
+    "scoped_memory",
+    "memory_index",
+    "project_instructions",
+    "skills_snapshot",
+    "user_profile",
+    "agents_guide",
+    "identity",
+    "soul",
+)
 
 _MEMORY_SCOPE_DIRS = ("project", "user", "agent")
 
@@ -86,7 +127,18 @@ def _format_retrieved_memory_label(result: dict[str, Any]) -> str:
     return " ".join(label_parts)
 
 
-def build_retrieved_memory_block(results: list[dict]) -> str:
+def build_retrieved_memory_block(
+    results: list[dict],
+    *,
+    budget: dict[str, int] | None = None,
+) -> str:
+    block_cap = (budget or {}).get(
+        "retrieved_memory_block_max_chars", MAX_RETRIEVED_MEMORY_BLOCK_CHARS
+    )
+    item_cap = (budget or {}).get(
+        "retrieved_memory_item_max_chars", MAX_RETRIEVED_MEMORY_ITEM_CHARS
+    )
+
     lines = ["[Retrieved Memory - background context only; not verified current project state]"]
 
     for result in results:
@@ -100,7 +152,7 @@ def build_retrieved_memory_block(results: list[dict]) -> str:
         compact_text = " ".join(text.split())
         compact_text, _ = _truncate_text(
             compact_text,
-            MAX_RETRIEVED_MEMORY_ITEM_CHARS,
+            item_cap,
             marker="...",
         )
         lines.append(f"- {label}: {compact_text}")
@@ -111,7 +163,7 @@ def build_retrieved_memory_block(results: list[dict]) -> str:
     rendered = "\n".join(lines)
     rendered, _ = _truncate_text(
         rendered,
-        MAX_RETRIEVED_MEMORY_BLOCK_CHARS,
+        block_cap,
         marker="\n...[retrieved memory truncated]",
     )
     return rendered
@@ -174,10 +226,20 @@ def _display_project_reference(instruction_file: Path, referenced_file: Path) ->
         return referenced_file.name
 
 
-def _build_project_instruction_context(base_dir: Path) -> str:
+def _build_project_instruction_context(
+    base_dir: Path,
+    *,
+    budget: dict[str, int] | None = None,
+) -> str:
+    file_cap = (budget or {}).get(
+        "project_instruction_file_max_chars", MAX_PROJECT_INSTRUCTION_FILE_CHARS
+    )
+    total_cap = (budget or {}).get(
+        "project_instruction_total_max_chars", MAX_PROJECT_INSTRUCTION_TOTAL_CHARS
+    )
     sections: list[str] = []
     seen: set[Path] = set()
-    remaining_chars = MAX_PROJECT_INSTRUCTION_TOTAL_CHARS
+    remaining_chars = total_cap
 
     for instruction_file in _discover_project_instruction_files(base_dir):
         resolved_instruction = instruction_file.resolve()
@@ -186,7 +248,7 @@ def _build_project_instruction_context(base_dir: Path) -> str:
 
         instruction_content = _read_component(
             instruction_file,
-            max_chars=min(MAX_PROJECT_INSTRUCTION_FILE_CHARS, remaining_chars),
+            max_chars=min(file_cap, remaining_chars),
         )
         if not instruction_content:
             continue
@@ -209,7 +271,7 @@ def _build_project_instruction_context(base_dir: Path) -> str:
 
             reference_content = _read_component(
                 referenced_file,
-                max_chars=min(MAX_PROJECT_INSTRUCTION_FILE_CHARS, remaining_chars),
+                max_chars=min(file_cap, remaining_chars),
             )
             if not reference_content:
                 continue
@@ -247,7 +309,11 @@ def _run_git_command(base_dir: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def _build_git_context(base_dir: Path) -> str:
+def _build_git_context(
+    base_dir: Path,
+    *,
+    budget: dict[str, int] | None = None,
+) -> str:
     include_git_context_env = os.getenv("BIOAPEX_PROMPT_INCLUDE_GIT_CONTEXT", "").strip().lower()
     if include_git_context_env:
         include_git_context = include_git_context_env in {"1", "true", "yes", "on"}
@@ -270,7 +336,8 @@ def _build_git_context(base_dir: Path) -> str:
     if diff_stat:
         sections.append(f"Git diff stat:\n{diff_stat}")
 
-    rendered, _ = _truncate_text("\n\n".join(sections), MAX_GIT_CONTEXT_CHARS)
+    cap = (budget or {}).get("git_context_max_chars", MAX_GIT_CONTEXT_CHARS)
+    rendered, _ = _truncate_text("\n\n".join(sections), cap)
     return f"<!-- Project Git Context -->\n{rendered}"
 
 
@@ -341,7 +408,11 @@ def _format_scoped_memory_entry(relative_path: Path, frontmatter: dict[str, Any]
     return line
 
 
-def _build_scoped_memory_listing(base_dir: Path) -> str:
+def _build_scoped_memory_listing(
+    base_dir: Path,
+    *,
+    budget: dict[str, int] | None = None,
+) -> str:
     memory_root = base_dir / "memory"
     if not memory_root.is_dir():
         return ""
@@ -378,7 +449,8 @@ def _build_scoped_memory_listing(base_dir: Path) -> str:
         return ""
 
     rendered = "<!-- Scoped Memory (fresh or pinned) -->\n" + "\n".join(lines)
-    rendered, _ = _truncate_text(rendered, MAX_SCOPED_MEMORY_BLOCK_CHARS)
+    cap = (budget or {}).get("scoped_memory_block_max_chars", MAX_SCOPED_MEMORY_BLOCK_CHARS)
+    rendered, _ = _truncate_text(rendered, cap)
     return rendered
 
 
@@ -386,8 +458,11 @@ def _build_skills_snapshot_context(
     base_dir: Path,
     *,
     skill_entries: list[dict[str, Any]] | None = None,
+    budget: dict[str, int] | None = None,
 ) -> str:
     from tools.skills_scanner import collect_skill_entries, iter_skill_files, render_skills_snapshot
+
+    component_cap = (budget or {}).get("component_max_chars", MAX_COMPONENT_CHARS)
 
     if skill_entries is not None:
         return render_skills_snapshot(skill_entries)
@@ -395,7 +470,37 @@ def _build_skills_snapshot_context(
     runtime_skill_entries = collect_skill_entries(base_dir, respect_enabled=True)
     if runtime_skill_entries or iter_skill_files(base_dir):
         return render_skills_snapshot(runtime_skill_entries)
-    return _read_component(base_dir / "SKILLS_SNAPSHOT.md")
+    return _read_component(base_dir / "SKILLS_SNAPSHOT.md", max_chars=component_cap)
+
+
+def _apply_eviction(
+    sections: list[tuple[str, str]],
+    *,
+    total_max_chars: int,
+    separator: str = "\n\n",
+) -> list[tuple[str, str]]:
+    """Drop sections in EVICTION_ORDER until the joined length fits the cap.
+
+    ``sections`` is a list of (section_id, content) tuples in render order. The
+    static guidance block (``_tool_result_error_contract``) is never evicted
+    because it is not present in EVICTION_ORDER. Returns the surviving
+    sections in their original order.
+    """
+    if total_max_chars <= 0:
+        return sections
+
+    def _joined_len(items: list[tuple[str, str]]) -> int:
+        if not items:
+            return 0
+        return sum(len(content) for _, content in items) + len(separator) * (len(items) - 1)
+
+    remaining = list(sections)
+    for section_id in EVICTION_ORDER:
+        if _joined_len(remaining) <= total_max_chars:
+            break
+        remaining = [(sid, body) for sid, body in remaining if sid != section_id]
+
+    return remaining
 
 
 def build_system_prompt(
@@ -405,44 +510,59 @@ def build_system_prompt(
     skill_entries: list[dict[str, Any]] | None = None,
 ) -> str:
     """
-    Assemble the system prompt from the 6 ordered workspace components and
-    any additive project context discovered around the workspace root.
-    Components exceeding MAX_COMPONENT_CHARS are truncated.
+    Assemble the system prompt from the ordered workspace components and any
+    additive project context discovered around the workspace root.
+
+    Per-section character budgets come from ``config.get_prompt_budget()``;
+    individual sections exceeding their cap are truncated in place with a
+    visible marker. When the optional ``total_max_chars`` global cap is set,
+    sections are dropped wholesale in the documented EVICTION_ORDER (least
+    load-bearing first) so SOUL/IDENTITY/USER/AGENTS survive as long as
+    possible. The static Tool Result Error Contract guidance is never evicted.
     """
-    parts: list[str] = []
+    budget = config.get_prompt_budget()
+    component_cap = budget["component_max_chars"]
+    memory_index_cap = budget["memory_index_max_chars"]
 
-    snap = _build_skills_snapshot_context(base_dir, skill_entries=skill_entries)
+    sections: list[tuple[str, str]] = []
+
+    snap = _build_skills_snapshot_context(
+        base_dir,
+        skill_entries=skill_entries,
+        budget=budget,
+    )
     if snap:
-        parts.append(f"<!-- Skills Snapshot -->\n{snap}")
+        sections.append(("skills_snapshot", f"<!-- Skills Snapshot -->\n{snap}"))
 
-    soul = _read_component(base_dir / "workspace" / "SOUL.md")
+    soul = _read_component(base_dir / "workspace" / "SOUL.md", max_chars=component_cap)
     if soul:
-        parts.append(f"<!-- Soul -->\n{soul}")
+        sections.append(("soul", f"<!-- Soul -->\n{soul}"))
 
-    identity = _read_component(base_dir / "workspace" / "IDENTITY.md")
+    identity = _read_component(base_dir / "workspace" / "IDENTITY.md", max_chars=component_cap)
     if identity:
-        parts.append(f"<!-- Identity -->\n{identity}")
+        sections.append(("identity", f"<!-- Identity -->\n{identity}"))
 
-    user = _read_component(base_dir / "workspace" / "USER.md")
+    user = _read_component(base_dir / "workspace" / "USER.md", max_chars=component_cap)
     if user:
-        parts.append(f"<!-- User Profile -->\n{user}")
+        sections.append(("user_profile", f"<!-- User Profile -->\n{user}"))
 
-    agents = _read_component(base_dir / "workspace" / "AGENTS.md")
+    agents = _read_component(base_dir / "workspace" / "AGENTS.md", max_chars=component_cap)
     if agents:
-        parts.append(f"<!-- Agents Guide -->\n{agents}")
+        sections.append(("agents_guide", f"<!-- Agents Guide -->\n{agents}"))
 
-    project_instructions = _build_project_instruction_context(base_dir)
+    project_instructions = _build_project_instruction_context(base_dir, budget=budget)
     if project_instructions:
-        parts.append(project_instructions)
+        sections.append(("project_instructions", project_instructions))
 
-    git_context = _build_git_context(base_dir)
+    git_context = _build_git_context(base_dir, budget=budget)
     if git_context:
-        parts.append(git_context)
+        sections.append(("git_context", git_context))
 
-    parts.append(_TOOL_RESULT_ERROR_GUIDANCE)
+    # Static guidance — pinned, not subject to eviction.
+    sections.append(("_tool_result_error_contract", _TOOL_RESULT_ERROR_GUIDANCE))
 
     if rag_mode:
-        parts.append(_RAG_MEMORY_GUIDANCE)
+        sections.append(("_rag_memory_guidance", _RAG_MEMORY_GUIDANCE))
     else:
         # MEMORY.md is intentionally loaded as a concise curated index rather
         # than durable content. The tight char budget prevents the prompt from
@@ -451,12 +571,17 @@ def build_system_prompt(
         # and are surfaced via _build_scoped_memory_listing.
         memory = _read_component(
             base_dir / "memory" / "MEMORY.md",
-            max_chars=MAX_MEMORY_INDEX_CHARS,
+            max_chars=memory_index_cap,
         )
         if memory:
-            parts.append(f"<!-- Long-term Memory -->\n{memory}")
-        scoped_memory = _build_scoped_memory_listing(base_dir)
+            sections.append(("memory_index", f"<!-- Long-term Memory -->\n{memory}"))
+        scoped_memory = _build_scoped_memory_listing(base_dir, budget=budget)
         if scoped_memory:
-            parts.append(scoped_memory)
+            sections.append(("scoped_memory", scoped_memory))
 
-    return "\n\n".join(parts)
+    sections = _apply_eviction(
+        sections,
+        total_max_chars=budget.get("total_max_chars", 0),
+    )
+
+    return "\n\n".join(content for _, content in sections)
