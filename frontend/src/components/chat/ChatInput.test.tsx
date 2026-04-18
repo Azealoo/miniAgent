@@ -39,14 +39,14 @@ describe("ChatInput", () => {
     renderChatInput();
 
     const textbox = screen.getByRole("textbox");
-    await user.type(textbox, "/rn");
+    await user.type(textbox, "/pap");
 
     expect(screen.getByText("Matching Commands")).toBeTruthy();
-    expect(screen.getByText("/rnaseq")).toBeTruthy();
+    expect(screen.getByText("/papers")).toBeTruthy();
 
     fireEvent.keyDown(textbox, { key: "Tab" });
 
-    expect(screen.getByDisplayValue("/rnaseq")).toBeTruthy();
+    expect(screen.getByDisplayValue("/papers")).toBeTruthy();
   });
 
   it("executes exact slash commands that prime structured analysis prompts", async () => {
@@ -54,14 +54,12 @@ describe("ChatInput", () => {
     const props = renderChatInput();
 
     const textbox = screen.getByRole("textbox");
-    await user.type(textbox, "/rnaseq");
+    await user.type(textbox, "/primers");
 
     fireEvent.keyDown(textbox, { key: "Enter" });
 
     expect(props.onPrimeDraftMessage).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "Review the attached RNA-seq dataset context, outline the QC and differential expression steps you recommend"
-      )
+      expect.stringContaining("Design PCR primers for <TARGET>")
     );
     expect(props.onSend).not.toHaveBeenCalled();
   });

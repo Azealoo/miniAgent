@@ -13,6 +13,24 @@ from runtime_config_types import LoadedRuntimeConfig
 _CONFIG_FILE = Path(__file__).parent / "config.json"
 _DEFAULT_MEMORY_STALE_DAYS = 30
 _DEFAULT_MAX_TOKENS_PER_TURN = 200_000
+
+# Per-section character budgets used by graph.prompt_builder. Each value is the
+# upper bound for one assembled section; the prompt builder truncates a section
+# in place once it exceeds its cap (with a visible truncation marker). The
+# optional ``total_max_chars`` (0 = disabled) is a global ceiling that, when
+# set, triggers section eviction in the documented priority order.
+_DEFAULT_PROMPT_BUDGET: dict = {
+    "component_max_chars": 20_000,
+    "project_instruction_file_max_chars": 2_000,
+    "project_instruction_total_max_chars": 8_000,
+    "git_context_max_chars": 2_000,
+    "retrieved_memory_block_max_chars": 1_600,
+    "retrieved_memory_item_max_chars": 280,
+    "scoped_memory_block_max_chars": 4_000,
+    "memory_index_max_chars": 2_048,
+    "total_max_chars": 0,
+}
+
 _DEFAULT: dict = {
     "rag_mode": False,
     "deterministic_seed": None,
@@ -22,6 +40,7 @@ _DEFAULT: dict = {
         "include_git_context": False,
         "memory_stale_days": _DEFAULT_MEMORY_STALE_DAYS,
     },
+    "prompt_budget": dict(_DEFAULT_PROMPT_BUDGET),
     "agent_runtime": {
         "executor_recursion_limit": 1000,
         "helper_agent_recursion_limit": 1000,
@@ -113,6 +132,27 @@ def get_memory_stale_days() -> int:
         return max(0, int(raw))
     except (TypeError, ValueError):
         return _DEFAULT_MEMORY_STALE_DAYS
+
+
+def get_prompt_budget() -> dict[str, int]:
+    """Return per-section prompt char budgets (graph.prompt_builder).
+
+    Resolution order: runtime ``prompt_budget.<field>``, then the built-in
+    default. Invalid values fall back silently to the default for that field.
+    Negative values are clamped to 0. Behavior is unchanged when the
+    ``prompt_budget`` block is absent from the config.
+    """
+    raw = _load_runtime().get("prompt_budget", {})
+    if not isinstance(raw, dict):
+        raw = {}
+    resolved: dict[str, int] = {}
+    for field, default in _DEFAULT_PROMPT_BUDGET.items():
+        value = raw.get(field, default)
+        try:
+            resolved[field] = max(0, int(value))
+        except (TypeError, ValueError):
+            resolved[field] = int(default)
+    return resolved
 
 
 def get_agent_runtime_settings() -> dict[str, Any]:

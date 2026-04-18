@@ -16,6 +16,7 @@ from tools.skills_scanner import (
     collect_skill_entries,
     describe_skill_registry,
     scan_skills,
+    skill_required_env_satisfied,
 )
 
 
@@ -538,3 +539,139 @@ class TestScanSkills:
                 assert label in body
             for tool_name in expected_tools:
                 assert f"`{tool_name}`" in body
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Extended skill contract: tools_allowed, exposure, required_env, posture/risk
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _write_extended_skill(base: Path, name: str, extra_lines: list[str]) -> None:
+    skill_dir = base / "skills" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"name: {name}",
+        "description: extended contract skill",
+        "category: bio/compute",
+        "requires_tools: [read_file]",
+        "requires_network: false",
+        "user_invocable: true",
+        "species: any",
+        "modality: compute",
+        "stage: utilities",
+        "stability: experimental",
+        "safety_level: low",
+        *extra_lines,
+    ]
+    (skill_dir / "SKILL.md").write_text(
+        "---\n" + "\n".join(lines) + "\n---\n# Body\n",
+        encoding="utf-8",
+    )
+
+
+class TestExtendedSkillContract:
+    def test_parses_tools_allowed_and_exposure_defaults(self, tmp_path):
+        _write_extended_skill(
+            tmp_path,
+            "extended_defaults",
+            ["tools_allowed: [read_file, search_knowledge_base]"],
+        )
+        entries = collect_skill_entries(tmp_path, respect_enabled=False)
+        entry = entries[0]
+        assert entry["tools_allowed"] == ["read_file", "search_knowledge_base"]
+        assert entry["planner_visible"] is True
+        assert entry["verifier_visible"] is True
+        assert entry["required_env"] == []
+        assert entry["min_posture"] == ""
+        assert entry["risk_tier"] == ""
+
+    def test_parses_exposure_flags_when_explicit(self, tmp_path):
+        _write_extended_skill(
+            tmp_path,
+            "exposure_off",
+            [
+                "planner_visible: false",
+                "verifier_visible: false",
+                "risk_tier: medium",
+                "min_posture: execution",
+            ],
+        )
+        entry = collect_skill_entries(tmp_path, respect_enabled=False)[0]
+        assert entry["planner_visible"] is False
+        assert entry["verifier_visible"] is False
+        assert entry["risk_tier"] == "medium"
+        assert entry["min_posture"] == "execution"
+
+    def test_snapshot_surfaces_tools_allowed_and_exposure(self, tmp_path):
+        _write_extended_skill(
+            tmp_path,
+            "snapshot_skill",
+            [
+                "tools_allowed: [read_file]",
+                "planner_visible: false",
+                "verifier_visible: false",
+                "required_env: [BIOAPEX_DEMO_TOKEN]",
+                "min_posture: inspection",
+                "risk_tier: low",
+            ],
+        )
+        scan_skills(tmp_path)
+        content = (tmp_path / "SKILLS_SNAPSHOT.md").read_text()
+        assert "<tools_allowed>read_file</tools_allowed>" in content
+        assert "<planner_visible>false</planner_visible>" in content
+        assert "<verifier_visible>false</verifier_visible>" in content
+        assert "<required_env>BIOAPEX_DEMO_TOKEN</required_env>" in content
+        assert "<min_posture>inspection</min_posture>" in content
+        assert "<risk_tier>low</risk_tier>" in content
+
+    def test_rejects_tools_allowed_referencing_unavailable_tool(self, tmp_path):
+        _write_extended_skill(
+            tmp_path,
+            "bad_allowlist",
+            ["tools_allowed: [does_not_exist_tool]"],
+        )
+        with pytest.raises(
+            ValueError, match="tools_allowed references unavailable tools"
+        ):
+            collect_skill_entries(tmp_path, respect_enabled=False)
+
+    def test_rejects_invalid_min_posture(self, tmp_path):
+        _write_extended_skill(
+            tmp_path,
+            "bad_posture",
+            ["min_posture: ultra_admin"],
+        )
+        with pytest.raises(ValueError, match="invalid min_posture"):
+            collect_skill_entries(tmp_path, respect_enabled=False)
+
+    def test_rejects_invalid_risk_tier(self, tmp_path):
+        _write_extended_skill(
+            tmp_path,
+            "bad_risk",
+            ["risk_tier: catastrophic"],
+        )
+        with pytest.raises(ValueError, match="invalid risk_tier"):
+            collect_skill_entries(tmp_path, respect_enabled=False)
+
+    def test_required_env_satisfied_checks_environment(self, tmp_path):
+        entry = {"required_env": ["BIOAPEX_DEMO_TOKEN"]}
+        assert skill_required_env_satisfied(entry, env={}) is False
+        assert (
+            skill_required_env_satisfied(entry, env={"BIOAPEX_DEMO_TOKEN": ""})
+            is False
+        )
+        assert (
+            skill_required_env_satisfied(entry, env={"BIOAPEX_DEMO_TOKEN": "1"})
+            is True
+        )
+        assert skill_required_env_satisfied({"required_env": []}) is True
+        assert skill_required_env_satisfied({}) is True
+
+    def test_required_env_normalizes_name_only_entries(self, tmp_path):
+        _write_extended_skill(
+            tmp_path,
+            "env_only_names",
+            ["required_env: [FOO_TOKEN, 'BAR_TOKEN=should_be_dropped']"],
+        )
+        entry = collect_skill_entries(tmp_path, respect_enabled=False)[0]
+        assert entry["required_env"] == ["FOO_TOKEN", "BAR_TOKEN"]

@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+from graph.session.session_archive_index import remove_session_from_index
 from graph.session.session_normalizer import (
     _build_blocks_from_legacy_message,
     _normalize_blocks,
@@ -233,6 +234,7 @@ class SessionStore:
                 archive_path.unlink()
             except FileNotFoundError:
                 continue
+        remove_session_from_index(self.archive_dir, session_id)
         # Clean up the per-session lock to prevent unbounded memory growth
         _compress_locks.pop(session_id, None)
 

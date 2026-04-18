@@ -30,10 +30,9 @@ interface ComposerQuickAction {
 }
 
 const QUICK_ACTION_COMMANDS: Record<string, string> = {
-  "biology-question": "/ask",
-  "rnaseq-de": "/rnaseq",
-  "evidence-review": "/evidence",
-  "request-review": "/readiness",
+  "find-papers": "/papers",
+  "summarize-pdf": "/summarize",
+  "design-primers": "/primers",
 };
 
 const COMPOSER_QUICK_ACTIONS: ComposerQuickAction[] = [
@@ -253,7 +252,7 @@ export default function ChatInput({
             </div>
           ) : (
             <p className="mt-1.5 text-[11px] text-slate-500">
-              No matching commands. Try /ask, /rnaseq, /evidence, /readiness, /sources,
+              No matching commands. Try /papers, /summarize, /primers, /sources,
               /turns, or /files.
             </p>
           )}

@@ -372,10 +372,21 @@ export const submitApprovalDecision = (payload: ApprovalDecisionPayload) =>
 
 // Chat streaming (custom SSE parser — POST-based)
 
+export interface StreamChatOptions {
+  /**
+   * Optional client-side correlation id for this turn. Surfaces on the
+   * optimistic assistant message and on synthetic error events so a retry can
+   * be paired with its original attempt. The backend still mints its own
+   * per-turn request_id; this override is not forwarded in the request body.
+   */
+  requestId?: string;
+}
+
 export async function streamChat(
   message: string,
   sessionId: string,
-  callbacks: StreamCallbacks
+  callbacks: StreamCallbacks,
+  options: StreamChatOptions = {}
 ): Promise<void> {
   const response = await executeFetch("/api/chat", {
     jsonBody: { message, session_id: sessionId },
@@ -390,6 +401,7 @@ export async function streamChat(
     const errorEvent: ChatStreamErrorEvent = {
       type: "error",
       error: extractApiErrorMessage(text, response.status, response.statusText),
+      request_id: options.requestId,
     };
     dispatcher.dispatch(errorEvent);
     return;
@@ -416,7 +428,7 @@ export async function streamChat(
       dispatcher.dispatch({
         type: "error",
         error: "The response stream closed before completion.",
-        request_id: dispatcher.lastRequestId(),
+        request_id: dispatcher.lastRequestId() ?? options.requestId,
       });
     }
   } finally {

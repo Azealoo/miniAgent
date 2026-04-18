@@ -163,6 +163,11 @@ class AgentManager:
             message,
             history=history,
         )
+        # Share the routed skill set with the in-flight policy context so
+        # `tools_allowed` can be enforced at dispatch time.
+        from tools.policy import set_active_skills_on_current_context
+
+        set_active_skills_on_current_context(selected_skill_entries)
         agent = self._build_agent(rag_mode, skill_entries=selected_skill_entries)
 
         # ── Stream events ──────────────────────────────────────────────

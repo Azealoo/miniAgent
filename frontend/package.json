@@ -10,6 +10,7 @@
     "start:e2e": "NEXT_DIST_DIR=.next-e2e-build next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "codegen:types": "node --experimental-strip-types ../scripts/codegen-types.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "PLAYWRIGHT_BROWSERS_PATH=0 npm run build:e2e && PLAYWRIGHT_BROWSERS_PATH=0 playwright test"
