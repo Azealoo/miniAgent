@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  backend:
+    name: Backend (pytest + pydantic schema drift)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      # Covers the backend pydantic -> JSON schema drift guards:
+      #   - backend/tests/test_shared_types_schema.py
+      #   - backend/tests/test_runtime_events.py
+      - name: Run pytest
+        run: python -m pytest
+
+  frontend:
+    name: Frontend (typecheck + codegen drift + test + lint)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Fails if frontend/src/lib/types.generated.ts is out of date with the
+      # committed JSON schema snapshots in backend/codegen and backend/runtime.
+      - name: Codegen drift check
+        run: npm run codegen:check
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Lint
+        run: npm run lint
