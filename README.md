@@ -45,7 +45,11 @@ conda activate miniAgent
 # Backend
 cd backend
 pip install -r requirements.txt
-uvicorn app:app --port 8002 --host 0.0.0.0 --reload
+# The uvicorn --host value is driven by the active production-hardening
+# posture: dev/hosted-strict → 127.0.0.1, trusted-lab → 0.0.0.0.
+uvicorn app:app --port 8002 \
+    --host "$(python -c 'import config; print(config.get_production_hardening_policy().host_binding)')" \
+    --reload
 
 # Frontend
 cd frontend

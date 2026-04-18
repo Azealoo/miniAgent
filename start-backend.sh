@@ -18,4 +18,9 @@ fi
 conda activate miniAgent
 
 cd "$BACKEND_DIR"
-exec uvicorn app:app --port 8002 --host 0.0.0.0 --reload
+
+# Resolve the uvicorn host from the active production-hardening posture so
+# hosted-strict/dev bind loopback and trusted-lab binds the lab network.
+HOST="$(python -c 'import config; print(config.get_production_hardening_policy().host_binding)')"
+
+exec uvicorn app:app --port 8002 --host "$HOST" --reload

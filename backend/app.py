@@ -3,7 +3,14 @@ BioAPEX backend entry point.
 
 Run with:
     cd backend
-    uvicorn app:app --port 8002 --host 0.0.0.0 --reload
+    uvicorn app:app --port 8002 \\
+        --host "$(python -c 'import config; print(config.get_production_hardening_policy().host_binding)')" \\
+        --reload
+
+The ``--host`` value is driven by the active production-hardening posture
+(see ``hardening.py``): ``dev`` and ``hosted-strict`` bind loopback
+(``127.0.0.1``) while ``trusted-lab`` binds the lab network (``0.0.0.0``).
+``start-backend.sh`` resolves this for you.
 """
 import os
 import sys
