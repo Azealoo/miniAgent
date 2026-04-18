@@ -8,6 +8,7 @@ Supports:
 - Project-scoped .agents/skills/ from repo root (if present)
 - Per-skill enable/disable via config skills.entries.<name>.enabled
 """
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -55,6 +56,8 @@ VALID_STAGES = frozenset(
 VALID_STABILITIES = frozenset({"stable", "evolving", "experimental"})
 VALID_SAFETY_LEVELS = frozenset({"low", "medium", "high"})
 VALID_EFFORT_LEVELS = frozenset({"low", "medium", "high"})
+VALID_POSTURES = frozenset({"inspection", "execution", "admin"})
+VALID_RISK_TIERS = frozenset({"low", "medium", "high"})
 REQUIRED_BIOLOGY_METADATA_FIELDS = (
     "species",
     "modality",
@@ -95,6 +98,30 @@ def _normalize_text(value: Any) -> str:
 
 def _normalize_effort(value: Any) -> str:
     return _normalize_text(value).lower()
+
+
+def _normalize_optional_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "y", "1"}:
+            return True
+        if lowered in {"false", "no", "n", "0"}:
+            return False
+    return bool(value)
+
+
+def _normalize_env_names(value: Any) -> list[str]:
+    """Normalize required_env to a list of env-var names only (no values)."""
+    names: list[str] = []
+    for item in _normalize_list(value):
+        name = item.split("=", 1)[0].strip()
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 def _normalize_path_hints(value: Any) -> list[str]:
@@ -139,6 +166,26 @@ def _validate_skill_entry(entry: dict[str, Any], *, available_tool_names: set[st
     if invalid_tools:
         raise ValueError(
             f"Skill '{skill_name}' declares unavailable tools: {', '.join(invalid_tools)}"
+        )
+    invalid_tools_allowed = sorted(
+        {tool for tool in entry.get("tools_allowed", []) if tool not in available_tool_names}
+    )
+    if invalid_tools_allowed:
+        raise ValueError(
+            f"Skill '{skill_name}' tools_allowed references unavailable tools: "
+            f"{', '.join(invalid_tools_allowed)}"
+        )
+    min_posture = entry.get("min_posture", "")
+    if min_posture and min_posture not in VALID_POSTURES:
+        raise ValueError(
+            f"Skill '{skill_name}' has invalid min_posture '{min_posture}'; expected one of: "
+            f"{', '.join(sorted(VALID_POSTURES))}"
+        )
+    risk_tier = entry.get("risk_tier", "")
+    if risk_tier and risk_tier not in VALID_RISK_TIERS:
+        raise ValueError(
+            f"Skill '{skill_name}' has invalid risk_tier '{risk_tier}'; expected one of: "
+            f"{', '.join(sorted(VALID_RISK_TIERS))}"
         )
     if effort and effort not in VALID_EFFORT_LEVELS:
         raise ValueError(
@@ -261,6 +308,16 @@ def parse_skill_entry(base_dir: Path, source: SkillSource, skill_md: Path) -> Op
             "stage": _normalize_text(frontmatter.get("stage", "")),
             "stability": _normalize_text(frontmatter.get("stability", "")),
             "safety_level": _normalize_text(frontmatter.get("safety_level", "")),
+            "tools_allowed": _normalize_list(frontmatter.get("tools_allowed")),
+            "planner_visible": _normalize_optional_bool(
+                frontmatter.get("planner_visible"), default=True
+            ),
+            "verifier_visible": _normalize_optional_bool(
+                frontmatter.get("verifier_visible"), default=True
+            ),
+            "required_env": _normalize_env_names(frontmatter.get("required_env")),
+            "min_posture": _normalize_text(frontmatter.get("min_posture", "")).lower(),
+            "risk_tier": _normalize_text(frontmatter.get("risk_tier", "")).lower(),
             "source_kind": source.kind,
             "source_root": str(source.root_dir),
             "precedence": source.precedence,
@@ -365,6 +422,22 @@ def render_skills_snapshot(skill_entries: list[dict[str, Any]]) -> str:
             lines.append(f"    <stability>{_escape(entry['stability'])}</stability>")
         if entry.get("safety_level"):
             lines.append(f"    <safety_level>{_escape(entry['safety_level'])}</safety_level>")
+        if entry.get("tools_allowed"):
+            lines.append(
+                f"    <tools_allowed>{_escape(', '.join(entry['tools_allowed']))}</tools_allowed>"
+            )
+        if entry.get("min_posture"):
+            lines.append(f"    <min_posture>{_escape(entry['min_posture'])}</min_posture>")
+        if entry.get("risk_tier"):
+            lines.append(f"    <risk_tier>{_escape(entry['risk_tier'])}</risk_tier>")
+        if entry.get("required_env"):
+            lines.append(
+                f"    <required_env>{_escape(', '.join(entry['required_env']))}</required_env>"
+            )
+        if entry.get("planner_visible") is False:
+            lines.append("    <planner_visible>false</planner_visible>")
+        if entry.get("verifier_visible") is False:
+            lines.append("    <verifier_visible>false</verifier_visible>")
         if entry.get("user_invocable") is False:
             lines.append("    <user_invocable>false</user_invocable>")
         lines.append("  </skill>")
@@ -380,6 +453,19 @@ def scan_skills(base_dir: Path) -> None:
     snapshot_path = base_dir / "SKILLS_SNAPSHOT.md"
     skill_entries = collect_skill_entries(base_dir, respect_enabled=True)
     snapshot_path.write_text(render_skills_snapshot(skill_entries), encoding="utf-8")
+
+
+def skill_required_env_satisfied(
+    entry: dict[str, Any],
+    *,
+    env: dict[str, str] | None = None,
+) -> bool:
+    """Return True when every env var in entry['required_env'] is set and non-empty."""
+    required = entry.get("required_env") or []
+    if not required:
+        return True
+    source = env if env is not None else os.environ
+    return all(bool(source.get(name)) for name in required)
 
 
 def _escape(s: str) -> str:
