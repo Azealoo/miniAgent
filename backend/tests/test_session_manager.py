@@ -560,8 +560,9 @@ class TestCompressHistory:
         archived, remaining = sm.compress_history(sid, "summary text", 4)
         assert archived == 4
         assert remaining == 6
-        # Archive file written
-        archive_files = list((tmp_path / "sessions" / "archive").glob("*.json"))
+        # Archive file written (scoped to this session; the archive dir also
+        # holds a ``_index.json`` sidecar that should not be counted here).
+        archive_files = list((tmp_path / "sessions" / "archive").glob(f"{sid}_*.json"))
         assert len(archive_files) == 1
         archived_data = json.loads(archive_files[0].read_text())
         assert len(archived_data) == 4
@@ -675,6 +676,8 @@ class TestCompressHistory:
         assert continuity[1]["archived_message_count"] == 4
 
     def test_get_session_continuity_does_not_guess_when_archive_counts_mismatch(self, sm):
+        from graph.session.session_archive_index import ARCHIVE_INDEX_FILENAME
+
         sid = sm.create_session()
         self._populate(sm, sid, 10)
         sm.compress_history(sid, _structured_summary("first block"), 4)
@@ -685,6 +688,11 @@ class TestCompressHistory:
         data.pop("compressed_archive_index", None)
         sm._write(sid, data)
 
+        # Force the sidecar to be rebuilt by scanning disk, then corrupt one
+        # archive file so the rebuilt count no longer matches the number of
+        # stored summaries. Without both, the sidecar would preserve the
+        # original write-time metadata.
+        (sm.archive_dir / ARCHIVE_INDEX_FILENAME).unlink()
         first_archive = sorted(sm.archive_dir.glob(f"{sid}_*.json"))[0]
         first_archive.write_text("{invalid", encoding="utf-8")
 

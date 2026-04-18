@@ -82,6 +82,10 @@ class ToolPolicyExecutionContext:
     # declares a non-empty ``tools_allowed`` list, tool dispatch is
     # restricted to the union of those allowlists across active skills.
     active_skills: tuple[ActiveSkillSpec, ...] = ()
+    # Tool names the reviewer explicitly denied for this turn. Denied tools
+    # hard-block (rather than re-prompt) so the agent sees a blocked envelope
+    # and routes around the capability instead of spinning on the same gate.
+    denied_tool_runs: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

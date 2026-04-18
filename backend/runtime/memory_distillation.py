@@ -132,7 +132,8 @@ def distill_request_memory(
 
     if memory_indexer is not None and getattr(memory_indexer, "base_dir", None) == base_dir:
         try:
-            memory_indexer.rebuild_index()
+            # Incremental: only re-embeds the distilled file, not the whole corpus.
+            memory_indexer._maybe_rebuild()
         except Exception:
             pass
 

@@ -167,12 +167,14 @@ class WriteFileTool(BaseTool):
             skills_rescanned = False
 
             if path_clean.startswith("memory/"):
-                # Rebuild memory vector index so writes anywhere under memory/
+                # Refresh memory vector index so writes anywhere under memory/
                 # are reflected in retrieval, not only MEMORY.md updates.
+                # `_maybe_rebuild` diffs per-file state and only re-embeds the
+                # touched file instead of the whole corpus.
                 try:
                     from graph.agent import agent_manager
                     if agent_manager.memory_indexer:
-                        agent_manager.memory_indexer.rebuild_index()
+                        agent_manager.memory_indexer._maybe_rebuild()
                         memory_index_rebuilt = True
                 except Exception:
                     pass

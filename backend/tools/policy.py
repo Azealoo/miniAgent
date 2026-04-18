@@ -133,14 +133,23 @@ def evaluate_pre_tool_policy(
     if skill_violation is not None:
         return skill_violation
 
-    if manifest.requires_approval and not _user_has_approved(manifest, context):
-        return ToolPolicyDecision(
-            status="needs_approval",
-            approval_reason="requires_approval",
-            approval_message=(
-                f"Tool '{manifest.name}' is gated and needs human approval before it can run."
-            ),
-        )
+    if manifest.requires_approval:
+        if _user_has_denied(manifest, context):
+            return ToolPolicyDecision(
+                status="blocked",
+                block_reason="reviewer_denied_approval",
+                block_message=(
+                    f"Tool '{manifest.name}' was denied by the reviewer; proceed without it."
+                ),
+            )
+        if not _user_has_approved(manifest, context):
+            return ToolPolicyDecision(
+                status="needs_approval",
+                approval_reason="requires_approval",
+                approval_message=(
+                    f"Tool '{manifest.name}' is gated and needs human approval before it can run."
+                ),
+            )
 
     if warnings:
         return ToolPolicyDecision(status="allow_with_warning", warnings=tuple(warnings))
@@ -328,6 +337,16 @@ def _user_has_approved(
     if manifest.name in approved:
         return True
     return False
+
+
+def _user_has_denied(
+    manifest: ToolManifestEntry,
+    context: ToolPolicyExecutionContext,
+) -> bool:
+    denied = getattr(context, "denied_tool_runs", None)
+    if not denied:
+        return False
+    return manifest.name in denied
 
 
 def annotate_tool_result(

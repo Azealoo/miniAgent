@@ -9,6 +9,10 @@ import json
 import time
 from typing import Any
 
+from graph.session.session_archive_index import (
+    append_archive_entry,
+    list_archive_entries,
+)
 from graph.session.session_normalizer import (
     _normalize_messages,
     _normalize_messages_for_storage,
@@ -80,6 +84,12 @@ class SessionManager(SessionStore):
             json.dumps(archived, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+        # Update the on-disk sidecar so ``list_archived_history_batches`` can
+        # answer without reading every file on subsequent calls.
+        append_archive_entry(
+            self.archive_dir, session_id, archive_id, len(archived)
+        )
+
         # Append to compressed_context (multiple compressions separated by ---)
         existing = data.get("compressed_context", "").strip()
         archive_index = _pad_archive_index(
@@ -116,27 +126,14 @@ class SessionManager(SessionStore):
         _validate_session_id(session_id)
         if not self._path(session_id).exists():
             return []
-        batches: list[dict[str, Any]] = []
 
-        for path in sorted(self.archive_dir.glob(f"{session_id}_*.json")):
-            archive_id = path.stem.removeprefix(f"{session_id}_")
-            if not _ARCHIVE_ID_RE.match(archive_id):
-                continue
-
-            try:
-                raw_messages = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-
-            messages = _normalize_messages(raw_messages)
-            batches.append(
-                {
-                    "archive_id": archive_id,
-                    "message_count": len(messages),
-                }
-            )
-
-        return batches
+        return [
+            {
+                "archive_id": entry["archive_id"],
+                "message_count": entry["message_count"],
+            }
+            for entry in list_archive_entries(self.archive_dir, session_id)
+        ]
 
     def load_archived_history(self, session_id: str, archive_id: str) -> list[dict]:
         _validate_session_id(session_id)

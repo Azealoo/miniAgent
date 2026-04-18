@@ -89,6 +89,13 @@ class TurnLedger:
                 )
             return [event]
 
+        if event_type == "tool_awaiting_approval":
+            tool_name = event.get("tool")
+            run_id = event.get("run_id", tool_name)
+            if isinstance(tool_name, str) and isinstance(run_id, str) and run_id:
+                self._append_approval_gate(event, tool_name=tool_name, run_id=run_id)
+            return [event]
+
         if event_type in {"plan_created", "plan_updated"}:
             self._append_plan_event(event)
             return [event]
@@ -218,6 +225,32 @@ class TurnLedger:
             block["tool_trace"] = [
                 dict(item) for item in tool_trace if isinstance(item, dict)
             ]
+        self._current_blocks.append(block)
+
+    def _append_approval_gate(
+        self,
+        event: dict[str, Any],
+        *,
+        tool_name: str,
+        run_id: str,
+    ) -> None:
+        started = self._pending_tools.pop(run_id, None)
+        block: dict[str, Any] = {
+            "type": "approval_gate",
+            "tool": tool_name,
+            "input": (
+                started.get("input", "") if isinstance(started, dict) else event.get("input", "")
+            ),
+            "run_id": run_id,
+            "reason": event.get("reason", "requires_approval"),
+            "message": event.get("message", ""),
+        }
+        result = event.get("result")
+        if result is not None:
+            block["result"] = result
+        policy = event.get("policy")
+        if isinstance(policy, dict):
+            block["policy"] = dict(policy)
         self._current_blocks.append(block)
 
     def _append_verification_event(self, event: dict[str, Any]) -> None:

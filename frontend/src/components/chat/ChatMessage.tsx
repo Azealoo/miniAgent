@@ -9,6 +9,7 @@ import {
 } from "@/lib/message-blocks";
 import { completedElapsedLabel } from "@/lib/message-duration";
 import { splitStreamingMarkdown } from "@/lib/streaming-markdown";
+import { useAppOptional } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import TurnActivityFeed from "./TurnActivityFeed";
 import type { Message } from "@/lib/types";
@@ -132,6 +133,8 @@ function StreamingMarkdownContent({
 export default function ChatMessage({
   message,
 }: ChatMessageProps) {
+  const app = useAppOptional();
+  const sessionId = app?.currentSessionId ?? null;
   const isUser = message.role === "user";
   const normalizedContent = normalizeMessageContent(message);
   const displayContent = normalizedContent.content;
@@ -191,7 +194,9 @@ export default function ChatMessage({
       <MessageMarker />
 
       <div className="min-w-0 pt-0.5">
-        {showTurnActivityBeforeContent ? <TurnActivityFeed message={message} /> : null}
+        {showTurnActivityBeforeContent ? (
+          <TurnActivityFeed message={message} sessionId={sessionId} />
+        ) : null}
 
         {hasContent && completedDuration ? (
           <p className="mb-2 pl-[1px] font-mono text-[10px] italic leading-5 text-slate-400">
@@ -206,7 +211,9 @@ export default function ChatMessage({
           />
         ) : null}
 
-        {showTurnActivityAfterContent ? <TurnActivityFeed message={message} /> : null}
+        {showTurnActivityAfterContent ? (
+          <TurnActivityFeed message={message} sessionId={sessionId} />
+        ) : null}
       </div>
     </article>
   );

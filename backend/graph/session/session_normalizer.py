@@ -3,9 +3,10 @@
 from typing import Any
 
 from graph.session.session_schema import (
-    SessionContentBlock, SessionPlanBlock, SessionRetrievalBlock,
-    SessionTextBlock, SessionToolResultBlock, SessionToolUseBlock,
-    SessionUsageBlock, SessionVerificationBlock, _tool_block_key,
+    SessionApprovalGateBlock, SessionContentBlock, SessionPlanBlock,
+    SessionRetrievalBlock, SessionTextBlock, SessionToolResultBlock,
+    SessionToolUseBlock, SessionUsageBlock, SessionVerificationBlock,
+    _tool_block_key,
 )
 
 
@@ -168,6 +169,30 @@ def _normalize_blocks(value: Any) -> list[SessionContentBlock]:
                 block["tool_trace"] = [
                     dict(entry) for entry in tool_trace if isinstance(entry, dict)
                 ]
+            blocks.append(block)
+        elif block_type == "approval_gate":
+            tool_name = item.get("tool")
+            run_id = item.get("run_id")
+            if not isinstance(tool_name, str) or not isinstance(run_id, str) or not run_id:
+                continue
+            block: SessionApprovalGateBlock = {
+                "type": "approval_gate",
+                "tool": tool_name,
+                "input": item.get("input") if isinstance(item.get("input"), str) else "",
+                "run_id": run_id,
+                "reason": (
+                    item.get("reason")
+                    if isinstance(item.get("reason"), str) and item.get("reason")
+                    else "requires_approval"
+                ),
+                "message": item.get("message") if isinstance(item.get("message"), str) else "",
+            }
+            result = item.get("result")
+            if isinstance(result, dict):
+                block["result"] = dict(result)
+            policy = item.get("policy")
+            if isinstance(policy, dict):
+                block["policy"] = dict(policy)
             blocks.append(block)
 
     return blocks
