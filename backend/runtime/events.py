@@ -140,12 +140,16 @@ class DoneRuntimeEvent(_RuntimeEventBase):
     type: Literal["done"] = "done"
     content: str
     session_id: Optional[str] = None
-    turn_status: Optional[Literal["ok", "awaiting_approval", "budget_exceeded", "error"]] = Field(
+    turn_status: Optional[
+        Literal["ok", "awaiting_approval", "budget_exceeded", "error", "cancelled"]
+    ] = Field(
         default=None,
         description=(
             "Terminal state of the turn. Absent or 'ok' means the turn completed "
             "normally; 'awaiting_approval' means the runtime paused on a gated tool "
-            "and the client must call /api/chat/approval before the next turn."
+            "and the client must call /api/chat/approval before the next turn; "
+            "'cancelled' means the client disconnected or otherwise cancelled the "
+            "turn before it finished (partial assistant segments are still persisted)."
         ),
     )
 

@@ -132,7 +132,7 @@ export interface ChatStreamDoneEvent {
   request_id?: string;
   schema_version?: number;
   session_id?: string;
-  turn_status?: "ok" | "awaiting_approval" | "budget_exceeded" | "error";
+  turn_status?: "ok" | "awaiting_approval" | "budget_exceeded" | "error" | "cancelled";
   type: "done";
 }
 export interface ChatStreamErrorEvent {
