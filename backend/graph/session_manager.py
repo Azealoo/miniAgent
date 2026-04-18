@@ -7,6 +7,16 @@ The session implementation has moved into ``graph.session`` (split across
 migration completes — plan to remove it after one release cycle.
 """
 
-from graph.session import SESSION_SCHEMA_VERSION, SessionManager, _validate_session_id
+from graph.session import (
+    FrozenSessionPrefix,
+    SESSION_SCHEMA_VERSION,
+    SessionManager,
+    _validate_session_id,
+)
 
-__all__ = ["SessionManager", "SESSION_SCHEMA_VERSION", "_validate_session_id"]
+__all__ = [
+    "FrozenSessionPrefix",
+    "SessionManager",
+    "SESSION_SCHEMA_VERSION",
+    "_validate_session_id",
+]

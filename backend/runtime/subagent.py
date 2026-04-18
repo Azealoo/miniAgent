@@ -78,6 +78,16 @@ class SubAgentContract:
     ``tools_allowed`` is the final tool list handed to the LLM — callers
     filter with :func:`filter_tools_by_exposure` before constructing the
     contract so policy/exposure metadata stays authoritative.
+
+    ``stable_prefix`` is an optional session-scoped leading prompt fragment
+    (workspace files, skill snapshot, tool-result contract, harness guidance)
+    captured by :class:`graph.session_manager.SessionManager` on the first
+    turn of the parent session. When set, ``run_subagent`` prepends it verbatim
+    to ``system_prompt`` so the provider's prefix cache matches the parent
+    agent's leading bytes and ~95% of the sub-agent's input is served from
+    cache. Adding a skill or editing workspace files mid-session silently
+    invalidates the prefix and degrades the cache hit rate; see
+    :meth:`SessionManager.freeze_session_prefix` for the drift warning hook.
     """
 
     name: str
@@ -85,6 +95,7 @@ class SubAgentContract:
     tools_allowed: tuple[Any, ...]
     max_steps: int
     token_budget: int
+    stable_prefix: str = ""
 
     def __post_init__(self) -> None:
         if not self.name or not self.name.strip():
@@ -101,6 +112,16 @@ class SubAgentContract:
     @property
     def tool_names(self) -> tuple[str, ...]:
         return tuple(_tool_name(tool) for tool in self.tools_allowed)
+
+    def composed_system_prompt(self) -> str:
+        """Return the final system prompt handed to :func:`create_agent`.
+
+        The stable prefix comes first so its bytes align with the parent
+        agent's prefix and participate in the provider's prefix cache.
+        """
+        if self.stable_prefix and self.stable_prefix.strip():
+            return f"{self.stable_prefix}\n\n{self.system_prompt}"
+        return self.system_prompt
 
 
 @dataclass(frozen=True)
@@ -119,6 +140,52 @@ class SubAgentArtifact:
     absolute_path: str
     payload: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    cache_stats: dict[str, Any] | None = None
+
+
+def _extract_llm_usage_event(event: dict[str, Any]) -> dict[str, int] | None:
+    """Map a LangChain ``on_chat_model_end`` event into prompt-cache counters.
+
+    LangChain normalizes provider-side cache accounting into
+    ``AIMessage.usage_metadata`` — ``input_token_details.cache_read`` and
+    ``cache_creation`` are populated for DeepSeek, OpenAI and Anthropic once
+    the SDK maps them. Runs without usage metadata (some streamed responses)
+    are skipped: the collector only needs samples, not an invariant.
+    """
+    output = event.get("data", {}).get("output")
+    usage = getattr(output, "usage_metadata", None)
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = int(usage.get("input_tokens") or 0)
+    details = usage.get("input_token_details") or {}
+    if not isinstance(details, dict):
+        details = {}
+    cache_read = int(details.get("cache_read") or 0)
+    cache_creation = int(details.get("cache_creation") or 0)
+    if input_tokens <= 0 and cache_read <= 0 and cache_creation <= 0:
+        return None
+    return {
+        "input_tokens": input_tokens,
+        "cache_read_tokens": cache_read,
+        "cache_creation_tokens": cache_creation,
+    }
+
+
+def _observe_llm_usage(usage: dict[str, int], *, subagent_name: str) -> None:
+    """Forward per-call usage samples to the process-wide metrics collector.
+
+    Import is deferred so this module stays usable in unit tests that stub
+    the Prometheus surface.
+    """
+    try:
+        from runtime.metrics_collector import METRICS
+    except Exception:  # pragma: no cover — defensive
+        return
+    METRICS.observe_llm_usage(
+        input_tokens=usage["input_tokens"],
+        cache_read_tokens=usage["cache_read_tokens"],
+        cache_creation_tokens=usage["cache_creation_tokens"],
+    )
 
 
 def _normalize_tool_input(raw_input: Any) -> str:
@@ -141,6 +208,7 @@ def _build_artifact_payload(
     verdict: str | None,
     error: str | None,
     extra_metadata: dict[str, Any] | None,
+    cache_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     trace_list = [dict(item) for item in tool_trace]
     payload: dict[str, Any] = {
@@ -155,6 +223,9 @@ def _build_artifact_payload(
             "max_steps": contract.max_steps,
             "token_budget": contract.token_budget,
             "tools_allowed": list(contract.tool_names),
+            "stable_prefix_bytes": len(contract.stable_prefix.encode("utf-8"))
+            if contract.stable_prefix
+            else 0,
         },
         "inputs": {
             "system_prompt": contract.system_prompt,
@@ -170,6 +241,8 @@ def _build_artifact_payload(
         "verdict": verdict,
         "error": error,
     }
+    if cache_stats is not None:
+        payload["cache_stats"] = cache_stats
     if extra_metadata:
         payload["metadata"] = dict(extra_metadata)
     return payload
@@ -260,16 +333,25 @@ async def run_subagent(
     if run_id is None:
         run_id = generate_run_id(now=created_at)
 
-    agent = create_agent(llm, list(contract.tools_allowed), system_prompt=contract.system_prompt)
+    composed_prompt = contract.composed_system_prompt()
+    agent = create_agent(llm, list(contract.tools_allowed), system_prompt=composed_prompt)
     recursion_limit = max(25, contract.max_steps)
     response_chunks: list[str] = []
     tool_trace: list[dict[str, Any]] = []
     pending: dict[Any, int] = {}
-    tokens_used = _count_tokens(contract.system_prompt) + _count_tokens(user_prompt)
+    tokens_used = _count_tokens(composed_prompt) + _count_tokens(user_prompt)
     steps_used = 0
     status: SubAgentStatus = "ok"
     error: str | None = None
     budget = max(0, contract.token_budget)
+    cache_stats = {
+        "llm_calls": 0,
+        "input_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+        "uncached_tokens": 0,
+        "cache_hit_rate": 0.0,
+    }
 
     def _over_budget() -> bool:
         return budget > 0 and tokens_used > budget
@@ -287,6 +369,16 @@ async def run_subagent(
                 if text:
                     response_chunks.append(text)
                     tokens_used += _count_tokens(text)
+            elif kind == "on_chat_model_end":
+                usage_event = _extract_llm_usage_event(event)
+                if usage_event is not None:
+                    cache_stats["llm_calls"] += 1
+                    cache_stats["input_tokens"] += usage_event["input_tokens"]
+                    cache_stats["cache_read_tokens"] += usage_event["cache_read_tokens"]
+                    cache_stats["cache_creation_tokens"] += usage_event[
+                        "cache_creation_tokens"
+                    ]
+                    _observe_llm_usage(usage_event, subagent_name=contract.name)
             elif kind == "on_tool_start":
                 run_event_id = event.get("run_id")
                 raw_input = event.get("data", {}).get("input", {})
@@ -328,6 +420,28 @@ async def run_subagent(
             status = "error"
         error = str(exc) or exc.__class__.__name__
 
+    # Finalize the cache hit rate for the artifact so per-run inspection is
+    # possible alongside the process-wide Prometheus gauge.
+    total_input = (
+        cache_stats["cache_read_tokens"]
+        + cache_stats["cache_creation_tokens"]
+        + max(
+            0,
+            cache_stats["input_tokens"]
+            - cache_stats["cache_read_tokens"]
+            - cache_stats["cache_creation_tokens"],
+        )
+    )
+    cache_stats["uncached_tokens"] = max(
+        0,
+        cache_stats["input_tokens"]
+        - cache_stats["cache_read_tokens"]
+        - cache_stats["cache_creation_tokens"],
+    )
+    cache_stats["cache_hit_rate"] = (
+        cache_stats["cache_read_tokens"] / total_input
+    ) if total_input > 0 else 0.0
+
     response_text = "".join(response_chunks).strip()
     artifact_payload = _build_artifact_payload(
         contract=contract,
@@ -342,6 +456,7 @@ async def run_subagent(
         verdict=verdict,
         error=error,
         extra_metadata=extra_metadata,
+        cache_stats=cache_stats if cache_stats["llm_calls"] > 0 else None,
     )
 
     relative_path, absolute_path = _write_artifact(
@@ -364,6 +479,7 @@ async def run_subagent(
         absolute_path=str(absolute_path),
         payload=artifact_payload,
         error=error,
+        cache_stats=dict(cache_stats) if cache_stats["llm_calls"] > 0 else None,
     )
 
 
@@ -390,6 +506,33 @@ def default_token_budget() -> int:
     return get_max_tokens_per_turn()
 
 
+def resolve_session_stable_prefix() -> str:
+    """Return the parent session's frozen stable prefix, or ``""``.
+
+    Sub-agent tools call this from inside a ``tool_policy_context`` so the
+    frozen prefix captured on the parent turn is reused verbatim. When the
+    session or session manager is unavailable (tests, one-off CLI runs) this
+    returns an empty string and the sub-agent falls back to its own system
+    prompt — correct behaviour, at the cost of no prompt-cache hits.
+    """
+    try:
+        from graph.agent import agent_manager
+        from tools.policy import get_tool_policy_context
+    except Exception:  # pragma: no cover — defensive import path
+        return ""
+
+    policy_context = get_tool_policy_context()
+    if policy_context is None or not policy_context.session_id:
+        return ""
+    session_manager = getattr(agent_manager, "session_manager", None)
+    if session_manager is None:
+        return ""
+    frozen = session_manager.get_frozen_session_prefix(policy_context.session_id)
+    if frozen is None:
+        return ""
+    return frozen.stable_prefix
+
+
 __all__ = [
     "SUBAGENT_ARTIFACT_FILENAME",
     "SUBAGENT_ARTIFACT_TYPE",
@@ -400,5 +543,6 @@ __all__ = [
     "SubAgentStatus",
     "default_max_steps",
     "default_token_budget",
+    "resolve_session_stable_prefix",
     "run_subagent",
 ]

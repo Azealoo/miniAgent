@@ -19,7 +19,7 @@ from evidence.integrity import (
 )
 from runtime.model_factory import build_chat_model
 from .memory_indexer import MemoryIndexer
-from .prompt_builder import build_retrieved_memory_block, build_system_prompt
+from .prompt_builder import build_retrieved_memory_block, build_system_prompt_blocks
 from .session_manager import SessionManager
 from .skill_router import select_skill_entries_for_query
 from tools.contracts import normalize_tool_output
@@ -120,16 +120,37 @@ class AgentManager:
         rag_mode: bool = False,
         *,
         skill_entries: list[dict] | None = None,
+        session_id: str | None = None,
     ):
         """
         Rebuild the agent from scratch, ensuring the latest workspace edits
         and RAG configuration are reflected in the system prompt.
+
+        The stable prefix half of the prompt (workspace files, skill snapshot,
+        tool-result contract, harness guidance) is frozen on the session on
+        first call so sub-agent runs can reuse it for provider prompt-cache
+        hits. The volatile suffix (memory index, git context) is appended
+        fresh each turn and is intentionally excluded from the frozen prefix.
         """
         assert self.base_dir is not None, "AgentManager not initialised"
-        system_prompt = (
-            f"{build_system_prompt(self.base_dir, rag_mode, skill_entries=skill_entries)}"
-            f"\n\n{_HARNESS_GUIDANCE}"
+        stable_prefix, volatile_suffix = build_system_prompt_blocks(
+            self.base_dir,
+            rag_mode,
+            skill_entries=skill_entries,
         )
+        stable_prefix_with_harness = (
+            f"{stable_prefix}\n\n{_HARNESS_GUIDANCE}" if stable_prefix else _HARNESS_GUIDANCE
+        )
+        if session_id and self.session_manager is not None:
+            self.session_manager.freeze_session_prefix(
+                session_id,
+                stable_prefix=stable_prefix_with_harness,
+                tool_names=tuple(getattr(tool, "name", type(tool).__name__) for tool in self.tools),
+            )
+        if stable_prefix_with_harness and volatile_suffix:
+            system_prompt = f"{stable_prefix_with_harness}\n\n{volatile_suffix}"
+        else:
+            system_prompt = stable_prefix_with_harness or volatile_suffix
         return create_agent(self.llm, self.tools, system_prompt=system_prompt)
 
     def clear_session_runtime(self, session_id: str) -> None:
@@ -196,10 +217,16 @@ class AgentManager:
         )
         # Share the routed skill set with the in-flight policy context so
         # `tools_allowed` can be enforced at dispatch time.
-        from tools.policy import set_active_skills_on_current_context
+        from tools.policy import get_tool_policy_context, set_active_skills_on_current_context
 
         set_active_skills_on_current_context(selected_skill_entries)
-        agent = self._build_agent(rag_mode, skill_entries=selected_skill_entries)
+        policy_context = get_tool_policy_context()
+        session_id = policy_context.session_id if policy_context is not None else None
+        agent = self._build_agent(
+            rag_mode,
+            skill_entries=selected_skill_entries,
+            session_id=session_id,
+        )
 
         # ── Stream events ──────────────────────────────────────────────
         after_tool = False
