@@ -65,12 +65,34 @@ def _pad_archive_index(
     return padded
 
 
+COMPRESSION_PHASES: tuple[str, ...] = ("snip", "microcompact", "collapse", "autocompact")
+
+
 class SessionManager(SessionStore):
-    def compress_history(self, session_id: str, summary: str, n: int) -> tuple[int, int]:
+    def compress_history(
+        self,
+        session_id: str,
+        summary: str,
+        n: int,
+        *,
+        phase: str | None = None,
+    ) -> tuple[int, int]:
         """
         Archive the first *n* messages and store *summary* in compressed_context.
         Returns (archived_count, remaining_count).
+
+        ``phase`` records which rung of the four-phase compaction ladder
+        (``snip`` → ``microcompact`` → ``collapse`` → ``autocompact``) produced
+        this compression. It is persisted on the session JSON as
+        ``context_compression_phase`` so the UI and audit tools can surface
+        the most recent rung without replaying the SSE stream.
         """
+        if phase is not None and phase not in COMPRESSION_PHASES:
+            raise ValueError(
+                f"Unknown compression phase {phase!r}; "
+                f"expected one of {COMPRESSION_PHASES}"
+            )
+
         data = self._read(session_id)
         messages = _normalize_messages_for_storage(data.get("messages", []))
 
@@ -100,9 +122,18 @@ class SessionManager(SessionStore):
         data["compressed_context"] = append_compressed_summary(existing, summary)
         data["compressed_archive_index"] = archive_index
         data["messages"] = remaining
+        if phase is not None:
+            data["context_compression_phase"] = phase
         self._write(session_id, data)
 
         return len(archived), len(remaining)
+
+    def get_context_compression_phase(self, session_id: str) -> str | None:
+        """Return the most recent compaction phase applied to *session_id*."""
+        value = self._read(session_id).get("context_compression_phase")
+        if isinstance(value, str) and value in COMPRESSION_PHASES:
+            return value
+        return None
 
     def get_compressed_context(self, session_id: str) -> str:
         return self._read(session_id).get("compressed_context", "")

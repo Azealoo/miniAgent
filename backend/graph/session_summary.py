@@ -265,6 +265,101 @@ async def generate_structured_summary(messages: Sequence[dict], llm) -> str:
     return normalize_generated_summary(str(response.content).strip())
 
 
+def build_deterministic_summary(messages: Sequence[dict]) -> str:
+    """Build a structured continuity summary without calling an LLM.
+
+    Used by the cheap ``snip`` and ``microcompact`` phases of the compaction
+    ladder in :mod:`runtime.compaction`. Instead of asking a model to
+    summarize, scan ``messages`` for high-signal fragments (PMIDs, other
+    stable IDs, file paths, URLs, tool run IDs, risk/approval lines) and
+    deposit them into the appropriate register. The output is enforced
+    through :func:`enforce_summary_size_limit` so both LLM and deterministic
+    summaries share a single size contract.
+    """
+    summary = ScientificContinuitySummary()
+
+    evidence_seen: set[str] = set()
+    compliance_seen: set[str] = set()
+    decision_seen: set[str] = set()
+    result_seen: set[str] = set()
+
+    message_list = list(messages)
+    exchange_count = sum(
+        1 for message in message_list if str(message.get("role", "")).lower() == "user"
+    )
+    tool_calls_seen = 0
+
+    for message in message_list:
+        role = str(message.get("role", "assistant")).strip().lower() or "assistant"
+        content_text = str(message.get("content", "") or "").strip()
+
+        for fragment in _extract_salient_fragments(content_text, max_items=8):
+            if fragment in evidence_seen:
+                continue
+            if _RISK_LINE_RE.search(fragment) or _RISK_LINE_RE.search(content_text):
+                if fragment not in compliance_seen:
+                    summary.compliance_register.append(fragment)
+                    compliance_seen.add(fragment)
+                    continue
+            summary.evidence_register.append(fragment)
+            evidence_seen.add(fragment)
+
+        if content_text:
+            head = _clip_text_preserving_ends(content_text, limit=180)
+            if role == "user":
+                if head and head not in decision_seen:
+                    summary.decisions_and_rationale.append(f"User asked: {head}")
+                    decision_seen.add(head)
+            else:
+                if head and head not in result_seen:
+                    summary.results_register.append(head)
+                    result_seen.add(head)
+
+        for call in message.get("tool_calls") or []:
+            tool_calls_seen += 1
+            tool_name = str(call.get("tool", "unknown")).strip() or "unknown"
+            tool_input = str(call.get("input", "") or "").strip()
+            tool_output = str(call.get("output", "") or "").strip()
+
+            for fragment in _extract_salient_fragments(
+                f"{tool_input}\n{tool_output}", max_items=6
+            ):
+                if fragment in evidence_seen:
+                    continue
+                summary.evidence_register.append(fragment)
+                evidence_seen.add(fragment)
+
+            risk_source = " ".join((tool_input, tool_output))
+            if _RISK_LINE_RE.search(risk_source):
+                note = _clip_text_preserving_ends(
+                    f"{tool_name}: {risk_source}", limit=160
+                )
+                if note not in compliance_seen:
+                    summary.compliance_register.append(note)
+                    compliance_seen.add(note)
+
+            result = call.get("result")
+            if isinstance(result, dict):
+                status = result.get("status") or result.get("review_status")
+                if isinstance(status, str) and status.strip():
+                    note = f"{tool_name}: {status.strip()}"
+                    if note not in result_seen:
+                        summary.results_register.append(note)
+                        result_seen.add(note)
+
+    summary.decisions_and_rationale.append(
+        f"Archived {len(message_list)} messages ({exchange_count} user turns, "
+        f"{tool_calls_seen} tool calls) without LLM summarization."
+    )
+
+    if not summary.open_questions_and_next_actions:
+        summary.open_questions_and_next_actions.append(
+            "See archived batch for full message text and tool outputs."
+        )
+
+    return enforce_summary_size_limit(summary)
+
+
 def enforce_summary_size_limit(
     summary: ScientificContinuitySummary | str, *, max_chars: int = MAX_SUMMARY_CHARS
 ) -> str:

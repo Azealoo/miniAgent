@@ -21,6 +21,25 @@
           "title": "From Turn",
           "type": "integer"
         },
+        "phase": {
+          "anyOf": [
+            {
+              "enum": [
+                "snip",
+                "microcompact",
+                "collapse",
+                "autocompact"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Which rung of the progressive compaction ladder produced this event. Absent for legacy payloads predating the four-phase ladder (issue #82).",
+          "title": "Phase"
+        },
         "request_id": {
           "anyOf": [
             {

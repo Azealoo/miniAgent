@@ -184,6 +184,15 @@ const NewResponseRuntimeEventSchema = z
   })
   .strict();
 
+export const COMPACTION_PHASES = [
+  "snip",
+  "microcompact",
+  "collapse",
+  "autocompact",
+] as const;
+
+export type CompactionPhase = (typeof COMPACTION_PHASES)[number];
+
 const CompactionRuntimeEventSchema = z
   .object({
     type: z.literal("compaction_event"),
@@ -194,6 +203,7 @@ const CompactionRuntimeEventSchema = z
     to_turn: z.number().int(),
     summary: z.string(),
     saved_tokens: z.number().int(),
+    phase: z.enum(COMPACTION_PHASES).nullish(),
   })
   .strict();
 
