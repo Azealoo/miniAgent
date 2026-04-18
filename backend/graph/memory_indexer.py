@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -96,6 +97,13 @@ class MemoryIndexer:
         self._nodes: list = []
         self._sections: list[_MemorySection] = []
         self._last_md5: str = ""
+        # Per-file state map: file source (relative posix path) ->
+        # (mtime, size, md5). Drives the incremental diff in `_maybe_rebuild`
+        # so we only re-embed the files that actually changed since last scan.
+        self._file_states: dict[str, tuple[float, int, str]] = {}
+        # file source -> sections currently indexed for that file. Lets us
+        # locate the stale doc_ids to delete when a file is removed or edited.
+        self._file_sections: dict[str, list[_MemorySection]] = {}
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
@@ -435,31 +443,267 @@ class MemoryIndexer:
         scored_results.sort(key=lambda item: item["score"], reverse=True)
         return scored_results[:top_k]
 
-    def _memory_state_md5(self) -> str:
-        digest = hashlib.md5()
-        saw_file = False
+    def _memory_state_map(self) -> dict[str, tuple[float, int, str]]:
+        """Walk `memory/` and return {source: (mtime, size, md5)} per eligible file.
 
+        Reuses `self._file_states` as a cache: when a file's mtime and size both
+        match the prior scan, the cached md5 is trusted and the file is not
+        re-read. This turns the common "no change" path into an O(N) stat scan
+        instead of an O(N) content hash.
+        """
+        states: dict[str, tuple[float, int, str]] = {}
+        cache = self._file_states
         for path in self._memory_files():
+            try:
+                stat_result = path.stat()
+            except OSError:
+                continue
+            source = self._relative_source(path)
+            cached = cache.get(source)
+            if (
+                cached is not None
+                and cached[0] == stat_result.st_mtime
+                and cached[1] == stat_result.st_size
+            ):
+                states[source] = cached
+                continue
             try:
                 content = path.read_bytes()
             except OSError:
                 continue
+            file_md5 = hashlib.md5(content).hexdigest()
+            states[source] = (stat_result.st_mtime, stat_result.st_size, file_md5)
+        return states
 
-            saw_file = True
-            digest.update(self._relative_source(path).encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(content)
-            digest.update(b"\0")
-
-        if not saw_file:
+    def _digest_state_map(
+        self, state_map: dict[str, tuple[float, int, str]]
+    ) -> str:
+        """Combine per-file md5s into a single stable digest over the corpus."""
+        if not state_map:
             return ""
-
+        digest = hashlib.md5()
+        for source in sorted(state_map):
+            _, _, file_md5 = state_map[source]
+            digest.update(source.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(file_md5.encode("utf-8"))
+            digest.update(b"\0")
         return digest.hexdigest()
 
+    def _memory_state_md5(self) -> str:
+        """Back-compat helper — returns the corpus-wide digest, or "" if empty."""
+        return self._digest_state_map(self._memory_state_map())
+
+    def _diff_state_maps(
+        self,
+        old: dict[str, tuple[float, int, str]],
+        new: dict[str, tuple[float, int, str]],
+    ) -> tuple[set[str], set[str], set[str]]:
+        old_keys = set(old)
+        new_keys = set(new)
+        added = new_keys - old_keys
+        removed = old_keys - new_keys
+        modified = {
+            source
+            for source in (old_keys & new_keys)
+            if old[source][2] != new[source][2]
+        }
+        return added, modified, removed
+
+    def _file_source_from_section(self, section: _MemorySection) -> str:
+        """Section sources are `<file>` or `<file>#<anchor>[-N]`; strip the anchor."""
+        return section.source.split("#", 1)[0]
+
+    def _group_sections_by_file(
+        self, sections: list[_MemorySection]
+    ) -> dict[str, list[_MemorySection]]:
+        grouped: dict[str, list[_MemorySection]] = {}
+        for section in sections:
+            grouped.setdefault(self._file_source_from_section(section), []).append(
+                section
+            )
+        return grouped
+
+    def _section_to_document(self, Document: Any, section: _MemorySection) -> Any:
+        metadata: dict[str, Any] = {"source": section.source}
+        if section.memory_type:
+            metadata["memory_type"] = section.memory_type
+        if section.memory_name:
+            metadata["memory_name"] = section.memory_name
+        if section.memory_description:
+            metadata["memory_description"] = section.memory_description
+        if section.memory_kind:
+            metadata["memory_kind"] = section.memory_kind
+        if section.memory_scope:
+            metadata["memory_scope"] = section.memory_scope
+        if section.memory_tags:
+            metadata["memory_tags"] = list(section.memory_tags)
+        # Using `section.source` as the doc_id is what lets us call
+        # `index.delete_ref_doc(section.source)` during incremental updates.
+        return Document(text=section.text, metadata=metadata, doc_id=section.source)
+
+    def _persist_state_map(self) -> None:
+        try:
+            self._storage_path.mkdir(parents=True, exist_ok=True)
+            payload = {
+                source: [mtime, size, file_md5]
+                for source, (mtime, size, file_md5) in self._file_states.items()
+            }
+            (self._storage_path / "state.json").write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+        except OSError:
+            pass
+
+    def _load_persisted_state_map(self) -> dict[str, tuple[float, int, str]]:
+        state_file = self._storage_path / "state.json"
+        try:
+            raw = json.loads(state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        loaded: dict[str, tuple[float, int, str]] = {}
+        for source, entry in (raw or {}).items():
+            try:
+                mtime, size, file_md5 = entry
+                loaded[str(source)] = (float(mtime), int(size), str(file_md5))
+            except (TypeError, ValueError):
+                continue
+        return loaded
+
     def _maybe_rebuild(self) -> None:
-        current = self._memory_state_md5()
-        if current != self._last_md5:
-            self.rebuild_index()
+        current_map = self._memory_state_map()
+        current_digest = self._digest_state_map(current_map)
+        if current_digest == self._last_md5:
+            return
+        # First-ever build (cold start or empty state) — hand off to the full
+        # rebuild path so the persisted-index fast-load has a chance to run.
+        if not self._file_states or self._index is None and not self._sections:
+            self.rebuild_index(
+                current_map=current_map, current_digest=current_digest
+            )
+            return
+        added, modified, removed = self._diff_state_maps(
+            self._file_states, current_map
+        )
+        if not (added or modified or removed):
+            self._file_states = dict(current_map)
+            self._last_md5 = current_digest
+            return
+        self._apply_incremental_update(
+            added=added,
+            modified=modified,
+            removed=removed,
+            current_map=current_map,
+            current_digest=current_digest,
+        )
+
+    def _apply_incremental_update(
+        self,
+        *,
+        added: set[str],
+        modified: set[str],
+        removed: set[str],
+        current_map: dict[str, tuple[float, int, str]],
+        current_digest: str,
+    ) -> None:
+        """Surgically patch `_sections`, `_file_sections`, and the vector index."""
+        stale_files = removed | modified
+        fresh_files = added | modified
+
+        # Parse only the files that changed. Malformed frontmatter is logged
+        # inline (mirroring rebuild_index's _log_malformed_documents behavior)
+        # so downstream reviewers still see bad files without paying a full
+        # corpus scan per write.
+        new_sections_by_file: dict[str, list[_MemorySection]] = {}
+        for source in fresh_files:
+            path = self.base_dir / source
+            try:
+                content = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            parsed = parse_memory_document(source, content)
+            if parsed.errors:
+                logger.warning(
+                    "Malformed typed memory file %s: %s",
+                    parsed.source,
+                    "; ".join(parsed.errors),
+                )
+            if not parsed.body:
+                new_sections_by_file[source] = []
+                continue
+            new_sections_by_file[source] = self._split_document_sections(parsed)
+
+        # Collect sections to remove *before* we mutate _file_sections so we
+        # can issue the matching `delete_ref_doc` calls against the index.
+        sections_to_delete: list[_MemorySection] = []
+        for source in stale_files:
+            sections_to_delete.extend(self._file_sections.get(source, []))
+
+        for source in stale_files:
+            self._file_sections.pop(source, None)
+        for source, sections in new_sections_by_file.items():
+            if sections:
+                self._file_sections[source] = sections
+
+        # Rebuild the flat section list in deterministic (file-sorted) order so
+        # retrieval behavior matches what rebuild_index would produce.
+        flat_sections: list[_MemorySection] = []
+        for file_source in sorted(self._file_sections):
+            flat_sections.extend(self._file_sections[file_source])
+        self._sections = flat_sections
+
+        new_sections_flat: list[_MemorySection] = []
+        for source in fresh_files:
+            new_sections_flat.extend(new_sections_by_file.get(source, []))
+
+        if self._index is not None and (sections_to_delete or new_sections_flat):
+            try:
+                from llama_index.core import Document
+            except Exception:
+                # LlamaIndex disappeared between the initial build and now —
+                # fall back to lexical-only retrieval without crashing.
+                self._index = None
+                self._nodes = []
+            else:
+                for section in sections_to_delete:
+                    try:
+                        self._index.delete_ref_doc(
+                            section.source, delete_from_docstore=True
+                        )
+                    except Exception:
+                        # Best-effort: if a doc was never embedded (e.g.
+                        # previous insert failed) the delete is a no-op.
+                        pass
+                if new_sections_flat:
+                    try:
+                        for section in new_sections_flat:
+                            doc = self._section_to_document(Document, section)
+                            self._index.insert(doc)
+                    except Exception:
+                        # Embedding backend unavailable — drop the index so
+                        # retrieval falls back to the lexical path and the
+                        # next cold start triggers a full rebuild.
+                        self._index = None
+                        self._nodes = []
+                if self._index is not None:
+                    try:
+                        self._index.storage_context.persist(
+                            persist_dir=str(self._storage_path)
+                        )
+                        (self._storage_path / "md5.txt").write_text(
+                            current_digest, encoding="utf-8"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        self._nodes = list(self._index.docstore.docs.values())
+                    except Exception:
+                        pass
+
+        self._file_states = dict(current_map)
+        self._last_md5 = current_digest
+        if self._index is not None:
+            self._persist_state_map()
 
     # ------------------------------------------------------------------ #
     # Public API                                                           #
@@ -484,24 +728,37 @@ class MemoryIndexer:
                     "; ".join(parsed.errors),
                 )
 
-    def rebuild_index(self) -> None:
+    def rebuild_index(
+        self,
+        *,
+        current_map: dict[str, tuple[float, int, str]] | None = None,
+        current_digest: str | None = None,
+    ) -> None:
         """
         Build a VectorStoreIndex from memory/ documents and persist to storage/memory_index/.
 
         Fast path: if the persisted index exists and its stored MD5 matches the current
         memory state, load from disk (no re-embedding). Slow path: parse, embed, persist.
+
+        Callers may pass a pre-computed `current_map` / `current_digest` (as done from
+        `_maybe_rebuild`) to avoid walking the memory tree twice.
         """
-        current_md5 = self._memory_state_md5()
+        if current_map is None:
+            current_map = self._memory_state_map()
+        if current_digest is None:
+            current_digest = self._digest_state_map(current_map)
         md5_file = self._storage_path / "md5.txt"
 
         self._log_malformed_documents()
 
         sections = self._memory_sections()
         self._sections = sections
+        self._file_sections = self._group_sections_by_file(sections)
         if not sections:
             self._index = None
             self._nodes = []
-            self._last_md5 = current_md5
+            self._file_states = dict(current_map)
+            self._last_md5 = current_digest
             return
 
         # Record the observed file hash before optional indexing work so callers
@@ -509,7 +766,8 @@ class MemoryIndexer:
         # embedding backend is unavailable.
         self._index = None
         self._nodes = []
-        self._last_md5 = current_md5
+        self._file_states = dict(current_map)
+        self._last_md5 = current_digest
 
         try:
             from llama_index.core import (
@@ -524,33 +782,24 @@ class MemoryIndexer:
 
         # ── Fast path: load persisted index if file hasn't changed ────────
         if self._storage_path.exists() and md5_file.exists():
-            if md5_file.read_text(encoding="utf-8").strip() == current_md5:
+            if md5_file.read_text(encoding="utf-8").strip() == current_digest:
                 try:
                     storage_context = StorageContext.from_defaults(
                         persist_dir=str(self._storage_path)
                     )
                     self._index = load_index_from_storage(storage_context)
                     self._nodes = list(self._index.docstore.docs.values())
+                    # Prefer the persisted per-file state (it was written
+                    # atomically with the index) so stat values round-trip
+                    # exactly across restarts.
+                    persisted_state = self._load_persisted_state_map()
+                    if persisted_state:
+                        self._file_states = persisted_state
                     return
                 except Exception:
                     pass  # Fall through to full rebuild
 
-        docs = []
-        for section in sections:
-            metadata = {"source": section.source}
-            if section.memory_type:
-                metadata["memory_type"] = section.memory_type
-            if section.memory_name:
-                metadata["memory_name"] = section.memory_name
-            if section.memory_description:
-                metadata["memory_description"] = section.memory_description
-            if section.memory_kind:
-                metadata["memory_kind"] = section.memory_kind
-            if section.memory_scope:
-                metadata["memory_scope"] = section.memory_scope
-            if section.memory_tags:
-                metadata["memory_tags"] = list(section.memory_tags)
-            docs.append(Document(text=section.text, metadata=metadata))
+        docs = [self._section_to_document(Document, section) for section in sections]
         splitter = SentenceSplitter(chunk_size=256, chunk_overlap=32)
         self._nodes = splitter.get_nodes_from_documents(docs)
 
@@ -560,7 +809,8 @@ class MemoryIndexer:
                 storage_context = StorageContext.from_defaults()
                 self._index = VectorStoreIndex(self._nodes, storage_context=storage_context)
                 self._index.storage_context.persist(persist_dir=str(self._storage_path))
-                md5_file.write_text(current_md5, encoding="utf-8")
+                md5_file.write_text(current_digest, encoding="utf-8")
+                self._persist_state_map()
             except Exception:
                 # Missing embeddings or transient index-storage failures should not
                 # block lexical/BM25 memory retrieval for the current turn.

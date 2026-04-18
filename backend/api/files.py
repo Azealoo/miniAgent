@@ -235,13 +235,14 @@ def save_file(body: SaveRequest, request: Request = None):
         )
         raise
 
-    # Rebuild memory index after any memory/ write so multi-file memory stays fresh.
+    # Refresh memory index after any memory/ write so multi-file memory stays fresh.
+    # `_maybe_rebuild` only re-embeds the changed file instead of the full corpus.
     if clean.startswith("memory/"):
         try:
             from graph.agent import agent_manager
 
             if agent_manager.memory_indexer:
-                agent_manager.memory_indexer.rebuild_index()
+                agent_manager.memory_indexer._maybe_rebuild()
         except Exception:
             pass
 

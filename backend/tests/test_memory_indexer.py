@@ -410,7 +410,11 @@ class TestMaybeRebuild:
         indexer._last_md5 = indexer._memory_state_md5()
 
         rebuild_called = []
-        monkeypatch.setattr(indexer, "rebuild_index", lambda: rebuild_called.append(1))
+        monkeypatch.setattr(
+            indexer,
+            "rebuild_index",
+            lambda *args, **kwargs: rebuild_called.append(1),
+        )
         indexer._maybe_rebuild()
 
         assert rebuild_called == []
@@ -420,7 +424,11 @@ class TestMaybeRebuild:
         indexer._last_md5 = "stale_md5"
 
         rebuild_called = []
-        monkeypatch.setattr(indexer, "rebuild_index", lambda: rebuild_called.append(1))
+        monkeypatch.setattr(
+            indexer,
+            "rebuild_index",
+            lambda *args, **kwargs: rebuild_called.append(1),
+        )
         indexer._maybe_rebuild()
 
         assert rebuild_called == [1]
@@ -429,7 +437,11 @@ class TestMaybeRebuild:
         _write_memory_file(tmp_path, "memory/user/profile.md", "User likes practical solutions.")
 
         rebuild_called = []
-        monkeypatch.setattr(indexer, "rebuild_index", lambda: rebuild_called.append(1))
+        monkeypatch.setattr(
+            indexer,
+            "rebuild_index",
+            lambda *args, **kwargs: rebuild_called.append(1),
+        )
         indexer._maybe_rebuild()
 
         assert rebuild_called == [1]
@@ -681,3 +693,142 @@ class TestRetrieve:
         results = indexer.retrieve("topic", top_k=2)
 
         assert len(results) <= 2
+
+
+class TestIncrementalRebuild:
+    """Per-file invalidation: only the files that changed should be re-parsed."""
+
+    def test_diff_state_maps_identifies_added_modified_removed(self, indexer):
+        old = {
+            "memory/a.md": (1.0, 10, "hash_a"),
+            "memory/b.md": (1.0, 20, "hash_b"),
+            "memory/c.md": (1.0, 30, "hash_c"),
+        }
+        new = {
+            "memory/a.md": (1.0, 10, "hash_a"),         # unchanged
+            "memory/b.md": (2.0, 25, "hash_b_edited"),  # modified
+            "memory/d.md": (2.0, 40, "hash_d"),         # added
+        }
+
+        added, modified, removed = indexer._diff_state_maps(old, new)
+
+        assert added == {"memory/d.md"}
+        assert modified == {"memory/b.md"}
+        assert removed == {"memory/c.md"}
+
+    def test_single_file_edit_only_reparses_that_file(
+        self, indexer, tmp_path, monkeypatch
+    ):
+        _write_memory_file(tmp_path, "memory/MEMORY.md", "# Index\n")
+        _write_memory_file(
+            tmp_path, "memory/project/alpha.md", "# Alpha\nAlpha body content.\n"
+        )
+        _write_memory_file(
+            tmp_path, "memory/project/beta.md", "# Beta\nBeta body content.\n"
+        )
+        _write_memory_file(
+            tmp_path, "memory/user/profile.md", "# Profile\nUser profile content.\n"
+        )
+        indexer._maybe_rebuild()
+        assert indexer._file_states  # initial state seeded
+
+        import graph.memory_indexer as memory_indexer_module
+
+        parse_calls: list[str] = []
+        original_parse = memory_indexer_module.parse_memory_document
+
+        def tracking_parse(source, content):
+            parse_calls.append(source)
+            return original_parse(source, content)
+
+        monkeypatch.setattr(
+            memory_indexer_module, "parse_memory_document", tracking_parse
+        )
+
+        # Touch exactly one file with new content.
+        (tmp_path / "memory" / "project" / "beta.md").write_text(
+            "# Beta\nBeta body content — updated.\n", encoding="utf-8"
+        )
+
+        indexer._maybe_rebuild()
+
+        assert parse_calls == ["memory/project/beta.md"]
+        assert any(
+            section.text.endswith("updated.")
+            for section in indexer._file_sections["memory/project/beta.md"]
+        )
+        # Other files' sections are untouched references from the initial build.
+        assert "memory/project/alpha.md" in indexer._file_sections
+        assert "memory/user/profile.md" in indexer._file_sections
+
+    def test_removing_a_file_drops_its_sections(self, indexer, tmp_path):
+        _write_memory_file(tmp_path, "memory/MEMORY.md", "# Index\n")
+        _write_memory_file(
+            tmp_path, "memory/project/keep.md", "# Keep\nKept content.\n"
+        )
+        target = _write_memory_file(
+            tmp_path, "memory/project/drop.md", "# Drop\nDropped content.\n"
+        )
+        indexer._maybe_rebuild()
+        assert "memory/project/drop.md" in indexer._file_sections
+
+        target.unlink()
+        indexer._maybe_rebuild()
+
+        assert "memory/project/drop.md" not in indexer._file_sections
+        assert "memory/project/keep.md" in indexer._file_sections
+        assert not any(
+            section.source.startswith("memory/project/drop.md")
+            for section in indexer._sections
+        )
+
+    def test_benchmark_10k_file_tree_single_edit_under_one_second(
+        self, indexer, tmp_path, monkeypatch
+    ):
+        """A single-file edit in a 10k-file corpus updates in < 1s.
+
+        The embedder is never invoked: rebuild_index bails out before touching
+        LlamaIndex (no embedding backend is configured in the test env), and
+        the incremental path only re-parses the one changed file.
+        """
+        total_files = 10_000
+        files_per_dir = 100
+        for index in range(total_files):
+            subdir = f"memory/project/bucket_{index // files_per_dir:03d}"
+            _write_memory_file(
+                tmp_path,
+                f"{subdir}/note_{index:05d}.md",
+                f"# Note {index}\nBody for note {index}.\n",
+            )
+
+        # Seed state with an initial scan (not timed).
+        indexer._maybe_rebuild()
+        assert len(indexer._file_states) == total_files
+
+        import graph.memory_indexer as memory_indexer_module
+
+        parse_calls: list[str] = []
+        original_parse = memory_indexer_module.parse_memory_document
+
+        def tracking_parse(source, content):
+            parse_calls.append(source)
+            return original_parse(source, content)
+
+        monkeypatch.setattr(
+            memory_indexer_module, "parse_memory_document", tracking_parse
+        )
+
+        # Edit exactly one file.
+        target = tmp_path / "memory/project/bucket_042/note_04237.md"
+        target.write_text("# Note 4237\nBody for note 4237 — revised.\n", encoding="utf-8")
+
+        import time
+
+        start = time.perf_counter()
+        indexer._maybe_rebuild()
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 1.0, (
+            f"Single-file edit in {total_files}-file tree took {elapsed:.3f}s"
+        )
+        assert parse_calls == ["memory/project/bucket_042/note_04237.md"]
