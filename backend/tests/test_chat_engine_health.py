@@ -84,6 +84,10 @@ def test_app_import_keeps_chat_engine_surface_lightweight():
             "api.observability",
             "api.skills_registry",
             "api.studies",
+            "compliance",
+            "compliance.audit",
+            "observability",
+            "observability.store",
         }
         if name in banned:
             raise AssertionError(f"{name} should not be imported by the chat-engine app")
