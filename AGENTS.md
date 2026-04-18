@@ -30,7 +30,7 @@ When working in this repo:
 - Conda env path: `/gpfs/home/yininz6/.conda/envs/miniAgent`
 - Backend dev server: `./start-backend.sh`
 - Frontend dev server: `./start-frontend.sh`
-- Direct backend run: `cd backend && uvicorn app:app --port 8002 --host 0.0.0.0 --reload`
+- Direct backend run: `cd backend && uvicorn app:app --port 8002 --host "$(python -c 'import config; print(config.get_production_hardening_policy().host_binding)')" --reload` (the host is driven by the active production-hardening posture — `dev`/`hosted-strict` → `127.0.0.1`, `trusted-lab` → `0.0.0.0`)
 - Frontend dev: `cd frontend && npm run dev`
 - Frontend build: `cd frontend && npm run build`
 - Frontend production server: `cd frontend && npm run start`
