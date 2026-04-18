@@ -126,6 +126,8 @@ class AgentManager:
 
         # ── RAG injection ──────────────────────────────────────────────
         if rag_mode and self.memory_indexer:
+            from runtime.metrics_collector import METRICS
+
             try:
                 results = self.memory_indexer.retrieve(message, top_k=3)
                 if results:
@@ -135,7 +137,10 @@ class AgentManager:
                     # provided context, not as something it previously said.
                     if rag_block:
                         history = history + [{"role": "system", "content": rag_block}]
+                else:
+                    METRICS.observe_retrieval(hit=False)
             except Exception:
+                METRICS.observe_retrieval(hit=False)
                 pass  # RAG failure is non-fatal
 
         # ── Build message list ─────────────────────────────────────────
