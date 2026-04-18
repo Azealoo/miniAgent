@@ -2,15 +2,31 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel
 
 from .contracts import TOOL_RESULT_CONTRACT_VERSION
+from .policy_types import (
+    EvidenceRequirement,
+    SandboxSpec,
+    ToolAccessScope,
+    ToolInterruptBehavior,
+)
 
-ToolAccessScope = Literal["inspection", "execution", "admin"]
-EvidenceRequirement = Literal["none", "recommended", "required"]
-ToolInterruptBehavior = Literal["restartable", "wait_for_completion", "avoid_interrupting"]
+# Re-exports kept so existing imports like ``from tools.registry import
+# ToolAccessScope`` continue to resolve.
+__all__ = [
+    "EvidenceRequirement",
+    "SandboxSpec",
+    "ToolAccessScope",
+    "ToolInterruptBehavior",
+    "ToolManifestEntry",
+    "ToolPolicyMetadata",
+    "ToolRegistry",
+    "build_tool_manifest_entry",
+    "build_tool_registry",
+]
 
 
 @dataclass(frozen=True)
@@ -28,6 +44,7 @@ class ToolPolicyMetadata:
     activity_summary_hint: str | None = None
     result_summary_hint: str | None = None
     requires_approval: bool = False
+    sandbox: SandboxSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -50,12 +67,49 @@ class ToolManifestEntry:
     activity_summary_hint: str | None = None
     result_summary_hint: str | None = None
     requires_approval: bool = False
+    sandbox: SandboxSpec | None = None
 
 
 @dataclass(frozen=True)
 class ToolRegistry:
     tools: tuple[Any, ...]
     manifests: tuple[ToolManifestEntry, ...]
+
+
+# Per-tool SandboxSpec declarations. Attached to manifest entries at
+# build time so enforcement is uniform across every high-risk tool.
+_HIGH_RISK_SANDBOX_SPECS: dict[str, SandboxSpec] = {
+    "python_repl": SandboxSpec(
+        allowed_file_roots=("memory/", "skills/", "knowledge/", "artifacts/", "storage/"),
+        allowed_env_vars=("PATH", "HOME", "LANG", "LC_ALL", "PYTHONHASHSEED"),
+        network_scope="none",
+        max_wall_clock_seconds=60.0,
+        max_output_bytes=5_000,
+    ),
+    "fetch_url": SandboxSpec(
+        allowed_env_vars=("PATH", "HOME", "LANG", "LC_ALL"),
+        network_scope="public",
+        max_wall_clock_seconds=30.0,
+        max_output_bytes=8_000,
+    ),
+    "http_json": SandboxSpec(
+        allowed_env_vars=("PATH", "HOME", "LANG", "LC_ALL"),
+        network_scope="public",
+        max_wall_clock_seconds=45.0,
+        max_output_bytes=100_000,
+    ),
+    "write_file": SandboxSpec(
+        allowed_file_roots=("memory/", "skills/", "knowledge/"),
+        allowed_env_vars=("PATH", "HOME", "LANG", "LC_ALL"),
+        network_scope="none",
+        max_wall_clock_seconds=15.0,
+        max_output_bytes=20_000,
+    ),
+}
+
+
+def _sandbox_for(tool_name: str) -> SandboxSpec | None:
+    return _HIGH_RISK_SANDBOX_SPECS.get(tool_name)
 
 
 _POLICY_OVERRIDES: dict[str, ToolPolicyMetadata] = {
@@ -203,6 +257,7 @@ def build_tool_manifest_entry(tool: Any) -> ToolManifestEntry:
         read_only=read_only,
         destructive=destructive,
     )
+    sandbox = policy.sandbox if policy.sandbox is not None else _sandbox_for(tool.name)
     return ToolManifestEntry(
         name=tool.name,
         description=getattr(tool, "description", ""),
@@ -222,6 +277,7 @@ def build_tool_manifest_entry(tool: Any) -> ToolManifestEntry:
         activity_summary_hint=activity_summary_hint,
         result_summary_hint=result_summary_hint,
         requires_approval=policy.requires_approval,
+        sandbox=sandbox,
     )
 
 
