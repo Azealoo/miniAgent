@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +21,13 @@ from .contracts import (
     normalize_tool_output,
     retriable_error_result,
 )
-from .policy import annotate_tool_result, evaluate_pre_tool_policy, get_tool_policy_context
+from .policy import (
+    annotate_tool_result,
+    evaluate_pre_tool_policy,
+    evaluate_sandbox_arguments,
+    get_tool_policy_context,
+    scoped_environment,
+)
 from .registry import ToolManifestEntry, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -175,6 +183,16 @@ def _emit_tool_trace(
         )
 
 
+class _SandboxWallClockExceeded(Exception):
+    """Raised internally when dispatch runs past the sandbox's wall-clock cap."""
+
+    def __init__(self, max_wall_clock: float) -> None:
+        super().__init__(
+            f"sandbox wall-clock budget of {max_wall_clock:.1f}s was exceeded"
+        )
+        self.max_wall_clock = max_wall_clock
+
+
 class PolicyWrappedTool(BaseTool):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -198,6 +216,81 @@ class PolicyWrappedTool(BaseTool):
             return result
 
         return normalize_tool_output(self.name, raw_output)
+
+    def _dispatch_sync_with_wall_clock(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        max_wall_clock: float | None,
+    ) -> Any:
+        if max_wall_clock is None or max_wall_clock <= 0:
+            return self.wrapped_tool._run(*args, **kwargs)
+
+        result_holder: dict[str, Any] = {}
+
+        def _target() -> None:
+            try:
+                result_holder["value"] = self.wrapped_tool._run(*args, **kwargs)
+            except BaseException as exc:  # captured and rethrown from the caller thread
+                result_holder["exc"] = exc
+
+        thread = threading.Thread(
+            target=_target,
+            name=f"sandbox-{self.name}",
+            daemon=True,
+        )
+        thread.start()
+        thread.join(timeout=max_wall_clock)
+        if thread.is_alive():
+            raise _SandboxWallClockExceeded(max_wall_clock)
+        if "exc" in result_holder:
+            raise result_holder["exc"]
+        return result_holder.get("value")
+
+    async def _dispatch_async_with_wall_clock(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        max_wall_clock: float | None,
+    ) -> Any:
+        if max_wall_clock is None or max_wall_clock <= 0:
+            return await self.wrapped_tool._arun(*args, **kwargs)
+        try:
+            return await asyncio.wait_for(
+                self.wrapped_tool._arun(*args, **kwargs),
+                timeout=max_wall_clock,
+            )
+        except asyncio.TimeoutError as exc:
+            raise _SandboxWallClockExceeded(max_wall_clock) from exc
+
+    def _apply_output_byte_cap(self, envelope: ToolResultEnvelope) -> ToolResultEnvelope:
+        sandbox = self.manifest.sandbox
+        if sandbox is None or sandbox.max_output_bytes is None:
+            return envelope
+        max_bytes = sandbox.max_output_bytes
+        if max_bytes <= 0:
+            return envelope
+        summary = envelope.summary or ""
+        encoded = summary.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return envelope
+        truncated = encoded[:max_bytes].decode("utf-8", errors="ignore")
+        marker = "\n...[sandbox output truncated]"
+        envelope.summary = truncated + marker
+        if "sandbox_output_truncated" not in envelope.warnings:
+            envelope.warnings.append("sandbox_output_truncated")
+        metadata = dict(envelope.metadata)
+        metadata.setdefault("sandbox", {})
+        if isinstance(metadata["sandbox"], dict):
+            metadata["sandbox"].update(
+                {
+                    "output_truncated": True,
+                    "max_output_bytes": max_bytes,
+                    "summary_bytes_before_cap": len(encoded),
+                }
+            )
+        envelope.metadata = metadata
+        return envelope
 
     def _handle_tool_exception(
         self,
@@ -230,18 +323,28 @@ class PolicyWrappedTool(BaseTool):
             return retriable_error_result(self.name, envelope_message, metadata=metadata)
         return execution_error_result(self.name, envelope_message, metadata=metadata)
 
-    def _run(self, *args, **kwargs):  # type: ignore[override]
-        started_at = datetime.now(timezone.utc)
-        t0 = time.perf_counter()
+    def _resolve_pre_dispatch_decision(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ):
         decision = evaluate_pre_tool_policy(self.manifest, get_tool_policy_context())
+        if decision.status in ("blocked", "needs_approval"):
+            return decision
+        sandbox_decision = evaluate_sandbox_arguments(self.manifest, args, kwargs)
+        if sandbox_decision.status != "allow":
+            return sandbox_decision
+        return decision
+
+    def _short_circuit_raw_output(self, decision) -> Any | None:
         if decision.status == "blocked":
-            raw_output = blocked_result(
+            return blocked_result(
                 self.name,
                 decision.block_message or "Blocked by BioAPEX runtime policy.",
                 metadata={"policy_block_reason": decision.block_reason},
             )
-        elif decision.status == "needs_approval":
-            raw_output = needs_approval_result(
+        if decision.status == "needs_approval":
+            return needs_approval_result(
                 self.name,
                 decision.approval_message
                 or f"Tool '{self.name}' requires human approval before it can run.",
@@ -250,13 +353,54 @@ class PolicyWrappedTool(BaseTool):
                     "requires_approval": True,
                 },
             )
-        else:
+        return None
+
+    def _sandbox_wall_clock(self) -> float | None:
+        sandbox = self.manifest.sandbox
+        if sandbox is None:
+            return None
+        return sandbox.max_wall_clock_seconds
+
+    def _sandbox_env_allowlist(self) -> tuple[str, ...] | None:
+        sandbox = self.manifest.sandbox
+        if sandbox is None:
+            return None
+        return sandbox.allowed_env_vars
+
+    def _handle_wall_clock_exceeded(
+        self,
+        exc: _SandboxWallClockExceeded,
+    ) -> Any:
+        return blocked_result(
+            self.name,
+            (
+                f"Tool '{self.name}' exceeded the sandbox wall-clock budget of "
+                f"{exc.max_wall_clock:.1f}s and was stopped."
+            ),
+            metadata={
+                "policy_block_reason": "sandbox_wall_clock_exceeded",
+                "sandbox_wall_clock_seconds": exc.max_wall_clock,
+            },
+        )
+
+    def _run(self, *args, **kwargs):  # type: ignore[override]
+        started_at = datetime.now(timezone.utc)
+        t0 = time.perf_counter()
+        decision = self._resolve_pre_dispatch_decision(args, kwargs)
+        raw_output = self._short_circuit_raw_output(decision)
+        if raw_output is None:
             try:
-                raw_output = self.wrapped_tool._run(*args, **kwargs)
+                with scoped_environment(self._sandbox_env_allowlist()):
+                    raw_output = self._dispatch_sync_with_wall_clock(
+                        args, kwargs, self._sandbox_wall_clock()
+                    )
+            except _SandboxWallClockExceeded as exc:
+                raw_output = self._handle_wall_clock_exceeded(exc)
             except Exception as exc:
                 raw_output = self._handle_tool_exception(exc, args, kwargs)
 
         result = self._normalize_raw_output(raw_output)
+        result = self._apply_output_byte_cap(result)
         annotated = annotate_tool_result(
             self.manifest,
             result,
@@ -277,30 +421,21 @@ class PolicyWrappedTool(BaseTool):
     async def _arun(self, *args, **kwargs):  # type: ignore[override]
         started_at = datetime.now(timezone.utc)
         t0 = time.perf_counter()
-        decision = evaluate_pre_tool_policy(self.manifest, get_tool_policy_context())
-        if decision.status == "blocked":
-            raw_output = blocked_result(
-                self.name,
-                decision.block_message or "Blocked by BioAPEX runtime policy.",
-                metadata={"policy_block_reason": decision.block_reason},
-            )
-        elif decision.status == "needs_approval":
-            raw_output = needs_approval_result(
-                self.name,
-                decision.approval_message
-                or f"Tool '{self.name}' requires human approval before it can run.",
-                metadata={
-                    "policy_approval_reason": decision.approval_reason,
-                    "requires_approval": True,
-                },
-            )
-        else:
+        decision = self._resolve_pre_dispatch_decision(args, kwargs)
+        raw_output = self._short_circuit_raw_output(decision)
+        if raw_output is None:
             try:
-                raw_output = await self.wrapped_tool._arun(*args, **kwargs)
+                with scoped_environment(self._sandbox_env_allowlist()):
+                    raw_output = await self._dispatch_async_with_wall_clock(
+                        args, kwargs, self._sandbox_wall_clock()
+                    )
+            except _SandboxWallClockExceeded as exc:
+                raw_output = self._handle_wall_clock_exceeded(exc)
             except Exception as exc:
                 raw_output = self._handle_tool_exception(exc, args, kwargs)
 
         result = self._normalize_raw_output(raw_output)
+        result = self._apply_output_byte_cap(result)
         annotated = annotate_tool_result(
             self.manifest,
             result,

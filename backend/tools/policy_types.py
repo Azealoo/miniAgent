@@ -3,7 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from .registry import EvidenceRequirement, ToolAccessScope
+# The canonical definitions for these access/evidence literals live here
+# so that ``policy_types`` has no import dependency on ``registry``.
+# ``registry`` re-exports them for callers that still reference the old
+# location.
+ToolAccessScope = Literal["inspection", "execution", "admin"]
+EvidenceRequirement = Literal["none", "recommended", "required"]
+ToolInterruptBehavior = Literal[
+    "restartable", "wait_for_completion", "avoid_interrupting"
+]
 
 ToolPolicyStatus = Literal[
     "allow",
@@ -11,6 +19,38 @@ ToolPolicyStatus = Literal[
     "blocked",
     "needs_approval",
 ]
+
+# Network posture declared by a SandboxSpec.
+# - "none"   → tool is not allowed to make network calls; any URL argument is blocked.
+# - "public" → public internet only; tools are expected to reject loopback / private ranges.
+# - "any"    → unrestricted; kept declarative for auditing, no wrapper-level gate.
+SandboxNetworkScope = Literal["none", "public", "any"]
+
+
+@dataclass(frozen=True)
+class SandboxSpec:
+    """Declarative, per-tool execution sandbox contract.
+
+    The fields are intentionally narrow so the wrapper can enforce them
+    uniformly before and after dispatch. Leave a field at its default to
+    opt out of that dimension; the wrapper performs no check in that case.
+    """
+
+    # Relative roots (under the tool's base_dir) that file-style path
+    # arguments must stay inside. Empty tuple = no pre-dispatch path check.
+    allowed_file_roots: tuple[str, ...] = ()
+    # Names of environment variables the wrapped tool is allowed to see
+    # while executing. `None` means "do not scope" — the tool inherits the
+    # full process environment. An empty tuple means "no env vars at all".
+    allowed_env_vars: tuple[str, ...] | None = None
+    network_scope: SandboxNetworkScope = "any"
+    # Hostname allowlist when `network_scope="public"`; empty tuple means
+    # rely on the tool's own SSRF filter without an explicit allowlist.
+    allowed_hosts: tuple[str, ...] = ()
+    # Hard cap on dispatch wall-clock. `None` disables the timeout.
+    max_wall_clock_seconds: float | None = None
+    # Hard cap on the serialized summary byte length. `None` disables.
+    max_output_bytes: int | None = None
 
 
 @dataclass
