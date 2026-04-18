@@ -1,11 +1,10 @@
 "use client";
 
 import {
-  BookOpen,
+  Dna,
+  FileText,
   Files,
-  FlaskConical,
-  MessageSquare,
-  ShieldCheck,
+  Search,
   type LucideIcon,
 } from "lucide-react";
 import { humanizeToken } from "@/lib/format";
@@ -35,40 +34,31 @@ export interface SurfaceItem {
 
 export const quickStartItems: QuickStartItem[] = [
   {
-    id: "biology-question",
-    label: "Biology Question",
-    description: "Draft an open-ended biology question for BioAPEX to answer.",
-    kind: "Ask",
-    icon: MessageSquare,
+    id: "find-papers",
+    label: "Find Papers",
+    description: "Draft a literature search request on a biology topic.",
+    kind: "Search",
+    icon: Search,
     draftMessage:
-      "Help me answer this biology question using the attached context and any relevant tools. Separate what is known from what is uncertain, and cite or inspect sources when they matter.",
+      "Find peer-reviewed papers on <TOPIC>. Summarize the main approaches, highlight the strongest sources with citations, and flag where the literature is thin or contested.",
   },
   {
-    id: "rnaseq-de",
-    label: "RNA-seq Analysis",
-    description: "Draft a chat request for RNA-seq QC and differential expression guidance.",
-    kind: "Analyze",
-    icon: FlaskConical,
+    id: "summarize-pdf",
+    label: "Summarize PDF",
+    description: "Draft a request to summarize an attached paper or PDF.",
+    kind: "Summarize",
+    icon: FileText,
     draftMessage:
-      "Review the attached RNA-seq dataset context, outline the QC and differential expression steps you recommend, call out missing inputs or assumptions, and explain what analysis I should run next.",
+      "Summarize the attached PDF. Extract the research question, methods, key findings, and limitations, and quote the passages that back up each point.",
   },
   {
-    id: "evidence-review",
-    label: "Evidence Review",
-    description: "Draft a source-grounded biology evidence review request.",
-    kind: "Review",
-    icon: BookOpen,
+    id: "design-primers",
+    label: "Design Primers",
+    description: "Draft a primer design request for a biology target.",
+    kind: "Design",
+    icon: Dna,
     draftMessage:
-      "Review the evidence for this biology question, separate source facts from conclusions, and cite the strongest supporting artifacts.",
-  },
-  {
-    id: "request-review",
-    label: "Request Review",
-    description: "Draft a pre-execution request review with risks, warnings, and missing context.",
-    kind: "Check",
-    icon: ShieldCheck,
-    draftMessage:
-      "Review this request before execution, call out risks or warnings, and note what information is missing before we proceed.",
+      "Design PCR primers for <TARGET>. State the design constraints you are assuming (length, Tm, GC content, amplicon size), propose forward/reverse candidates, and call out any specificity or secondary-structure concerns.",
   },
 ];
 
