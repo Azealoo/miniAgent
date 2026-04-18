@@ -1,39 +1,101 @@
-export type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | JsonValue[]
-  | { [key: string]: JsonValue };
+/**
+ * Hand-written types + re-exports.
+ *
+ * Backend-shaped DTOs (tool contracts, session blocks, runtime events) are
+ * generated from pydantic models into ``./types.generated`` and re-exported
+ * here. Anything UI-only (inspector view models, hybrid chat Message,
+ * synthetic parse_error event, access-scope state) stays hand-written below.
+ *
+ * Drift is caught by:
+ *   - ``backend/tests/test_shared_types_schema.py`` — JSON snapshot vs pydantic.
+ *   - ``frontend/src/lib/types.generated.test.ts`` — codegen vs committed .ts.
+ *
+ * Regenerate the generated DTOs with:
+ *   python -m codegen.shared_types             # from backend/
+ *   npm run codegen:types                      # from frontend/
+ */
 
-export interface JsonObject {
-  [key: string]: JsonValue;
+// ────────────────────────────────────────────────────────────────────────
+// Generated DTOs — re-exported verbatim where backend ↔ frontend match.
+// ────────────────────────────────────────────────────────────────────────
+
+export type {
+  JsonValue,
+  JsonObject,
+  ToolArtifactRef,
+  ToolResultError,
+  SessionTextBlock,
+  SessionUsageBlock,
+  ChatStreamTokenEvent,
+  ChatStreamPlanCreatedEvent,
+  ChatStreamPlanUpdatedEvent,
+  ChatStreamVerificationResultEvent,
+  ChatStreamNewResponseEvent,
+  ChatStreamCompactionEvent,
+  ChatStreamDoneEvent,
+  ChatStreamErrorEvent,
+  ChatStreamToolStartEvent,
+  ChatStreamToolChunkEvent,
+} from "./types.generated";
+
+import type {
+  JsonObject,
+  ToolArtifactRef,
+  ToolResultError,
+  ToolResultEnvelope as GeneratedToolResultEnvelope,
+  ChatStreamToolEndEvent as GeneratedChatStreamToolEndEvent,
+  ChatStreamToolAwaitingApprovalEvent as GeneratedChatStreamToolAwaitingApprovalEvent,
+  ChatStreamRetrievalEvent as GeneratedChatStreamRetrievalEvent,
+  ChatStreamTokenEvent,
+  ChatStreamToolStartEvent,
+  ChatStreamToolChunkEvent,
+  ChatStreamPlanCreatedEvent,
+  ChatStreamPlanUpdatedEvent,
+  ChatStreamVerificationResultEvent,
+  ChatStreamNewResponseEvent,
+  ChatStreamCompactionEvent,
+  ChatStreamDoneEvent,
+  ChatStreamErrorEvent,
+  SessionTextBlock,
+  SessionUsageBlock,
+  SessionPlanBlock as GeneratedSessionPlanBlock,
+  SessionVerificationBlock as GeneratedSessionVerificationBlock,
+  SessionToolUseBlock as GeneratedSessionToolUseBlock,
+  SessionToolResultBlock as GeneratedSessionToolResultBlock,
+  SessionRetrievalBlock as GeneratedSessionRetrievalBlock,
+  SessionApprovalGateBlock as GeneratedSessionApprovalGateBlock,
+} from "./types.generated";
+
+// ────────────────────────────────────────────────────────────────────────
+// Frontend-tightened DTOs
+//
+// The backend emits these fields as generic dicts on the wire; the frontend
+// treats them as their typed shapes after the zod parser in
+// ``runtime-events.ts`` has validated the envelope. We compose the tighter
+// shape from the generated base so a backend-side field addition still
+// propagates, while the overridden field stays specific.
+// ────────────────────────────────────────────────────────────────────────
+
+export interface RetrievalResult {
+  text: string;
+  score: number;
+  source: string;
+  memory_type?: string;
+  memory_type_label?: string;
+  memory_name?: string;
+  memory_description?: string;
 }
 
-export interface ToolArtifactRef {
-  path?: string | null;
-  label?: string | null;
-  artifact_type?: string | null;
-  identifier?: string | null;
-}
-
-export interface ToolResultError {
-  code:
-    | "blocked"
-    | "invalid_input"
-    | "retriable_failure"
-    | "execution_failure"
-    | "needs_approval";
-  message: string;
-  retriable: boolean;
-}
-
-export interface ToolResultEnvelope {
+// Pydantic's JSON schema marks fields-with-defaults as optional, but the
+// backend always emits them. Tighten the envelope here so consumers can
+// iterate without undefined-checks on fields the wire always carries.
+export type ToolResultEnvelope = Omit<
+  GeneratedToolResultEnvelope,
+  "artifact_refs" | "metadata" | "warnings" | "status" | "outcome" | "contract_version"
+> & {
   contract_version: string;
-  tool_name: string;
-  summary: string;
-  structured_payload?: JsonValue;
   artifact_refs: ToolArtifactRef[];
+  metadata: JsonObject;
   warnings: string[];
   status: "success" | "error";
   outcome:
@@ -45,10 +107,192 @@ export interface ToolResultEnvelope {
     | "execution_failure"
     | "needs_approval"
     | "streaming_chunk";
-  error?: ToolResultError | null;
-  metadata: JsonObject;
-  source_payload?: JsonValue;
+};
+
+export type ChatStreamToolEndEvent = Omit<
+  GeneratedChatStreamToolEndEvent,
+  "result"
+> & {
+  result?: ToolResultEnvelope;
+};
+
+export type ChatStreamToolAwaitingApprovalEvent = Omit<
+  GeneratedChatStreamToolAwaitingApprovalEvent,
+  "result"
+> & {
+  result?: ToolResultEnvelope;
+};
+
+// ``SessionPlanBlock.plan`` / ``SessionVerificationBlock.verification`` are
+// marked optional by ``TypedDict(total=False)`` in the backend, but the
+// persisted blocks always carry them. Tighten so the inspector UI can render
+// them without null-checking.
+export type SessionPlanBlock = Omit<GeneratedSessionPlanBlock, "plan"> & {
+  plan: JsonObject;
+};
+export type SessionVerificationBlock = Omit<
+  GeneratedSessionVerificationBlock,
+  "verification"
+> & {
+  verification: JsonObject;
+};
+
+export type ChatStreamRetrievalEvent = Omit<
+  GeneratedChatStreamRetrievalEvent,
+  "results"
+> & {
+  results: RetrievalResult[];
+};
+
+// The backend writes these blocks with `tool`/`input`/`output` populated even
+// though session_schema.py marks them optional (TypedDict total=False). The
+// frontend consumers treat those as present; narrow the types here so the
+// store / reducers don't have to re-check every field.
+export type SessionToolUseBlock = Omit<
+  GeneratedSessionToolUseBlock,
+  "tool" | "input"
+> & {
+  tool: string;
+  input: string;
+};
+
+export type SessionToolResultBlock = Omit<
+  GeneratedSessionToolResultBlock,
+  "tool" | "output" | "result"
+> & {
+  tool: string;
+  output: string;
+  result?: ToolResultEnvelope;
+};
+
+export type SessionRetrievalBlock = Omit<
+  GeneratedSessionRetrievalBlock,
+  "results"
+> & {
+  results: RetrievalResult[];
+};
+
+// Backend always populates tool/input/run_id/reason/message when it writes
+// an approval_gate block, and ``result`` is a generic dict on the wire — we
+// tighten both so the inspector UI can render without undefined-checks.
+export type SessionApprovalGateBlock = Omit<
+  GeneratedSessionApprovalGateBlock,
+  "tool" | "input" | "run_id" | "reason" | "message" | "result"
+> & {
+  tool: string;
+  input: string;
+  run_id: string;
+  reason: string;
+  message: string;
+  result?: ToolResultEnvelope;
+};
+
+export type SessionContentBlock =
+  | SessionTextBlock
+  | SessionToolUseBlock
+  | SessionToolResultBlock
+  | SessionRetrievalBlock
+  | SessionUsageBlock
+  | SessionPlanBlock
+  | SessionVerificationBlock
+  | SessionApprovalGateBlock;
+
+export interface ToolCall {
+  tool: string;
+  input: string;
+  output: string;
+  run_id?: string;
+  result?: ToolResultEnvelope;
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Synthetic stream events + full client-side ChatStreamEvent union
+// ────────────────────────────────────────────────────────────────────────
+
+/**
+ * Client-side synthetic event surfaced when an incoming SSE payload fails
+ * RuntimeEvent (zod) validation. Never emitted by the backend.
+ */
+export interface ChatStreamParseErrorEvent {
+  request_id?: string;
+  event_index?: number;
+  type: "parse_error";
+  error: string;
+  raw?: string;
+}
+
+export type ChatStreamEvent =
+  | ChatStreamRetrievalEvent
+  | ChatStreamTokenEvent
+  | ChatStreamToolStartEvent
+  | ChatStreamToolEndEvent
+  | ChatStreamToolAwaitingApprovalEvent
+  | ChatStreamToolChunkEvent
+  | ChatStreamPlanCreatedEvent
+  | ChatStreamPlanUpdatedEvent
+  | ChatStreamVerificationResultEvent
+  | ChatStreamNewResponseEvent
+  | ChatStreamCompactionEvent
+  | ChatStreamDoneEvent
+  | ChatStreamErrorEvent
+  | ChatStreamParseErrorEvent;
+
+export type ChatStreamEventType = ChatStreamEvent["type"];
+
+// ────────────────────────────────────────────────────────────────────────
+// Hybrid chat Message — backend shape + client-side streaming fields
+// ────────────────────────────────────────────────────────────────────────
+
+export interface Message {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  request_id?: string;
+  blocks?: SessionContentBlock[];
+  isStreaming?: boolean;
+  startedAtMs?: number;
+  endedAtMs?: number;
+  /** Tool currently executing (cleared when tool_end arrives) */
+  pendingTool?: { tool: string; input: string; runId: string };
+  /**
+   * Mid-tool partial outputs, keyed by run_id, accumulated until the matching
+   * `tool_end` arrives and the buffer is flushed into the persisted block.
+   */
+  toolChunkBuffers?: Record<string, { chunks: { index: number; text: string }[] }>;
+}
+
+export interface SessionHistoryMessage {
+  role: string;
+  content?: string;
+  request_id?: string;
+  tool_calls?: ToolCall[];
+  retrievals?: RetrievalResult[];
+  blocks?: SessionContentBlock[];
+}
+
+export interface SessionContinuitySummary {
+  source_format: "structured" | "legacy";
+  legacy_summary: string | null;
+  decisions_and_rationale: string[];
+  results_register: string[];
+  evidence_register: string[];
+  compliance_register: string[];
+  open_questions_and_next_actions: string[];
+  archive_id: string | null;
+  archived_message_count: number;
+}
+
+export interface SessionContinuityResponse {
+  summaries: SessionContinuitySummary[];
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Evidence / compliance DTOs
+//
+// These shapes mirror backend/artifacts/schemas.py. Kept hand-written for now;
+// they can be folded into the codegen manifest when the evidence/compliance
+// path is next touched.
+// ────────────────────────────────────────────────────────────────────────
 
 export type ConfidenceLevel = "low" | "medium" | "high";
 
@@ -77,9 +321,9 @@ export interface EvidenceRetrievalCardSummary {
   run_id?: string | null;
   claim_count: number;
   limitation_count: number;
-  entity_tags?: JsonValue;
-  grounded_entities?: JsonValue;
-  grounding_results?: JsonValue;
+  entity_tags?: import("./types.generated").JsonValue;
+  grounded_entities?: import("./types.generated").JsonValue;
+  grounding_results?: import("./types.generated").JsonValue;
   grounding_requires_clarification: boolean;
   entity_grounding_path?: string | null;
 }
@@ -91,7 +335,7 @@ export interface EvidenceRetrievalFailure {
 
 export interface EvidenceRetrievalPayload {
   query?: string | null;
-  candidate_records: JsonValue[];
+  candidate_records: import("./types.generated").JsonValue[];
   selected_pmids: string[];
   retrieval_context_run_id?: string | null;
   retrieval_context_path?: string | null;
@@ -194,6 +438,10 @@ export interface ComplianceReportArtifact {
   final_disposition: ComplianceDisposition;
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// UI-only view models (inspector, access-scope state, tokenizer, etc.)
+// ────────────────────────────────────────────────────────────────────────
+
 export type SourcesInspectorCitationTone =
   | "supported"
   | "mixed"
@@ -238,272 +486,6 @@ export interface SourcesInspectorSummary {
   scoped_message_count: number;
   citations: SourcesInspectorCitation[];
   checklist: SourcesInspectorChecklistCard;
-}
-
-export interface ToolCall {
-  tool: string;
-  input: string;
-  output: string;
-  run_id?: string;
-  result?: ToolResultEnvelope;
-}
-
-export interface RetrievalResult {
-  text: string;
-  score: number;
-  source: string;
-  memory_type?: string;
-  memory_type_label?: string;
-  memory_name?: string;
-  memory_description?: string;
-}
-
-interface ChatStreamEventBase {
-  request_id?: string;
-  event_index?: number;
-}
-
-export interface ChatStreamRetrievalEvent extends ChatStreamEventBase {
-  type: "retrieval";
-  query: string;
-  results: RetrievalResult[];
-}
-
-export interface ChatStreamTokenEvent extends ChatStreamEventBase {
-  type: "token";
-  content: string;
-}
-
-export interface ChatStreamToolStartEvent extends ChatStreamEventBase {
-  type: "tool_start";
-  tool: string;
-  input: string;
-  run_id?: string;
-}
-
-export interface ChatStreamToolEndEvent extends ChatStreamEventBase {
-  type: "tool_end";
-  tool: string;
-  output: string;
-  run_id?: string;
-  result?: ToolResultEnvelope;
-  policy?: JsonObject;
-}
-
-export interface ChatStreamToolAwaitingApprovalEvent
-  extends ChatStreamEventBase {
-  type: "tool_awaiting_approval";
-  tool: string;
-  input: string;
-  run_id: string;
-  reason: string;
-  message: string;
-  result?: ToolResultEnvelope;
-  policy?: JsonObject;
-}
-
-export interface ChatStreamToolChunkEvent extends ChatStreamEventBase {
-  type: "tool_chunk";
-  tool: string;
-  run_id: string;
-  chunk_index: number;
-  chunk: string;
-  terminal: boolean;
-}
-
-interface ChatStreamPlanEventBase extends ChatStreamEventBase {
-  summary: string;
-  run_id?: string;
-  plan: JsonObject;
-  tool_trace?: JsonObject[];
-}
-
-export interface ChatStreamPlanCreatedEvent extends ChatStreamPlanEventBase {
-  type: "plan_created";
-}
-
-export interface ChatStreamPlanUpdatedEvent extends ChatStreamPlanEventBase {
-  type: "plan_updated";
-}
-
-export interface ChatStreamVerificationResultEvent extends ChatStreamEventBase {
-  type: "verification_result";
-  summary: string;
-  verdict: "pass" | "repair_required" | "fail";
-  run_id?: string;
-  verification: JsonObject;
-  tool_trace?: JsonObject[];
-}
-
-export interface ChatStreamNewResponseEvent extends ChatStreamEventBase {
-  type: "new_response";
-}
-
-export interface ChatStreamCompactionEvent extends ChatStreamEventBase {
-  type: "compaction_event";
-  from_turn: number;
-  to_turn: number;
-  summary: string;
-  saved_tokens: number;
-}
-
-export type TurnStatus =
-  | "ok"
-  | "awaiting_approval"
-  | "budget_exceeded"
-  | "error";
-
-export interface ChatStreamDoneEvent extends ChatStreamEventBase {
-  type: "done";
-  content: string;
-  session_id?: string;
-  turn_status?: TurnStatus;
-}
-
-export interface ChatStreamErrorEvent extends ChatStreamEventBase {
-  type: "error";
-  error: string;
-}
-
-/**
- * Client-side synthetic event surfaced when an incoming SSE payload fails
- * RuntimeEvent (zod) validation. Never emitted by the backend.
- */
-export interface ChatStreamParseErrorEvent extends ChatStreamEventBase {
-  type: "parse_error";
-  error: string;
-  raw?: string;
-}
-
-export type ChatStreamEvent =
-  | ChatStreamRetrievalEvent
-  | ChatStreamTokenEvent
-  | ChatStreamToolStartEvent
-  | ChatStreamToolEndEvent
-  | ChatStreamToolAwaitingApprovalEvent
-  | ChatStreamToolChunkEvent
-  | ChatStreamPlanCreatedEvent
-  | ChatStreamPlanUpdatedEvent
-  | ChatStreamVerificationResultEvent
-  | ChatStreamNewResponseEvent
-  | ChatStreamCompactionEvent
-  | ChatStreamDoneEvent
-  | ChatStreamErrorEvent
-  | ChatStreamParseErrorEvent;
-
-export type ChatStreamEventType = ChatStreamEvent["type"];
-
-export interface SessionTextBlock {
-  type: "text";
-  text: string;
-}
-
-export interface SessionToolUseBlock {
-  type: "tool_use";
-  tool: string;
-  input: string;
-  run_id?: string;
-}
-
-export interface SessionToolResultBlock {
-  type: "tool_result";
-  tool: string;
-  output: string;
-  run_id?: string;
-  result?: ToolResultEnvelope;
-}
-
-export interface SessionRetrievalBlock {
-  type: "retrieval";
-  query?: string;
-  results: RetrievalResult[];
-}
-
-export interface SessionUsageBlock {
-  type: "usage";
-  metadata: JsonObject;
-}
-
-export interface SessionPlanBlock {
-  type: "plan";
-  event: "created" | "updated";
-  summary: string;
-  run_id?: string;
-  plan: JsonObject;
-  tool_trace?: JsonObject[];
-}
-
-export interface SessionVerificationBlock {
-  type: "verification";
-  summary: string;
-  verdict: "pass" | "repair_required" | "fail";
-  run_id?: string;
-  verification: JsonObject;
-  tool_trace?: JsonObject[];
-}
-
-export interface SessionApprovalGateBlock {
-  type: "approval_gate";
-  tool: string;
-  input: string;
-  run_id: string;
-  reason: string;
-  message: string;
-  result?: ToolResultEnvelope;
-  policy?: JsonObject;
-}
-
-export type SessionContentBlock =
-  | SessionTextBlock
-  | SessionToolUseBlock
-  | SessionToolResultBlock
-  | SessionRetrievalBlock
-  | SessionUsageBlock
-  | SessionPlanBlock
-  | SessionVerificationBlock
-  | SessionApprovalGateBlock;
-
-export interface Message {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  request_id?: string;
-  blocks?: SessionContentBlock[];
-  isStreaming?: boolean;
-  startedAtMs?: number;
-  endedAtMs?: number;
-  /** Tool currently executing (cleared when tool_end arrives) */
-  pendingTool?: { tool: string; input: string; runId: string };
-  /**
-   * Mid-tool partial outputs, keyed by run_id, accumulated until the matching
-   * `tool_end` arrives and the buffer is flushed into the persisted block.
-   */
-  toolChunkBuffers?: Record<string, { chunks: { index: number; text: string }[] }>;
-}
-
-export interface SessionHistoryMessage {
-  role: string;
-  content?: string;
-  request_id?: string;
-  tool_calls?: ToolCall[];
-  retrievals?: RetrievalResult[];
-  blocks?: SessionContentBlock[];
-}
-
-export interface SessionContinuitySummary {
-  source_format: "structured" | "legacy";
-  legacy_summary: string | null;
-  decisions_and_rationale: string[];
-  results_register: string[];
-  evidence_register: string[];
-  compliance_register: string[];
-  open_questions_and_next_actions: string[];
-  archive_id: string | null;
-  archived_message_count: number;
-}
-
-export interface SessionContinuityResponse {
-  summaries: SessionContinuitySummary[];
 }
 
 export type InspectorTab =

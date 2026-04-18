@@ -44,6 +44,7 @@ export function makeMockAppValue(
     deleteSession: async () => {},
     renameSession: async () => {},
     sendMessage: async () => {},
+    submitApprovalDecision: async () => {},
     stopStreaming: () => {},
     primeDraftMessage: () => {},
     clearDraftMessage: () => {},

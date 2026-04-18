@@ -642,6 +642,65 @@ class TestSkillRouting:
         assert selected is not None
         assert [entry["name"] for entry in selected] == ["runtime_debugger"]
 
+    def test_skill_router_drops_skill_with_missing_required_env(
+        self, workspace, monkeypatch
+    ):
+        skill_dir = workspace / "skills" / "needs_token_skill"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(
+            (
+                "---\nname: needs_token_skill\n"
+                "description: Requires an env token to operate\n"
+                "category: bio/compute\n"
+                "tags: [paper, abstract]\n"
+                "requires_tools: [read_file]\nrequires_network: false\n"
+                "user_invocable: true\n"
+                "species: any\nmodality: compute\nstage: utilities\n"
+                "stability: experimental\nsafety_level: low\n"
+                "required_env: [BIOAPEX_NEEDS_THIS]\n"
+                "---\n# Body\n"
+            ),
+            encoding="utf-8",
+        )
+        _write_skill(
+            workspace,
+            "paper_triage",
+            "Classify relevance of a paper abstract.",
+            category="bio/literature",
+            tags="paper, abstract, literature",
+            modality="literature",
+            stage="interpretation",
+        )
+
+        monkeypatch.delenv("BIOAPEX_NEEDS_THIS", raising=False)
+
+        selected = select_skill_entries_for_query(
+            workspace,
+            "triage this paper abstract",
+        )
+        assert selected is not None
+        names = {entry["name"] for entry in selected}
+        assert "needs_token_skill" not in names
+        assert "paper_triage" in names
+
+        monkeypatch.setenv("BIOAPEX_NEEDS_THIS", "1")
+        selected_with_env = select_skill_entries_for_query(
+            workspace,
+            "triage this paper abstract",
+        )
+        assert selected_with_env is not None
+        names_with_env = {entry["name"] for entry in selected_with_env}
+        # With the env set, the skill is eligible; whether it scores is
+        # query-dependent — we only assert it's no longer filtered out a
+        # priori. Explicit invocation by name proves the gate is off.
+        explicit = select_skill_entries_for_query(
+            workspace,
+            "use needs_token_skill to help",
+        )
+        assert explicit is not None
+        assert "needs_token_skill" in {entry["name"] for entry in explicit}
+        del names_with_env  # silence unused warning on CI linters
+
 
 class TestRetrievedMemoryBlock:
     def test_retrieved_memory_block_includes_typed_metadata_compactly(self):
