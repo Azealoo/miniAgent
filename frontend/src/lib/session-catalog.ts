@@ -31,6 +31,20 @@ export interface UseSessionCatalogParams {
   resetDraftAndInspector: () => void;
 }
 
+export interface SendMessageOptions {
+  /**
+   * Optional client-side correlation id. When a turn fails mid-stream the UI
+   * captures the original turn's request_id so a "retry" dispatches a new
+   * attempt tagged with the same id.
+   */
+  requestId?: string;
+}
+
+export interface FailedTurnState {
+  content: string;
+  requestId?: string;
+}
+
 export interface UseSessionCatalogResult {
   sessions: Session[];
   currentSessionId: string | null;
@@ -41,14 +55,16 @@ export interface UseSessionCatalogResult {
   sessionHistoryStatus: SessionHistoryStatus;
   sessionHistoryError: string | null;
   sessionContinuitySummaries: SessionContinuitySummary[];
+  lastFailedTurn: FailedTurnState | null;
   refreshSessions: () => Promise<void>;
   reloadCurrentSession: () => Promise<void>;
   createSession: () => Promise<void>;
   selectSession: (id: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (content: string, options?: SendMessageOptions) => Promise<void>;
   stopStreaming: () => void;
+  clearLastFailedTurn: () => void;
 }
 
 export function useSessionCatalog(
@@ -80,6 +96,9 @@ export function useSessionCatalog(
   const [sessionContinuitySummaries, setSessionContinuitySummaries] = useState<
     SessionContinuitySummary[]
   >([]);
+  const [lastFailedTurn, setLastFailedTurn] = useState<FailedTurnState | null>(
+    null
+  );
 
   const streamingIdRef = useRef<string | null>(null);
   const streamAbortControllerRef = useRef<AbortController | null>(null);
@@ -416,7 +435,7 @@ export function useSessionCatalog(
   );
 
   const sendMessage = useCallback(
-    async (content: string) => {
+    async (content: string, options?: SendMessageOptions) => {
       if (isStreaming || !hasExecutionAccess) return;
 
       let sessionId = currentSessionId;
@@ -442,10 +461,12 @@ export function useSessionCatalog(
       }
 
       resetDraftAndInspector();
+      setLastFailedTurn(null);
 
       await runChatTurn({
         content,
         sessionId,
+        requestId: options?.requestId,
         refs: {
           messagesRef,
           streamingIdRef,
@@ -462,6 +483,12 @@ export function useSessionCatalog(
               messageCount
             );
           },
+          onTurnError: (failedRequestId) => {
+            setLastFailedTurn({
+              content,
+              requestId: failedRequestId ?? options?.requestId,
+            });
+          },
         },
       });
     },
@@ -474,6 +501,10 @@ export function useSessionCatalog(
       sessions,
     ]
   );
+
+  const clearLastFailedTurn = useCallback(() => {
+    setLastFailedTurn(null);
+  }, []);
 
   const stopStreaming = useCallback(() => {
     stopChatTurn({
@@ -494,6 +525,7 @@ export function useSessionCatalog(
     sessionHistoryStatus,
     sessionHistoryError,
     sessionContinuitySummaries,
+    lastFailedTurn,
     refreshSessions,
     reloadCurrentSession,
     createSession,
@@ -502,5 +534,6 @@ export function useSessionCatalog(
     renameSession,
     sendMessage,
     stopStreaming,
+    clearLastFailedTurn,
   };
 }

@@ -20,9 +20,11 @@ export default function ChatPanel() {
     sessionHistoryStatus,
     sessionHistoryError,
     sessionContinuitySummaries,
+    lastFailedTurn,
     sendMessage,
     stopStreaming,
     reloadCurrentSession,
+    clearLastFailedTurn,
     setInspectorTab,
     draftMessage,
     draftRevision,
@@ -96,6 +98,13 @@ export default function ChatPanel() {
   const handleSend = async (text: string) => {
     await sendMessage(text);
   };
+
+  const handleRetryFailedTurn = useCallback(() => {
+    if (!lastFailedTurn || isStreaming) return;
+    void sendMessage(lastFailedTurn.content, {
+      requestId: lastFailedTurn.requestId,
+    });
+  }, [isStreaming, lastFailedTurn, sendMessage]);
 
   const chatDisabled = isSessionLoading || !hasExecutionAccess;
   const chatDisabledReason = !hasExecutionAccess
@@ -179,6 +188,32 @@ export default function ChatPanel() {
 
         <div className="sticky bottom-0 z-10 px-3 pb-2 sm:px-5 sm:pb-3 lg:px-6 lg:pb-3">
           <div className="mx-auto w-full max-w-[56rem]">
+            {lastFailedTurn && !isStreaming ? (
+              <div className="mb-2">
+                <SurfaceState
+                  compact
+                  tone="error"
+                  eyebrow="Turn Failed"
+                  title="Turn failed — retry"
+                  description={
+                    lastFailedTurn.requestId
+                      ? `The last turn did not complete. Retry re-issues it with request ${lastFailedTurn.requestId}.`
+                      : "The last turn did not complete. Retry re-issues it with the same request id."
+                  }
+                  actions={
+                    <div className="flex flex-wrap gap-2">
+                      <InlineActionButton onClick={handleRetryFailedTurn}>
+                        <RefreshCw size={12} />
+                        Retry turn
+                      </InlineActionButton>
+                      <InlineActionButton onClick={clearLastFailedTurn}>
+                        Dismiss
+                      </InlineActionButton>
+                    </div>
+                  }
+                />
+              </div>
+            ) : null}
             <ChatInput
               onSend={handleSend}
               onStop={stopStreaming}
