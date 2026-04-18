@@ -186,6 +186,40 @@ This gives each tool an explicit contract:
 
 The tool result contract in [`backend/tools/contracts.py`](../tools/contracts.py) normalizes all tool outputs into a structured envelope so the frontend and session store can treat tools consistently.
 
+#### Pre/Post-Tool Hook Registry
+
+Tool execution also runs through a declarative hook registry in
+[`backend/runtime/hooks.py`](../runtime/hooks.py). The wrapper invokes
+two entry points per tool call:
+
+- `pre_tool(name, args, kwargs)` — fires after the sandbox/access-scope
+  policy check but before dispatch.
+- `post_tool(name, args, kwargs, result)` — fires after result
+  normalization, sandbox byte-cap enforcement, and policy annotation.
+
+Each hook returns one of four statuses:
+
+| Status   | Pre-tool semantics                              | Post-tool semantics                          |
+| -------- | ----------------------------------------------- | -------------------------------------------- |
+| `allow`  | Continue to the next hook / dispatch            | Envelope unchanged                           |
+| `deny`   | Short-circuit with a `blocked` envelope         | Replace envelope with a `blocked` envelope   |
+| `ask`    | Short-circuit with `needs_approval`; SSE emits `tool_awaiting_approval` | Overlay envelope (treated like `modify`)     |
+| `modify` | Replace args/kwargs for subsequent hooks + dispatch | Replace the envelope for subsequent hooks |
+
+Hooks run in registration order. `deny` and `ask` short-circuit the
+chain. `modify` threads the replacement payload through later hooks.
+Hook failures are logged and skipped — tracing or audit bookkeeping
+cannot break the tool path.
+
+This centralizes audit, redaction, compliance preflight, and
+feature-flag kills that were previously inlined. The post-tool trace
+writer under `backend/storage/tool-traces/` is itself registered as a
+post-tool hook (`tool_trace_jsonl`) in
+[`backend/tools/policy_wrappers.py`](../tools/policy_wrappers.py).
+Performance is guarded by a unit test in
+[`backend/tests/test_runtime_hooks.py`](../tests/test_runtime_hooks.py)
+that asserts the full pre+post chain runs in under 100 ms.
+
 ### 7. Planning and Verification as Helper Agents
 
 Planning and verification are not handled by separate routes. They are helper-agent tools:

@@ -13,6 +13,8 @@ from typing import Any
 from langchain_core.tools import BaseTool
 from pydantic import ConfigDict, Field
 
+from runtime import hooks as runtime_hooks
+
 from .contracts import (
     ToolResultEnvelope,
     blocked_result,
@@ -132,37 +134,53 @@ def _build_result_summary(envelope: ToolResultEnvelope) -> str:
     return _truncate(combined)
 
 
-def _emit_tool_trace(
-    *,
-    tool_name: str,
+def _tool_trace_post_hook(
+    name: str,
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
-    envelope: ToolResultEnvelope,
-    started_at: datetime,
-    duration_ms: float,
-) -> None:
-    context = get_tool_policy_context()
-    session_id = context.session_id if context else None
-    turn_id = context.turn_id if context else None
+    result: Any,
+) -> runtime_hooks.PostToolDecision | None:
+    """Registered post-tool hook that writes the JSONL trace line.
+
+    Pulls timing out of the invocation context the wrapper sets around the
+    hook chain. Returns ``None`` (≡ ``allow``) because tracing is a pure
+    side effect that never modifies the tool result.
+    """
+
+    if not isinstance(result, ToolResultEnvelope):
+        return None
+
+    invocation = runtime_hooks.get_invocation_context()
+    policy_context = get_tool_policy_context()
+    session_id = (invocation.session_id if invocation else None) or (
+        policy_context.session_id if policy_context else None
+    )
+    turn_id = (invocation.turn_id if invocation else None) or (
+        policy_context.turn_id if policy_context else None
+    )
+    started_at = (
+        invocation.started_at if invocation and invocation.started_at else datetime.now(timezone.utc)
+    )
+    duration_ms = float(invocation.duration_ms) if invocation and invocation.duration_ms is not None else 0.0
 
     redacted_args, redacted_kwargs = _redact_call_args(args, kwargs)
     args_summary = _summarize_call_args(redacted_args, redacted_kwargs)
 
     error_payload: dict[str, Any] | None = None
-    if envelope.error is not None:
+    if result.error is not None:
         error_payload = {
-            "code": envelope.error.code,
-            "message": envelope.error.message,
-            "retriable": envelope.error.retriable,
+            "code": result.error.code,
+            "message": result.error.message,
+            "retriable": result.error.retriable,
         }
 
     record = {
         "ts": started_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         "session_id": session_id,
         "turn_id": turn_id,
-        "tool_name": tool_name,
+        "tool_name": name,
         "args_summary": args_summary,
-        "result_summary": _build_result_summary(envelope),
+        "result_summary": _build_result_summary(result),
         "duration_ms": round(duration_ms, 3),
         "error": error_payload,
     }
@@ -177,10 +195,14 @@ def _emit_tool_trace(
     except Exception:  # pragma: no cover - tracing must never break the tool path
         logger.warning(
             "Failed to write tool trace for %s (session=%s)",
-            tool_name,
+            name,
             session_id,
             exc_info=True,
         )
+    return None
+
+
+runtime_hooks.register_post("tool_trace_jsonl", _tool_trace_post_hook)
 
 
 class _SandboxWallClockExceeded(Exception):
@@ -383,11 +405,101 @@ class PolicyWrappedTool(BaseTool):
             },
         )
 
+    def _apply_pre_tool_hooks(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[tuple[Any, ...], dict[str, Any], Any | None]:
+        """Run registered pre-tool hooks.
+
+        Returns ``(args, kwargs, short_circuit_raw_output)``. The first two
+        carry any modify-overrides; the third is non-``None`` when a hook
+        returned ``deny`` or ``ask`` and the wrapper should skip dispatch.
+        """
+
+        decision = runtime_hooks.pre_tool(self.name, args, kwargs)
+        if decision.status == "deny":
+            message = decision.message or f"Tool '{self.name}' was denied by a runtime hook."
+            return args, kwargs, blocked_result(
+                self.name,
+                message,
+                metadata={
+                    "hook_block_reason": decision.reason or "runtime_hook_deny",
+                },
+            )
+        if decision.status == "ask":
+            message = (
+                decision.message
+                or f"Tool '{self.name}' requires human approval before it can run."
+            )
+            return args, kwargs, needs_approval_result(
+                self.name,
+                message,
+                metadata={
+                    "hook_approval_reason": decision.reason or "runtime_hook_ask",
+                    "requires_approval": True,
+                },
+            )
+        if decision.status == "modify":
+            new_args = decision.args if decision.args is not None else args
+            new_kwargs = decision.kwargs if decision.kwargs is not None else kwargs
+            return new_args, new_kwargs, None
+        return args, kwargs, None
+
+    def _apply_post_tool_hooks(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        envelope: ToolResultEnvelope,
+    ) -> ToolResultEnvelope:
+        """Run registered post-tool hooks, possibly replacing the envelope."""
+
+        decision = runtime_hooks.post_tool(self.name, args, kwargs, envelope)
+        if decision.status == "deny":
+            message = decision.message or f"Tool '{self.name}' output was denied by a runtime hook."
+            summary, payload = blocked_result(
+                self.name,
+                message,
+                metadata={
+                    "hook_block_reason": decision.reason or "runtime_hook_post_deny",
+                },
+            )
+            del summary
+            return ToolResultEnvelope.model_validate(payload)
+        if decision.status in {"modify", "ask"} and isinstance(
+            decision.result, ToolResultEnvelope
+        ):
+            return decision.result
+        return envelope
+
+    def _build_invocation_context(
+        self,
+        *,
+        started_at: datetime,
+        duration_ms: float | None,
+    ) -> runtime_hooks.HookInvocationContext:
+        policy_context = get_tool_policy_context()
+        return runtime_hooks.HookInvocationContext(
+            tool_name=self.name,
+            started_at=started_at,
+            duration_ms=duration_ms,
+            session_id=policy_context.session_id if policy_context else None,
+            turn_id=policy_context.turn_id if policy_context else None,
+            request_id=policy_context.request_id if policy_context else None,
+        )
+
     def _run(self, *args, **kwargs):  # type: ignore[override]
         started_at = datetime.now(timezone.utc)
         t0 = time.perf_counter()
         decision = self._resolve_pre_dispatch_decision(args, kwargs)
         raw_output = self._short_circuit_raw_output(decision)
+        if raw_output is None:
+            with runtime_hooks.hook_invocation_context(
+                self._build_invocation_context(started_at=started_at, duration_ms=None)
+            ):
+                args, kwargs, hook_raw = self._apply_pre_tool_hooks(args, kwargs)
+            if hook_raw is not None:
+                raw_output = hook_raw
         if raw_output is None:
             try:
                 with scoped_environment(self._sandbox_env_allowlist()):
@@ -408,14 +520,10 @@ class PolicyWrappedTool(BaseTool):
             decision,
         )
         duration_ms = (time.perf_counter() - t0) * 1000.0
-        _emit_tool_trace(
-            tool_name=self.name,
-            args=args,
-            kwargs=kwargs,
-            envelope=annotated,
-            started_at=started_at,
-            duration_ms=duration_ms,
-        )
+        with runtime_hooks.hook_invocation_context(
+            self._build_invocation_context(started_at=started_at, duration_ms=duration_ms)
+        ):
+            annotated = self._apply_post_tool_hooks(args, kwargs, annotated)
         return annotated.summary, annotated.model_dump(mode="json")
 
     async def _arun(self, *args, **kwargs):  # type: ignore[override]
@@ -423,6 +531,13 @@ class PolicyWrappedTool(BaseTool):
         t0 = time.perf_counter()
         decision = self._resolve_pre_dispatch_decision(args, kwargs)
         raw_output = self._short_circuit_raw_output(decision)
+        if raw_output is None:
+            with runtime_hooks.hook_invocation_context(
+                self._build_invocation_context(started_at=started_at, duration_ms=None)
+            ):
+                args, kwargs, hook_raw = self._apply_pre_tool_hooks(args, kwargs)
+            if hook_raw is not None:
+                raw_output = hook_raw
         if raw_output is None:
             try:
                 with scoped_environment(self._sandbox_env_allowlist()):
@@ -443,14 +558,10 @@ class PolicyWrappedTool(BaseTool):
             decision,
         )
         duration_ms = (time.perf_counter() - t0) * 1000.0
-        _emit_tool_trace(
-            tool_name=self.name,
-            args=args,
-            kwargs=kwargs,
-            envelope=annotated,
-            started_at=started_at,
-            duration_ms=duration_ms,
-        )
+        with runtime_hooks.hook_invocation_context(
+            self._build_invocation_context(started_at=started_at, duration_ms=duration_ms)
+        ):
+            annotated = self._apply_post_tool_hooks(args, kwargs, annotated)
         return annotated.summary, annotated.model_dump(mode="json")
 
 
