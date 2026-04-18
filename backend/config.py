@@ -2,8 +2,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from hardening import ProductionHardeningPolicy
+from hardening import (
+    DEFAULT_POSTURE,
+    VALID_POSTURES,
+    ProductionHardeningPolicy,
+)
 from runtime_config import load_runtime_config
+from runtime_config_types import LoadedRuntimeConfig
 
 _CONFIG_FILE = Path(__file__).parent / "config.json"
 _DEFAULT_MEMORY_STALE_DAYS = 30
@@ -12,6 +17,7 @@ _DEFAULT: dict = {
     "rag_mode": False,
     "deterministic_seed": None,
     "max_tokens_per_turn": _DEFAULT_MAX_TOKENS_PER_TURN,
+    "production_hardening": {"posture": DEFAULT_POSTURE},
     "prompt_context": {
         "include_git_context": False,
         "memory_stale_days": _DEFAULT_MEMORY_STALE_DAYS,
@@ -70,11 +76,20 @@ _DEFAULT: dict = {
 }
 
 
-def _load_runtime() -> dict:
+def _load_loaded_runtime() -> LoadedRuntimeConfig:
     return load_runtime_config(
         default_config=_DEFAULT,
         project_config_path=_CONFIG_FILE,
-    ).data
+    )
+
+
+def _load_runtime() -> dict:
+    return _load_loaded_runtime().data
+
+
+def get_loaded_runtime_config() -> LoadedRuntimeConfig:
+    """Return the merged runtime config together with per-layer provenance."""
+    return _load_loaded_runtime()
 
 def get_prompt_context_settings() -> dict[str, Any]:
     prompt_context = _load_runtime().get("prompt_context", {})
@@ -209,12 +224,14 @@ def get_read_file_extra_roots(base_dir: Path) -> list[Path]:
 
 def get_production_hardening_policy() -> ProductionHardeningPolicy:
     cfg = _load_runtime()
-    if "production_hardening" not in cfg:
-        return ProductionHardeningPolicy()
     raw = cfg.get("production_hardening", {})
     if not isinstance(raw, dict):
         return ProductionHardeningPolicy.fail_closed()
+    posture = raw.get("posture", DEFAULT_POSTURE)
+    if posture not in VALID_POSTURES:
+        return ProductionHardeningPolicy.fail_closed()
+    overrides = {k: v for k, v in raw.items() if k != "posture"}
     try:
-        return ProductionHardeningPolicy.model_validate(raw)
+        return ProductionHardeningPolicy.from_posture(posture, overrides=overrides)
     except Exception:
         return ProductionHardeningPolicy.fail_closed()
