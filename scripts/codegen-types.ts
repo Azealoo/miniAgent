@@ -98,6 +98,9 @@ const EVENT_NAME_MAP: Record<string, string> = {
   CompactionRuntimeEvent: "ChatStreamCompactionEvent",
   DoneRuntimeEvent: "ChatStreamDoneEvent",
   ErrorRuntimeEvent: "ChatStreamErrorEvent",
+  WorkflowStepStartedRuntimeEvent: "ChatStreamWorkflowStepStartedEvent",
+  WorkflowStepEndedRuntimeEvent: "ChatStreamWorkflowStepEndedEvent",
+  WorkflowStepFailedRuntimeEvent: "ChatStreamWorkflowStepFailedEvent",
 };
 
 function mappedName(rawName: string, knownTopLevel: Set<string>): string {
@@ -365,12 +368,29 @@ export function runCli(): void {
   console.log(`wrote ${OUTPUT_PATH}`);
 }
 
+export function checkCli(): void {
+  const expected = generateTypes(loadInputs());
+  const actual = readFileSync(OUTPUT_PATH, "utf-8");
+  if (actual !== expected) {
+    console.error(
+      `DRIFT: ${OUTPUT_PATH} is out of date with the committed JSON schemas.\n` +
+        `Regenerate with: npm run codegen:types (from frontend/)`,
+    );
+    process.exit(1);
+  }
+  console.log(`OK: ${OUTPUT_PATH} is in sync with the committed JSON schemas`);
+}
+
 // Invoked directly (tsx scripts/codegen-types.ts or node --experimental-strip-types).
 const invokedDirectly =
   import.meta.url === `file://${process.argv[1]}` ||
   import.meta.url.endsWith(path.basename(process.argv[1] ?? ""));
 if (invokedDirectly) {
-  runCli();
+  if (process.argv.includes("--check")) {
+    checkCli();
+  } else {
+    runCli();
+  }
 }
 
 export const PATHS = {

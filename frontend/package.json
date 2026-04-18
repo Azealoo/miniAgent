@@ -11,6 +11,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "codegen:types": "node --experimental-strip-types ../scripts/codegen-types.ts",
+    "codegen:check": "node --experimental-strip-types ../scripts/codegen-types.ts --check",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "PLAYWRIGHT_BROWSERS_PATH=0 npm run build:e2e && PLAYWRIGHT_BROWSERS_PATH=0 playwright test"

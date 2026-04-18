@@ -164,6 +164,56 @@ def test_retrieval_miss_updates_hit_ratio(collector: MetricsCollector) -> None:
     )
 
 
+def test_llm_usage_event_records_prompt_cache_hit_rate(
+    collector: MetricsCollector,
+) -> None:
+    # First call seeds the cache: 100 uncached input tokens.
+    collector.observe_event(
+        {
+            "type": "llm_usage",
+            "input_tokens": 100,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 100,
+        }
+    )
+    # Subsequent calls read 90 of 100 tokens from the cache.
+    for _ in range(4):
+        collector.observe_event(
+            {
+                "type": "llm_usage",
+                "input_tokens": 100,
+                "cache_read_tokens": 90,
+                "cache_creation_tokens": 0,
+            }
+        )
+    text = collector.render_exposition()
+    # 4 turns × 90 cache reads = 360.
+    assert "bioapex_prompt_cache_read_tokens_total 360" in text
+    # First turn wrote 100 to cache.
+    assert "bioapex_prompt_cache_creation_tokens_total 100" in text
+    # Four turns × 10 uncached = 40.
+    assert "bioapex_prompt_cache_uncached_tokens_total 40" in text
+    # 360 / (360 + 100 + 40) = 0.72
+    hit_rate_line = next(
+        line for line in text.splitlines()
+        if line.startswith("bioapex_prompt_cache_hit_rate ")
+    )
+    _, _, value = hit_rate_line.partition(" ")
+    assert abs(float(value) - 0.72) < 1e-6
+
+
+def test_llm_usage_event_without_cache_fields_records_only_uncached(
+    collector: MetricsCollector,
+) -> None:
+    collector.observe_event(
+        {"type": "llm_usage", "input_tokens": 500}
+    )
+    text = collector.render_exposition()
+    assert "bioapex_prompt_cache_uncached_tokens_total 500" in text
+    assert "bioapex_prompt_cache_read_tokens_total 0" in text
+    assert "bioapex_prompt_cache_hit_rate 0" in text
+
+
 def test_done_event_records_turn_and_status(collector: MetricsCollector) -> None:
     collector.observe_event({"type": "done", "turn_status": "ok"})
     text = collector.render_exposition()
@@ -212,6 +262,10 @@ def test_exposition_lists_every_core_metric_name(
         "bioapex_retrieval_cache_hits_total",
         "bioapex_retrieval_cache_misses_total",
         "bioapex_retrieval_cache_hit_ratio",
+        "bioapex_prompt_cache_read_tokens_total",
+        "bioapex_prompt_cache_creation_tokens_total",
+        "bioapex_prompt_cache_uncached_tokens_total",
+        "bioapex_prompt_cache_hit_rate",
     }
     for name in expected_names:
         assert f"# TYPE {name} " in text, f"missing TYPE header for {name}"

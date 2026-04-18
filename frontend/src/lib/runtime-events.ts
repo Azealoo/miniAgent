@@ -29,6 +29,9 @@ export const RUNTIME_EVENT_TYPES = [
   "warning",
   "done",
   "error",
+  "workflow_step_started",
+  "workflow_step_ended",
+  "workflow_step_failed",
 ] as const;
 
 export type RuntimeEventType = (typeof RUNTIME_EVENT_TYPES)[number];
@@ -218,7 +221,7 @@ const DoneRuntimeEventSchema = z
     content: z.string(),
     session_id: z.string().nullish(),
     turn_status: z
-      .enum(["ok", "awaiting_approval", "budget_exceeded", "error"])
+      .enum(["ok", "awaiting_approval", "budget_exceeded", "error", "cancelled"])
       .nullish(),
   })
   .strict();
@@ -230,6 +233,60 @@ const ErrorRuntimeEventSchema = z
     request_id: requestIdField,
     event_index: eventIndexField,
     error: z.string(),
+  })
+  .strict();
+
+const WorkflowStepStartedRuntimeEventSchema = z
+  .object({
+    type: z.literal("workflow_step_started"),
+    schema_version: schemaVersionField,
+    request_id: requestIdField,
+    event_index: eventIndexField,
+    workflow_id: z.string(),
+    run_id: z.string(),
+    step_id: z.string(),
+    step_index: z.number().int().min(1),
+    total_steps: z.number().int().min(1),
+    label: z.string().nullish(),
+    attempt: z.number().int().min(1).default(1),
+  })
+  .strict();
+
+const WorkflowStepEndedRuntimeEventSchema = z
+  .object({
+    type: z.literal("workflow_step_ended"),
+    schema_version: schemaVersionField,
+    request_id: requestIdField,
+    event_index: eventIndexField,
+    workflow_id: z.string(),
+    run_id: z.string(),
+    step_id: z.string(),
+    step_index: z.number().int().min(1),
+    total_steps: z.number().int().min(1),
+    duration_ms: z.number().int().min(0),
+    outputs: jsonObjectSchema.nullish(),
+  })
+  .strict();
+
+const WorkflowStepFailedRuntimeEventSchema = z
+  .object({
+    type: z.literal("workflow_step_failed"),
+    schema_version: schemaVersionField,
+    request_id: requestIdField,
+    event_index: eventIndexField,
+    workflow_id: z.string(),
+    run_id: z.string(),
+    step_id: z.string(),
+    step_index: z.number().int().min(1),
+    total_steps: z.number().int().min(1),
+    duration_ms: z.number().int().min(0),
+    error: z.string(),
+    failure_policy: z.enum([
+      "fail_workflow",
+      "block_workflow",
+      "continue_with_warning",
+    ]),
+    attempt: z.number().int().min(1).default(1),
   })
   .strict();
 
@@ -248,6 +305,9 @@ export const RuntimeEventSchema = z.discriminatedUnion("type", [
   WarningRuntimeEventSchema,
   DoneRuntimeEventSchema,
   ErrorRuntimeEventSchema,
+  WorkflowStepStartedRuntimeEventSchema,
+  WorkflowStepEndedRuntimeEventSchema,
+  WorkflowStepFailedRuntimeEventSchema,
 ]);
 
 export type RuntimeEvent = z.infer<typeof RuntimeEventSchema>;
@@ -270,6 +330,9 @@ export const RUNTIME_EVENT_SCHEMAS: Record<
   warning: WarningRuntimeEventSchema,
   done: DoneRuntimeEventSchema,
   error: ErrorRuntimeEventSchema,
+  workflow_step_started: WorkflowStepStartedRuntimeEventSchema,
+  workflow_step_ended: WorkflowStepEndedRuntimeEventSchema,
+  workflow_step_failed: WorkflowStepFailedRuntimeEventSchema,
 };
 
 export type RuntimeEventParseSuccess = {

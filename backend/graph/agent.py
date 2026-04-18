@@ -3,6 +3,7 @@ AgentManager — singleton that owns the LLM, tools, session manager,
 and memory indexer. Rebuilds the agent on every request via create_agent
 so that live workspace edits are always reflected in the system prompt.
 """
+import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,36 @@ from .skill_router import select_skill_entries_for_query
 from tools.contracts import normalize_tool_output
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_llm_usage_event(event: dict) -> dict | None:
+    """Map a LangChain ``on_chat_model_end`` event to an ``llm_usage`` runtime
+    event so the metrics collector can track provider-side prompt-cache usage.
+
+    LangChain normalizes cache accounting across DeepSeek / OpenAI / Anthropic
+    into ``AIMessage.usage_metadata`` with an optional ``input_token_details``
+    dict carrying ``cache_read`` and ``cache_creation``. If the response has
+    no usage metadata (some streamed runs) we skip — the collector only needs
+    samples, not a per-call invariant.
+    """
+    output = event.get("data", {}).get("output")
+    usage = getattr(output, "usage_metadata", None)
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = int(usage.get("input_tokens") or 0)
+    details = usage.get("input_token_details") or {}
+    if not isinstance(details, dict):
+        details = {}
+    cache_read = int(details.get("cache_read") or 0)
+    cache_creation = int(details.get("cache_creation") or 0)
+    if input_tokens <= 0 and cache_read <= 0 and cache_creation <= 0:
+        return None
+    return {
+        "type": "llm_usage",
+        "input_tokens": input_tokens,
+        "cache_read_tokens": cache_read,
+        "cache_creation_tokens": cache_creation,
+    }
 
 _HARNESS_GUIDANCE = """
 <!-- Runtime Harness Guidance -->
@@ -201,6 +232,11 @@ class AgentManager:
                             answer_segments.append(chunk.content)
                         yield {"type": "token", "content": chunk.content}
 
+                elif kind == "on_chat_model_end":
+                    usage_event = _extract_llm_usage_event(event)
+                    if usage_event is not None:
+                        yield usage_event
+
                 elif kind == "on_tool_start":
                     run_id = event["run_id"]
                     tool_name = event["name"]
@@ -275,6 +311,13 @@ class AgentManager:
                     yield payload
                     after_tool = True
 
+        except asyncio.CancelledError:
+            # Cancellation must propagate verbatim so it reaches in-flight
+            # async tools as a CancelledError at their next await point.
+            # Catching and converting it to an "error" event would silently
+            # turn a client disconnect into a normal turn failure and would
+            # leave the cancelled tool task uncancelled.
+            raise
         except Exception as exc:
             yield {"type": "error", "error": str(exc)}
             return

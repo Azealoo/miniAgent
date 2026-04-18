@@ -1,14 +1,65 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import uuid
 from dataclasses import dataclass, replace
-from typing import Any, AsyncGenerator
+from typing import Any, Awaitable, Callable, AsyncGenerator, Sequence
 
 from config import get_max_tokens_per_turn, get_verification_settings
 from runtime.events import dump_runtime_event
 from runtime.metrics_collector import METRICS
 from runtime.turn_ledger import TurnLedger, TurnResult
+from tools.registry import ToolManifestEntry, is_concurrency_safe_tier
+
+
+@dataclass(frozen=True)
+class ToolBatchCall:
+    """A single resolved tool call pending dispatch.
+
+    ``invoke`` is a zero-argument coroutine factory so the dispatcher can
+    await it at the point it chooses (gathered vs. serial). ``manifest``
+    tells the dispatcher which tier the call belongs to.
+    """
+
+    manifest: ToolManifestEntry
+    invoke: Callable[[], Awaitable[Any]]
+
+
+async def dispatch_tool_batch(
+    calls: Sequence[ToolBatchCall],
+) -> list[Any]:
+    """Partition resolved tool calls by risk tier and dispatch them.
+
+    Read-only/concurrency-safe calls are launched together through
+    ``asyncio.gather`` so their I/O overlaps. Destructive calls run
+    serially in input order so their side effects happen one at a time.
+    Results are returned in the original input order regardless of tier.
+    """
+    results: list[Any] = [None] * len(calls)
+    parallel_indices: list[int] = []
+    parallel_awaitables: list[Awaitable[Any]] = []
+    serial_indices: list[int] = []
+
+    for idx, call in enumerate(calls):
+        if is_concurrency_safe_tier(call.manifest):
+            parallel_indices.append(idx)
+            parallel_awaitables.append(call.invoke())
+        else:
+            serial_indices.append(idx)
+
+    if parallel_awaitables:
+        gathered = await asyncio.gather(*parallel_awaitables)
+        for idx, value in zip(parallel_indices, gathered):
+            results[idx] = value
+
+    for idx in serial_indices:
+        results[idx] = await calls[idx].invoke()
+
+    return results
+
+_logger = logging.getLogger(__name__)
 
 
 def _count_tokens(value: Any) -> int:
@@ -314,6 +365,12 @@ class QueryEngine:
                     yield event
                     continue
 
+                # Prompt-cache usage samples are internal: the metrics
+                # collector records them against the Prometheus gauges but
+                # they should not reach the SSE wire.
+                if event_type == "llm_usage":
+                    continue
+
                 if event_type == "tool_start":
                     input_tokens += _count_tokens(event.get("input"))
                 elif event_type == "tool_end":
@@ -544,6 +601,26 @@ class QueryEngine:
                         return
 
                     yield _sse(self._shape_event_for_sse(event))
+            except (asyncio.CancelledError, GeneratorExit):
+                # Client disconnect (or any upstream cancel) reaches us as a
+                # CancelledError thrown into the awaiting `async for`, or as
+                # GeneratorExit when the consumer drops the generator entirely.
+                # Persist whatever the agent has already produced so the next
+                # turn picks up from a consistent on-disk state, then re-raise
+                # so cancellation continues propagating to in-flight tools.
+                # Pending approvals are deliberately NOT consumed here: the
+                # turn never reached its terminal state, so they remain valid
+                # for the next /api/chat retry.
+                try:
+                    ledger.persist_user_message()
+                    cancelled_result = ledger.finalize(turn_status="cancelled")
+                    ledger.persist_segments(cancelled_result)
+                except Exception:
+                    _logger.warning(
+                        "Failed to persist partial turn state on cancellation",
+                        exc_info=True,
+                    )
+                raise
             except Exception as exc:
                 ledger.persist_user_message()
                 error_event = {"type": "error", "error": str(exc)}

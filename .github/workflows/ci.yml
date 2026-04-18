@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Scoped to the Frontend<->backend schema drift guard (issue #63).
+# End-to-end drift coverage is split across two jobs:
+#   - backend-schema-drift: pydantic models -> committed JSON snapshots
+#   - frontend-types-drift: committed JSON snapshots -> types.generated.ts
+jobs:
+  backend-schema-drift:
+    name: Backend pydantic -> JSON schema drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      # Regenerates the committed JSON snapshots from the current pydantic
+      # models and fails if anything drifted.
+      - name: Run pydantic -> JSON drift guards
+        working-directory: backend
+        run: |
+          python -m pytest \
+            tests/test_shared_types_schema.py \
+            tests/test_runtime_events.py
+
+  frontend-types-drift:
+    name: Frontend JSON -> TypeScript codegen drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # node >= 22 required: scripts/codegen-types.ts is run with
+      # --experimental-strip-types, which only lands in Node 22.6+.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run JSON -> TS drift guard
+        working-directory: frontend
+        run: npm run codegen:check

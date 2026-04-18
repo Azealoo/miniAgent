@@ -1,12 +1,47 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import AsyncGenerator
 from unittest.mock import patch
 
 import pytest
 
-from runtime.query_engine import QueryEngine, QueryTurnInput
+from runtime.query_engine import (
+    QueryEngine,
+    QueryTurnInput,
+    ToolBatchCall,
+    dispatch_tool_batch,
+)
+from tools.registry import ToolManifestEntry
+
+
+def _manifest(
+    name: str,
+    *,
+    read_only: bool,
+    destructive: bool,
+    concurrency_safe: bool,
+) -> ToolManifestEntry:
+    return ToolManifestEntry(
+        name=name,
+        description=f"fake {name}",
+        args_schema=None,
+        response_format="content_and_artifact",
+        access_scope="inspection" if read_only else "execution",
+        evidence_requirement="none",
+        output_contract_version="tool_result.v1",
+        source_module="tests.test_runtime_query_engine",
+        read_only=read_only,
+        destructive=destructive,
+        concurrency_safe=concurrency_safe,
+        planner_exposed=read_only,
+        verifier_exposed=read_only,
+        interrupt_behavior="restartable" if read_only else "avoid_interrupting",
+        tool_validates_input=False,
+        activity_summary_hint="inspect",
+        result_summary_hint="result",
+    )
 
 
 class _FakeAgentManager:
@@ -732,3 +767,143 @@ async def test_query_engine_run_turn_keeps_biology_questions_on_the_same_dispatc
             [],
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tool_batch_gathers_concurrency_safe_reads():
+    """Read-only/concurrency-safe calls overlap via asyncio.gather.
+
+    Each call increments a shared in-flight counter and sleeps briefly.
+    If gather dispatches them together, the counter's peak equals the
+    number of parallel calls; a serial implementation would peak at 1.
+    """
+    in_flight = 0
+    peak = 0
+    lock = asyncio.Lock()
+
+    async def _make_read_call(label: str):
+        nonlocal in_flight, peak
+
+        async def _invoke():
+            nonlocal in_flight, peak
+            async with lock:
+                in_flight += 1
+                peak = max(peak, in_flight)
+            try:
+                await asyncio.sleep(0.05)
+                return f"{label}-done"
+            finally:
+                async with lock:
+                    in_flight -= 1
+
+        return _invoke
+
+    calls = [
+        ToolBatchCall(
+            manifest=_manifest(
+                f"read_{idx}",
+                read_only=True,
+                destructive=False,
+                concurrency_safe=True,
+            ),
+            invoke=await _make_read_call(f"read-{idx}"),
+        )
+        for idx in range(4)
+    ]
+
+    results = await dispatch_tool_batch(calls)
+
+    assert results == ["read-0-done", "read-1-done", "read-2-done", "read-3-done"]
+    assert peak == 4, (
+        f"expected all 4 read-only tools to run concurrently via gather, "
+        f"observed peak={peak}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tool_batch_serializes_destructive_calls():
+    """Destructive calls must run one at a time, in input order."""
+
+    order: list[str] = []
+    in_flight = 0
+    peak = 0
+    lock = asyncio.Lock()
+
+    def _make_destructive(label: str):
+        async def _invoke():
+            nonlocal in_flight, peak
+            async with lock:
+                in_flight += 1
+                peak = max(peak, in_flight)
+            try:
+                await asyncio.sleep(0.02)
+                order.append(label)
+                return label
+            finally:
+                async with lock:
+                    in_flight -= 1
+
+        return _invoke
+
+    calls = [
+        ToolBatchCall(
+            manifest=_manifest(
+                f"write_{idx}",
+                read_only=False,
+                destructive=True,
+                concurrency_safe=False,
+            ),
+            invoke=_make_destructive(f"write-{idx}"),
+        )
+        for idx in range(3)
+    ]
+
+    results = await dispatch_tool_batch(calls)
+
+    assert results == ["write-0", "write-1", "write-2"]
+    assert order == ["write-0", "write-1", "write-2"]
+    assert peak == 1, f"destructive tier must be serial, observed peak={peak}"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tool_batch_preserves_order_across_mixed_tiers():
+    """A mixed batch returns results in the original input order."""
+
+    async def _return(value):
+        async def _invoke():
+            await asyncio.sleep(0)
+            return value
+
+        return _invoke
+
+    calls = [
+        ToolBatchCall(
+            manifest=_manifest(
+                "read_a",
+                read_only=True,
+                destructive=False,
+                concurrency_safe=True,
+            ),
+            invoke=await _return("a"),
+        ),
+        ToolBatchCall(
+            manifest=_manifest(
+                "write_b",
+                read_only=False,
+                destructive=True,
+                concurrency_safe=False,
+            ),
+            invoke=await _return("b"),
+        ),
+        ToolBatchCall(
+            manifest=_manifest(
+                "read_c",
+                read_only=True,
+                destructive=False,
+                concurrency_safe=True,
+            ),
+            invoke=await _return("c"),
+        ),
+    ]
+
+    assert await dispatch_tool_batch(calls) == ["a", "b", "c"]

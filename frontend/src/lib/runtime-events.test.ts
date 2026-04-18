@@ -114,6 +114,38 @@ function minimalPayloadFor(eventType: string): Record<string, unknown> {
       return { type: "done", content: "final answer" };
     case "error":
       return { type: "error", error: "boom" };
+    case "workflow_step_started":
+      return {
+        type: "workflow_step_started",
+        workflow_id: "rna-seq-qc",
+        run_id: "wf-run-1",
+        step_id: "preflight_check",
+        step_index: 1,
+        total_steps: 2,
+        label: "Validate dataset manifest",
+      };
+    case "workflow_step_ended":
+      return {
+        type: "workflow_step_ended",
+        workflow_id: "rna-seq-qc",
+        run_id: "wf-run-1",
+        step_id: "preflight_check",
+        step_index: 1,
+        total_steps: 2,
+        duration_ms: 42,
+      };
+    case "workflow_step_failed":
+      return {
+        type: "workflow_step_failed",
+        workflow_id: "rna-seq-qc",
+        run_id: "wf-run-1",
+        step_id: "summarize_qc",
+        step_index: 2,
+        total_steps: 2,
+        duration_ms: 128,
+        error: "KeyError: min_genes",
+        failure_policy: "fail_workflow",
+      };
     default:
       throw new Error(`No minimal payload defined for ${eventType}`);
   }

@@ -170,6 +170,44 @@ export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent {
         error: event.error,
         ...base,
       };
+    case "workflow_step_started":
+      return {
+        type: "workflow_step_started",
+        workflow_id: event.workflow_id,
+        run_id: event.run_id,
+        step_id: event.step_id,
+        step_index: event.step_index,
+        total_steps: event.total_steps,
+        label: event.label ?? undefined,
+        attempt: event.attempt,
+        ...base,
+      };
+    case "workflow_step_ended":
+      return {
+        type: "workflow_step_ended",
+        workflow_id: event.workflow_id,
+        run_id: event.run_id,
+        step_id: event.step_id,
+        step_index: event.step_index,
+        total_steps: event.total_steps,
+        duration_ms: event.duration_ms,
+        outputs: (event.outputs ?? undefined) as JsonObject | undefined,
+        ...base,
+      };
+    case "workflow_step_failed":
+      return {
+        type: "workflow_step_failed",
+        workflow_id: event.workflow_id,
+        run_id: event.run_id,
+        step_id: event.step_id,
+        step_index: event.step_index,
+        total_steps: event.total_steps,
+        duration_ms: event.duration_ms,
+        error: event.error,
+        failure_policy: event.failure_policy,
+        attempt: event.attempt,
+        ...base,
+      };
   }
 }
 

@@ -163,6 +163,26 @@ class MetricsCollector:
             "gauge",
             "Rolling ratio of retrieval hits over total retrieval queries.",
         )
+        self._register(
+            "bioapex_prompt_cache_read_tokens_total",
+            "counter",
+            "Input tokens served from the provider-side prompt cache.",
+        )
+        self._register(
+            "bioapex_prompt_cache_creation_tokens_total",
+            "counter",
+            "Input tokens written to the provider-side prompt cache.",
+        )
+        self._register(
+            "bioapex_prompt_cache_uncached_tokens_total",
+            "counter",
+            "Input tokens that were neither cache-read nor cache-write.",
+        )
+        self._register(
+            "bioapex_prompt_cache_hit_rate",
+            "gauge",
+            "Rolling ratio cache_read_tokens / total_input_tokens across LLM calls.",
+        )
 
     # ------------------------------------------------------------------ #
     # Mutation helpers                                                     #
@@ -251,6 +271,58 @@ class MetricsCollector:
             total = hits + misses
             ratio = (hits / total) if total > 0 else 0.0
             self._gauges.setdefault("bioapex_retrieval_cache_hit_ratio", {})[()] = ratio
+
+    def observe_llm_usage(
+        self,
+        *,
+        input_tokens: int,
+        cache_read_tokens: int,
+        cache_creation_tokens: int,
+    ) -> None:
+        """Record a per-call LLM usage sample and refresh the cache hit rate.
+
+        Token counts come from LangChain's normalized ``usage_metadata`` on
+        ``AIMessage`` responses (``input_tokens`` plus ``input_token_details``
+        with ``cache_read`` and ``cache_creation`` keys). DeepSeek, OpenAI and
+        Anthropic all surface the same shape once LangChain has mapped it, so
+        the metric is provider-agnostic.
+        """
+        cache_read = max(0, int(cache_read_tokens))
+        cache_creation = max(0, int(cache_creation_tokens))
+        total_input = max(cache_read + cache_creation, int(input_tokens))
+        uncached = max(0, total_input - cache_read - cache_creation)
+
+        if cache_read:
+            self._inc_counter(
+                "bioapex_prompt_cache_read_tokens_total",
+                amount=float(cache_read),
+            )
+        if cache_creation:
+            self._inc_counter(
+                "bioapex_prompt_cache_creation_tokens_total",
+                amount=float(cache_creation),
+            )
+        if uncached:
+            self._inc_counter(
+                "bioapex_prompt_cache_uncached_tokens_total",
+                amount=float(uncached),
+            )
+        self._recompute_prompt_cache_hit_rate()
+
+    def _recompute_prompt_cache_hit_rate(self) -> None:
+        with self._lock:
+            read = self._counters.get(
+                "bioapex_prompt_cache_read_tokens_total", {}
+            ).get((), 0.0)
+            creation = self._counters.get(
+                "bioapex_prompt_cache_creation_tokens_total", {}
+            ).get((), 0.0)
+            uncached = self._counters.get(
+                "bioapex_prompt_cache_uncached_tokens_total", {}
+            ).get((), 0.0)
+            total = read + creation + uncached
+            rate = (read / total) if total > 0 else 0.0
+            self._gauges.setdefault("bioapex_prompt_cache_hit_rate", {})[()] = rate
 
     def observe_event(self, event: dict[str, Any]) -> None:
         """Update metrics from a runtime event payload.
@@ -346,6 +418,14 @@ class MetricsCollector:
             results = event.get("results")
             hit = isinstance(results, list) and len(results) > 0
             self.observe_retrieval(hit=hit)
+            return
+
+        if event_type == "llm_usage":
+            self.observe_llm_usage(
+                input_tokens=int(event.get("input_tokens") or 0),
+                cache_read_tokens=int(event.get("cache_read_tokens") or 0),
+                cache_creation_tokens=int(event.get("cache_creation_tokens") or 0),
+            )
             return
 
         if event_type == "done":

@@ -963,6 +963,117 @@ async def test_chat_stream_does_not_buffer_answer_tokens_for_biology_questions(
 
 
 @pytest.mark.asyncio
+async def test_chat_rejects_overlapping_turn_for_same_session_with_409(
+    isolated_chat_state,
+):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    async def fake_astream(_message, _history):
+        yield {"type": "token", "content": "first turn"}
+        yield {"type": "done"}
+
+    with patch.object(agent_manager, "astream", fake_astream):
+        # First call acquires the per-session turn lock synchronously before
+        # returning the StreamingResponse; the lock stays held until the
+        # response body is iterated to completion.
+        response_first = await chat(
+            ChatRequest(message="first", session_id=session_id)
+        )
+
+        # Second call for the same session_id must fail fast with 409 while the
+        # first turn's stream has not yet been drained.
+        with pytest.raises(HTTPException) as exc_info:
+            await chat(ChatRequest(message="second", session_id=session_id))
+        assert exc_info.value.status_code == 409
+
+        # A different session_id is unaffected by the lock on ``session_id``.
+        other_session_id = agent_manager.session_manager.create_session()
+        response_other = await chat(
+            ChatRequest(message="sibling", session_id=other_session_id)
+        )
+        payloads_other = await _collect_sse_payloads(response_other)
+        assert any(item["type"] == "done" for item in payloads_other)
+
+        # Drain the first stream — this releases the per-session lock.
+        payloads_first = await _collect_sse_payloads(response_first)
+        assert any(item["type"] == "done" for item in payloads_first)
+
+        # After release, a follow-up turn on the original session succeeds.
+        response_third = await chat(
+            ChatRequest(message="third", session_id=session_id)
+        )
+        payloads_third = await _collect_sse_payloads(response_third)
+        assert any(item["type"] == "done" for item in payloads_third)
+
+
+@pytest.mark.asyncio
+async def test_chat_serializes_concurrent_turns_for_same_session(isolated_chat_state):
+    """When two turns race for the same session, the second must not execute
+    concurrently with the first. With the 409 fast-fail contract, the second
+    call raises HTTPException(409) rather than interleaving writes."""
+    import asyncio
+
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def paused_astream(message, _history):
+        if message == "first":
+            first_started.set()
+            await release_first.wait()
+        yield {"type": "token", "content": f"turn:{message}"}
+        yield {"type": "done"}
+
+    with patch.object(agent_manager, "astream", paused_astream):
+        response_first = await chat(
+            ChatRequest(message="first", session_id=session_id)
+        )
+
+        async def drain(response):
+            return await _collect_sse_payloads(response)
+
+        drain_first = asyncio.create_task(drain(response_first))
+
+        # Wait until the first turn has actually entered the executor. At this
+        # point the per-session lock is held by the in-flight generator.
+        await first_started.wait()
+
+        second_error: HTTPException | None = None
+        try:
+            await chat(ChatRequest(message="second", session_id=session_id))
+        except HTTPException as exc:
+            second_error = exc
+
+        assert second_error is not None
+        assert second_error.status_code == 409
+
+        release_first.set()
+        first_payloads = await drain_first
+        # After the first turn drained and released the lock, a fresh attempt
+        # must succeed — demonstrating the lock's bounded lifetime.
+        response_follow = await chat(
+            ChatRequest(message="follow", session_id=session_id)
+        )
+        follow_payloads = await _collect_sse_payloads(response_follow)
+
+    tokens_first = [
+        item["content"] for item in first_payloads if item["type"] == "token"
+    ]
+    tokens_follow = [
+        item["content"] for item in follow_payloads if item["type"] == "token"
+    ]
+    assert tokens_first == ["turn:first"]
+    assert tokens_follow == ["turn:follow"]
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_uses_normal_agent_dispatch_without_workflow_state(
     isolated_chat_state,
 ):

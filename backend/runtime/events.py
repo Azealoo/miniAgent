@@ -159,12 +159,16 @@ class DoneRuntimeEvent(_RuntimeEventBase):
     type: Literal["done"] = "done"
     content: str
     session_id: Optional[str] = None
-    turn_status: Optional[Literal["ok", "awaiting_approval", "budget_exceeded", "error"]] = Field(
+    turn_status: Optional[
+        Literal["ok", "awaiting_approval", "budget_exceeded", "error", "cancelled"]
+    ] = Field(
         default=None,
         description=(
             "Terminal state of the turn. Absent or 'ok' means the turn completed "
             "normally; 'awaiting_approval' means the runtime paused on a gated tool "
-            "and the client must call /api/chat/approval before the next turn."
+            "and the client must call /api/chat/approval before the next turn; "
+            "'cancelled' means the client disconnected or otherwise cancelled the "
+            "turn before it finished (partial assistant segments are still persisted)."
         ),
     )
 
@@ -172,6 +176,48 @@ class DoneRuntimeEvent(_RuntimeEventBase):
 class ErrorRuntimeEvent(_RuntimeEventBase):
     type: Literal["error"] = "error"
     error: str
+
+
+class WorkflowStepStartedRuntimeEvent(_RuntimeEventBase):
+    """Emitted by the workflow runner before it invokes a step's executor.
+
+    ``run_id`` identifies the workflow run (stable across all three step events
+    for the same invocation); ``step_id`` identifies the step within the spec.
+    Transport-only — not persisted in session JSON.
+    """
+
+    type: Literal["workflow_step_started"] = "workflow_step_started"
+    workflow_id: str
+    run_id: str
+    step_id: str
+    step_index: int = Field(ge=1)
+    total_steps: int = Field(ge=1)
+    label: Optional[str] = None
+    attempt: int = Field(default=1, ge=1)
+
+
+class WorkflowStepEndedRuntimeEvent(_RuntimeEventBase):
+    type: Literal["workflow_step_ended"] = "workflow_step_ended"
+    workflow_id: str
+    run_id: str
+    step_id: str
+    step_index: int = Field(ge=1)
+    total_steps: int = Field(ge=1)
+    duration_ms: int = Field(ge=0)
+    outputs: Optional[dict[str, Any]] = None
+
+
+class WorkflowStepFailedRuntimeEvent(_RuntimeEventBase):
+    type: Literal["workflow_step_failed"] = "workflow_step_failed"
+    workflow_id: str
+    run_id: str
+    step_id: str
+    step_index: int = Field(ge=1)
+    total_steps: int = Field(ge=1)
+    duration_ms: int = Field(ge=0)
+    error: str
+    failure_policy: Literal["fail_workflow", "block_workflow", "continue_with_warning"]
+    attempt: int = Field(default=1, ge=1)
 
 
 RuntimeEvent = Annotated[
@@ -190,6 +236,9 @@ RuntimeEvent = Annotated[
         WarningRuntimeEvent,
         DoneRuntimeEvent,
         ErrorRuntimeEvent,
+        WorkflowStepStartedRuntimeEvent,
+        WorkflowStepEndedRuntimeEvent,
+        WorkflowStepFailedRuntimeEvent,
     ],
     Field(discriminator="type"),
 ]
@@ -209,6 +258,9 @@ RUNTIME_EVENT_TYPES: tuple[str, ...] = (
     "warning",
     "done",
     "error",
+    "workflow_step_started",
+    "workflow_step_ended",
+    "workflow_step_failed",
 )
 
 _RUNTIME_EVENT_ADAPTER: TypeAdapter[RuntimeEvent] = TypeAdapter(RuntimeEvent)
