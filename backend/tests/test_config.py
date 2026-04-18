@@ -246,3 +246,83 @@ class TestConfig:
 
             assert config.get_agent_runtime_limit("executor_recursion_limit", 1000) == 1000
             assert config.get_agent_runtime_limit("helper_agent_recursion_limit", 1000) == 1000
+
+    def test_effective_config_endpoint_reports_per_field_provenance(self, tmp_path):
+        user_cfg = tmp_path / "user-config.json"
+        project_cfg = tmp_path / "config.json"
+        local_cfg = tmp_path / "config.local.json"
+
+        user_cfg.write_text(
+            json.dumps(
+                {
+                    "rag_mode": True,
+                    "prompt_context": {"include_git_context": True},
+                    "tool_policy": {"warn_on_missing_artifact_refs": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+        project_cfg.write_text(
+            json.dumps(
+                {
+                    "rag_mode": False,
+                    "tool_policy": {"enabled": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+        local_cfg.write_text(
+            json.dumps(
+                {
+                    "tool_policy": {"enabled": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("config._CONFIG_FILE", project_cfg), patch.dict(
+            os.environ,
+            {
+                "BIOAPEX_USER_CONFIG": str(user_cfg),
+                "BIOAPEX_LOCAL_CONFIG": str(local_cfg),
+            },
+            clear=False,
+        ):
+            from api.config import get_effective_config
+
+            response = get_effective_config(request=None)
+
+        assert "field_provenance" in response
+        provenance = response["field_provenance"]
+
+        # Local overrides project override → tool_policy.enabled came from local.
+        enabled_entry = provenance["tool_policy.enabled"]
+        assert enabled_entry["value"] is True
+        assert enabled_entry["source_layer"] == "local"
+        assert enabled_entry["path"] == str(local_cfg)
+
+        # Project overrides user → rag_mode came from project.
+        rag_entry = provenance["rag_mode"]
+        assert rag_entry["value"] is False
+        assert rag_entry["source_layer"] == "project"
+        assert rag_entry["path"] == str(project_cfg)
+
+        # Only user set this flag → source is user.
+        git_entry = provenance["prompt_context.include_git_context"]
+        assert git_entry["value"] is True
+        assert git_entry["source_layer"] == "user"
+        assert git_entry["path"] == str(user_cfg)
+
+        # Only user set this flag → source is user.
+        warn_entry = provenance["tool_policy.warn_on_missing_artifact_refs"]
+        assert warn_entry["value"] is False
+        assert warn_entry["source_layer"] == "user"
+
+        # Untouched defaults should still report provenance from defaults.
+        memory_stale = provenance["prompt_context.memory_stale_days"]
+        assert memory_stale["source_layer"] == "defaults"
+        assert memory_stale["path"] is None
+
+        # Backwards-compatible layer summary remains alongside field_provenance.
+        layer_names = [layer["name"] for layer in response["config_layers"]]
+        assert layer_names == ["defaults", "user", "project", "local"]
