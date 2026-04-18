@@ -973,6 +973,7 @@ export function normalizeMessageContent(
       case "usage":
       case "plan":
       case "verification":
+      case "approval_gate":
         break;
     }
   });

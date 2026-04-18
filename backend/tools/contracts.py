@@ -25,13 +25,23 @@ ToolResultOutcome = Literal[
     "invalid_input",
     "retriable_failure",
     "execution_failure",
+    "needs_approval",
+    "streaming_chunk",
 ]
 ToolErrorCode = Literal[
     "blocked",
     "invalid_input",
     "retriable_failure",
     "execution_failure",
+    "needs_approval",
 ]
+
+# Outcomes whose semantics are "the tool didn't fail" — used when deriving
+# the binary `status` field. `streaming_chunk` is a non-terminal partial
+# result, so it stays on the success side of the wall.
+_SUCCESSFUL_OUTCOMES: frozenset[str] = frozenset(
+    {"success", "success_empty", "streaming_chunk"}
+)
 
 _TRUNCATED_MARKERS = ("[output truncated]", "...[truncated]")
 _INVALID_INPUT_PATTERNS = (
@@ -253,6 +263,68 @@ def execution_error_result(
     )
 
 
+def needs_approval_result(
+    tool_name: str,
+    message: str,
+    *,
+    structured_payload: JsonLike = None,
+    artifact_refs: list[ToolArtifactRef] | None = None,
+    warnings: list[str] | None = None,
+    metadata: dict[str, JsonLike] | None = None,
+    source_payload: JsonLike = None,
+) -> tuple[str, dict[str, Any]]:
+    summary = message if message.startswith("[NEEDS_APPROVAL]") else f"[NEEDS_APPROVAL] {message}"
+    error_message = (
+        summary.removeprefix("[NEEDS_APPROVAL]").strip()
+        or "Tool requires human approval before it can run."
+    )
+    return build_tool_result(
+        tool_name,
+        summary,
+        structured_payload=structured_payload,
+        artifact_refs=artifact_refs,
+        warnings=warnings,
+        metadata=metadata,
+        source_payload=source_payload,
+        outcome="needs_approval",
+        error=ToolResultError(code="needs_approval", message=error_message, retriable=False),
+    )
+
+
+def streaming_chunk_result(
+    tool_name: str,
+    summary: str,
+    *,
+    chunk_index: int,
+    chunk: str,
+    terminal: bool = False,
+    structured_payload: JsonLike = None,
+    artifact_refs: list[ToolArtifactRef] | None = None,
+    warnings: list[str] | None = None,
+    metadata: dict[str, JsonLike] | None = None,
+    source_payload: JsonLike = None,
+) -> tuple[str, dict[str, Any]]:
+    if chunk_index < 0:
+        raise ValueError("chunk_index must be a non-negative integer")
+    chunk_metadata: dict[str, JsonLike] = {
+        "chunk_index": chunk_index,
+        "chunk_terminal": terminal,
+        "chunk_text": chunk,
+    }
+    merged_metadata: dict[str, JsonLike] = dict(metadata or {})
+    merged_metadata.update(chunk_metadata)
+    return build_tool_result(
+        tool_name,
+        summary,
+        structured_payload=structured_payload,
+        artifact_refs=artifact_refs,
+        warnings=warnings,
+        metadata=merged_metadata,
+        source_payload=source_payload,
+        outcome="streaming_chunk",
+    )
+
+
 def build_tool_result(
     tool_name: str,
     summary: str,
@@ -289,7 +361,9 @@ def build_tool_result(
     if source_truncated and "source_payload_truncated" not in normalized_warnings:
         normalized_warnings.append("source_payload_truncated")
 
-    status: ToolResultStatus = "error" if outcome not in ("success", "success_empty") or error else "success"
+    status: ToolResultStatus = (
+        "error" if outcome not in _SUCCESSFUL_OUTCOMES or error else "success"
+    )
     envelope = ToolResultEnvelope(
         tool_name=tool_name,
         summary=normalized_summary,
@@ -563,8 +637,10 @@ __all__ = [
     "invalid_input_result",
     "is_tool_result_dict",
     "json_to_pretty_text",
+    "needs_approval_result",
     "normalize_tool_output",
     "retriable_error_result",
+    "streaming_chunk_result",
     "success_result",
     "truncate_text",
 ]

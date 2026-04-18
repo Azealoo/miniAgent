@@ -57,6 +57,24 @@ function minimalPayloadFor(eventType: string): Record<string, unknown> {
         output: "ok",
         run_id: "run-1",
       };
+    case "tool_awaiting_approval":
+      return {
+        type: "tool_awaiting_approval",
+        tool: "terminal",
+        input: "rm -rf /",
+        run_id: "run-2",
+        reason: "requires_approval",
+        message: "Approve this destructive command before it runs.",
+      };
+    case "tool_chunk":
+      return {
+        type: "tool_chunk",
+        tool: "terminal",
+        run_id: "run-2",
+        chunk_index: 0,
+        chunk: "partial output...",
+        terminal: false,
+      };
     case "plan_created":
       return {
         type: "plan_created",

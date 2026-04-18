@@ -65,6 +65,40 @@ class ToolEndRuntimeEvent(_RuntimeEventBase):
     policy: Optional[dict[str, Any]] = None
 
 
+class ToolAwaitingApprovalRuntimeEvent(_RuntimeEventBase):
+    """Emitted when policy gates a tool call pending human approval.
+
+    Replaces (does not accompany) the `tool_end` event for that run_id; the
+    underlying tool was not invoked. The frontend renders an inline gate so a
+    reviewer can approve or deny the call before the turn resumes.
+    """
+
+    type: Literal["tool_awaiting_approval"] = "tool_awaiting_approval"
+    tool: str
+    input: str
+    run_id: str
+    reason: str
+    message: str
+    result: Optional[dict[str, Any]] = None
+    policy: Optional[dict[str, Any]] = None
+
+
+class ToolChunkRuntimeEvent(_RuntimeEventBase):
+    """Mid-tool partial output for streaming-capable tools.
+
+    Always followed by a terminal `tool_end` for the same `run_id`. Chunks are
+    transport-only — they are not persisted in session JSON; only the final
+    `tool_end` envelope is.
+    """
+
+    type: Literal["tool_chunk"] = "tool_chunk"
+    tool: str
+    run_id: str
+    chunk_index: int = Field(ge=0)
+    chunk: str
+    terminal: bool = False
+
+
 class PlanCreatedRuntimeEvent(_RuntimeEventBase):
     type: Literal["plan_created"] = "plan_created"
     summary: str
@@ -119,6 +153,8 @@ RuntimeEvent = Annotated[
         TokenRuntimeEvent,
         ToolStartRuntimeEvent,
         ToolEndRuntimeEvent,
+        ToolAwaitingApprovalRuntimeEvent,
+        ToolChunkRuntimeEvent,
         PlanCreatedRuntimeEvent,
         PlanUpdatedRuntimeEvent,
         VerificationResultRuntimeEvent,
@@ -135,6 +171,8 @@ RUNTIME_EVENT_TYPES: tuple[str, ...] = (
     "token",
     "tool_start",
     "tool_end",
+    "tool_awaiting_approval",
+    "tool_chunk",
     "plan_created",
     "plan_updated",
     "verification_result",

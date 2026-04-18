@@ -61,6 +61,22 @@ def test_runtime_event_snapshot_lists_every_expected_event_type() -> None:
             "result": {"status": "success"},
         },
         {
+            "type": "tool_awaiting_approval",
+            "tool": "terminal",
+            "input": "rm -rf /",
+            "run_id": "run-2",
+            "reason": "requires_approval",
+            "message": "Approve before running.",
+        },
+        {
+            "type": "tool_chunk",
+            "tool": "terminal",
+            "run_id": "run-2",
+            "chunk_index": 0,
+            "chunk": "partial output...",
+            "terminal": False,
+        },
+        {
             "type": "plan_created",
             "summary": "planner",
             "plan": {"goal": "g", "steps": []},
@@ -125,6 +141,19 @@ def test_build_runtime_event_rejects_unknown_event_type() -> None:
 def test_build_runtime_event_rejects_extra_fields() -> None:
     with pytest.raises(ValidationError):
         build_runtime_event({"type": "token", "content": "hi", "surprise": True})
+
+
+def test_build_runtime_event_rejects_negative_chunk_index() -> None:
+    with pytest.raises(ValidationError):
+        build_runtime_event(
+            {
+                "type": "tool_chunk",
+                "tool": "terminal",
+                "run_id": "run-1",
+                "chunk_index": -1,
+                "chunk": "x",
+            }
+        )
 
 
 def test_build_runtime_event_rejects_bad_verdict() -> None:

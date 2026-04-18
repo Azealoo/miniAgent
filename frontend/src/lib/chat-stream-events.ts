@@ -81,6 +81,28 @@ export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent {
         policy: (event.policy ?? undefined) as JsonObject | undefined,
         ...base,
       };
+    case "tool_awaiting_approval":
+      return {
+        type: "tool_awaiting_approval",
+        tool: event.tool,
+        input: event.input,
+        run_id: event.run_id,
+        reason: event.reason,
+        message: event.message,
+        result: (event.result ?? undefined) as ToolResultEnvelope | undefined,
+        policy: (event.policy ?? undefined) as JsonObject | undefined,
+        ...base,
+      };
+    case "tool_chunk":
+      return {
+        type: "tool_chunk",
+        tool: event.tool,
+        run_id: event.run_id,
+        chunk_index: event.chunk_index,
+        chunk: event.chunk,
+        terminal: event.terminal,
+        ...base,
+      };
     case "plan_created":
       return {
         type: "plan_created",

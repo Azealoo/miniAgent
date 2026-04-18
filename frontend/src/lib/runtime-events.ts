@@ -19,6 +19,8 @@ export const RUNTIME_EVENT_TYPES = [
   "token",
   "tool_start",
   "tool_end",
+  "tool_awaiting_approval",
+  "tool_chunk",
   "plan_created",
   "plan_updated",
   "verification_result",
@@ -96,6 +98,36 @@ const ToolEndRuntimeEventSchema = z
     run_id: z.string(),
     result: jsonObjectSchema.nullish(),
     policy: jsonObjectSchema.nullish(),
+  })
+  .strict();
+
+const ToolAwaitingApprovalRuntimeEventSchema = z
+  .object({
+    type: z.literal("tool_awaiting_approval"),
+    schema_version: schemaVersionField,
+    request_id: requestIdField,
+    event_index: eventIndexField,
+    tool: z.string(),
+    input: z.string(),
+    run_id: z.string(),
+    reason: z.string(),
+    message: z.string(),
+    result: jsonObjectSchema.nullish(),
+    policy: jsonObjectSchema.nullish(),
+  })
+  .strict();
+
+const ToolChunkRuntimeEventSchema = z
+  .object({
+    type: z.literal("tool_chunk"),
+    schema_version: schemaVersionField,
+    request_id: requestIdField,
+    event_index: eventIndexField,
+    tool: z.string(),
+    run_id: z.string(),
+    chunk_index: z.number().int().min(0),
+    chunk: z.string(),
+    terminal: z.boolean().default(false),
   })
   .strict();
 
@@ -187,6 +219,8 @@ export const RuntimeEventSchema = z.discriminatedUnion("type", [
   TokenRuntimeEventSchema,
   ToolStartRuntimeEventSchema,
   ToolEndRuntimeEventSchema,
+  ToolAwaitingApprovalRuntimeEventSchema,
+  ToolChunkRuntimeEventSchema,
   PlanCreatedRuntimeEventSchema,
   PlanUpdatedRuntimeEventSchema,
   VerificationResultRuntimeEventSchema,
@@ -206,6 +240,8 @@ export const RUNTIME_EVENT_SCHEMAS: Record<
   token: TokenRuntimeEventSchema,
   tool_start: ToolStartRuntimeEventSchema,
   tool_end: ToolEndRuntimeEventSchema,
+  tool_awaiting_approval: ToolAwaitingApprovalRuntimeEventSchema,
+  tool_chunk: ToolChunkRuntimeEventSchema,
   plan_created: PlanCreatedRuntimeEventSchema,
   plan_updated: PlanUpdatedRuntimeEventSchema,
   verification_result: VerificationResultRuntimeEventSchema,

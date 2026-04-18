@@ -15,6 +15,7 @@ from .contracts import (
     ToolResultEnvelope,
     blocked_result,
     execution_error_result,
+    needs_approval_result,
     normalize_tool_output,
     retriable_error_result,
 )
@@ -239,6 +240,16 @@ class PolicyWrappedTool(BaseTool):
                 decision.block_message or "Blocked by BioAPEX runtime policy.",
                 metadata={"policy_block_reason": decision.block_reason},
             )
+        elif decision.status == "needs_approval":
+            raw_output = needs_approval_result(
+                self.name,
+                decision.approval_message
+                or f"Tool '{self.name}' requires human approval before it can run.",
+                metadata={
+                    "policy_approval_reason": decision.approval_reason,
+                    "requires_approval": True,
+                },
+            )
         else:
             try:
                 raw_output = self.wrapped_tool._run(*args, **kwargs)
@@ -272,6 +283,16 @@ class PolicyWrappedTool(BaseTool):
                 self.name,
                 decision.block_message or "Blocked by BioAPEX runtime policy.",
                 metadata={"policy_block_reason": decision.block_reason},
+            )
+        elif decision.status == "needs_approval":
+            raw_output = needs_approval_result(
+                self.name,
+                decision.approval_message
+                or f"Tool '{self.name}' requires human approval before it can run.",
+                metadata={
+                    "policy_approval_reason": decision.approval_reason,
+                    "requires_approval": True,
+                },
             )
         else:
             try:

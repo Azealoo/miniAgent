@@ -201,17 +201,51 @@ class AgentManager:
                     run_id = event["run_id"]
                     raw_output = event["data"].get("output", "")
                     result = normalize_tool_output(event["name"], raw_output)
+                    raw_input = event["data"].get("input", {})
+                    if isinstance(raw_input, dict) and len(raw_input) == 1:
+                        tool_input_str = str(next(iter(raw_input.values())))
+                    else:
+                        tool_input_str = str(raw_input)
+
+                    result_dict = result.model_dump(mode="json")
+                    policy = result.metadata.get("policy")
+                    policy_dict = policy if isinstance(policy, dict) else None
+
+                    if result.outcome == "needs_approval":
+                        approval_message = (
+                            result.error.message
+                            if result.error is not None
+                            else result.summary
+                        )
+                        approval_reason = (
+                            policy_dict.get("approval_reason")
+                            if isinstance(policy_dict, dict)
+                            else None
+                        ) or "requires_approval"
+                        payload = {
+                            "type": "tool_awaiting_approval",
+                            "tool": event["name"],
+                            "input": tool_input_str,
+                            "run_id": run_id,
+                            "reason": approval_reason,
+                            "message": approval_message,
+                            "result": result_dict,
+                        }
+                        if policy_dict is not None:
+                            payload["policy"] = policy_dict
+                        yield payload
+                        after_tool = True
+                        continue
 
                     payload = {
                         "type": "tool_end",
                         "tool": event["name"],
                         "output": result.summary,
-                        "result": result.model_dump(mode="json"),
+                        "result": result_dict,
                         "run_id": run_id,
                     }
-                    policy = result.metadata.get("policy")
-                    if isinstance(policy, dict):
-                        payload["policy"] = policy
+                    if policy_dict is not None:
+                        payload["policy"] = policy_dict
                     yield payload
                     after_tool = True
 
