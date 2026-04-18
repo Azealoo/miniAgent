@@ -7,6 +7,7 @@ from typing import Any, AsyncGenerator
 
 from config import get_max_tokens_per_turn, get_verification_settings
 from runtime.events import dump_runtime_event
+from runtime.metrics_collector import METRICS
 from runtime.turn_ledger import TurnLedger, TurnResult
 
 
@@ -262,17 +263,20 @@ class QueryEngine:
             _count_tokens(message.get("content")) for message in turn.history
         )
         output_tokens = 0
+        METRICS.record_input_tokens(input_tokens)
 
         def _budget_exceeded() -> bool:
             return budget > 0 and (input_tokens + output_tokens) > budget
 
         def _budget_error_event() -> dict[str, Any]:
             total = input_tokens + output_tokens
-            return {
+            event = {
                 "type": "error",
                 "error": f"turn budget exceeded at {total} tokens",
                 "turn_status": "budget_exceeded",
             }
+            METRICS.observe_event(event)
+            return event
 
         while True:
             latest_plan_event: dict[str, Any] | None = None
@@ -289,6 +293,8 @@ class QueryEngine:
                 if event_type == "done":
                     turn_status = event.get("turn_status") or event.get("status", "ok")
                     break
+
+                METRICS.observe_event(event)
 
                 if event_type == "token":
                     content = event.get("content")
@@ -321,6 +327,7 @@ class QueryEngine:
                         latest_plan_event = helper_event
                     elif helper_event["type"] == "verification_result":
                         latest_verification_event = helper_event
+                    METRICS.observe_event(helper_event)
                     yield helper_event
 
                 if _budget_exceeded():
@@ -341,7 +348,9 @@ class QueryEngine:
                 and latest_verification_event is not None
             )
             if not should_retry:
-                yield {"type": "done", "turn_status": turn_status}
+                done_event = {"type": "done", "turn_status": turn_status}
+                METRICS.observe_event(done_event)
+                yield done_event
                 return
 
             repair_attempted = True
@@ -492,6 +501,7 @@ class QueryEngine:
         with tool_policy_context(policy_context):
             try:
                 if compaction_event is not None:
+                    METRICS.observe_event(compaction_event)
                     yield _sse(compaction_event)
                 async for event in self.run_turn(turn, ledger=ledger):
                     event_type = event.get("type")
@@ -536,4 +546,6 @@ class QueryEngine:
                     yield _sse(self._shape_event_for_sse(event))
             except Exception as exc:
                 ledger.persist_user_message()
-                yield _sse({"type": "error", "error": str(exc)})
+                error_event = {"type": "error", "error": str(exc)}
+                METRICS.observe_event(error_event)
+                yield _sse(error_event)
