@@ -1,14 +1,20 @@
 {
-  "updated_at": "2026-04-01T00:00:00Z",
+  "updated_at": "2026-04-18T00:00:00Z",
   "topic": "codebase_redundancy_review",
   "facts": [
     "Assistant session messages are currently maintained in dual shapes: legacy arrays (`tool_calls`, `workflow_events`, `retrievals`) and structured `blocks`, with both backend and frontend keeping them in sync.",
-    "The main chat route repeats tool lifecycle bookkeeping for compliance preflight, protocol execution, the evidence-review gate, and generic streamed tool events instead of using one shared helper.",
+    "Main chat tool-lifecycle bookkeeping is consolidated: `backend/api/chat.py` is a 71-line transport shim, `backend/graph/agent.py` emits a single `on_tool_start`/`on_tool_end` pair, `backend/runtime/turn_ledger.py` owns `pending_tools` and block accumulation, and `backend/runtime/query_engine.py._shape_event_for_sse` owns SSE shaping. The earlier claim of four duplicated paths inside chat.py (compliance preflight / protocol executor / evidence-review gate / generic streamed tools) was superseded by that refactor — see the #44 issue reply for details.",
+    "`on_tool_start`/`on_tool_end` translation appears in three distinct astream loops (main executor `backend/graph/agent.py`, `backend/runtime/helper_agent_runner.py`, `backend/runtime/subagent.py`) with different downstream sinks (SSE emission vs. scoped `tool_trace` vs. subagent trace + token budget). This is a narrower, still-open opportunity to factor out the shared `event -> {tool, input, run_id, output, result}` mapping; it is not the chat.py duplication that issue #44 claimed.",
     "Frontend display formatting has drift-prone duplication across major surfaces, especially workflow-label formatting, token humanization, text compaction, and identifier shortening.",
     "The knowledge base contains two competing T-cell rejuvenation hypothesis documents, and the recursive knowledge indexer will consider both during retrieval."
   ],
   "sources": [
     "backend/api/chat.py",
+    "backend/runtime/query_engine.py",
+    "backend/runtime/turn_ledger.py",
+    "backend/graph/agent.py",
+    "backend/runtime/helper_agent_runner.py",
+    "backend/runtime/subagent.py",
     "backend/graph/session_manager.py",
     "frontend/src/lib/store.tsx",
     "frontend/src/components/editor/TurnDetailsPanel.tsx",

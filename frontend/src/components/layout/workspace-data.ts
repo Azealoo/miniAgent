@@ -8,6 +8,7 @@ import {
   ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
+import { humanizeToken } from "@/lib/format";
 import {
   getMessageRetrievals,
   getMessageToolCalls,
@@ -70,11 +71,6 @@ export const quickStartItems: QuickStartItem[] = [
       "Review this request before execution, call out risks or warnings, and note what information is missing before we proceed.",
   },
 ];
-
-function humanizeToken(value?: string | null): string | null {
-  if (!value) return null;
-  return value.replaceAll("_", " ").replaceAll("-", " ");
-}
 
 function shortenPath(path: string): string {
   const segments = path.split("/").filter(Boolean);

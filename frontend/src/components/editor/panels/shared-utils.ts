@@ -1,13 +1,11 @@
+import { compactText, humanizeToken } from "@/lib/format";
 import {
   getMessageRetrievals,
   getMessageToolCalls,
 } from "@/lib/message-blocks";
 import type { Message } from "@/lib/types";
 
-export function humanizeToken(value?: string | null): string | null {
-  if (!value) return null;
-  return value.replaceAll("_", " ").replaceAll("-", " ");
-}
+export { compactText, humanizeToken };
 
 export function humanizeLabel(value?: string | null): string | null {
   const humanized = humanizeToken(value);
@@ -16,21 +14,6 @@ export function humanizeLabel(value?: string | null): string | null {
   }
 
   return humanized.charAt(0).toUpperCase() + humanized.slice(1);
-}
-
-export function compactText(value?: string | null, maxLength = 160): string | null {
-  if (!value) return null;
-
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return null;
-  }
-
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-
-  return `${normalized.slice(0, maxLength - 1)}…`;
 }
 
 export function uniqueStrings(values: Array<string | null | undefined>): string[] {

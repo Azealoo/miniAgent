@@ -66,11 +66,13 @@ baseline.
 ### Effective-posture inspection
 
 `GET /api/config/effective` returns the active posture, every derived
-flag, and per-layer config provenance drawn from
+flag, per-layer config provenance drawn from
 `runtime_config_types.LoadedRuntimeConfig` (defaults → user → project →
-local). The route is gated behind `require_inspection_access` so remote
-operators cannot probe bearer-token environment-variable names
-anonymously.
+local), and a `field_provenance` map that records which layer last set
+each effective leaf (`{field_path: {value, source_layer, path}}`). The
+route is gated behind `require_admin_access` so remote operators cannot
+probe bearer-token environment-variable names or other sensitive
+settings anonymously.
 
 ## Least-privilege expectations
 
