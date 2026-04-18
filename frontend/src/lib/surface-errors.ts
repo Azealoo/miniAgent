@@ -1,14 +1,7 @@
 import { classifyAccessError } from "./access-control";
 import { ApiError, ApiPayloadError } from "./api";
+import { compactText } from "./format";
 import type { AccessScope, AccessScopeState } from "./types";
-
-function compactText(value: string, maxLength = 200): string {
-  const trimmed = value.trim();
-  if (trimmed.length <= maxLength) {
-    return trimmed;
-  }
-  return `${trimmed.slice(0, maxLength - 1).trimEnd()}…`;
-}
 
 export function shouldPromoteScopeError(error: unknown): boolean {
   if (error instanceof ApiPayloadError) {
