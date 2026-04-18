@@ -6,37 +6,71 @@ This runbook defines the minimum deployment posture for BioAPEX once it moves be
 
 ## Runtime policy knobs
 
-BioAPEX now supports additive production-hardening controls in `backend/config.json`:
+BioAPEX selects a single hardening **posture** in `backend/config.json`. The
+posture expands into every downstream flag — loopback auth, host binding,
+tool risk tiers, approval thresholds, the file-write whitelist, and CORS
+origins. Per-field overrides remain available as optional escape hatches.
+
+Minimal configuration (recommended):
 
 ```json
 {
   "production_hardening": {
-    "tools": {
-      "terminal_enabled": true,
-      "python_repl_enabled": true,
-      "slurm_enabled": true,
-      "slurm_legacy_commands_enabled": true,
-      "write_file_enabled": true
-    },
-    "api": {
-      "files_write_enabled": true,
-      "allow_loopback_without_auth": true,
-      "trust_forwarded_loopback_headers": false,
-      "inspection_bearer_token_env_var": null,
-      "execution_bearer_token_env_var": null,
-      "admin_bearer_token_env_var": null,
-      "cors_allowed_origins": [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001"
-      ]
-    }
+    "posture": "trusted-lab"
   }
 }
 ```
 
-High-risk routes default to direct loopback access and can be opened to trusted remote clients only by configuring bearer-token environment-variable names plus explicit CORS origins.
+Overrides layer on top of posture defaults. For example, to use the
+`trusted-lab` posture but reopen the Python REPL and register an
+execution-bearer token:
+
+```json
+{
+  "production_hardening": {
+    "posture": "trusted-lab",
+    "tools": {"python_repl_enabled": true},
+    "api": {"execution_bearer_token_env_var": "BIOAPEX_EXECUTION_TOKEN"}
+  }
+}
+```
+
+An unknown posture or a malformed override fails closed to
+`hosted-strict` — BioAPEX never silently starts in a more permissive state
+than the operator declared.
+
+### Posture matrix
+
+| Flag                                        | `dev`            | `trusted-lab`     | `hosted-strict` |
+| ------------------------------------------- | ---------------- | ----------------- | --------------- |
+| `tools.terminal_enabled`                    | `true`           | `true`            | `false`         |
+| `tools.python_repl_enabled`                 | `true`           | `false`           | `false`         |
+| `tools.slurm_enabled`                       | `true`           | `true`            | `false`         |
+| `tools.slurm_legacy_commands_enabled`       | `true`           | `false`           | `false`         |
+| `tools.write_file_enabled`                  | `true`           | `true`            | `false`         |
+| `api.files_write_enabled`                   | `true`           | `true`            | `false`         |
+| `api.allow_loopback_without_auth`           | `true`           | `false`           | `false`         |
+| `api.trust_forwarded_loopback_headers`      | `false`          | `false`           | `false`         |
+| `api.cors_allowed_origins`                  | local frontend   | local frontend    | `[]`            |
+| `host_binding`                              | `127.0.0.1`      | `0.0.0.0`         | `127.0.0.1`     |
+| `approval_threshold`                        | `none`           | `destructive_only`| `all_risky`     |
+| `file_write_whitelist`                      | workspace, memory, skills, knowledge | workspace, memory, skills, knowledge | `[]` |
+
+Grounding: posture semantics follow
+[`.omx/research/claude-code-src-hardening-leverage-2026-04-02.md`](../../.omx/research/claude-code-src-hardening-leverage-2026-04-02.md)
+— `dev` is the current permissive default, `trusted-lab` is the
+shared-hosted middle (loopback bypass off, REPL off, legacy slurm off,
+listens on the lab network), and `hosted-strict` is the `fail_closed()`
+baseline.
+
+### Effective-posture inspection
+
+`GET /api/config/effective` returns the active posture, every derived
+flag, and per-layer config provenance drawn from
+`runtime_config_types.LoadedRuntimeConfig` (defaults → user → project →
+local). The route is gated behind `require_inspection_access` so remote
+operators cannot probe bearer-token environment-variable names
+anonymously.
 
 ## Least-privilege expectations
 
