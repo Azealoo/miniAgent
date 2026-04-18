@@ -54,6 +54,9 @@ describe("types.generated.ts drift-guard", () => {
       compaction_event: "ChatStreamCompactionEvent",
       done: "ChatStreamDoneEvent",
       error: "ChatStreamErrorEvent",
+      workflow_step_started: "ChatStreamWorkflowStepStartedEvent",
+      workflow_step_ended: "ChatStreamWorkflowStepEndedEvent",
+      workflow_step_failed: "ChatStreamWorkflowStepFailedEvent",
     };
     for (const eventType of Object.keys(events.discriminator.mapping)) {
       const interfaceName = expectedInterfaces[eventType];

@@ -98,6 +98,9 @@ const EVENT_NAME_MAP: Record<string, string> = {
   CompactionRuntimeEvent: "ChatStreamCompactionEvent",
   DoneRuntimeEvent: "ChatStreamDoneEvent",
   ErrorRuntimeEvent: "ChatStreamErrorEvent",
+  WorkflowStepStartedRuntimeEvent: "ChatStreamWorkflowStepStartedEvent",
+  WorkflowStepEndedRuntimeEvent: "ChatStreamWorkflowStepEndedEvent",
+  WorkflowStepFailedRuntimeEvent: "ChatStreamWorkflowStepFailedEvent",
 };
 
 function mappedName(rawName: string, knownTopLevel: Set<string>): string {

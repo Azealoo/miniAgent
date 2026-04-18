@@ -159,6 +159,48 @@ class ErrorRuntimeEvent(_RuntimeEventBase):
     error: str
 
 
+class WorkflowStepStartedRuntimeEvent(_RuntimeEventBase):
+    """Emitted by the workflow runner before it invokes a step's executor.
+
+    ``run_id`` identifies the workflow run (stable across all three step events
+    for the same invocation); ``step_id`` identifies the step within the spec.
+    Transport-only — not persisted in session JSON.
+    """
+
+    type: Literal["workflow_step_started"] = "workflow_step_started"
+    workflow_id: str
+    run_id: str
+    step_id: str
+    step_index: int = Field(ge=1)
+    total_steps: int = Field(ge=1)
+    label: Optional[str] = None
+    attempt: int = Field(default=1, ge=1)
+
+
+class WorkflowStepEndedRuntimeEvent(_RuntimeEventBase):
+    type: Literal["workflow_step_ended"] = "workflow_step_ended"
+    workflow_id: str
+    run_id: str
+    step_id: str
+    step_index: int = Field(ge=1)
+    total_steps: int = Field(ge=1)
+    duration_ms: int = Field(ge=0)
+    outputs: Optional[dict[str, Any]] = None
+
+
+class WorkflowStepFailedRuntimeEvent(_RuntimeEventBase):
+    type: Literal["workflow_step_failed"] = "workflow_step_failed"
+    workflow_id: str
+    run_id: str
+    step_id: str
+    step_index: int = Field(ge=1)
+    total_steps: int = Field(ge=1)
+    duration_ms: int = Field(ge=0)
+    error: str
+    failure_policy: Literal["fail_workflow", "block_workflow", "continue_with_warning"]
+    attempt: int = Field(default=1, ge=1)
+
+
 RuntimeEvent = Annotated[
     Union[
         RetrievalRuntimeEvent,
@@ -174,6 +216,9 @@ RuntimeEvent = Annotated[
         CompactionRuntimeEvent,
         DoneRuntimeEvent,
         ErrorRuntimeEvent,
+        WorkflowStepStartedRuntimeEvent,
+        WorkflowStepEndedRuntimeEvent,
+        WorkflowStepFailedRuntimeEvent,
     ],
     Field(discriminator="type"),
 ]
@@ -192,6 +237,9 @@ RUNTIME_EVENT_TYPES: tuple[str, ...] = (
     "compaction_event",
     "done",
     "error",
+    "workflow_step_started",
+    "workflow_step_ended",
+    "workflow_step_failed",
 )
 
 _RUNTIME_EVENT_ADAPTER: TypeAdapter[RuntimeEvent] = TypeAdapter(RuntimeEvent)

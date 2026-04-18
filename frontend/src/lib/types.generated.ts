@@ -240,6 +240,48 @@ export interface ChatStreamVerificationResultEvent {
   verdict: "pass" | "repair_required" | "fail";
   verification: JsonObject;
 }
+export interface ChatStreamWorkflowStepEndedEvent {
+  duration_ms: number;
+  event_index?: number;
+  outputs?: JsonObject;
+  request_id?: string;
+  run_id: string;
+  schema_version?: number;
+  step_id: string;
+  step_index: number;
+  total_steps: number;
+  type: "workflow_step_ended";
+  workflow_id: string;
+}
+export interface ChatStreamWorkflowStepFailedEvent {
+  attempt?: number;
+  duration_ms: number;
+  error: string;
+  event_index?: number;
+  failure_policy: "fail_workflow" | "block_workflow" | "continue_with_warning";
+  request_id?: string;
+  run_id: string;
+  schema_version?: number;
+  step_id: string;
+  step_index: number;
+  total_steps: number;
+  type: "workflow_step_failed";
+  workflow_id: string;
+}
+/** Emitted by the workflow runner before it invokes a step's executor. */
+export interface ChatStreamWorkflowStepStartedEvent {
+  attempt?: number;
+  event_index?: number;
+  label?: string;
+  request_id?: string;
+  run_id: string;
+  schema_version?: number;
+  step_id: string;
+  step_index: number;
+  total_steps: number;
+  type: "workflow_step_started";
+  workflow_id: string;
+}
 /** Discriminated union of every backend-emitted streaming event. */
 export type ChatStreamEventDTO =
   | ChatStreamRetrievalEvent
@@ -254,4 +296,7 @@ export type ChatStreamEventDTO =
   | ChatStreamNewResponseEvent
   | ChatStreamCompactionEvent
   | ChatStreamDoneEvent
-  | ChatStreamErrorEvent;
+  | ChatStreamErrorEvent
+  | ChatStreamWorkflowStepStartedEvent
+  | ChatStreamWorkflowStepEndedEvent
+  | ChatStreamWorkflowStepFailedEvent;
