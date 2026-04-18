@@ -17,6 +17,12 @@ export interface ChatTurnCallbacks {
   setMessages: (messages: Message[]) => void;
   setIsStreaming: (value: boolean) => void;
   onTurnComplete: (messageCount: number) => void;
+  /**
+   * Fired when a turn terminates because an `error` event finalized the
+   * stream. Carries the request_id the turn was correlated against (either
+   * the caller-supplied override or the backend-generated id, if any).
+   */
+  onTurnError?: (requestId: string | undefined) => void;
 }
 
 export interface RunChatTurnParams {
@@ -24,6 +30,11 @@ export interface RunChatTurnParams {
   sessionId: string;
   refs: ChatTurnRefs;
   callbacks: ChatTurnCallbacks;
+  /**
+   * Optional request_id override — used when retrying a previously failed
+   * turn so the new assistant message carries the original correlation id.
+   */
+  requestId?: string;
 }
 
 /**
@@ -37,14 +48,20 @@ export async function runChatTurn({
   sessionId,
   refs,
   callbacks,
+  requestId,
 }: RunChatTurnParams): Promise<void> {
   const userMsg: Message = {
     id: uid(),
     role: "user",
     content,
+    request_id: requestId,
     blocks: [{ type: "text", text: content }],
   };
-  const assistantMsg = createOptimisticAssistantMessage(uid(), Date.now());
+  const assistantMsg = createOptimisticAssistantMessage(
+    uid(),
+    Date.now(),
+    requestId
+  );
   refs.streamingIdRef.current = assistantMsg.id;
 
   const nextMessages = [...refs.messagesRef.current, userMsg, assistantMsg];
@@ -77,15 +94,22 @@ export async function runChatTurn({
       callbacks.setIsStreaming(false);
       if (event.type === "done") {
         callbacks.onTurnComplete(reduced.messages.length);
+      } else if (event.type === "error") {
+        callbacks.onTurnError?.(event.request_id ?? requestId);
       }
     }
   };
 
   try {
-    await api.streamChat(content, sessionId, {
-      signal: abortController.signal,
-      onEvent: applyAndCommitEvent,
-    });
+    await api.streamChat(
+      content,
+      sessionId,
+      {
+        signal: abortController.signal,
+        onEvent: applyAndCommitEvent,
+      },
+      { requestId }
+    );
   } catch (error) {
     if (api.isAbortError(error) && refs.userStoppedStreamRef.current) {
       applyAndCommitEvent({

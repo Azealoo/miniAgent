@@ -45,7 +45,7 @@ test("default navigation lands on the biology-agent chat", async ({ page }) => {
   // Typing "/" surfaces the biology-agent slash commands.
   await composer.fill("/");
   await expect(page.getByText("Matching Commands")).toBeVisible();
-  for (const command of ["/ask", "/rnaseq", "/evidence", "/readiness"]) {
+  for (const command of ["/papers", "/summarize", "/primers"]) {
     await expect(page.getByText(command, { exact: true })).toBeVisible();
   }
 

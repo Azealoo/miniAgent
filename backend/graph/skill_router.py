@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from tools.skills_scanner import collect_skill_entries
+from tools.skills_scanner import collect_skill_entries, skill_required_env_satisfied
 
 MAX_ROUTED_SKILLS = 6
 MAX_ROUTING_HISTORY_MESSAGES = 6
@@ -384,7 +384,7 @@ def select_skill_entries_for_query(
     skill_entries = [
         entry
         for entry in collect_skill_entries(base_dir, respect_enabled=True)
-        if entry.get("user_invocable", True)
+        if entry.get("user_invocable", True) and skill_required_env_satisfied(entry)
     ]
     if not skill_entries:
         return []

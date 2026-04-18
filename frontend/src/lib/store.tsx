@@ -15,7 +15,11 @@ import {
 } from "./access-control";
 import * as api from "./api";
 import { useAccessScopeState } from "./access-scope-state";
-import { useSessionCatalog } from "./session-catalog";
+import {
+  useSessionCatalog,
+  type FailedTurnState,
+  type SendMessageOptions,
+} from "./session-catalog";
 import type { SessionHistoryStatus } from "./session-history-loader";
 import type {
   AccessScope,
@@ -52,6 +56,7 @@ interface AppContextValue {
   sessionHistoryStatus: SessionHistoryStatus;
   sessionHistoryError: string | null;
   sessionContinuitySummaries: SessionContinuitySummary[];
+  lastFailedTurn: FailedTurnState | null;
   draftMessage: string;
   draftRevision: number;
   inspectorTab: InspectorTab;
@@ -64,8 +69,9 @@ interface AppContextValue {
   selectSession: (id: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (content: string, options?: SendMessageOptions) => Promise<void>;
   stopStreaming: () => void;
+  clearLastFailedTurn: () => void;
   primeDraftMessage: (text: string) => void;
   clearDraftMessage: () => void;
   submitApprovalDecision: (input: ApprovalDecisionInput) => Promise<void>;
@@ -244,6 +250,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         sessionHistoryStatus: catalog.sessionHistoryStatus,
         sessionHistoryError: catalog.sessionHistoryError,
         sessionContinuitySummaries: catalog.sessionContinuitySummaries,
+        lastFailedTurn: catalog.lastFailedTurn,
         draftMessage,
         draftRevision,
         inspectorTab,
@@ -257,6 +264,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         renameSession: catalog.renameSession,
         sendMessage: catalog.sendMessage,
         stopStreaming: catalog.stopStreaming,
+        clearLastFailedTurn: catalog.clearLastFailedTurn,
         primeDraftMessage,
         clearDraftMessage,
         submitApprovalDecision,
