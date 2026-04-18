@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import uuid
 from dataclasses import dataclass, replace
 from typing import Any, AsyncGenerator
@@ -9,6 +11,8 @@ from config import get_max_tokens_per_turn, get_verification_settings
 from runtime.events import dump_runtime_event
 from runtime.metrics_collector import METRICS
 from runtime.turn_ledger import TurnLedger, TurnResult
+
+_logger = logging.getLogger(__name__)
 
 
 def _count_tokens(value: Any) -> int:
@@ -550,6 +554,26 @@ class QueryEngine:
                         return
 
                     yield _sse(self._shape_event_for_sse(event))
+            except (asyncio.CancelledError, GeneratorExit):
+                # Client disconnect (or any upstream cancel) reaches us as a
+                # CancelledError thrown into the awaiting `async for`, or as
+                # GeneratorExit when the consumer drops the generator entirely.
+                # Persist whatever the agent has already produced so the next
+                # turn picks up from a consistent on-disk state, then re-raise
+                # so cancellation continues propagating to in-flight tools.
+                # Pending approvals are deliberately NOT consumed here: the
+                # turn never reached its terminal state, so they remain valid
+                # for the next /api/chat retry.
+                try:
+                    ledger.persist_user_message()
+                    cancelled_result = ledger.finalize(turn_status="cancelled")
+                    ledger.persist_segments(cancelled_result)
+                except Exception:
+                    _logger.warning(
+                        "Failed to persist partial turn state on cancellation",
+                        exc_info=True,
+                    )
+                raise
             except Exception as exc:
                 ledger.persist_user_message()
                 error_event = {"type": "error", "error": str(exc)}

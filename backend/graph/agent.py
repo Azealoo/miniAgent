@@ -3,6 +3,7 @@ AgentManager — singleton that owns the LLM, tools, session manager,
 and memory indexer. Rebuilds the agent on every request via create_agent
 so that live workspace edits are always reflected in the system prompt.
 """
+import asyncio
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
@@ -298,6 +299,13 @@ class AgentManager:
                     yield payload
                     after_tool = True
 
+        except asyncio.CancelledError:
+            # Cancellation must propagate verbatim so it reaches in-flight
+            # async tools as a CancelledError at their next await point.
+            # Catching and converting it to an "error" event would silently
+            # turn a client disconnect into a normal turn failure and would
+            # leave the cancelled tool task uncancelled.
+            raise
         except Exception as exc:
             yield {"type": "error", "error": str(exc)}
             return

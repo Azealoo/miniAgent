@@ -546,6 +546,13 @@ class PolicyWrappedTool(BaseTool):
                     )
             except _SandboxWallClockExceeded as exc:
                 raw_output = self._handle_wall_clock_exceeded(exc)
+            except asyncio.CancelledError:
+                # Client-disconnect cancellation must reach in-flight async
+                # tools at their next await point and bubble back up so the
+                # whole turn unwinds. Converting it to an error envelope
+                # would let the agent loop keep running on a half-cancelled
+                # task tree.
+                raise
             except Exception as exc:
                 raw_output = self._handle_tool_exception(exc, args, kwargs)
 
