@@ -9,7 +9,7 @@ from hardening import (
     VALID_POSTURES,
     ProductionHardeningPolicy,
 )
-from runtime_config import load_runtime_config
+from runtime_config import load_runtime_config, resolve_runtime_config_paths
 from runtime_config_types import LoadedRuntimeConfig
 
 _CONFIG_FILE = Path(__file__).parent / "config.json"
@@ -132,11 +132,44 @@ _DEFAULT: dict = {
 }
 
 
+_CACHED_LOADED_RUNTIME: LoadedRuntimeConfig | None = None
+_CACHED_LOADED_RUNTIME_SIGNATURE: tuple | None = None
+
+
+def _layer_stat_signature(layer_name: str, path: Path) -> tuple:
+    try:
+        st = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return (layer_name, str(path), None, None)
+    return (layer_name, str(path), st.st_mtime_ns, st.st_size)
+
+
+def _runtime_config_signature() -> tuple:
+    paths = resolve_runtime_config_paths(_CONFIG_FILE)
+    return tuple(
+        _layer_stat_signature(layer_name, paths[layer_name])
+        for layer_name in ("user", "project", "local")
+    )
+
+
 def _load_loaded_runtime() -> LoadedRuntimeConfig:
-    return load_runtime_config(
+    # Cache the merged config keyed by each layer file's (path, mtime_ns,
+    # size). Writes to tracked layer files are rejected by the file API
+    # unless BIOAPEX_ALLOW_CONFIG_RELOAD=1, so the signature stays stable
+    # within a turn; when the override is set, the next accessor sees the
+    # new mtime and reparses.
+    global _CACHED_LOADED_RUNTIME, _CACHED_LOADED_RUNTIME_SIGNATURE
+    signature = _runtime_config_signature()
+    cached = _CACHED_LOADED_RUNTIME
+    if cached is not None and _CACHED_LOADED_RUNTIME_SIGNATURE == signature:
+        return cached
+    loaded = load_runtime_config(
         default_config=_DEFAULT,
         project_config_path=_CONFIG_FILE,
     )
+    _CACHED_LOADED_RUNTIME = loaded
+    _CACHED_LOADED_RUNTIME_SIGNATURE = signature
+    return loaded
 
 
 def _load_runtime() -> dict:

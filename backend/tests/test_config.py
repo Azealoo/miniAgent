@@ -7,7 +7,26 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_config_cache():
+    """Clear the module-level runtime-config cache between tests.
+
+    The cache is keyed by per-layer stat signatures, so tmp_path isolation
+    already prevents cross-contamination — but resetting keeps cache-hit
+    counting tests self-contained regardless of execution order.
+    """
+    import config as _config
+
+    _config._CACHED_LOADED_RUNTIME = None
+    _config._CACHED_LOADED_RUNTIME_SIGNATURE = None
+    yield
+    _config._CACHED_LOADED_RUNTIME = None
+    _config._CACHED_LOADED_RUNTIME_SIGNATURE = None
 
 
 class TestConfig:
@@ -374,3 +393,69 @@ class TestConfig:
         # Backwards-compatible layer summary remains alongside field_provenance.
         layer_names = [layer["name"] for layer in response["config_layers"]]
         assert layer_names == ["defaults", "user", "project", "local"]
+
+
+class TestRuntimeConfigCache:
+    def test_repeated_accessor_calls_reuse_parsed_config(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"rag_mode": True}), encoding="utf-8")
+
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+
+            real_load = config.load_runtime_config
+            call_count = 0
+
+            def counting_load(**kwargs):
+                nonlocal call_count
+                call_count += 1
+                return real_load(**kwargs)
+
+            with patch("config.load_runtime_config", side_effect=counting_load):
+                # Mix of direct and accessor calls — all should share one parse.
+                assert config._load_loaded_runtime() is config._load_loaded_runtime()
+                assert config.get_rag_mode() is True
+                config.get_prompt_budget()
+                config.get_tool_policy_settings()
+
+            assert call_count == 1
+
+    def test_file_edit_invalidates_cache_when_reload_allowed(
+        self, tmp_path, monkeypatch
+    ):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"rag_mode": False}), encoding="utf-8")
+        monkeypatch.setenv("BIOAPEX_ALLOW_CONFIG_RELOAD", "1")
+
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+
+            assert config.get_rag_mode() is False
+
+            cfg_file.write_text(json.dumps({"rag_mode": True}), encoding="utf-8")
+            # Bump the mtime explicitly so the test does not depend on the
+            # filesystem's clock resolution between the two writes.
+            st = cfg_file.stat()
+            os.utime(cfg_file, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+            assert config.get_rag_mode() is True
+
+    def test_snapshot_reflects_current_file_state(self, tmp_path, monkeypatch):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"rag_mode": False}), encoding="utf-8")
+        monkeypatch.setenv("BIOAPEX_ALLOW_CONFIG_RELOAD", "1")
+
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+
+            first = config.snapshot_runtime_config()
+            assert first.config.data["rag_mode"] is False
+
+            cfg_file.write_text(json.dumps({"rag_mode": True}), encoding="utf-8")
+            st = cfg_file.stat()
+            os.utime(cfg_file, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+            second = config.snapshot_runtime_config()
+            assert second.config.data["rag_mode"] is True
+            # First snapshot still holds its point-in-time view.
+            assert first.config.data["rag_mode"] is False
