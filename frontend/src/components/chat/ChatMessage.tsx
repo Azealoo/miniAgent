@@ -190,6 +190,8 @@ export default function ChatMessage({
   return (
     <article
       aria-label="Assistant response"
+      aria-live="polite"
+      aria-busy={message.isStreaming ? true : undefined}
       className="apex-transcript-enter grid grid-cols-[1rem,minmax(0,1fr)] gap-3 sm:gap-4"
     >
       <MessageMarker />
