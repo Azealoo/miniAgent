@@ -18,7 +18,11 @@ from graph.session.session_normalizer import (
     _normalize_messages,
     _normalize_record_list,
 )
-from graph.session.session_schema import SESSION_SCHEMA_VERSION, _validate_session_id
+from graph.session.session_schema import (
+    SESSION_SCHEMA_VERSION,
+    SessionCorruptError,
+    _validate_session_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +73,7 @@ class SessionStore:
     def __init__(self, base_dir: Path) -> None:
         self.sessions_dir = base_dir / "sessions"
         self.archive_dir = self.sessions_dir / "archive"
+        self.quarantine_dir = self.sessions_dir / "_quarantine"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -80,6 +85,32 @@ class SessionStore:
         _validate_session_id(session_id)
         return self.sessions_dir / f"{session_id}.json"
 
+    def _quarantine_corrupt_file(self, path: Path, session_id: str) -> Path:
+        """Move *path* into ``sessions/_quarantine/`` and return the new path.
+
+        Used when a session JSON file fails to decode. Preserves the bad
+        bytes for forensic review while clearing the active slot so the
+        next read returns an empty session.
+        """
+        self.quarantine_dir.mkdir(parents=True, exist_ok=True)
+        quarantined = self.quarantine_dir / f"{int(time.time())}_{session_id}.json"
+        try:
+            path.replace(quarantined)
+        except OSError as exc:
+            logger.warning(
+                "session_quarantine_failed session_id=%s path=%s error=%s",
+                session_id,
+                path,
+                exc,
+            )
+            return quarantined
+        logger.warning(
+            "session_quarantined session_id=%s quarantine_path=%s",
+            session_id,
+            quarantined,
+        )
+        return quarantined
+
     def _read(self, session_id: str) -> dict:
         path = self._path(session_id)
         if not path.exists():
@@ -87,9 +118,14 @@ class SessionStore:
 
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            # Corrupted or unreadable file — return a fresh session structure
-            # rather than propagating a 500 error to the user.
+        except json.JSONDecodeError as exc:
+            quarantined = self._quarantine_corrupt_file(path, session_id)
+            raise SessionCorruptError(
+                session_id, str(quarantined), original_error=exc
+            ) from exc
+        except OSError:
+            # Transient read failure (permissions, EBUSY, etc.) — surface as
+            # an empty session rather than destroying the file.
             return self._empty(session_id)
 
         # v1 migration: plain list → v2 dict
@@ -152,7 +188,22 @@ class SessionStore:
         sessions = []
         for path in self.sessions_dir.glob("*.json"):
             try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
+                raw_text = path.read_text(encoding="utf-8")
+            except OSError:
+                # Transient read failure — skip this file but leave it in
+                # place so a future call can recover it.
+                continue
+
+            try:
+                raw = json.loads(raw_text)
+            except json.JSONDecodeError:
+                # Corrupt file: quarantine it so the slot is freed and a
+                # subsequent direct load surfaces SessionCorruptError. Skip
+                # the entry in the listing rather than blocking the catalog.
+                self._quarantine_corrupt_file(path, path.stem)
+                continue
+
+            try:
                 if isinstance(raw, list):
                     title, updated_at, msgs = path.stem, 0.0, raw
                 else:
@@ -167,7 +218,7 @@ class SessionStore:
                         "message_count": len(msgs),
                     }
                 )
-            except Exception:
+            except (AttributeError, TypeError):
                 continue
         sessions.sort(key=lambda x: x["updated_at"], reverse=True)
         return sessions

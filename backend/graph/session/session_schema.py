@@ -19,6 +19,29 @@ _ARCHIVE_ID_RE = re.compile(r"^\d+$")
 SESSION_SCHEMA_VERSION = "session.v3"
 
 
+class SessionCorruptError(Exception):
+    """Raised when a session JSON file cannot be decoded.
+
+    The corrupted file has been moved aside (see ``quarantine_path``) so the
+    next read returns an empty session — callers can surface a typed error
+    to the UI instead of silently overwriting the user's history.
+    """
+
+    def __init__(
+        self,
+        session_id: str,
+        quarantine_path: str,
+        *,
+        original_error: Exception | None = None,
+    ) -> None:
+        self.session_id = session_id
+        self.quarantine_path = quarantine_path
+        self.original_error = original_error
+        super().__init__(
+            f"Session {session_id!r} JSON was corrupt; quarantined at {quarantine_path}"
+        )
+
+
 class SessionTextBlock(TypedDict):
     type: Literal["text"]
     text: str

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from graph.session_manager import SessionManager
+from graph.session_manager import SessionCorruptError, SessionManager
 from graph.session_summary import (
     MAX_SUMMARY_CHARS,
     STRUCTURED_SUMMARY_HEADER,
@@ -932,3 +932,71 @@ class TestDeleteSessionDistillationHook:
         assert not (tmp_path / "sessions" / f"{session_id}.json").exists()
         # Failure is surfaced via the in-memory set the debug endpoint exposes.
         assert session_id in get_failed_distillations()
+
+
+# --------------------------------------------------------------------- #
+# Corrupt-session quarantine                                            #
+# --------------------------------------------------------------------- #
+
+
+class TestCorruptSessionQuarantine:
+    def test_corrupt_file_quarantined_and_raises(self, sm, tmp_path):
+        sid = sm.create_session()
+        path = tmp_path / "sessions" / f"{sid}.json"
+        path.write_text("{not-json", encoding="utf-8")
+
+        with pytest.raises(SessionCorruptError) as excinfo:
+            sm.load_session(sid)
+
+        # Original session_id is exposed on the typed error.
+        assert excinfo.value.session_id == sid
+
+        # Quarantine directory is created on demand.
+        quarantine_dir = tmp_path / "sessions" / "_quarantine"
+        assert quarantine_dir.is_dir()
+
+        # The corrupt bytes were moved aside (not silently wiped).
+        quarantined = list(quarantine_dir.glob(f"*_{sid}.json"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_text(encoding="utf-8") == "{not-json"
+        # The error's quarantine_path matches the file on disk.
+        assert excinfo.value.quarantine_path == str(quarantined[0])
+
+        # Active session slot is freed.
+        assert not path.exists()
+
+    def test_quarantined_session_not_in_active_list(self, sm, tmp_path):
+        good_sid = sm.create_session()
+        bad_sid = sm.create_session()
+
+        # Corrupt the second session's file.
+        (tmp_path / "sessions" / f"{bad_sid}.json").write_text(
+            "{garbage", encoding="utf-8"
+        )
+
+        listed = sm.list_sessions()
+        listed_ids = {s["id"] for s in listed}
+
+        # The good session is still listed; the corrupt one is not.
+        assert good_sid in listed_ids
+        assert bad_sid not in listed_ids
+
+        # The corrupt file was quarantined as part of the listing pass.
+        quarantine_dir = tmp_path / "sessions" / "_quarantine"
+        assert list(quarantine_dir.glob(f"*_{bad_sid}.json"))
+
+    def test_quarantine_filename_uses_unix_ts_prefix(self, sm, tmp_path):
+        sid = sm.create_session()
+        (tmp_path / "sessions" / f"{sid}.json").write_text(
+            "not json at all", encoding="utf-8"
+        )
+
+        with pytest.raises(SessionCorruptError):
+            sm._read(sid)
+
+        quarantined = list(
+            (tmp_path / "sessions" / "_quarantine").glob(f"*_{sid}.json")
+        )
+        assert len(quarantined) == 1
+        ts_prefix = quarantined[0].stem.split("_", 1)[0]
+        assert ts_prefix.isdigit()
