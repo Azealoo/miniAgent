@@ -15,8 +15,15 @@ SSE event types emitted:
   plan_updated {type, summary, plan, tool_trace?, run_id?}
   verification_result {type, summary, verdict, verification, tool_trace?, run_id?}
   new_response {type}
-  done         {type, content, session_id, turn_status?}
+  done         {type, content, session_id, turn_status?, exit}
   error        {type, error}
+  warning      {type, kind, message, ...}
+
+The terminal ``done`` event carries a structured ``exit`` object
+(``reason``/``exit_code``/``summary?``) on schema_version=2. Legacy v1 clients
+can send ``X-Runtime-Event-Schema-Version: 1`` to receive a one-shot
+``warning`` with ``kind="schema_version_deprecated"`` before the stream body;
+``turn_status`` remains populated for back-compat.
 
 Event shaping and persistence live in ``runtime.query_engine.QueryEngine``;
 this route is intentionally limited to request plumbing.
@@ -139,10 +146,20 @@ async def chat(request: ChatRequest, http_request: Request = None):
         )
     await turn_lock.acquire()
 
+    client_schema_version: int | None = None
+    if http_request is not None:
+        raw_version = http_request.headers.get("x-runtime-event-schema-version")
+        if raw_version is not None:
+            try:
+                client_schema_version = int(raw_version.strip())
+            except ValueError:
+                client_schema_version = None
+
     engine = QueryEngine(agent_manager)
     inner_stream = engine.stream_turn_sse(
         message=request.message,
         session_id=request.session_id,
+        client_schema_version=client_schema_version,
     )
 
     async def _locked_stream():

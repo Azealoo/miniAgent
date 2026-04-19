@@ -9,6 +9,7 @@ import type {
   JsonObject,
   RetrievalResult,
   ToolResultEnvelope,
+  TurnExit,
 } from "./types";
 
 interface ParsedChatStreamChunk {
@@ -162,6 +163,8 @@ export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent {
         type: "done",
         content: event.content,
         session_id: event.session_id ?? undefined,
+        turn_status: event.turn_status ?? undefined,
+        exit: (event.exit ?? undefined) as TurnExit | undefined,
         ...base,
       };
     case "error":

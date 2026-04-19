@@ -20,6 +20,7 @@ import {
   parseChatStreamChunk,
   type StreamCallbacks,
 } from "./chat-stream-events";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "./runtime-events";
 
 export { ApiPayloadError, isApiPayloadError };
 export type { StreamCallbacks };
@@ -392,6 +393,9 @@ export async function streamChat(
     jsonBody: { message, session_id: sessionId },
     method: "POST",
     signal: callbacks.signal,
+    headers: {
+      "X-Runtime-Event-Schema-Version": String(RUNTIME_EVENT_SCHEMA_VERSION),
+    },
   });
 
   const dispatcher = createChatStreamDispatcher(callbacks);

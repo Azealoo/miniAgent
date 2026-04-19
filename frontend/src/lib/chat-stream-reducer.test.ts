@@ -610,6 +610,41 @@ describe("applyStreamEvent per-event coverage", () => {
     expect(assistant.content).toBe("streamed");
   });
 
+  it("done stores the structured exit payload on the finalized message", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      {
+        type: "done",
+        content: "done",
+        exit: {
+          reason: "token_budget",
+          exit_code: 3,
+          summary: "turn budget exceeded",
+        },
+      },
+      200
+    );
+    const assistant = state.messages[0];
+    expect(assistant.exit).toEqual({
+      reason: "token_budget",
+      exit_code: 3,
+      summary: "turn budget exceeded",
+    });
+  });
+
+  it("done preserves message.exit when a later done has no exit field", () => {
+    let state = freshState();
+    const priorExit = { reason: "tool_error", exit_code: 1 } as const;
+    state = {
+      ...state,
+      messages: state.messages.map((m) => ({ ...m, exit: priorExit })),
+    };
+    state = reduceEvent(state, { type: "done", content: "ok" }, 210);
+    const assistant = state.messages[0];
+    expect(assistant.exit).toEqual(priorExit);
+  });
+
   it("error appends an error block and ends the turn", () => {
     let state = freshState();
     state = reduceEvent(
