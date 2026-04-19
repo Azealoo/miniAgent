@@ -2,8 +2,10 @@
 Tests for skills_scanner — scans SKILL.md files and writes SKILLS_SNAPSHOT.md.
 """
 import json
+import os
 import re
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from tools import skills_scanner
 from tools.skills_scanner import (
     SkillRegistry,
     _parse_frontmatter,
@@ -796,3 +799,157 @@ class TestSkillRegistryTwoPhase:
         assert body is not None
         assert _BODY_MARKER in body
         assert "helper_skill" not in body  # name lived in frontmatter only
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Registry cache — issue #128
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _write_cache_skill(base: Path, name: str) -> Path:
+    skill_dir = base / "skills" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skill_dir / "SKILL.md"
+    skill_path.write_text(
+        (
+            f"---\nname: {name}\ndescription: cache test skill {name}\n"
+            "category: bio/literature\n"
+            "requires_tools: [read_file]\nrequires_network: false\nuser_invocable: true\n"
+            "species: any\nmodality: literature\nstage: analysis\n"
+            "stability: experimental\nsafety_level: low\n"
+            "---\n# Body\n"
+        ),
+        encoding="utf-8",
+    )
+    return skill_path
+
+
+class TestRegistryCache:
+    def setup_method(self):
+        skills_scanner._clear_registry_cache()
+
+    def teardown_method(self):
+        skills_scanner._clear_registry_cache()
+
+    def test_repeated_calls_within_ttl_skip_parsing(self, tmp_path):
+        _write_cache_skill(tmp_path, "cache_alpha")
+        _write_cache_skill(tmp_path, "cache_beta")
+
+        with patch(
+            "tools.skills_scanner.parse_skill_entry",
+            wraps=skills_scanner.parse_skill_entry,
+        ) as parse_mock:
+            first = collect_skill_entries(tmp_path, respect_enabled=False)
+            cold_parses = parse_mock.call_count
+            second = collect_skill_entries(tmp_path, respect_enabled=False)
+            warm_parses = parse_mock.call_count
+
+        assert cold_parses == 2
+        assert warm_parses == cold_parses  # no re-parsing on cache hit
+        assert first == second
+
+    def test_touching_skill_file_invalidates_cache(self, tmp_path):
+        skill_path = _write_cache_skill(tmp_path, "invalidated_skill")
+
+        with patch(
+            "tools.skills_scanner.parse_skill_entry",
+            wraps=skills_scanner.parse_skill_entry,
+        ) as parse_mock:
+            collect_skill_entries(tmp_path, respect_enabled=False)
+            first_parses = parse_mock.call_count
+
+            # Bump mtime to simulate an edit (use +1s so even coarse-grained
+            # filesystems register a change).
+            stat_result = skill_path.stat()
+            os.utime(
+                skill_path,
+                (stat_result.st_atime, stat_result.st_mtime + 1),
+            )
+
+            collect_skill_entries(tmp_path, respect_enabled=False)
+            second_parses = parse_mock.call_count
+
+        assert second_parses > first_parses
+
+    def test_ttl_expiry_invalidates_cache(self, tmp_path, monkeypatch):
+        _write_cache_skill(tmp_path, "ttl_skill")
+        monkeypatch.setattr(skills_scanner, "_CACHE_TTL_SECONDS", 0.01)
+
+        with patch(
+            "tools.skills_scanner.parse_skill_entry",
+            wraps=skills_scanner.parse_skill_entry,
+        ) as parse_mock:
+            collect_skill_entries(tmp_path, respect_enabled=False)
+            first_parses = parse_mock.call_count
+
+            time.sleep(0.05)
+
+            collect_skill_entries(tmp_path, respect_enabled=False)
+            second_parses = parse_mock.call_count
+
+        assert second_parses > first_parses
+
+    def test_respect_enabled_uses_separate_cache_slots(self, tmp_path):
+        _write_cache_skill(tmp_path, "flagged_skill")
+        cfg_file = tmp_path / "backend-config.json"
+        cfg_file.write_text(
+            json.dumps(
+                {"skills": {"entries": {"flagged_skill": {"enabled": False}}}}
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("config._CONFIG_FILE", cfg_file):
+            active_first = collect_skill_entries(tmp_path, respect_enabled=True)
+            unfiltered_first = collect_skill_entries(tmp_path, respect_enabled=False)
+            active_cached = collect_skill_entries(tmp_path, respect_enabled=True)
+            unfiltered_cached = collect_skill_entries(tmp_path, respect_enabled=False)
+
+        assert active_first == []
+        assert [entry["name"] for entry in unfiltered_first] == ["flagged_skill"]
+        # Both slots must remain consistent across repeated cached reads.
+        assert active_first == active_cached
+        assert unfiltered_first == unfiltered_cached
+
+    def test_scan_skills_write_busts_cache_via_mtime(self, tmp_path):
+        skill_path = _write_cache_skill(tmp_path, "snapshot_skill")
+
+        scan_skills(tmp_path)
+        first_snapshot = (tmp_path / "SKILLS_SNAPSHOT.md").read_text()
+        assert "<name>snapshot_skill</name>" in first_snapshot
+
+        # Simulate a SKILL.md edit that renames the skill; scan_skills should
+        # pick it up because the mtime changes the cache fingerprint.
+        skill_path.write_text(
+            skill_path.read_text(encoding="utf-8").replace(
+                "name: snapshot_skill", "name: renamed_skill"
+            ),
+            encoding="utf-8",
+        )
+        stat_result = skill_path.stat()
+        os.utime(skill_path, (stat_result.st_atime, stat_result.st_mtime + 1))
+
+        scan_skills(tmp_path)
+        second_snapshot = (tmp_path / "SKILLS_SNAPSHOT.md").read_text()
+        assert "<name>renamed_skill</name>" in second_snapshot
+        assert "<name>snapshot_skill</name>" not in second_snapshot
+
+    def test_cached_calls_are_substantially_faster(self, tmp_path):
+        for index in range(20):
+            _write_cache_skill(tmp_path, f"bench_skill_{index:02d}")
+
+        skills_scanner._clear_registry_cache()
+        cold_start = time.perf_counter()
+        collect_skill_entries(tmp_path, respect_enabled=False)
+        cold_elapsed = time.perf_counter() - cold_start
+
+        warm_runs = 20
+        warm_start = time.perf_counter()
+        for _ in range(warm_runs):
+            collect_skill_entries(tmp_path, respect_enabled=False)
+        warm_elapsed = (time.perf_counter() - warm_start) / warm_runs
+
+        assert warm_elapsed * 3 < cold_elapsed, (
+            f"Registry cache did not speed up collection: "
+            f"cold={cold_elapsed:.4f}s, warm_avg={warm_elapsed:.4f}s"
+        )
