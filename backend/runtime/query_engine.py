@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, replace
-from typing import Any, Awaitable, Callable, AsyncGenerator, Sequence
+from typing import Any, AsyncIterator, Awaitable, Callable, AsyncGenerator, Sequence
 
 from config import (
     get_max_tokens_per_turn,
+    get_max_turn_wallclock_s,
     get_verification_settings,
     snapshot_runtime_config,
 )
@@ -68,6 +70,48 @@ async def dispatch_tool_batch(
     return results
 
 _logger = logging.getLogger(__name__)
+
+
+async def _bounded_async_stream(
+    agen: AsyncIterator[dict],
+    wallclock_deadline: float | None,
+) -> AsyncGenerator[dict, None]:
+    """Re-yield ``agen`` events while enforcing an absolute wall-clock deadline.
+
+    When ``wallclock_deadline`` is ``None`` the helper behaves as a thin
+    pass-through. Otherwise each ``__anext__()`` is wrapped in
+    ``asyncio.wait_for`` with the remaining time budget so a stuck tool
+    awaiting inside the inner agent receives a ``CancelledError`` at its
+    next await point. The underlying generator is always closed in the
+    ``finally`` block so tool ``finally:`` handlers run.
+
+    Raises ``asyncio.TimeoutError`` to the caller when the deadline is hit.
+    """
+    try:
+        while True:
+            if wallclock_deadline is not None:
+                remaining = wallclock_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError("turn wallclock budget exceeded")
+                event = await asyncio.wait_for(
+                    agen.__anext__(),
+                    timeout=remaining,
+                )
+            else:
+                event = await agen.__anext__()
+            yield event
+    except StopAsyncIteration:
+        return
+    finally:
+        aclose = getattr(agen, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:
+                _logger.debug(
+                    "agent astream aclose raised during bounded stream teardown",
+                    exc_info=True,
+                )
 
 
 def _count_tokens(value: Any) -> int:
@@ -328,6 +372,17 @@ class QueryEngine:
         output_tokens = 0
         METRICS.record_input_tokens(input_tokens)
 
+        # Turn-level wall-clock budget (seconds). 0 disables the cap. The
+        # deadline is absolute over the entire turn (inclusive of any repair
+        # retry pass) so a stuck tool cannot extend the turn by entering the
+        # retry loop.
+        wallclock_budget_s = get_max_turn_wallclock_s()
+        wallclock_deadline = (
+            time.monotonic() + wallclock_budget_s
+            if wallclock_budget_s > 0
+            else None
+        )
+
         def _budget_exceeded() -> bool:
             return budget > 0 and (input_tokens + output_tokens) > budget
 
@@ -345,6 +400,22 @@ class QueryEngine:
             METRICS.observe_event(event)
             return event
 
+        def _wallclock_timeout_error_event() -> dict[str, Any]:
+            summary = (
+                f"turn wallclock budget of {wallclock_budget_s:.1f}s exceeded"
+            )
+            event = {
+                "type": "error",
+                "error": summary,
+                "turn_status": "cancelled",
+                "exit": turn_status_to_exit(
+                    "cancelled",
+                    summary=summary,
+                ).model_dump(exclude_none=True),
+            }
+            METRICS.observe_event(event)
+            return event
+
         while True:
             latest_plan_event: dict[str, Any] | None = None
             latest_verification_event: dict[str, Any] | None = None
@@ -352,60 +423,77 @@ class QueryEngine:
             current_segment: list[str] = []
             turn_status = "ok"
 
-            async for event in self.agent_manager.astream(
+            inner_agen = self.agent_manager.astream(
                 current_turn.message,
                 current_turn.history,
-            ):
-                event_type = event.get("type")
-                if event_type == "done":
-                    turn_status = event.get("turn_status") or event.get("status", "ok")
-                    break
+            )
+            bounded = _bounded_async_stream(inner_agen, wallclock_deadline)
+            wallclock_timed_out = False
+            try:
+                async for event in bounded:
+                    event_type = event.get("type")
+                    if event_type == "done":
+                        turn_status = event.get("turn_status") or event.get("status", "ok")
+                        break
 
-                METRICS.observe_event(event)
+                    METRICS.observe_event(event)
 
-                if event_type == "token":
-                    content = event.get("content")
-                    if isinstance(content, str) and content:
-                        current_segment.append(content)
-                        output_tokens += _count_tokens(content)
+                    if event_type == "token":
+                        content = event.get("content")
+                        if isinstance(content, str) and content:
+                            current_segment.append(content)
+                            output_tokens += _count_tokens(content)
+                        yield event
+                        if _budget_exceeded():
+                            yield _budget_error_event()
+                            return
+                        continue
+
+                    if event_type == "new_response":
+                        if current_segment:
+                            draft_segments.append("".join(current_segment))
+                            current_segment.clear()
+                        yield event
+                        continue
+
+                    # Prompt-cache usage samples are internal: the metrics
+                    # collector records them against the Prometheus gauges but
+                    # they should not reach the SSE wire.
+                    if event_type == "llm_usage":
+                        continue
+
+                    if event_type == "tool_start":
+                        input_tokens += _count_tokens(event.get("input"))
+                    elif event_type == "tool_end":
+                        output_tokens += _count_tokens(event.get("output"))
+
                     yield event
+                    helper_event = self._extract_helper_agent_event(event, saw_plan=saw_plan)
+                    if helper_event is not None:
+                        if helper_event["type"] in {"plan_created", "plan_updated"}:
+                            saw_plan = True
+                            latest_plan_event = helper_event
+                        elif helper_event["type"] == "verification_result":
+                            latest_verification_event = helper_event
+                        METRICS.observe_event(helper_event)
+                        yield helper_event
+
                     if _budget_exceeded():
                         yield _budget_error_event()
                         return
-                    continue
+            except asyncio.TimeoutError:
+                # Turn wallclock budget exceeded. asyncio.wait_for has
+                # already cancelled the in-flight astream task (and any
+                # tool awaiting inside it), so emitting an error event is
+                # safe — the consumer will finalize the ledger in the same
+                # "cancelled" path used for client-disconnect.
+                wallclock_timed_out = True
 
-                if event_type == "new_response":
-                    if current_segment:
-                        draft_segments.append("".join(current_segment))
-                        current_segment.clear()
-                    yield event
-                    continue
-
-                # Prompt-cache usage samples are internal: the metrics
-                # collector records them against the Prometheus gauges but
-                # they should not reach the SSE wire.
-                if event_type == "llm_usage":
-                    continue
-
-                if event_type == "tool_start":
-                    input_tokens += _count_tokens(event.get("input"))
-                elif event_type == "tool_end":
-                    output_tokens += _count_tokens(event.get("output"))
-
-                yield event
-                helper_event = self._extract_helper_agent_event(event, saw_plan=saw_plan)
-                if helper_event is not None:
-                    if helper_event["type"] in {"plan_created", "plan_updated"}:
-                        saw_plan = True
-                        latest_plan_event = helper_event
-                    elif helper_event["type"] == "verification_result":
-                        latest_verification_event = helper_event
-                    METRICS.observe_event(helper_event)
-                    yield helper_event
-
-                if _budget_exceeded():
-                    yield _budget_error_event()
-                    return
+            if wallclock_timed_out:
+                if current_segment:
+                    draft_segments.append("".join(current_segment))
+                yield _wallclock_timeout_error_event()
+                return
 
             if current_segment:
                 draft_segments.append("".join(current_segment))

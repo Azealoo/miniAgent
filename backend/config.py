@@ -43,6 +43,16 @@ _DEFAULT_PROMPT_BUDGET: dict = {
 _DEFAULT_LLM_PROBE_MIN_FILES = 10
 _DEFAULT_LLM_PROBE_MAX_CHARS = 8_000
 
+# Wall-clock budgets. ``max_turn_wallclock_s`` caps how long a single turn may
+# run before the runtime raises ``asyncio.TimeoutError`` at the turn loop.
+# ``tool_wallclock.default_seconds`` is the default per-tool wall-clock budget
+# applied inside ``PolicyWrappedTool._arun`` when a tool does not declare its
+# own ``SandboxSpec.max_wall_clock_seconds``. ``tool_wallclock.overrides``
+# maps a tool name to a per-tool override (wins over both the sandbox default
+# and the ``default_seconds`` fallback). A value ``<= 0`` disables the cap.
+_DEFAULT_MAX_TURN_WALLCLOCK_S = 0.0
+_DEFAULT_TOOL_WALLCLOCK_DEFAULT_S = 0.0
+
 # Normalized values for rag_mode. Historically this was a plain bool
 # (False = no RAG, True = keyword BM25/lexical retrieval). The string form
 # ("off" / "keyword" / "llm_probe") is a superset that unlocks the LLM-probe
@@ -57,6 +67,11 @@ _DEFAULT: dict = {
     "rag_mode": False,
     "deterministic_seed": None,
     "max_tokens_per_turn": _DEFAULT_MAX_TOKENS_PER_TURN,
+    "max_turn_wallclock_s": _DEFAULT_MAX_TURN_WALLCLOCK_S,
+    "tool_wallclock": {
+        "default_seconds": _DEFAULT_TOOL_WALLCLOCK_DEFAULT_S,
+        "overrides": {},
+    },
     "production_hardening": {"posture": DEFAULT_POSTURE},
     "prompt_context": {
         "include_git_context": False,
@@ -363,6 +378,58 @@ def get_max_tokens_per_turn() -> int:
     except (TypeError, ValueError):
         return _DEFAULT_MAX_TOKENS_PER_TURN
     return max(0, resolved)
+
+
+def _coerce_positive_seconds(value: Any) -> float:
+    """Return ``value`` coerced to a non-negative float; invalid values → 0."""
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        resolved = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if resolved <= 0:
+        return 0.0
+    return resolved
+
+
+def get_max_turn_wallclock_s() -> float:
+    """Return the per-turn wall-clock budget in seconds. 0 disables the cap."""
+    return _coerce_positive_seconds(
+        _load_runtime().get("max_turn_wallclock_s", _DEFAULT_MAX_TURN_WALLCLOCK_S)
+    )
+
+
+def _tool_wallclock_block() -> dict[str, Any]:
+    raw = _load_runtime().get("tool_wallclock", {})
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def get_tool_wallclock_default_s() -> float:
+    """Return the default per-tool wall-clock budget in seconds.
+
+    Applied when a tool does not declare its own
+    ``SandboxSpec.max_wall_clock_seconds`` and when no per-tool override
+    exists for that name. 0 or negative disables the default.
+    """
+    return _coerce_positive_seconds(
+        _tool_wallclock_block().get("default_seconds", _DEFAULT_TOOL_WALLCLOCK_DEFAULT_S)
+    )
+
+
+def get_tool_wallclock_override_s(tool_name: str) -> float | None:
+    """Return the per-tool wall-clock override in seconds, or ``None``.
+
+    A returned value of 0.0 means the operator explicitly disabled the cap
+    for this tool — callers should treat that as "do not enforce" rather
+    than falling back to the manifest sandbox default.
+    """
+    overrides = _tool_wallclock_block().get("overrides", {})
+    if not isinstance(overrides, dict):
+        return None
+    if tool_name not in overrides:
+        return None
+    return _coerce_positive_seconds(overrides[tool_name])
 
 
 def get_deterministic_seed() -> int | None:
