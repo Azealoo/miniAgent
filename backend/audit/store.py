@@ -32,6 +32,7 @@ AuditEventType = Literal[
     "file_written",
     "job_submitted",
     "export_generated",
+    "model_fallback",
 ]
 
 

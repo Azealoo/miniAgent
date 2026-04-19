@@ -22,6 +22,7 @@ class RoleModelConfig:
     temperature: float
     streaming: bool
     seed: int | None = None
+    fallback_model: str | None = None
 
 
 _ROLE_DEFAULTS: dict[ModelRole, dict[str, object]] = {
@@ -31,6 +32,7 @@ _ROLE_DEFAULTS: dict[ModelRole, dict[str, object]] = {
         "base_url": "https://api.deepseek.com",
         "temperature": 0.3,
         "streaming": True,
+        "fallback_model": None,
     },
     "planner": {
         "provider": "openai",
@@ -38,6 +40,7 @@ _ROLE_DEFAULTS: dict[ModelRole, dict[str, object]] = {
         "base_url": "https://api.openai.com/v1",
         "temperature": 0.2,
         "streaming": True,
+        "fallback_model": None,
     },
     "verifier": {
         "provider": "openai",
@@ -45,6 +48,7 @@ _ROLE_DEFAULTS: dict[ModelRole, dict[str, object]] = {
         "base_url": "https://api.openai.com/v1",
         "temperature": 0.2,
         "streaming": True,
+        "fallback_model": None,
     },
     "title": {
         "provider": "openai",
@@ -52,6 +56,7 @@ _ROLE_DEFAULTS: dict[ModelRole, dict[str, object]] = {
         "base_url": "https://api.openai.com/v1",
         "temperature": 0.2,
         "streaming": False,
+        "fallback_model": None,
     },
 }
 
@@ -173,6 +178,17 @@ def get_role_model_config(role: ModelRole, *, streaming: bool | None = None) -> 
         # Deterministic mode pins temperature to 0 regardless of per-role setting.
         temperature = 0.0
 
+    fallback_model_setting = (
+        os.getenv(f"{_role_env_prefix(role)}_FALLBACK_MODEL")
+        or role_settings.get("fallback_model")
+        or llm_settings.get("fallback_model")
+        or defaults.get("fallback_model")
+    )
+    if isinstance(fallback_model_setting, str):
+        fallback_model_setting = fallback_model_setting.strip() or None
+    elif fallback_model_setting is not None:
+        fallback_model_setting = None
+
     return RoleModelConfig(
         role=role,
         provider=provider,
@@ -182,6 +198,7 @@ def get_role_model_config(role: ModelRole, *, streaming: bool | None = None) -> 
         temperature=temperature,
         streaming=resolved_streaming,
         seed=seed,
+        fallback_model=fallback_model_setting,
     )
 
 
@@ -189,10 +206,9 @@ def role_model_is_configured(role: ModelRole) -> bool:
     return bool(get_role_model_config(role).api_key.strip())
 
 
-def build_chat_model(role: ModelRole, *, streaming: bool | None = None):
-    settings = get_role_model_config(role, streaming=streaming)
+def _instantiate_chat_model(settings: RoleModelConfig, *, model_override: str | None = None):
     kwargs: dict[str, object] = {
-        "model": settings.model,
+        "model": model_override or settings.model,
         "api_key": settings.api_key,
         "base_url": settings.base_url,
         "temperature": settings.temperature,
@@ -204,4 +220,24 @@ def build_chat_model(role: ModelRole, *, streaming: bool | None = None):
         return ChatDeepSeek(**kwargs)
     if settings.provider == "openai":
         return ChatOpenAI(**kwargs)
-    raise ValueError(f"Unsupported provider for role {role!r}: {settings.provider!r}")
+    raise ValueError(
+        f"Unsupported provider for role {settings.role!r}: {settings.provider!r}"
+    )
+
+
+def build_chat_model(role: ModelRole, *, streaming: bool | None = None):
+    settings = get_role_model_config(role, streaming=streaming)
+    return _instantiate_chat_model(settings)
+
+
+def build_fallback_chat_model(role: ModelRole, *, streaming: bool | None = None):
+    """Return a chat model client built with the role's ``fallback_model``.
+
+    Returns ``None`` when the role has no ``fallback_model`` configured —
+    callers should treat this as "no fallback available" and re-raise the
+    original overload/timeout exception.
+    """
+    settings = get_role_model_config(role, streaming=streaming)
+    if not settings.fallback_model:
+        return None
+    return _instantiate_chat_model(settings, model_override=settings.fallback_model)

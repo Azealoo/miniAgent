@@ -7,7 +7,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional
 
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -17,7 +17,9 @@ from evidence.integrity import (
     build_citation_mismatch_event,
     check_citation_integrity,
 )
-from runtime.model_factory import build_chat_model
+from runtime.model_factory import build_chat_model, build_fallback_chat_model, get_role_model_config
+from runtime.model_fallback import is_overload_or_timeout
+from audit.store import append_audit_event
 from .memory_indexer import MemoryIndexer
 from .prompt_builder import build_retrieved_memory_block, build_system_prompt
 from .session_manager import SessionManager
@@ -120,6 +122,7 @@ class AgentManager:
         rag_mode: bool = False,
         *,
         skill_entries: list[dict] | None = None,
+        llm: Any = None,
     ):
         """
         Rebuild the agent from scratch, ensuring the latest workspace edits
@@ -130,7 +133,7 @@ class AgentManager:
             f"{build_system_prompt(self.base_dir, rag_mode, skill_entries=skill_entries)}"
             f"\n\n{_HARNESS_GUIDANCE}"
         )
-        return create_agent(self.llm, self.tools, system_prompt=system_prompt)
+        return create_agent(llm or self.llm, self.tools, system_prompt=system_prompt)
 
     def clear_session_runtime(self, session_id: str) -> None:
         for tool in self.tools:
@@ -205,6 +208,8 @@ class AgentManager:
         after_tool = False
         answer_segments: list[str] = []
         turn_started_at = datetime.now(timezone.utc)
+        streamed_any_event = False
+        used_fallback = False
 
         # Biology requests with retrieval and multi-step reasoning often need
         # far more graph turns than LangGraph's small default budget.
@@ -214,113 +219,146 @@ class AgentManager:
                 1000,
             )
         }
-        try:
-            async for event in agent.astream_events(
-                {"messages": lc_messages},
-                version="v2",
-                config=run_config,
-            ):
-                kind = event["event"]
+        # Outer primary->fallback loop: if the primary executor model raises
+        # an overload/timeout error before any event has been yielded, swap
+        # in the role's configured fallback_model once per turn. The inner
+        # stream is unchanged; verification/repair retries remain in
+        # ``runtime/query_engine.py`` and are intentionally not merged here.
+        while True:
+            try:
+                async for event in agent.astream_events(
+                    {"messages": lc_messages},
+                    version="v2",
+                    config=run_config,
+                ):
+                    kind = event["event"]
 
-                if kind == "on_chat_model_stream":
-                    chunk = event["data"]["chunk"]
-                    if chunk.content:
-                        if after_tool:
-                            yield {"type": "new_response"}
-                            after_tool = False
-                        if isinstance(chunk.content, str):
-                            answer_segments.append(chunk.content)
-                        yield {"type": "token", "content": chunk.content}
+                    if kind == "on_chat_model_stream":
+                        chunk = event["data"]["chunk"]
+                        if chunk.content:
+                            if after_tool:
+                                yield {"type": "new_response"}
+                                after_tool = False
+                            if isinstance(chunk.content, str):
+                                answer_segments.append(chunk.content)
+                            streamed_any_event = True
+                            yield {"type": "token", "content": chunk.content}
 
-                elif kind == "on_chat_model_end":
-                    usage_event = _extract_llm_usage_event(event)
-                    if usage_event is not None:
-                        yield usage_event
+                    elif kind == "on_chat_model_end":
+                        usage_event = _extract_llm_usage_event(event)
+                        if usage_event is not None:
+                            streamed_any_event = True
+                            yield usage_event
 
-                elif kind == "on_tool_start":
-                    run_id = event["run_id"]
-                    tool_name = event["name"]
-                    raw_input = event["data"].get("input", {})
+                    elif kind == "on_tool_start":
+                        run_id = event["run_id"]
+                        tool_name = event["name"]
+                        raw_input = event["data"].get("input", {})
 
-                    # Flatten single-key dict inputs for readability
-                    if isinstance(raw_input, dict) and len(raw_input) == 1:
-                        tool_input_str = str(next(iter(raw_input.values())))
-                    else:
-                        tool_input_str = str(raw_input)
+                        # Flatten single-key dict inputs for readability
+                        if isinstance(raw_input, dict) and len(raw_input) == 1:
+                            tool_input_str = str(next(iter(raw_input.values())))
+                        else:
+                            tool_input_str = str(raw_input)
 
-                    yield {
-                        "type": "tool_start",
-                        "tool": tool_name,
-                        "input": tool_input_str,
-                        "run_id": run_id,
-                    }
-
-                elif kind == "on_tool_end":
-                    run_id = event["run_id"]
-                    raw_output = event["data"].get("output", "")
-                    result = normalize_tool_output(event["name"], raw_output)
-                    raw_input = event["data"].get("input", {})
-                    if isinstance(raw_input, dict) and len(raw_input) == 1:
-                        tool_input_str = str(next(iter(raw_input.values())))
-                    else:
-                        tool_input_str = str(raw_input)
-
-                    result_dict = result.model_dump(mode="json")
-                    policy = result.metadata.get("policy")
-                    policy_dict = policy if isinstance(policy, dict) else None
-
-                    if result.outcome == "needs_approval":
-                        approval_message = (
-                            result.error.message
-                            if result.error is not None
-                            else result.summary
-                        )
-                        approval_reason = (
-                            policy_dict.get("approval_reason")
-                            if isinstance(policy_dict, dict)
-                            else None
-                        ) or "requires_approval"
-                        payload = {
-                            "type": "tool_awaiting_approval",
-                            "tool": event["name"],
+                        streamed_any_event = True
+                        yield {
+                            "type": "tool_start",
+                            "tool": tool_name,
                             "input": tool_input_str,
                             "run_id": run_id,
-                            "reason": approval_reason,
-                            "message": approval_message,
+                        }
+
+                    elif kind == "on_tool_end":
+                        run_id = event["run_id"]
+                        raw_output = event["data"].get("output", "")
+                        result = normalize_tool_output(event["name"], raw_output)
+                        raw_input = event["data"].get("input", {})
+                        if isinstance(raw_input, dict) and len(raw_input) == 1:
+                            tool_input_str = str(next(iter(raw_input.values())))
+                        else:
+                            tool_input_str = str(raw_input)
+
+                        result_dict = result.model_dump(mode="json")
+                        policy = result.metadata.get("policy")
+                        policy_dict = policy if isinstance(policy, dict) else None
+
+                        if result.outcome == "needs_approval":
+                            approval_message = (
+                                result.error.message
+                                if result.error is not None
+                                else result.summary
+                            )
+                            approval_reason = (
+                                policy_dict.get("approval_reason")
+                                if isinstance(policy_dict, dict)
+                                else None
+                            ) or "requires_approval"
+                            payload = {
+                                "type": "tool_awaiting_approval",
+                                "tool": event["name"],
+                                "input": tool_input_str,
+                                "run_id": run_id,
+                                "reason": approval_reason,
+                                "message": approval_message,
+                                "result": result_dict,
+                            }
+                            if policy_dict is not None:
+                                payload["policy"] = policy_dict
+                            yield payload
+                            # Hard-stop the turn: the agent must not keep reasoning over a
+                            # gated ToolMessage, since that would either loop on the same
+                            # gate or paper over the human decision. The reviewer resumes
+                            # the turn via POST /api/chat/approval + a follow-up /api/chat.
+                            yield {"type": "done", "turn_status": "awaiting_approval"}
+                            return
+
+                        payload = {
+                            "type": "tool_end",
+                            "tool": event["name"],
+                            "output": result.summary,
                             "result": result_dict,
+                            "run_id": run_id,
                         }
                         if policy_dict is not None:
                             payload["policy"] = policy_dict
+                        streamed_any_event = True
                         yield payload
-                        # Hard-stop the turn: the agent must not keep reasoning over a
-                        # gated ToolMessage, since that would either loop on the same
-                        # gate or paper over the human decision. The reviewer resumes
-                        # the turn via POST /api/chat/approval + a follow-up /api/chat.
-                        yield {"type": "done", "turn_status": "awaiting_approval"}
-                        return
+                        after_tool = True
+                break
 
-                    payload = {
-                        "type": "tool_end",
-                        "tool": event["name"],
-                        "output": result.summary,
-                        "result": result_dict,
-                        "run_id": run_id,
-                    }
-                    if policy_dict is not None:
-                        payload["policy"] = policy_dict
-                    yield payload
-                    after_tool = True
-
-        except asyncio.CancelledError:
-            # Cancellation must propagate verbatim so it reaches in-flight
-            # async tools as a CancelledError at their next await point.
-            # Catching and converting it to an "error" event would silently
-            # turn a client disconnect into a normal turn failure and would
-            # leave the cancelled tool task uncancelled.
-            raise
-        except Exception as exc:
-            yield {"type": "error", "error": str(exc)}
-            return
+            except asyncio.CancelledError:
+                # Cancellation must propagate verbatim so it reaches in-flight
+                # async tools as a CancelledError at their next await point.
+                # Catching and converting it to an "error" event would silently
+                # turn a client disconnect into a normal turn failure and would
+                # leave the cancelled tool task uncancelled.
+                raise
+            except Exception as exc:
+                if (
+                    not used_fallback
+                    and not streamed_any_event
+                    and is_overload_or_timeout(exc)
+                ):
+                    fallback_llm = build_fallback_chat_model(
+                        "executor", streaming=True
+                    )
+                    if fallback_llm is not None:
+                        self._record_model_fallback(
+                            role="executor",
+                            exc=exc,
+                        )
+                        agent = self._build_agent(
+                            rag_mode,
+                            skill_entries=selected_skill_entries,
+                            llm=fallback_llm,
+                        )
+                        used_fallback = True
+                        after_tool = False
+                        answer_segments = []
+                        continue
+                yield {"type": "error", "error": str(exc)}
+                return
 
         warning_event = self._maybe_build_citation_warning(
             "".join(answer_segments),
@@ -330,6 +368,35 @@ class AgentManager:
             yield warning_event
 
         yield {"type": "done"}
+
+    def _record_model_fallback(self, *, role: str, exc: BaseException) -> None:
+        """Emit an audit line when a primary model is swapped for its fallback."""
+        try:
+            primary_cfg = get_role_model_config(role, streaming=True)  # type: ignore[arg-type]
+        except Exception:  # pragma: no cover — defensive
+            primary_cfg = None
+        primary_model = getattr(primary_cfg, "model", "") or ""
+        fallback_model = getattr(primary_cfg, "fallback_model", "") or ""
+        summary = (
+            f"Primary {role} model '{primary_model}' fell back to '{fallback_model}' "
+            f"after {type(exc).__name__}."
+        )
+        try:
+            append_audit_event(
+                self.base_dir,
+                event_type="model_fallback",
+                summary=summary,
+                outcome="fallback",
+                details={
+                    "role": role,
+                    "primary_model": primary_model,
+                    "fallback_model": fallback_model,
+                    "exception_class": type(exc).__name__,
+                    "exception_message": str(exc)[:500],
+                },
+            )
+        except Exception:  # pragma: no cover — audit must never abort the turn
+            logger.warning("Failed to append model_fallback audit event", exc_info=True)
 
     def _maybe_build_citation_warning(
         self,
