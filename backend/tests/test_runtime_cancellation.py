@@ -291,3 +291,179 @@ async def test_run_harness_turn_propagates_cancelled_error_to_inflight_tool():
     assert agent_manager.streaming_cancelled.is_set(), (
         "cancellation must be delivered into the in-flight agent astream"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Turn-level wallclock timeout
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_run_harness_turn_wallclock_timeout_emits_cancelled_error(
+    monkeypatch,
+):
+    """When ``max_turn_wallclock_s`` is exceeded the harness must:
+      * cancel the in-flight agent astream (so any awaited tool wakes up with
+        ``CancelledError`` at its next await point)
+      * emit a terminal ``error`` event with ``turn_status="cancelled"`` so
+        the SSE adapter persists partial segments exactly like a client
+        disconnect
+      * not leak an uncaught ``TimeoutError`` out of the generator
+    """
+    monkeypatch.setattr(
+        "runtime.query_engine.get_max_turn_wallclock_s",
+        lambda: 0.05,
+    )
+
+    agent_manager = _StallingAgentManager()
+    engine = QueryEngine(agent_manager)
+    turn = QueryTurnInput(message="hello", history=[])
+
+    events: list[dict[str, Any]] = []
+    async for event in engine.run_harness_turn(turn):
+        events.append(event)
+
+    assert agent_manager.streaming_cancelled.is_set(), (
+        "turn wallclock timeout must deliver CancelledError into the astream"
+    )
+    # A single terminal error event is the last thing on the wire, carrying
+    # the cancel-class turn_status so the SSE layer reuses the disconnect
+    # persistence path.
+    assert events, "turn-timeout must produce at least one event"
+    terminal = events[-1]
+    assert terminal["type"] == "error"
+    assert terminal.get("turn_status") == "cancelled"
+    assert "wallclock" in terminal["error"].lower()
+
+
+# --------------------------------------------------------------------------- #
+# Per-tool wallclock timeout
+# --------------------------------------------------------------------------- #
+
+
+class _SleepingTool(BaseTool):
+    name: str = "sleeping_tool"
+    description: str = "Sleeps for the requested number of seconds."
+    response_format: str = "content_and_artifact"
+    entered: asyncio.Event = None  # type: ignore[assignment]
+
+    def _run(self, seconds: float) -> str:  # pragma: no cover - async-only test
+        raise NotImplementedError
+
+    async def _arun(self, seconds: float) -> str:
+        if self.entered is not None:
+            self.entered.set()
+        await asyncio.sleep(seconds)
+        return "done"
+
+
+def _sleeping_manifest() -> ToolManifestEntry:
+    return ToolManifestEntry(
+        name="sleeping_tool",
+        description="Sleeps for the requested number of seconds.",
+        args_schema=None,
+        response_format="content_and_artifact",
+        access_scope="inspection",
+        evidence_requirement="none",
+        output_contract_version="tool_result.v1",
+        source_module="tests.test_runtime_cancellation",
+        read_only=True,
+        destructive=False,
+        concurrency_safe=True,
+        planner_exposed=True,
+        verifier_exposed=True,
+        interrupt_behavior="restartable",
+        tool_validates_input=False,
+        activity_summary_hint="inspect",
+        result_summary_hint="result",
+        sandbox=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_per_tool_wallclock_override_cancels_stuck_tool(monkeypatch):
+    """A config ``tool_wallclock.overrides[<name>]`` entry must be enforced
+    in ``PolicyWrappedTool._arun``: the stuck tool is cancelled via
+    ``asyncio.wait_for`` and the wrapper returns a ``blocked`` envelope
+    with the ``sandbox_wall_clock_exceeded`` reason code.
+
+    The manifest here carries no ``SandboxSpec``, so the override is the
+    only source of the timeout — proving that the config knob alone is
+    enough to bound a tool with no declared sandbox.
+    """
+    entered = asyncio.Event()
+    inner = _SleepingTool(entered=entered)
+    wrapper = PolicyWrappedTool(
+        name=inner.name,
+        description=inner.description,
+        args_schema=None,
+        response_format="content_and_artifact",
+        wrapped_tool=inner,
+        manifest=_sleeping_manifest(),
+    )
+
+    monkeypatch.setattr(
+        "tools.policy_wrappers.get_tool_wallclock_override_s",
+        lambda name: 0.05 if name == "sleeping_tool" else None,
+    )
+
+    with tool_policy_context(
+        ToolPolicyExecutionContext(
+            session_id="session-tool-timeout",
+            request_id="request-tool-timeout",
+            allowed_access_scope="execution",
+        )
+    ):
+        summary, artifact = await wrapper._arun(seconds=5.0)
+
+    assert entered.is_set(), "the stuck tool must have started before the cap fired"
+    assert summary.startswith("[BLOCKED]"), (
+        "a wallclock-cancelled tool must surface a blocked envelope, not a success"
+    )
+    assert artifact["outcome"] == "blocked"
+    assert (
+        artifact["metadata"]["policy_block_reason"] == "sandbox_wall_clock_exceeded"
+    )
+    assert artifact["metadata"]["sandbox_wall_clock_seconds"] == pytest.approx(0.05)
+
+
+@pytest.mark.asyncio
+async def test_client_disconnect_still_raises_cancelled_error_with_override(
+    monkeypatch,
+):
+    """Client-disconnect cancellation must still propagate as
+    ``CancelledError`` even when a per-tool override is configured — the
+    wrapper must not convert a consumer-initiated cancel into the wallclock
+    blocked envelope. This guards the disconnect path documented in issue
+    #113 against a regression from the new timeout plumbing.
+    """
+    started = asyncio.Event()
+    inner = _CancellableTool(started=started)
+    wrapper = PolicyWrappedTool(
+        name=inner.name,
+        description=inner.description,
+        args_schema=None,
+        response_format="content_and_artifact",
+        wrapped_tool=inner,
+        manifest=_bare_manifest(inner.name),
+    )
+
+    # A very long override is present but does not fire in this test — the
+    # cancel comes from the consumer task, not the wait_for deadline.
+    monkeypatch.setattr(
+        "tools.policy_wrappers.get_tool_wallclock_override_s",
+        lambda name: 60.0,
+    )
+
+    with tool_policy_context(
+        ToolPolicyExecutionContext(
+            session_id="session-disconnect",
+            request_id="request-disconnect",
+            allowed_access_scope="execution",
+        )
+    ):
+        task = asyncio.create_task(wrapper._arun())
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
