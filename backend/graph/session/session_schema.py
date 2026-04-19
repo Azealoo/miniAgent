@@ -1,7 +1,13 @@
 """Typed session content blocks, schema version, and id validators."""
 
 import re
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal
+
+# Pydantic >=2.12 requires ``typing_extensions.TypedDict`` on Python < 3.12 so
+# that TypeAdapter can build a core schema (see https://errors.pydantic.dev/
+# 2.13/u/typed-dict-version). Using the backport unconditionally keeps the
+# schema drift guard working on the CI image (Python 3.11).
+from typing_extensions import TypedDict
 
 # Only allow standard UUID v4 strings produced by uuid.uuid4().
 # This blocks path traversal payloads like "../config" or "../../etc/passwd".
