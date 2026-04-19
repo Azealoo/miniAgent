@@ -31,6 +31,11 @@ _MARKDOWN_MEMORY_SUFFIXES = {".md", ".markdown"}
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
 _MAX_RESULT_TEXT_CHARS = 320
+# Sections with fewer body chars than this are folded into their parent
+# heading's section so long files do not fragment into thousands of tiny
+# entries. Measured on the body *excluding* the section's own heading line.
+_SMALL_SECTION_BODY_THRESHOLD = 300
+_DEFAULT_MAX_SECTIONS_PER_FILE = 64
 _LEXICAL_STOPWORDS = {
     "a",
     "an",
@@ -104,7 +109,12 @@ class MemoryIndexer:
     Uses BM25 + vector hybrid retrieval.
     """
 
-    def __init__(self, base_dir: Path) -> None:
+    def __init__(
+        self,
+        base_dir: Path,
+        *,
+        max_sections_per_file: int | None = None,
+    ) -> None:
         self.base_dir = base_dir
         self.memory_dir = base_dir / "memory"
         self.memory_path = self.memory_dir / "MEMORY.md"
@@ -113,6 +123,20 @@ class MemoryIndexer:
         self._nodes: list = []
         self._sections: list[_MemorySection] = []
         self._last_md5: str = ""
+        # Upper bound on the sections produced per markdown file. Invalid or
+        # non-positive values fall back to the built-in default so a
+        # misconfigured value can never disable indexing entirely.
+        try:
+            cap = (
+                int(max_sections_per_file)
+                if max_sections_per_file is not None
+                else _DEFAULT_MAX_SECTIONS_PER_FILE
+            )
+        except (TypeError, ValueError):
+            cap = _DEFAULT_MAX_SECTIONS_PER_FILE
+        self._max_sections_per_file = (
+            cap if cap >= 1 else _DEFAULT_MAX_SECTIONS_PER_FILE
+        )
         # Per-file state map: file source (relative posix path) ->
         # (mtime, size, md5). Drives the incremental diff in `_maybe_rebuild`
         # so we only re-embed the files that actually changed since last scan.
@@ -204,18 +228,55 @@ class MemoryIndexer:
                 )
             ]
 
-        raw_sections: list[_MemorySection] = []
+        # Parse markdown into a flat list of heading-scoped entries. Level 0
+        # is the pre-heading body (if any); levels 1–6 track H1–H6. Entries
+        # stay addressable by index so the merge passes below can collapse a
+        # child into its parent without reshuffling the list.
+        entries: list[dict[str, Any]] = []
+        current_level = 0
         current_heading: str | None = None
         current_lines: list[str] = []
 
-        def flush_current_section() -> None:
-            text = "\n".join(current_lines).strip()
-            if not text:
+        def _flush_entry() -> None:
+            if not any(line.strip() for line in current_lines):
                 return
+            entries.append(
+                {
+                    "level": current_level,
+                    "heading": current_heading,
+                    "lines": list(current_lines),
+                    "alive": True,
+                }
+            )
 
+        for line in document.body.splitlines():
+            heading_match = _MARKDOWN_HEADING_RE.match(line.strip())
+            if heading_match:
+                _flush_entry()
+                current_level = len(heading_match.group(1))
+                current_heading = heading_match.group(2).strip()
+                current_lines = [line]
+                continue
+
+            if not current_lines and not line.strip():
+                continue
+            current_lines.append(line)
+
+        _flush_entry()
+
+        self._merge_small_and_overflow_entries(entries)
+
+        raw_sections: list[_MemorySection] = []
+        for entry in entries:
+            if not entry["alive"]:
+                continue
+            text = "\n".join(entry["lines"]).strip()
+            if not text:
+                continue
             section_source = document.source
-            if current_heading:
-                anchor = self._slugify_heading(current_heading)
+            heading = entry["heading"]
+            if heading:
+                anchor = self._slugify_heading(heading)
                 if anchor:
                     section_source = f"{document.source}#{anchor}"
             raw_sections.append(
@@ -226,20 +287,6 @@ class MemoryIndexer:
                     inferred_kind=inferred_kind,
                 )
             )
-
-        for line in document.body.splitlines():
-            heading_match = _MARKDOWN_HEADING_RE.match(line.strip())
-            if heading_match:
-                flush_current_section()
-                current_heading = heading_match.group(2).strip()
-                current_lines = [line]
-                continue
-
-            if not current_lines and not line.strip():
-                continue
-            current_lines.append(line)
-
-        flush_current_section()
 
         if not raw_sections:
             return [
@@ -283,6 +330,87 @@ class MemoryIndexer:
             deduped_sections.append(section)
 
         return deduped_sections
+
+    def _merge_small_and_overflow_entries(
+        self, entries: list[dict[str, Any]]
+    ) -> None:
+        """Collapse tiny child entries into their parent heading's entry.
+
+        Two passes, each mutating ``entries`` in place:
+
+        1. Fold any child whose body is shorter than
+           ``_SMALL_SECTION_BODY_THRESHOLD`` (measured on the lines *after*
+           its own heading) into the nearest alive ancestor at a shallower
+           heading level. This is the common case that prevents a file with
+           many one-liner H3s / H4s from fragmenting.
+        2. If the surviving entry count still exceeds
+           ``self._max_sections_per_file``, repeatedly merge the shortest
+           remaining child into its parent (breaking ties by preferring
+           deeper headings so top-level structure is preserved last).
+        """
+        if not entries:
+            return
+
+        def _body_chars(entry: dict[str, Any]) -> int:
+            lines = entry["lines"]
+            start = 1 if entry["heading"] else 0
+            return len("\n".join(lines[start:]).strip())
+
+        def _alive_indices() -> list[int]:
+            return [i for i, entry in enumerate(entries) if entry["alive"]]
+
+        def _compute_parents(
+            indices: list[int],
+        ) -> dict[int, int | None]:
+            parents: dict[int, int | None] = {}
+            stack: list[tuple[int, int]] = []
+            for i in indices:
+                level = entries[i]["level"]
+                while stack and stack[-1][1] >= level:
+                    stack.pop()
+                parents[i] = stack[-1][0] if stack else None
+                stack.append((i, level))
+            return parents
+
+        def _merge_into_parent(child_idx: int, parent_idx: int) -> None:
+            entries[parent_idx]["lines"] = (
+                entries[parent_idx]["lines"] + entries[child_idx]["lines"]
+            )
+            entries[child_idx]["alive"] = False
+
+        # Pass 1 — size-based fold. Re-run until a pass produces no merges so
+        # a child orphaned by its parent's own merge still lands under the
+        # correct surviving ancestor.
+        changed = True
+        while changed:
+            changed = False
+            indices = _alive_indices()
+            parents = _compute_parents(indices)
+            for i in indices:
+                if not entries[i]["alive"]:
+                    continue
+                parent = parents.get(i)
+                if parent is None or not entries[parent]["alive"]:
+                    continue
+                if _body_chars(entries[i]) < _SMALL_SECTION_BODY_THRESHOLD:
+                    _merge_into_parent(i, parent)
+                    changed = True
+
+        # Pass 2 — cap enforcement. Only runs when the file is still over the
+        # per-file cap after size folding.
+        cap = self._max_sections_per_file
+        indices = _alive_indices()
+        while len(indices) > cap:
+            parents = _compute_parents(indices)
+            candidates = [i for i in indices if parents.get(i) is not None]
+            if not candidates:
+                break
+            candidates.sort(
+                key=lambda idx: (_body_chars(entries[idx]), -entries[idx]["level"])
+            )
+            chosen = candidates[0]
+            _merge_into_parent(chosen, parents[chosen])
+            indices = _alive_indices()
 
     def _memory_sections(self) -> list[_MemorySection]:
         sections: list[_MemorySection] = []
