@@ -844,6 +844,13 @@ class TestToolRegistry:
 
         assert "read_file" in planner_tools
         assert "fetch_url" in planner_tools
+        assert "http_json" in planner_tools
+        assert "evidence_retrieval" in planner_tools
+        # issue #126: raw ncbi_eutils is intentionally hidden from the planner
+        # so literature plans default to evidence_retrieval (which also
+        # persists durable evidence cards). The main agent and skills still
+        # see ncbi_eutils.
+        assert "ncbi_eutils" not in planner_tools
         assert "terminal" not in planner_tools
         assert "write_file" not in planner_tools
         assert "plan_agent" not in planner_tools
@@ -851,6 +858,9 @@ class TestToolRegistry:
 
         assert "read_file" in verifier_tools
         assert "evidence_review" in verifier_tools
+        # ncbi_eutils stays verifier-exposed — verifiers legitimately need raw
+        # E-utilities access to cross-check evidence cards.
+        assert "ncbi_eutils" in verifier_tools
         assert "terminal" not in verifier_tools
         assert "write_file" not in verifier_tools
         assert planner_catalog["read_file"]["interrupt_behavior"] == "restartable"

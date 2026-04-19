@@ -83,7 +83,8 @@ EVICTION_ORDER: tuple[str, ...] = (
 # Sections that belong to the prompt's stable prefix for prefix-cache reuse.
 # Anything not in this set is treated as volatile (per-turn state) and placed
 # after the cache breakpoint. Static guidance blocks (``_rag_memory_guidance``,
-# ``_tool_result_error_contract``) are pinned stable and never evicted.
+# ``_tool_result_error_contract``, ``_tool_selection_guidance``) are pinned
+# stable and never evicted.
 SECTIONS_IN_STABLE_PREFIX: frozenset[str] = frozenset({
     "skills_snapshot",
     "soul",
@@ -92,6 +93,7 @@ SECTIONS_IN_STABLE_PREFIX: frozenset[str] = frozenset({
     "agents_guide",
     "project_instructions",
     "_tool_result_error_contract",
+    "_tool_selection_guidance",
     "_rag_memory_guidance",
 })
 
@@ -104,6 +106,15 @@ _RAG_MEMORY_GUIDANCE = (
     "Use retrieved memory as background guidance only: it may include templates, heuristics, or "
     "prior-session notes. Do not present retrieved memory as something you verified in the current "
     "turn unless you explicitly inspected the referenced file or tool output."
+)
+_TOOL_SELECTION_GUIDANCE = (
+    "<!-- Tool Selection Guidance -->\n"
+    "The registered tools in `backend/tools/registry.py` contain overlapping "
+    "families (URL retrieval, execution tiers, biology databases, the evidence "
+    "surface, file I/O). When two tools could serve the same step, follow the "
+    "preferred defaults in `docs/tool-selection.md` and deviate only for the "
+    "reasons named there. This applies to both main-turn tool use and the "
+    "planner/verifier helper agents."
 )
 _TOOL_RESULT_ERROR_GUIDANCE = (
     "<!-- Tool Result Error Contract -->\n"
@@ -582,6 +593,7 @@ def _assemble_sections(
 
     # Static guidance — pinned and stable, so it lives in the cache prefix.
     sections.append(("_tool_result_error_contract", _TOOL_RESULT_ERROR_GUIDANCE))
+    sections.append(("_tool_selection_guidance", _TOOL_SELECTION_GUIDANCE))
 
     if rag_mode:
         sections.append(("_rag_memory_guidance", _RAG_MEMORY_GUIDANCE))

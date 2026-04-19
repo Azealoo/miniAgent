@@ -77,6 +77,15 @@ _DEFAULT: dict = {
     },
     "verification": {
         "retry_on_repair_required": True,
+        # Wallclock seconds allowed for the verifier + single repair retry,
+        # measured from the first ``verification_result`` helper event. 0
+        # disables the cap. Breach emits a ``verifier_cap_exceeded`` error
+        # through the same path as the per-turn token budget breach.
+        "verifier_max_wall_s": 0,
+        # Output-token ceiling for the verifier + single repair retry,
+        # measured as the delta from the first ``verification_result`` helper
+        # event. 0 disables the cap.
+        "verifier_max_tokens": 0,
     },
     "llm_output_token_cap": {
         "default": _DEFAULT_LLM_OUTPUT_TOKEN_CAP,
@@ -94,6 +103,10 @@ _DEFAULT: dict = {
     },
     "access_defaults": {
         "allow_loopback_without_auth": True,
+    },
+    "api_rate_limits": {
+        "files_read": {"rate": 30, "period_seconds": 60, "enabled": True},
+        "files_write": {"rate": 10, "period_seconds": 60, "enabled": True},
     },
     "execution_backends": {
         "llm": {
@@ -138,6 +151,14 @@ _DEFAULT: dict = {
         "max_sections_per_file": _DEFAULT_MAX_SECTIONS_PER_FILE,
     },
     "read_file_extra_roots": [],
+    "retention": {
+        # Off by default — callers opt in per-directory. ``dry_run`` in the
+        # config acts as the global default; ``apply_retention(dry_run=...)``
+        # can override it per invocation.
+        "dry_run": False,
+        "enabled_on_startup": False,
+        "paths": {},
+    },
 }
 
 
@@ -284,9 +305,37 @@ def get_access_defaults() -> dict[str, Any]:
     return dict(access_defaults) if isinstance(access_defaults, dict) else {}
 
 
+def get_api_rate_limits() -> dict[str, Any]:
+    """Return the ``api_rate_limits`` block used by ``rate_limit.py``.
+
+    Shape::
+
+        {
+          "<bucket_name>": {
+            "rate": <int>,
+            "period_seconds": <int>,
+            "enabled": <bool>,
+          },
+          ...
+        }
+
+    Bucket names currently consumed by the backend: ``files_read`` and
+    ``files_write``. Missing or malformed entries fall back to the
+    built-in defaults declared in ``rate_limit.DEFAULT_LIMITS``.
+    """
+    raw = _load_runtime().get("api_rate_limits", {})
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
 def get_execution_backend_settings() -> dict[str, Any]:
     execution_backends = _load_runtime().get("execution_backends", {})
     return dict(execution_backends) if isinstance(execution_backends, dict) else {}
+
+
+def get_retention_settings() -> dict[str, Any]:
+    """Return the ``retention`` config block (see ``runtime/retention.py``)."""
+    retention = _load_runtime().get("retention", {})
+    return dict(retention) if isinstance(retention, dict) else {}
 
 def _normalize_rag_mode(raw: Any) -> str:
     """Coerce the configured rag_mode into one of ``_VALID_RAG_MODES``.
