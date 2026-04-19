@@ -10,7 +10,7 @@ from hardening import (
     ProductionHardeningPolicy,
 )
 from runtime_config import load_runtime_config
-from runtime_config_types import LoadedRuntimeConfig
+from runtime_config_types import LoadedRuntimeConfig, validate_runtime_config
 
 _CONFIG_FILE = Path(__file__).parent / "config.json"
 
@@ -154,10 +154,16 @@ _DEFAULT: dict = {
 
 
 def _load_loaded_runtime() -> LoadedRuntimeConfig:
-    return load_runtime_config(
+    loaded = load_runtime_config(
         default_config=_DEFAULT,
         project_config_path=_CONFIG_FILE,
     )
+    # Fail loud at startup (app import / first snapshot) if the merged config
+    # has bad types, invalid enums, or unknown fields — better than surfacing
+    # the same problem later at first tool dispatch. See
+    # ``runtime_config_types.RuntimeConfigModel`` for the schema.
+    validate_runtime_config(loaded.data)
+    return loaded
 
 
 def _load_runtime() -> dict:
