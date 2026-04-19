@@ -101,6 +101,20 @@ def _normalize_loaded_index(raw: Any) -> dict[str, list[ArchiveIndexEntry]] | No
     return normalized
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write *text* to *path* atomically via ``<name>.tmp`` + rename.
+
+    A crash between the tmp-file write and the rename leaves the original
+    file untouched; callers that read with decode-error tolerance then see
+    the last good version instead of a truncated file. Callers in the
+    session package go through this helper so session JSON, archive batch
+    files, and the archive-index sidecar all share the same guarantee.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
 def _write_index(
     archive_dir: Path, index: dict[str, list[ArchiveIndexEntry]]
 ) -> None:
@@ -110,9 +124,7 @@ def _write_index(
         "schema_version": ARCHIVE_INDEX_SCHEMA_VERSION,
         "sessions": index,
     }
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def _load_index(archive_dir: Path) -> dict[str, list[ArchiveIndexEntry]]:
