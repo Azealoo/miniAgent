@@ -28,6 +28,7 @@ export {
   TurnExitSchema,
   COMPACTION_PHASES,
   RetrievalRuntimeEventSchema,
+  RetrievalErrorRuntimeEventSchema,
   TokenRuntimeEventSchema,
   ToolStartRuntimeEventSchema,
   ToolEndRuntimeEventSchema,

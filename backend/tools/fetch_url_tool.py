@@ -1,6 +1,13 @@
 """
 Fetches a URL and converts the response to clean Markdown (HTML pages)
 or returns JSON directly.
+
+Selection rule vs ``http_json`` (issue #126): use ``fetch_url`` for unstructured
+page content — HTML articles, documentation, blog posts — that benefits from
+the HTML→Markdown rendering path. For structured REST-API calls that return
+JSON (NCBI, UniProt, Enrichr, etc.) prefer ``http_json``; it has a larger
+output cap (100k vs 8k), automatic retries, and preserves pretty-printed JSON
+without the HTML rewriter mangling it.
 """
 import ipaddress
 import re
@@ -75,8 +82,11 @@ class FetchURLInput(BaseModel):
 class FetchURLTool(BaseTool):
     name: str = "fetch_url"
     description: str = (
-        "Fetch the content of a URL. HTML pages are converted to clean Markdown. "
-        "JSON responses are returned as-is. "
+        "Fetch the content of a URL. HTML pages are converted to clean Markdown; "
+        "JSON responses are returned as-is. Use this for web pages, documentation, "
+        "and unstructured article content. For REST APIs that return JSON (NCBI, "
+        "UniProt, Enrichr), prefer http_json — it has a larger output cap, "
+        "automatic retries, and JSON-aware response handling. "
         "Input: a valid http/https URL."
     )
     args_schema: Type[BaseModel] = FetchURLInput

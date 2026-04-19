@@ -59,15 +59,24 @@ def _chunk_generator(total: int, chunk_size: int):
 
 
 @pytest.fixture
-def streaming_app(tmp_path):
+def streaming_app(tmp_path, monkeypatch):
     """Build a minimal FastAPI app exposing only the files router.
 
     Avoids importing the full ``app.py`` (which triggers LlamaIndex / memory
     index rebuilds) while still exercising the live access-control and audit
     hooks.
+
+    Disables the file-API rate limiter so the 2 GiB memory-flat test (which
+    streams a payload through ~128 back-to-back Range reads) isn't tripped by
+    the production 30-reads/min default. Rate-limit behavior is covered in
+    ``test_files_rate_limit.py``.
     """
     from graph.agent import agent_manager
     from api.files import router as files_router
+    from rate_limit import clear_buckets
+
+    monkeypatch.setenv("BIOAPEX_RATE_LIMIT_DISABLED", "1")
+    clear_buckets()
 
     original_base_dir = agent_manager.base_dir
     original_memory_indexer = agent_manager.memory_indexer
@@ -85,6 +94,7 @@ def streaming_app(tmp_path):
     finally:
         agent_manager.base_dir = original_base_dir
         agent_manager.memory_indexer = original_memory_indexer
+        clear_buckets()
 
 
 def _loopback_client(app: FastAPI) -> TestClient:
@@ -126,6 +136,52 @@ def test_stream_get_invalid_range_returns_416(streaming_app):
         )
     assert resp.status_code == 416
     assert resp.headers.get("Content-Range") == "bytes */3"
+
+
+def test_stream_head_returns_size_and_content_type(streaming_app):
+    app, base_dir = streaming_app
+    artifact = base_dir / "artifacts" / "metadata.bin"
+    artifact.write_bytes(b"abcdefghij")  # 10 bytes
+
+    with _loopback_client(app) as client:
+        resp = client.head(
+            "/api/files/stream",
+            params={"path": "artifacts/metadata.bin"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.headers["Content-Length"] == "10"
+    assert resp.headers["Accept-Ranges"] == "bytes"
+    assert resp.headers.get("ETag")
+    assert resp.headers.get("Last-Modified")
+    assert resp.headers.get("Content-Type")
+    assert resp.content == b""
+
+
+def test_stream_head_does_not_buffer_2gb_file(streaming_app):
+    """HEAD against a 2 GiB sparse file returns size headers without reading body."""
+    app, base_dir = streaming_app
+    sparse = base_dir / "artifacts" / "huge_head.bin"
+    _make_sparse_file(sparse, _STREAM_BYTES)
+
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    with _loopback_client(app) as client:
+        resp = client.head(
+            "/api/files/stream",
+            params={"path": "artifacts/huge_head.bin"},
+        )
+    head_peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+
+    assert resp.status_code == 200
+    assert resp.headers["Content-Length"] == str(_STREAM_BYTES)
+    assert resp.headers["Accept-Ranges"] == "bytes"
+    assert resp.content == b""
+    assert head_peak < _MEM_BUDGET, (
+        f"HEAD on {_STREAM_BYTES} bytes peaked at {head_peak}, "
+        f"exceeding budget {_MEM_BUDGET}."
+    )
 
 
 def test_stream_put_rejects_non_artifacts_prefix(streaming_app):

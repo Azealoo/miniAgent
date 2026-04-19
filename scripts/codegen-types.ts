@@ -95,6 +95,7 @@ interface RuntimeEventsSchema {
 // name. Anything not in this map keeps its backend name verbatim.
 const EVENT_NAME_MAP: Record<string, string> = {
   RetrievalRuntimeEvent: "ChatStreamRetrievalEvent",
+  RetrievalErrorRuntimeEvent: "ChatStreamRetrievalErrorEvent",
   TokenRuntimeEvent: "ChatStreamTokenEvent",
   ToolStartRuntimeEvent: "ChatStreamToolStartEvent",
   ToolEndRuntimeEvent: "ChatStreamToolEndEvent",

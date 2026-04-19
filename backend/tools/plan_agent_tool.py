@@ -51,7 +51,10 @@ class PlanAgentTool(BaseTool):
     description: str = (
         "Use this helper agent before broad tool use on non-trivial tasks. "
         "The planner explores with read-only tools and returns a structured execution plan "
-        "with ordered steps, tool guidance, success criteria, and verification checks."
+        "with ordered steps, tool guidance, success criteria, and verification checks. "
+        "When choosing between tools that overlap (fetch_url vs http_json, python_repl vs "
+        "terminal, ncbi_eutils vs ensembl_api vs uniprot_api, the evidence tools, read_file "
+        "vs write_file), consult docs/tool-selection.md for the preferred default per family."
     )
     args_schema: Type[BaseModel] = PlanAgentInput
     response_format: str = "content_and_artifact"
@@ -102,7 +105,10 @@ class PlanAgentTool(BaseTool):
                 "You are BioAPEX's planning specialist. Use only the tools you were given. "
                 "Stay read-only unless the tool catalog explicitly says otherwise. "
                 "Explore just enough to decide a sound execution order. "
-                "Return only JSON. Prefer concrete step order and tool order over vague advice."
+                "Return only JSON. Prefer concrete step order and tool order over vague advice. "
+                "When multiple registered tools overlap (URL retrieval, execution tiers, "
+                "biology DBs, the evidence surface, file I/O), follow the defaults in "
+                "docs/tool-selection.md and deviate only for the reasons named there."
             )
 
             contract = SubAgentContract(

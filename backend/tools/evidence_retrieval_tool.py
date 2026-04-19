@@ -1,4 +1,12 @@
-"""Agent tool for durable PubMed-backed evidence retrieval."""
+"""Agent tool for durable PubMed-backed evidence retrieval.
+
+Canonical PubMed entry point (issue #126). Wraps the same NCBI E-utilities
+calls as ``ncbi_eutils`` but also persists durable BioAPEX evidence cards and
+cached raw PubMed payloads, so it should be preferred whenever the retrieval
+output belongs in the evidence-card pipeline. The raw ``ncbi_eutils`` tool is
+hidden from the planner helper agent for this reason; use it only when
+evidence-card persistence is NOT wanted or for non-PubMed DBs.
+"""
 
 from __future__ import annotations
 
@@ -26,9 +34,11 @@ _FAILURE_LIST_ADAPTER = TypeAdapter(list[dict[str, str]])
 class EvidenceRetrievalTool(BaseTool):
     name: str = "evidence_retrieval"
     description: str = (
-        "Search PubMed with NCBI E-utilities, fetch authoritative article metadata, "
-        "and persist durable BioAPEX evidence cards plus cached raw PubMed payloads. "
-        "Provide a query, explicit PMIDs, or both."
+        "Canonical PubMed retrieval tool: searches PubMed with NCBI E-utilities, "
+        "fetches authoritative article metadata, and persists durable BioAPEX "
+        "evidence cards plus cached raw PubMed payloads. Prefer this over raw "
+        "ncbi_eutils for any literature work that should land as an evidence "
+        "card. Provide a query, explicit PMIDs, or both."
     )
     args_schema: Type[BaseModel] = EvidenceRetrievalInput
     response_format: str = "content_and_artifact"

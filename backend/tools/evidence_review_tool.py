@@ -1,4 +1,15 @@
-"""Agent tool for deterministic evidence review over durable evidence cards."""
+"""Agent tool for deterministic evidence review over durable evidence cards.
+
+Selection rule vs ``claim_graph`` (issue #126): ``evidence_review`` answers a
+single biology question over a curated set of evidence cards and emits one
+durable ``evidence_review`` artifact. ``claim_graph`` is a different shape of
+output — it aggregates claims across many evidence cards, reviews, and
+workflow runs into a multi-artifact graph with contradiction edges, and is
+currently not registered in the runtime tool catalog (it remains available as
+an internal library entry point via ``evidence.run_claim_graph``). Use
+``evidence_review`` for single-question synthesis; reach for ``claim_graph``
+only when the task is explicit multi-artifact claim aggregation.
+"""
 
 from __future__ import annotations
 
@@ -24,10 +35,14 @@ from .contracts import (
 class EvidenceReviewTool(BaseTool):
     name: str = "evidence_review"
     description: str = (
-        "Run BioAPEX evidence-review mode for a biology question. The tool can reuse existing "
-        "evidence_card artifacts or retrieve PubMed-backed evidence cards, then emits a durable "
-        "evidence_review artifact that separates extracted source facts from synthesized conclusions "
-        "and marks unsupported claims explicitly."
+        "Run BioAPEX evidence-review mode for a single biology question. Canonical "
+        "tool for answering 'what does the literature say about X?' over one or more "
+        "evidence cards. For multi-artifact claim aggregation across many reviews and "
+        "workflow runs with contradiction detection, use claim_graph (library entry "
+        "point). The tool can reuse existing evidence_card artifacts or retrieve "
+        "PubMed-backed evidence cards, then emits a durable evidence_review artifact "
+        "that separates extracted source facts from synthesized conclusions and marks "
+        "unsupported claims explicitly."
     )
     args_schema: Type[BaseModel] = EvidenceReviewInput
     response_format: str = "content_and_artifact"

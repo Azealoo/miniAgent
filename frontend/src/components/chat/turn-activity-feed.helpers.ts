@@ -1,3 +1,4 @@
+import { getRawFileUrl } from "@/lib/api";
 import { getEvidenceReviewPayload } from "@/lib/evidence";
 import { deriveMessageBlocks } from "@/lib/message-blocks";
 import type {
@@ -10,11 +11,36 @@ import type {
 import type {
   FeedEntryDescriptor,
   FeedLineDescriptor,
+  FeedLineFullOutputLink,
   FeedPlanningDescriptor,
   FeedSectionDescriptor,
   FeedSectionKey,
   FeedTone,
 } from "./blocks/types";
+
+const TOOL_OUTPUT_OVERFLOW_ARTIFACT_TYPE = "tool_output_overflow";
+
+function fullOutputLinkFromResult(
+  result?: ToolResultEnvelope
+): FeedLineFullOutputLink | undefined {
+  const refs = result?.artifact_refs;
+  if (!refs || refs.length === 0) {
+    return undefined;
+  }
+
+  const overflow = refs.find(
+    (ref) =>
+      ref.artifact_type === TOOL_OUTPUT_OVERFLOW_ARTIFACT_TYPE && Boolean(ref.path)
+  );
+  if (!overflow?.path) {
+    return undefined;
+  }
+
+  return {
+    href: getRawFileUrl(overflow.path),
+    label: "full output →",
+  };
+}
 
 function humanizeValue(value?: string | null): string {
   if (!value) return "unknown";
@@ -522,12 +548,14 @@ function completedToolLine(
     ? compactUserFacingInline(input)
     : null;
   const detail = compactUserFacingInline(output, 72);
+  const fullOutput = fullOutputLinkFromResult(result);
 
   if (tool === "evidence_review") {
     return {
       kind: "line",
       text: "Ran evidence review.",
       tone: outcomeTone(result),
+      ...(fullOutput ? { fullOutput } : {}),
     };
   }
 
@@ -536,6 +564,7 @@ function completedToolLine(
       kind: "line",
       text: "Ran verification.",
       tone: outcomeTone(result),
+      ...(fullOutput ? { fullOutput } : {}),
     };
   }
 
@@ -544,6 +573,7 @@ function completedToolLine(
       kind: "line",
       text: `${sentenceCase(toolPhrase(tool))} hit an error.`,
       tone: "error",
+      ...(fullOutput ? { fullOutput } : {}),
     };
   }
 
@@ -552,6 +582,7 @@ function completedToolLine(
       kind: "line",
       text: "Used memory.",
       tone: outcomeTone(result),
+      ...(fullOutput ? { fullOutput } : {}),
     };
   }
 
@@ -563,6 +594,7 @@ function completedToolLine(
         ? `Ran ${toolPhrase(tool)}: ${detail}`
         : `Ran ${toolPhrase(tool)}.`,
     tone: outcomeTone(result),
+    ...(fullOutput ? { fullOutput } : {}),
   };
 }
 

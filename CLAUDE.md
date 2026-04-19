@@ -47,7 +47,10 @@ Before editing, read the piece of the system you are about to touch:
 - Tool surface: `backend/tools/registry.py` and the 15 tools listed in
   `README.md` ("Tools"), each wrapped via `backend/tools/policy_wrappers.py`
   with access scope, read-only/destructive flags, and planner/verifier
-  exposure.
+  exposure. When two tools in the registry could serve the same step, use
+  [`docs/tool-selection.md`](docs/tool-selection.md) to pick the preferred
+  default per family (URL retrieval, execution, biology DBs, evidence
+  surface, file I/O, knowledge lookup, helper agents).
 - Prompt cache: the system prompt is split into a *stable prefix* and a
   *volatile suffix* by `backend/graph/prompt_builder.py::build_system_prompt_blocks`.
   The prefix is frozen per-session via `SessionManager.freeze_session_prefix`

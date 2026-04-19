@@ -3,6 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ErrorBoundary from "@/components/ErrorBoundary";
+import { __resetTelemetryForTests } from "@/lib/telemetry";
 
 const SIBLING_TEXT = "sidebar-still-here";
 const FALLBACK_TEXT = "This panel hit an unexpected error";
@@ -11,13 +12,22 @@ const FALLBACK_TEXT = "This panel hit an unexpected error";
 // test output stays readable — we assert on the fallback, which is the real
 // signal that the boundary caught the throw.
 let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+let fetchSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  // Swallow telemetry POSTs so the logger's fire-and-forget behavior does
+  // not hit the network during these tests.
+  fetchSpy = vi
+    .spyOn(globalThis, "fetch")
+    .mockResolvedValue(new Response(null, { status: 200 }));
+  __resetTelemetryForTests();
 });
 
 afterEach(() => {
   consoleErrorSpy.mockRestore();
+  fetchSpy.mockRestore();
+  __resetTelemetryForTests();
 });
 
 function Exploder({ message }: { message: string }): React.ReactElement {
@@ -94,6 +104,32 @@ describe("ErrorBoundary", () => {
     const [firstArg] = onError.mock.calls[0];
     expect(firstArg).toBeInstanceOf(Error);
     expect((firstArg as Error).message).toBe("observed");
+  });
+
+  it("reports the caught error to the telemetry endpoint", async () => {
+    render(
+      <ErrorBoundary label="Workspace">
+        <Exploder message="telemetry-check" />
+      </ErrorBoundary>
+    );
+
+    // The logger is fire-and-forget; flush microtasks so the fetch lands.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const telemetryCalls = fetchSpy.mock.calls.filter(
+      (call: unknown[]) => String(call[0]).includes("/api/audit/client")
+    );
+    expect(telemetryCalls.length).toBeGreaterThanOrEqual(1);
+
+    const [, init] = telemetryCalls[0];
+    const body = JSON.parse(String((init as RequestInit | undefined)?.body));
+    expect(body).toMatchObject({
+      level: "error",
+      event: "error_boundary",
+      message: "telemetry-check",
+    });
+    expect(body.meta?.label).toBe("Workspace");
   });
 
   it("isolates one panel's crash from its siblings in a three-panel layout", async () => {

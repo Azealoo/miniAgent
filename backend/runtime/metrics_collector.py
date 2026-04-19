@@ -164,6 +164,11 @@ class MetricsCollector:
             "Rolling ratio of retrieval hits over total retrieval queries.",
         )
         self._register(
+            "bioapex_retrieval_errors_total",
+            "counter",
+            "Retrieval lookups that raised, labeled by exception class name.",
+        )
+        self._register(
             "bioapex_prompt_cache_read_tokens_total",
             "counter",
             "Input tokens served from the provider-side prompt cache.",
@@ -263,6 +268,19 @@ class MetricsCollector:
         else:
             self._inc_counter("bioapex_retrieval_cache_misses_total")
         self._recompute_hit_ratio()
+
+    def observe_retrieval_error(self, *, error_type: str) -> None:
+        """Record a retrieval attempt that raised.
+
+        Does not touch ``bioapex_retrieval_queries_total`` or the hit/miss
+        counters — callers keep invoking ``observe_retrieval(hit=False)`` on
+        the error path so the miss ratio stays comparable across releases.
+        """
+        label = error_type if error_type else "Exception"
+        self._inc_counter(
+            "bioapex_retrieval_errors_total",
+            labels={"error_type": label},
+        )
 
     def _recompute_hit_ratio(self) -> None:
         with self._lock:
@@ -418,6 +436,13 @@ class MetricsCollector:
             results = event.get("results")
             hit = isinstance(results, list) and len(results) > 0
             self.observe_retrieval(hit=hit)
+            return
+
+        if event_type == "retrieval_error":
+            error_type = event.get("error_type")
+            self.observe_retrieval_error(
+                error_type=str(error_type) if isinstance(error_type, str) else "Exception",
+            )
             return
 
         if event_type == "llm_usage":
