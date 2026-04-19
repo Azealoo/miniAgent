@@ -401,7 +401,7 @@ export default function SessionHistorySummary({
                 {archiveExpanded ? (
                   <div className="mt-4 space-y-4 border-t border-[rgba(211,219,210,0.78)] pt-4">
                     {archiveState.messages.map((message) => (
-                      <ChatMessage key={message.id} message={message} />
+                      <ChatMessage key={message.id} message={message} sessionId={currentSessionId} />
                     ))}
                   </div>
                 ) : null}
@@ -468,7 +468,7 @@ export default function SessionHistorySummary({
                 {expanded ? (
                   <div className="mt-4 space-y-4 border-t border-[rgba(211,219,210,0.78)] pt-4">
                     {turn.messages.map((message) => (
-                      <ChatMessage key={message.id} message={message} />
+                      <ChatMessage key={message.id} message={message} sessionId={currentSessionId} />
                     ))}
                   </div>
                 ) : null}
@@ -480,7 +480,7 @@ export default function SessionHistorySummary({
 
       {recentMessages.map((message) => (
         <div key={message.id} className="apex-virtualize-row">
-          <ChatMessage message={message} />
+          <ChatMessage message={message} sessionId={currentSessionId} />
         </div>
       ))}
     </div>

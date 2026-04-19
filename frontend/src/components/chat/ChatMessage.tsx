@@ -1,5 +1,6 @@
 "use client";
 
+import { memo, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -9,7 +10,6 @@ import {
 } from "@/lib/message-blocks";
 import { completedElapsedLabel } from "@/lib/message-duration";
 import { splitStreamingMarkdown } from "@/lib/streaming-markdown";
-import { useAppOptional } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import TurnActivityFeed from "./TurnActivityFeed";
 import TurnExitPill from "./TurnExitPill";
@@ -17,6 +17,7 @@ import type { Message } from "@/lib/types";
 
 interface ChatMessageProps {
   message: Message;
+  sessionId?: string | null;
 }
 
 function MessageMarker() {
@@ -131,13 +132,15 @@ function StreamingMarkdownContent({
   );
 }
 
-export default function ChatMessage({
+function ChatMessage({
   message,
+  sessionId = null,
 }: ChatMessageProps) {
-  const app = useAppOptional();
-  const sessionId = app?.currentSessionId ?? null;
   const isUser = message.role === "user";
-  const normalizedContent = normalizeMessageContent(message);
+  const normalizedContent = useMemo(
+    () => normalizeMessageContent(message),
+    [message]
+  );
   const displayContent = normalizedContent.content;
   const hasContent = Boolean(displayContent);
   const hasPlanningBlock = normalizedContent.blocks.some(
@@ -225,3 +228,9 @@ export default function ChatMessage({
     </article>
   );
 }
+
+// Memoize on the Message reference so non-streaming rows are skipped as the
+// store produces a new reference per token for the streaming message only.
+// Using React.memo here requires the component to not subscribe to fast-
+// changing contexts — sessionId arrives as a prop instead of via useApp.
+export default memo(ChatMessage);
