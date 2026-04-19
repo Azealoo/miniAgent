@@ -502,9 +502,7 @@ class QueryEngine:
                     if event_type == "token":
                         content = event.get("content")
                         if isinstance(content, str) and content:
-                            current_segment.append(content)
                             output_tokens += _count_tokens(content)
-                        yield event
                         if _budget_exceeded():
                             yield _budget_error_event()
                             return
@@ -512,6 +510,9 @@ class QueryEngine:
                         if cap_reason is not None:
                             yield _verifier_cap_error_event(cap_reason)
                             return
+                        if isinstance(content, str) and content:
+                            current_segment.append(content)
+                        yield event
                         continue
 
                     if event_type == "new_response":
