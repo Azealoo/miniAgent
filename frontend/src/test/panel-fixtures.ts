@@ -34,6 +34,7 @@ export function makeMockAppValue(
     sessionContinuitySummaries: [],
     lastFailedTurn: null,
     parseErrorCount: 0,
+    requestIdMismatchCount: 0,
     draftMessage: "",
     draftRevision: 0,
     inspectorTab: "files",

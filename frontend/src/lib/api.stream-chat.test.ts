@@ -446,6 +446,64 @@ describe("streamChat", () => {
     expect(surfacedErrors).toEqual([]);
   });
 
+  it("drops events whose request_id does not match the latched in-flight id", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      sseResponse(
+        [
+          {
+            type: "token",
+            content: "first ",
+            request_id: "request-live",
+            event_index: 1,
+          },
+          {
+            type: "token",
+            content: "stale-echo",
+            request_id: "request-stale",
+            event_index: 2,
+          },
+          { type: "token", content: "untagged ", event_index: 3 },
+          {
+            type: "done",
+            content: "first untagged done.",
+            request_id: "request-live",
+            event_index: 4,
+          },
+        ],
+        { chunkSize: 29 }
+      )
+    );
+
+    const tokens: string[] = [];
+    const mismatchRequestIds: string[] = [];
+    let finalContent = "";
+    let finalRequestId = "";
+
+    await streamChat(
+      "Ignore the stale echo.",
+      "session-stale",
+      {
+        onToken: (content) => {
+          tokens.push(content);
+        },
+        onDone: (content, requestId) => {
+          finalContent = content;
+          finalRequestId = requestId ?? "";
+        },
+        onRequestIdMismatch: (event) => {
+          if (event.request_id) {
+            mismatchRequestIds.push(event.request_id);
+          }
+        },
+      }
+    );
+
+    expect(tokens).toEqual(["first ", "untagged "]);
+    expect(mismatchRequestIds).toEqual(["request-stale"]);
+    expect(finalContent).toBe("first untagged done.");
+    expect(finalRequestId).toBe("request-live");
+  });
+
   it("cancels the in-flight fetch when the AbortController is aborted", async () => {
     let receivedSignal: AbortSignal | undefined;
 

@@ -69,6 +69,12 @@ interface AppContextValue {
    * observable instead of silently swallowed.
    */
   parseErrorCount: number;
+  /**
+   * Count of events the dispatcher dropped because their `request_id`
+   * didn't match the in-flight turn. Surfaced beside `parseErrorCount` in
+   * UsagePanel so stale-response drops are observable.
+   */
+  requestIdMismatchCount: number;
   draftMessage: string;
   draftRevision: number;
   inspectorTab: InspectorTab;
@@ -276,6 +282,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       sessionContinuitySummaries: catalog.sessionContinuitySummaries,
       lastFailedTurn: catalog.lastFailedTurn,
       parseErrorCount: catalog.parseErrorCount,
+      requestIdMismatchCount: catalog.requestIdMismatchCount,
       draftMessage,
       draftRevision,
       inspectorTab,
@@ -317,6 +324,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       catalog.sessionContinuitySummaries,
       catalog.lastFailedTurn,
       catalog.parseErrorCount,
+      catalog.requestIdMismatchCount,
       catalog.refreshSessions,
       catalog.reloadCurrentSession,
       catalog.createSession,

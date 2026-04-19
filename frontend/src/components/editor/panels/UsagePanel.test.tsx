@@ -68,6 +68,36 @@ describe("UsagePanel", () => {
     expect(screen.getByText("3")).toBeTruthy();
   });
 
+  it("shows the request-id drop counter once the dispatcher has dropped a stale event", () => {
+    const messages: Message[] = [
+      {
+        id: "user-1",
+        role: "user",
+        content: "hi",
+        blocks: [{ type: "text", text: "hi" }],
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "hello",
+        blocks: [{ type: "text", text: "hello" }],
+      },
+    ];
+
+    vi.mocked(useApp).mockReturnValue(
+      makeMockAppValue({
+        currentSessionId: "session-stale",
+        messages,
+        requestIdMismatchCount: 2,
+      })
+    );
+
+    render(<UsagePanel />);
+
+    expect(screen.getByText("Request-id drops")).toBeTruthy();
+    expect(screen.getByText("2")).toBeTruthy();
+  });
+
   it("omits the parse-error row when no malformed payloads have been seen", () => {
     const messages: Message[] = [
       {
@@ -95,5 +125,6 @@ describe("UsagePanel", () => {
     render(<UsagePanel />);
 
     expect(screen.queryByText("Parse errors")).toBeNull();
+    expect(screen.queryByText("Request-id drops")).toBeNull();
   });
 });
