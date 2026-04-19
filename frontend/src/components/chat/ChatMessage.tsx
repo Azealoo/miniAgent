@@ -12,6 +12,7 @@ import { splitStreamingMarkdown } from "@/lib/streaming-markdown";
 import { useAppOptional } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import TurnActivityFeed from "./TurnActivityFeed";
+import TurnExitPill from "./TurnExitPill";
 import type { Message } from "@/lib/types";
 
 interface ChatMessageProps {
@@ -209,6 +210,10 @@ export default function ChatMessage({
             content={displayContent}
             isStreaming={message.isStreaming}
           />
+        ) : null}
+
+        {!message.isStreaming && message.exit ? (
+          <TurnExitPill exit={message.exit} />
         ) : null}
 
         {showTurnActivityAfterContent ? (

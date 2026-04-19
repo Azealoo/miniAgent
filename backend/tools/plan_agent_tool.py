@@ -15,6 +15,7 @@ from runtime.subagent import (
     SubAgentContract,
     default_max_steps,
     default_token_budget,
+    resolve_session_stable_prefix,
     run_subagent,
 )
 from tools.contracts import execution_error_result, invalid_input_result, success_result
@@ -110,6 +111,7 @@ class PlanAgentTool(BaseTool):
                 tools_allowed=tuple(tools),
                 max_steps=default_max_steps(),
                 token_budget=default_token_budget(),
+                stable_prefix=resolve_session_stable_prefix(),
             )
             artifact = await run_subagent(
                 contract,

@@ -240,6 +240,51 @@ Important limits and behavior:
 - project instruction context is additive and discovered from ancestor instruction files
 - retrieved memory is injected as background context rather than as verified current state
 
+#### Prompt-cache stable prefix and sub-agent reuse
+
+The assembled prompt is split into a *stable prefix* (workspace files, skills
+snapshot, harness guidance, tool-result contract) and a *volatile suffix*
+(memory index, scoped-memory listing, git status). The split lives in
+`backend/graph/prompt_builder.py::build_system_prompt_blocks` and matches the
+`SECTIONS_IN_STABLE_PREFIX` set.
+
+The stable prefix is captured per session on the first turn via
+`SessionManager.freeze_session_prefix`. Helper sub-agents (`plan_agent`,
+`verification_agent`) read it back through `resolve_session_stable_prefix` and
+prepend it verbatim to their own helper-specific system prompt, so the
+provider's prefix cache matches the parent agent's leading bytes:
+
+- DeepSeek and OpenAI hit prefix caching automatically when the leading
+  tokens are byte-identical to a recent request from the same key.
+- Anthropic clients can feed the split through
+  `build_anthropic_system_blocks` to attach a `cache_control: ephemeral`
+  breakpoint at the end of the stable prefix.
+
+Per-call cache hit / miss / creation token counts come from LangChain's
+normalized `AIMessage.usage_metadata` (`input_token_details.cache_read` and
+`cache_creation`) and are surfaced two ways:
+
+- Process-wide: the Prometheus gauges
+  `bioapex_prompt_cache_read_tokens_total`,
+  `bioapex_prompt_cache_creation_tokens_total`,
+  `bioapex_prompt_cache_uncached_tokens_total`, and the rolling
+  `bioapex_prompt_cache_hit_rate` ratio (see
+  `backend/runtime/metrics_collector.py`).
+- Per sub-agent run: the artifact at
+  `artifacts/subagent/<date>/<run_id>/subagent_run.json` includes a
+  `cache_stats` block with `llm_calls`, `input_tokens`,
+  `cache_read_tokens`, `cache_creation_tokens`, `uncached_tokens`, and the
+  per-run `cache_hit_rate`.
+
+**Adding a tool, skill, or workspace edit mid-session breaks the cache.**
+The frozen prefix is sticky for the lifetime of the session; if the prompt
+assembly changes after the first turn (a skill is enabled, a workspace file
+is edited, the runtime is reconfigured) the new prefix no longer matches the
+frozen one and provider prefix caching falls through. The runtime logs a
+single `session_prefix_drift` warning the first time it sees a divergent
+prefix for a given session id so the loss of cache eligibility is visible.
+To recover the cache hit rate, start a new chat session.
+
 ### Tools
 
 The current default runtime toolset contains 15 tools:

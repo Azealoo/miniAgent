@@ -119,6 +119,7 @@ export type SessionContentBlock =
 export interface ChatStreamCompactionEvent {
   event_index?: number;
   from_turn: number;
+  phase?: "snip" | "microcompact" | "collapse" | "autocompact";
   request_id?: string;
   saved_tokens: number;
   schema_version?: number;
@@ -129,6 +130,7 @@ export interface ChatStreamCompactionEvent {
 export interface ChatStreamDoneEvent {
   content: string;
   event_index?: number;
+  exit?: TurnExit;
   request_id?: string;
   schema_version?: number;
   session_id?: string;
@@ -228,6 +230,12 @@ export interface ChatStreamToolStartEvent {
   schema_version?: number;
   tool: string;
   type: "tool_start";
+}
+/** Structured terminal-state payload carried on every ``done`` event. */
+export interface TurnExit {
+  exit_code: number;
+  reason: "success" | "tool_error" | "user_abort" | "context_limit" | "token_budget" | "approval_denied" | "awaiting_approval";
+  summary?: string;
 }
 export interface ChatStreamVerificationResultEvent {
   event_index?: number;

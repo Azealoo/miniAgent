@@ -1,9 +1,13 @@
 """Session disk I/O: atomic reads/writes, CRUD, and per-session compress locks."""
 
 import asyncio
+import hashlib
 import json
+import logging
+import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -16,6 +20,8 @@ from graph.session.session_normalizer import (
 )
 from graph.session.session_schema import SESSION_SCHEMA_VERSION, _validate_session_id
 
+logger = logging.getLogger(__name__)
+
 # Per-session locks prevent two concurrent requests from compressing the same
 # session simultaneously (which would double-archive messages).
 _compress_locks: dict[str, asyncio.Lock] = {}
@@ -24,6 +30,39 @@ _compress_locks: dict[str, asyncio.Lock] = {}
 # that two overlapping turns (e.g. a double-click or client retry) cannot
 # interleave writes to the session JSON, memory, or turn ledger.
 _turn_locks: dict[str, asyncio.Lock] = {}
+
+
+@dataclass(frozen=True)
+class FrozenSessionPrefix:
+    """Session-scoped snapshot of the cache-stable prompt prefix + tool list.
+
+    Sub-agents reuse ``stable_prefix`` as the leading system-prompt string so
+    the provider's server-side prefix cache matches across the parent turn and
+    helper runs. ``tool_names`` and ``prefix_fingerprint`` let the runtime
+    detect drift (a skill added mid-session, a workspace file edited) that
+    would silently invalidate the cache.
+    """
+
+    stable_prefix: str
+    tool_names: tuple[str, ...]
+    prefix_fingerprint: str
+
+
+# Per-session frozen prefix cache. Sub-agent contracts read this to reuse the
+# byte-identical leading prompt and maximise prompt-cache hits.
+_frozen_prefixes: dict[str, FrozenSessionPrefix] = {}
+_frozen_prefix_drift_logged: set[str] = set()
+_frozen_prefix_lock = threading.Lock()
+
+
+def _fingerprint_prefix(stable_prefix: str, tool_names: tuple[str, ...]) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(stable_prefix.encode("utf-8"))
+    hasher.update(b"\x1f")
+    for name in tool_names:
+        hasher.update(name.encode("utf-8"))
+        hasher.update(b"\x1e")
+    return hasher.hexdigest()
 
 
 class SessionStore:
@@ -243,6 +282,7 @@ class SessionStore:
         # Clean up the per-session locks to prevent unbounded memory growth
         _compress_locks.pop(session_id, None)
         _turn_locks.pop(session_id, None)
+        self.clear_frozen_session_prefix(session_id)
 
     def get_or_create_compress_lock(self, session_id: str) -> asyncio.Lock:
         """Return (creating if needed) the asyncio.Lock for *session_id*."""
@@ -255,6 +295,61 @@ class SessionStore:
         if session_id not in _turn_locks:
             _turn_locks[session_id] = asyncio.Lock()
         return _turn_locks[session_id]
+
+    # ------------------------------------------------------------------ #
+    # Frozen prompt-cache prefix                                          #
+    # ------------------------------------------------------------------ #
+
+    def freeze_session_prefix(
+        self,
+        session_id: str,
+        *,
+        stable_prefix: str,
+        tool_names: tuple[str, ...],
+    ) -> FrozenSessionPrefix:
+        """Record (on first call) or return the session's frozen prompt prefix.
+
+        The prefix + tool list are the leading bytes of the system prompt that
+        must stay byte-identical across the parent turn and every sub-agent
+        run for DeepSeek / OpenAI / Anthropic prompt-cache hits. We freeze on
+        the first turn and never replace the snapshot — subsequent turns with
+        a different prefix log a drift warning (workspace edits, skills added
+        mid-session) so the loss of cache-eligibility is visible.
+        """
+        _validate_session_id(session_id)
+        fingerprint = _fingerprint_prefix(stable_prefix, tool_names)
+        with _frozen_prefix_lock:
+            existing = _frozen_prefixes.get(session_id)
+            if existing is not None:
+                if existing.prefix_fingerprint != fingerprint and session_id not in _frozen_prefix_drift_logged:
+                    _frozen_prefix_drift_logged.add(session_id)
+                    logger.warning(
+                        "session_prefix_drift session_id=%s — frozen prefix no "
+                        "longer matches current prompt assembly; sub-agent "
+                        "prompt-cache hits will degrade for this session.",
+                        session_id,
+                    )
+                return existing
+            frozen = FrozenSessionPrefix(
+                stable_prefix=stable_prefix,
+                tool_names=tool_names,
+                prefix_fingerprint=fingerprint,
+            )
+            _frozen_prefixes[session_id] = frozen
+            return frozen
+
+    def get_frozen_session_prefix(self, session_id: str) -> FrozenSessionPrefix | None:
+        """Return the frozen prefix for *session_id*, or ``None`` if unset."""
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        with _frozen_prefix_lock:
+            return _frozen_prefixes.get(session_id)
+
+    def clear_frozen_session_prefix(self, session_id: str) -> None:
+        """Drop the frozen prefix (used when the session is deleted)."""
+        with _frozen_prefix_lock:
+            _frozen_prefixes.pop(session_id, None)
+            _frozen_prefix_drift_logged.discard(session_id)
 
     def get_session_meta(self, session_id: str) -> dict:
         data = self._read(session_id)
