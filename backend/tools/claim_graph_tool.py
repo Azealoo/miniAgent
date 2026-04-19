@@ -1,4 +1,16 @@
-"""Agent tool for deterministic claim-graph materialization."""
+"""Agent tool for deterministic claim-graph materialization.
+
+Selection rule vs ``evidence_review`` (issue #126): ``claim_graph`` aggregates
+claims across many evidence cards, evidence reviews, and workflow runs into a
+multi-artifact graph with conservative contradiction edges. It is NOT a
+drop-in substitute for ``evidence_review`` — if the task is answering a
+single biology question over a curated evidence set, use ``evidence_review``
+instead. ``ClaimGraphTool`` is intentionally NOT registered in the runtime
+tool catalog (see ``tools/__init__.py._instantiate_all_tools`` and the
+``test_runtime_tool_catalog_excludes_legacy_workflow_tools`` health check);
+it is kept as a library entry point callable via
+``evidence.run_claim_graph`` and via this tool class in tests / scripts.
+"""
 
 from __future__ import annotations
 
@@ -21,9 +33,14 @@ from .contracts import (
 class ClaimGraphTool(BaseTool):
     name: str = "claim_graph"
     description: str = (
-        "Build a durable BioAPEX claim graph from evidence_card, evidence_review, and workflow_run artifacts. "
-        "The graph keeps claim text separate from relationship edges, records provenance for both literature-backed "
-        "and workflow-backed claims, links grounded entities, and adds conservative contradiction edges when obvious "
+        "Build a durable BioAPEX claim graph from evidence_card, evidence_review, "
+        "and workflow_run artifacts. Use for multi-artifact claim aggregation with "
+        "contradiction detection — NOT for single-question literature synthesis "
+        "(use evidence_review for that). This tool is not registered in the "
+        "runtime tool catalog; it is exposed as a library entry point. "
+        "The graph keeps claim text separate from relationship edges, records "
+        "provenance for both literature-backed and workflow-backed claims, links "
+        "grounded entities, and adds conservative contradiction edges when obvious "
         "conflicts are detected."
     )
     args_schema: Type[BaseModel] = ClaimGraphInput

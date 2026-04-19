@@ -457,6 +457,70 @@
       "title": "PlanUpdatedRuntimeEvent",
       "type": "object"
     },
+    "RetrievalErrorRuntimeEvent": {
+      "additionalProperties": false,
+      "description": "Non-fatal signal that a RAG retrieval attempt raised.\n\nEmitted when ``MemoryIndexer.retrieve`` (or the LLM-probe fallback) throws\nduring the pre-turn retrieval phase. The turn itself continues \u2014 callers\nstill record a retrieval miss via the metrics collector \u2014 but the reviewer\nsees the failure in the UI instead of the old silent swallow.",
+      "properties": {
+        "error_type": {
+          "title": "Error Type",
+          "type": "string"
+        },
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
+        },
+        "schema_version": {
+          "default": 2,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "type": {
+          "const": "retrieval_error",
+          "default": "retrieval_error",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query",
+        "error_type",
+        "message"
+      ],
+      "title": "RetrievalErrorRuntimeEvent",
+      "type": "object"
+    },
     "RetrievalRuntimeEvent": {
       "additionalProperties": false,
       "properties": {
@@ -1432,6 +1496,7 @@
       "plan_created": "#/$defs/PlanCreatedRuntimeEvent",
       "plan_updated": "#/$defs/PlanUpdatedRuntimeEvent",
       "retrieval": "#/$defs/RetrievalRuntimeEvent",
+      "retrieval_error": "#/$defs/RetrievalErrorRuntimeEvent",
       "token": "#/$defs/TokenRuntimeEvent",
       "tool_awaiting_approval": "#/$defs/ToolAwaitingApprovalRuntimeEvent",
       "tool_chunk": "#/$defs/ToolChunkRuntimeEvent",
@@ -1448,6 +1513,9 @@
   "oneOf": [
     {
       "$ref": "#/$defs/RetrievalRuntimeEvent"
+    },
+    {
+      "$ref": "#/$defs/RetrievalErrorRuntimeEvent"
     },
     {
       "$ref": "#/$defs/TokenRuntimeEvent"

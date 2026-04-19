@@ -884,11 +884,14 @@ def test_property_total_prompt_under_sum_of_section_budgets(tmp_path, seed):
         + budget["memory_index_max_chars"]
         + budget["scoped_memory_block_max_chars"]
     )
-    # The static Tool Result Error Contract guidance is always present and
-    # never evicted; account for it explicitly so the bound is meaningful.
-    static_guidance_len = len(
-        "<!-- Tool Result Error Contract -->\n"
-    ) + 4_000  # generous upper bound for the guidance text.
+    # Static pinned guidance blocks (Tool Result Error Contract + Tool
+    # Selection Guidance) are always present and never evicted; account for
+    # them explicitly so the bound is meaningful.
+    static_guidance_len = (
+        len("<!-- Tool Result Error Contract -->\n")
+        + len("<!-- Tool Selection Guidance -->\n")
+        + 6_000  # generous upper bound covering both guidance bodies.
+    )
     truncation_slack = 200  # accommodates per-section truncate markers.
 
     assert len(prompt) <= sum_caps + static_guidance_len + truncation_slack
@@ -1206,6 +1209,7 @@ class TestPromptCachePrefix:
             "agents_guide",
             "project_instructions",
             "_tool_result_error_contract",
+            "_tool_selection_guidance",
             "_rag_memory_guidance",
         })
 

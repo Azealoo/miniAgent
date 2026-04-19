@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from graph.session.session_archive_index import (
+    _atomic_write_text,
     remove_session_from_index as _remove_session_from_archive_index,
 )
 from graph.session.session_index import (
@@ -94,9 +95,16 @@ class SessionStore:
 
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as exc:
             # Corrupted or unreadable file — return a fresh session structure
-            # rather than propagating a 500 error to the user.
+            # rather than propagating a 500 error to the user. Log so
+            # silent data loss from a truncated write is visible in ops.
+            logger.warning(
+                "session_read_fallback session_id=%s path=%s error=%s",
+                session_id,
+                path,
+                exc,
+            )
             return self._empty(session_id)
 
         # v1 migration: plain list → v2 dict
@@ -117,8 +125,9 @@ class SessionStore:
         data.setdefault("schema_version", SESSION_SCHEMA_VERSION)
         data["updated_at"] = time.time()
         self._stamp_deterministic_mode(data)
-        self._path(session_id).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        _atomic_write_text(
+            self._path(session_id),
+            json.dumps(data, ensure_ascii=False, indent=2),
         )
         messages = data.get("messages", [])
         _upsert_session_index_entry(
