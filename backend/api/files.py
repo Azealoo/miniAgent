@@ -47,6 +47,35 @@ _MAX_SAVE_BYTES = 500_000  # 500 KB limit for writes via the editor API
 _STREAM_CHUNK_BYTES = 1 << 20  # 1 MiB per disk read/write, bounds peak memory
 _REFERENCE_SCHEMA_PREFIX = "artifacts/reference_schemas/"
 
+# Runtime config surfaces that are frozen once a turn starts. Live edits via
+# the file API would otherwise let an in-flight turn pick up a different tool
+# policy, hardening posture, or hook configuration than the one captured at
+# turn entry. ``.env`` files are additionally covered by ``is_secret_like_path``
+# but are listed here so the rejection message is explicit.
+_FROZEN_CONFIG_FILES = frozenset(
+    {
+        "config.json",
+        "config.local.json",
+        "runtime/hooks.py",
+    }
+)
+_FROZEN_CONFIG_SUFFIXES = (".env",)
+_FROZEN_CONFIG_MESSAGE = (
+    "Runtime config files are frozen once a turn starts and cannot be "
+    "rewritten through the file API. Set BIOAPEX_ALLOW_CONFIG_RELOAD=1 in "
+    "the backend environment to opt back into live edits during development."
+)
+
+
+def _is_frozen_config_path(clean: str) -> bool:
+    """Return True for paths that should be treated as frozen runtime config."""
+    if clean in _FROZEN_CONFIG_FILES:
+        return True
+    name = clean.rsplit("/", 1)[-1]
+    if name.startswith(".env") or any(name.endswith(s) for s in _FROZEN_CONFIG_SUFFIXES):
+        return True
+    return False
+
 
 def _base_dir() -> Path:
     from graph.agent import agent_manager
@@ -78,11 +107,20 @@ def _check_path(relative_path: str, *, write: bool = False) -> tuple[Path, str]:
     except ValueError:
         raise HTTPException(403, "Path is outside the project directory.")
 
+    # Runtime config files are frozen during a turn. Reject writes with a
+    # clear, specific message (instead of the generic whitelist error) unless
+    # the dev override env var is set. Read is unaffected.
+    if write and _is_frozen_config_path(clean) and not cfg.config_reload_allowed():
+        raise HTTPException(403, _FROZEN_CONFIG_MESSAGE)
+
     # Whitelist check
     allowed_prefixes = _WRITE_ALLOWED_PREFIXES if write else _READ_ALLOWED_PREFIXES
     allowed = any(clean.startswith(p) for p in allowed_prefixes) or (
         clean in _ALLOWED_ROOT_FILES
     )
+    if write and cfg.config_reload_allowed() and _is_frozen_config_path(clean):
+        allowed = True
+
     if not allowed:
         mode = "write" if write else "read"
         raise HTTPException(
@@ -90,8 +128,12 @@ def _check_path(relative_path: str, *, write: bool = False) -> tuple[Path, str]:
             f"Access denied for {mode}. Allowed: {list(allowed_prefixes)} + {list(_ALLOWED_ROOT_FILES)}",
         )
 
+    # The secret-like check still applies to read paths and to non-frozen
+    # writes. When the dev override explicitly permits a config/.env rewrite
+    # we let it through so the reload gate actually works.
     if is_secret_like_path(clean):
-        raise HTTPException(403, "Credential / secret files are not accessible via this API.")
+        if not (write and cfg.config_reload_allowed() and _is_frozen_config_path(clean)):
+            raise HTTPException(403, "Credential / secret files are not accessible via this API.")
 
     return target, clean
 

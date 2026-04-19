@@ -67,6 +67,22 @@
   - how collisions are handled
   - how the artifact is referenced later
 
+## Runtime Configuration
+
+- Treat runtime configuration as frozen for the duration of a turn. The query
+  engine captures a `RuntimeConfigSnapshot` at turn entry
+  (`backend/config.py::snapshot_runtime_config`) and stamps the corresponding
+  `_loaded_at` timestamp onto session metadata.
+- Do not rewrite `backend/config.json`, `backend/config.local.json`, or
+  `backend/runtime/hooks.py` while a turn is in flight. The file API
+  (`backend/api/files.py`) rejects these writes with an explicit 403 so tool
+  policy, hardening posture, and hook configuration cannot drift mid-turn.
+- Operators who need to reload config during development can set
+  `BIOAPEX_ALLOW_CONFIG_RELOAD=1` in the backend environment. The override is
+  intentionally dev-only — production postures must never enable it.
+- Treat `.env`-style files as always frozen. They remain off-limits to the
+  file API regardless of the override.
+
 ## Workflow and Execution
 
 - Prefer explicit workflow steps over free-form multi-tool behavior for repetitive scientific tasks.
