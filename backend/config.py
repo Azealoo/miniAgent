@@ -129,6 +129,14 @@ _DEFAULT: dict = {
         "entries": {},
     },
     "read_file_extra_roots": [],
+    "retention": {
+        # Off by default — callers opt in per-directory. ``dry_run`` in the
+        # config acts as the global default; ``apply_retention(dry_run=...)``
+        # can override it per invocation.
+        "dry_run": False,
+        "enabled_on_startup": False,
+        "paths": {},
+    },
 }
 
 
@@ -278,6 +286,12 @@ def get_access_defaults() -> dict[str, Any]:
 def get_execution_backend_settings() -> dict[str, Any]:
     execution_backends = _load_runtime().get("execution_backends", {})
     return dict(execution_backends) if isinstance(execution_backends, dict) else {}
+
+
+def get_retention_settings() -> dict[str, Any]:
+    """Return the ``retention`` config block (see ``runtime/retention.py``)."""
+    retention = _load_runtime().get("retention", {})
+    return dict(retention) if isinstance(retention, dict) else {}
 
 def _normalize_rag_mode(raw: Any) -> str:
     """Coerce the configured rag_mode into one of ``_VALID_RAG_MODES``.
