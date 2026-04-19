@@ -95,4 +95,41 @@ describe("ErrorBoundary", () => {
     expect(firstArg).toBeInstanceOf(Error);
     expect((firstArg as Error).message).toBe("observed");
   });
+
+  it("isolates one panel's crash from its siblings in a three-panel layout", async () => {
+    const user = userEvent.setup();
+
+    // Mirrors AppShell's Sidebar / Workspace / Inspector structure: each panel
+    // is wrapped in its own boundary so a throw in one does not unmount the
+    // others.
+    render(
+      <div>
+        <ErrorBoundary label="Sidebar">
+          <div data-testid="sidebar-panel">sidebar-content</div>
+        </ErrorBoundary>
+        <ErrorBoundary label="Workspace">
+          <ExploderOnClick message="workspace-crash" />
+        </ErrorBoundary>
+        <ErrorBoundary label="Inspector">
+          <div data-testid="inspector-panel">inspector-content</div>
+        </ErrorBoundary>
+      </div>
+    );
+
+    expect(screen.getByTestId("sidebar-panel").textContent).toBe("sidebar-content");
+    expect(screen.getByTestId("inspector-panel").textContent).toBe("inspector-content");
+
+    await user.click(screen.getByRole("button", { name: "detonate" }));
+
+    expect(screen.getByText("Workspace")).toBeTruthy();
+    expect(screen.getByText("workspace-crash")).toBeTruthy();
+
+    // The other two panels must keep their content — only the Workspace
+    // boundary swaps to its fallback.
+    expect(screen.getByTestId("sidebar-panel").textContent).toBe("sidebar-content");
+    expect(screen.getByTestId("inspector-panel").textContent).toBe("inspector-content");
+
+    // Retry affordance is rendered so the user can recover the failed panel.
+    expect(screen.getByRole("button", { name: /reset panel/i })).toBeTruthy();
+  });
 });
