@@ -105,6 +105,11 @@ files over new abstractions.
   `workflows/report_templates/`. Artifact plumbing lives under
   `backend/artifacts/` — keep schema, registry, and provenance changes
   together rather than scattered.
+- Rejected approaches — regex-only permissions, single-phase
+  compaction, and `bash`/`python_repl` as default execution — are
+  documented in [`docs/anti-patterns.md`](docs/anti-patterns.md).
+  Skim it before reshaping the policy, compaction, or tool-execution
+  surfaces.
 
 ### 4. Goal-Driven Execution
 
