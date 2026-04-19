@@ -192,6 +192,14 @@ class CompactionRuntimeEvent(_RuntimeEventBase):
     to_turn: int
     summary: str
     saved_tokens: int
+    phase: Optional[Literal["snip", "microcompact", "collapse", "autocompact"]] = Field(
+        default=None,
+        description=(
+            "Which rung of the progressive compaction ladder produced this "
+            "event. Absent for legacy payloads predating the four-phase "
+            "ladder (issue #82)."
+        ),
+    )
 
 
 class WarningRuntimeEvent(_RuntimeEventBase):
