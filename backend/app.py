@@ -80,6 +80,21 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         print(f"[WARNING] Memory index build failed (non-fatal): {exc}")
 
+    # ── 4. Enforce retention / quota on on-disk state (opt-in) ────
+    retention_settings = cfg.get_retention_settings()
+    if retention_settings.get("enabled_on_startup"):
+        try:
+            from runtime.retention import apply_retention
+
+            result = apply_retention(BASE_DIR, config=retention_settings)
+            suffix = " [dry-run]" if result.dry_run else ""
+            print(
+                f"[startup] Retention applied{suffix}: "
+                f"{len(result.results)} dir(s) scanned"
+            )
+        except Exception as exc:
+            print(f"[WARNING] Retention run failed (non-fatal): {exc}")
+
     yield
     # (shutdown cleanup goes here if needed)
 
