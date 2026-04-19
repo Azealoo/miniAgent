@@ -1,22 +1,27 @@
 /**
  * Backend → frontend TypeScript codegen.
  *
- * Reads the two committed JSON-schema snapshots and emits
- * ``frontend/src/lib/types.generated.ts``:
+ * Reads the two committed JSON-schema snapshots and emits two sibling files
+ * under ``frontend/src/lib/``:
  *
- *   1. ``backend/codegen/shared_types.schema.json`` — tool-contract + session
- *      block DTOs (pydantic BaseModels + TypedDicts).
- *   2. ``backend/runtime/events.schema.json`` — the 13-variant discriminated
- *      union of runtime events.
+ *   - ``types.generated.ts`` — TypeScript interfaces and a discriminated-union
+ *     ``ChatStreamEventDTO`` type for every pydantic BaseModel / TypedDict.
+ *   - ``runtime-events.generated.ts`` — matching zod schemas for every runtime
+ *     event plus a ``ChatStreamEventSchema`` discriminated union. The
+ *     hand-written ``runtime-events.ts`` re-exports from here so every SSE
+ *     payload that flows through ``parseRuntimeEvent`` is validated against a
+ *     zod schema generated from the pydantic contract.
  *
- * The committed ``types.generated.ts`` is the contract the hand-written
- * ``types.ts`` re-exports from. Two drift-guards enforce that nothing diverges
- * silently:
+ * The committed generated files are the contracts the hand-written
+ * ``types.ts`` and ``runtime-events.ts`` compose from. Three drift-guards
+ * enforce that nothing diverges silently:
  *
  *   - ``backend/tests/test_shared_types_schema.py`` fails if the pydantic
  *     models drift from the committed JSON snapshot.
  *   - ``frontend/src/lib/types.generated.test.ts`` fails if the committed
  *     TypeScript file drifts from the generator output.
+ *   - ``frontend/src/lib/runtime-events.generated.test.ts`` fails if the
+ *     committed zod file drifts from the generator output.
  *
  * Manual regeneration:
  *
@@ -42,6 +47,10 @@ const EVENTS_SCHEMA_PATH = path.join(
 const OUTPUT_PATH = path.join(
   REPO_ROOT,
   "frontend/src/lib/types.generated.ts",
+);
+const RUNTIME_EVENTS_OUTPUT_PATH = path.join(
+  REPO_ROOT,
+  "frontend/src/lib/runtime-events.generated.ts",
 );
 
 /* ------------------------------ JSON Schema types ----------------------- */
@@ -350,6 +359,287 @@ export function generateTypes({ shared, events }: GenerateInput): string {
   return sections.join("\n") + "\n";
 }
 
+/* ------------------------------ Zod emission ---------------------------- */
+
+// Module-scope constants we emit so the generated zod file stays readable and
+// existing consumers (api.ts, runtime-events.test.ts) keep importing the same
+// names. Anything not listed here is rendered inline against the JSON schema.
+const SCHEMA_VERSION_FIELD_NAME = "schema_version";
+const TURN_EXIT_DEF_NAME = "TurnExit";
+const COMPACTION_EVENT_DEF_NAME = "CompactionRuntimeEvent";
+
+function refToDefName(ref: string): string {
+  return ref.replace(/^#\/\$defs\//, "");
+}
+
+function enumFromAnyOf(property: JsonSchema): string[] | undefined {
+  if (!property.anyOf) return undefined;
+  for (const variant of property.anyOf) {
+    if (variant.enum && Array.isArray(variant.enum)) {
+      return variant.enum as string[];
+    }
+  }
+  return undefined;
+}
+
+function zodForType(schema: JsonSchema, defName: string, fieldName: string): string {
+  if (schema.$ref) {
+    return `${refToDefName(schema.$ref)}Schema`;
+  }
+
+  if (schema.const !== undefined) {
+    return `z.literal(${JSON.stringify(schema.const)})`;
+  }
+
+  if (schema.enum && Array.isArray(schema.enum)) {
+    // Special-case: the TurnExit.reason enum is exposed to consumers as
+    // ``TURN_EXIT_REASONS`` so they can iterate it. Keep the named const.
+    if (defName === TURN_EXIT_DEF_NAME && fieldName === "reason") {
+      return `z.enum(TURN_EXIT_REASONS)`;
+    }
+    const items = schema.enum.map((v) => JSON.stringify(v)).join(", ");
+    return `z.enum([${items}])`;
+  }
+
+  if (schema.anyOf) {
+    const nonNull = schema.anyOf.filter((s) => s.type !== "null");
+    const hasNull = schema.anyOf.some((s) => s.type === "null");
+    if (nonNull.length === 1) {
+      const inner = zodForType(nonNull[0], defName, fieldName);
+      return hasNull ? `${inner}.nullish()` : inner;
+    }
+    const parts = nonNull.map((s) => zodForType(s, defName, fieldName));
+    const union = `z.union([${parts.join(", ")}])`;
+    return hasNull ? `${union}.nullish()` : union;
+  }
+
+  if (schema.type === "string") return "z.string()";
+  if (schema.type === "integer") {
+    let rendered = "z.number().int()";
+    if (typeof schema.minimum === "number") rendered += `.min(${schema.minimum})`;
+    if (typeof schema.maximum === "number") rendered += `.max(${schema.maximum})`;
+    return rendered;
+  }
+  if (schema.type === "number") return "z.number()";
+  if (schema.type === "boolean") return "z.boolean()";
+  if (schema.type === "null") return "z.null()";
+
+  if (schema.type === "array") {
+    const items = (schema.items as JsonSchema | undefined) ?? {};
+    const inner = zodForType(items, defName, fieldName);
+    return `z.array(${inner})`;
+  }
+
+  if (schema.type === "object") {
+    // pydantic ``dict[str, Any]`` → ``additionalProperties: true``. The
+    // equivalent zod shape is ``z.record(z.string(), z.unknown())``; we do not
+    // try to represent ``JsonLike`` more specifically here because pydantic
+    // will round-trip anything JSON-shaped through this field.
+    return "z.record(z.string(), z.unknown())";
+  }
+
+  return "z.unknown()";
+}
+
+function zodForField(
+  schema: JsonSchema,
+  required: boolean,
+  defName: string,
+  fieldName: string,
+): string {
+  // Discriminator fields (a literal ``type``) are always required even when
+  // pydantic emits them as optional-with-default, because zod's
+  // ``discriminatedUnion`` needs to see the literal on the input.
+  if (schema.const !== undefined) {
+    return zodForType(schema, defName, fieldName);
+  }
+
+  let rendered = zodForType(schema, defName, fieldName);
+
+  if (required) return rendered;
+
+  // anyOf-with-null already produced a ``.nullish()`` suffix above — keep it
+  // as-is so an omitted field resolves to ``undefined`` and a wire-level
+  // ``null`` stays ``null`` (matching pydantic ``Optional[T] = None``).
+  if (rendered.endsWith(".nullish()")) return rendered;
+
+  if (schema.default !== undefined && schema.default !== null) {
+    // Route the common schema_version constant through the exported symbol so
+    // changing the wire version is a one-line edit to ``events.py``.
+    if (fieldName === SCHEMA_VERSION_FIELD_NAME && typeof schema.default === "number") {
+      return `${rendered}.default(RUNTIME_EVENT_SCHEMA_VERSION)`;
+    }
+    return `${rendered}.default(${JSON.stringify(schema.default)})`;
+  }
+
+  // pydantic ``list[T] = Field(default_factory=list)`` does not serialize a
+  // default into JSON schema, but the wire always carries ``[]``. Mirror that
+  // so every consumer gets a concrete array instead of ``undefined``.
+  if (schema.type === "array") {
+    return `${rendered}.default([])`;
+  }
+
+  return `${rendered}.optional()`;
+}
+
+function emitZodSchema(defName: string, schema: JsonSchema): string {
+  const required = new Set(schema.required ?? []);
+  const props = schema.properties ?? {};
+  const lines: string[] = [];
+  if (schema.description) {
+    const lead = schema.description.split("\n")[0]?.trim() ?? "";
+    if (lead) lines.push(`/** ${lead} */`);
+  }
+  lines.push(`export const ${defName}Schema = z`);
+  lines.push(`  .object({`);
+  for (const key of Object.keys(props).sort()) {
+    const field = props[key];
+    const isReq = required.has(key);
+    const rendered = zodForField(field, isReq, defName, key);
+    lines.push(`    ${key}: ${rendered},`);
+  }
+  lines.push(`  })`);
+  lines.push(`  .strict();`);
+  return lines.join("\n");
+}
+
+const RUNTIME_EVENTS_HEADER = [
+  "/**",
+  " * AUTO-GENERATED. Do not edit by hand.",
+  " *",
+  " * Produced by scripts/codegen-types.ts from",
+  " * backend/runtime/events.schema.json. The hand-written",
+  " * ./runtime-events.ts re-exports from this file and adds the",
+  " * `parseRuntimeEvent` helper that every SSE payload flows through.",
+  " *",
+  " * Regenerate with:",
+  " *   python -m codegen.shared_types             # from backend/",
+  " *   npm run codegen:types                      # from frontend/",
+  " */",
+  'import { z } from "zod";',
+  "",
+].join("\n");
+
+export function generateRuntimeEventsZod(events: RuntimeEventsSchema): string {
+  const defs = events.$defs;
+  const sections: string[] = [RUNTIME_EVENTS_HEADER];
+
+  // Pull the common ``schema_version`` default off any runtime-event $def so
+  // changing the wire version only requires rebuilding the JSON snapshot.
+  const sampleEventName = Object.keys(defs).find((name) =>
+    name.endsWith("RuntimeEvent"),
+  );
+  const sampleEvent = sampleEventName ? defs[sampleEventName] : undefined;
+  const schemaVersion =
+    sampleEvent?.properties?.[SCHEMA_VERSION_FIELD_NAME]?.default;
+  if (typeof schemaVersion !== "number") {
+    throw new Error(
+      "Could not infer RUNTIME_EVENT_SCHEMA_VERSION from events schema.",
+    );
+  }
+  sections.push(
+    `export const RUNTIME_EVENT_SCHEMA_VERSION = ${schemaVersion} as const;`,
+  );
+
+  // TurnExit is referenced by ``DoneRuntimeEvent.exit`` — emit it first so the
+  // per-event schemas can point at ``TurnExitSchema`` by name.
+  const turnExit = defs[TURN_EXIT_DEF_NAME];
+  if (!turnExit) {
+    throw new Error("Expected TurnExit $def in events schema.");
+  }
+  const turnExitReasons = turnExit.properties?.reason?.enum as
+    | string[]
+    | undefined;
+  if (!turnExitReasons) {
+    throw new Error("Expected TurnExit.reason to carry an enum.");
+  }
+  sections.push("");
+  sections.push(
+    `export const TURN_EXIT_REASONS = [${turnExitReasons
+      .map((r) => JSON.stringify(r))
+      .join(", ")}] as const;`,
+  );
+  sections.push(
+    `export type TurnExitReason = (typeof TURN_EXIT_REASONS)[number];`,
+  );
+  sections.push("");
+  sections.push(emitZodSchema(TURN_EXIT_DEF_NAME, turnExit));
+  sections.push(`export type TurnExit = z.infer<typeof TurnExitSchema>;`);
+
+  // CompactionRuntimeEvent.phase exposes the ``COMPACTION_PHASES`` tuple to UI
+  // consumers — emit it as a named const above the per-event schemas.
+  const compaction = defs[COMPACTION_EVENT_DEF_NAME];
+  const phaseEnum = compaction
+    ? enumFromAnyOf(compaction.properties?.phase ?? {})
+    : undefined;
+  if (phaseEnum) {
+    sections.push("");
+    sections.push(
+      `export const COMPACTION_PHASES = [${phaseEnum
+        .map((p) => JSON.stringify(p))
+        .join(", ")}] as const;`,
+    );
+    sections.push(
+      `export type CompactionPhase = (typeof COMPACTION_PHASES)[number];`,
+    );
+  }
+
+  // Per-event schemas in the discriminator order declared by the backend.
+  const orderedEventNames: string[] = events.oneOf
+    ? events.oneOf.map((ref) => refToDefName(ref.$ref))
+    : Object.keys(defs).filter((n) => n !== TURN_EXIT_DEF_NAME);
+
+  sections.push("");
+  for (const name of orderedEventNames) {
+    sections.push(emitZodSchema(name, defs[name]));
+  }
+
+  // Discriminated union and the aliases consumers import.
+  sections.push("");
+  sections.push(
+    `export const ChatStreamEventSchema = z.discriminatedUnion("type", [`,
+  );
+  for (const name of orderedEventNames) {
+    sections.push(`  ${name}Schema,`);
+  }
+  sections.push(`]);`);
+  sections.push(`export const RuntimeEventSchema = ChatStreamEventSchema;`);
+  sections.push(`export type ChatStreamEvent = z.infer<typeof ChatStreamEventSchema>;`);
+  sections.push(`export type RuntimeEvent = ChatStreamEvent;`);
+
+  // Ordered type tuple + ZodType lookup so callers can iterate the wire
+  // contract without touching the individual schema bindings.
+  const eventTypeLiterals: string[] = [];
+  for (const name of orderedEventNames) {
+    const typeConst = defs[name].properties?.type?.const;
+    if (typeof typeConst !== "string") {
+      throw new Error(`Event ${name} is missing a string 'type' literal.`);
+    }
+    eventTypeLiterals.push(JSON.stringify(typeConst));
+  }
+  sections.push("");
+  sections.push(
+    `export const RUNTIME_EVENT_TYPES = [${eventTypeLiterals.join(
+      ", ",
+    )}] as const;`,
+  );
+  sections.push(
+    `export type RuntimeEventType = (typeof RUNTIME_EVENT_TYPES)[number];`,
+  );
+
+  sections.push("");
+  sections.push(
+    `export const RUNTIME_EVENT_SCHEMAS: Record<RuntimeEventType, z.ZodTypeAny> = {`,
+  );
+  for (const name of orderedEventNames) {
+    const typeConst = defs[name].properties?.type?.const as string;
+    sections.push(`  ${typeConst}: ${name}Schema,`);
+  }
+  sections.push(`};`);
+
+  return sections.join("\n") + "\n";
+}
+
 /* ------------------------------ CLI ------------------------------------- */
 
 export function loadInputs(): GenerateInput {
@@ -362,23 +652,50 @@ export function loadInputs(): GenerateInput {
   return { shared, events };
 }
 
+interface GeneratedFile {
+  path: string;
+  label: string;
+  output: string;
+}
+
+function generateAll(): GeneratedFile[] {
+  const inputs = loadInputs();
+  return [
+    {
+      path: OUTPUT_PATH,
+      label: "types.generated.ts",
+      output: generateTypes(inputs),
+    },
+    {
+      path: RUNTIME_EVENTS_OUTPUT_PATH,
+      label: "runtime-events.generated.ts",
+      output: generateRuntimeEventsZod(inputs.events),
+    },
+  ];
+}
+
 export function runCli(): void {
-  const output = generateTypes(loadInputs());
-  writeFileSync(OUTPUT_PATH, output);
-  console.log(`wrote ${OUTPUT_PATH}`);
+  for (const { path: out, output } of generateAll()) {
+    writeFileSync(out, output);
+    console.log(`wrote ${out}`);
+  }
 }
 
 export function checkCli(): void {
-  const expected = generateTypes(loadInputs());
-  const actual = readFileSync(OUTPUT_PATH, "utf-8");
-  if (actual !== expected) {
-    console.error(
-      `DRIFT: ${OUTPUT_PATH} is out of date with the committed JSON schemas.\n` +
-        `Regenerate with: npm run codegen:types (from frontend/)`,
-    );
-    process.exit(1);
+  let drift = false;
+  for (const { path: out, output: expected } of generateAll()) {
+    const actual = readFileSync(out, "utf-8");
+    if (actual !== expected) {
+      console.error(
+        `DRIFT: ${out} is out of date with the committed JSON schemas.\n` +
+          `Regenerate with: npm run codegen:types (from frontend/)`,
+      );
+      drift = true;
+    } else {
+      console.log(`OK: ${out} is in sync with the committed JSON schemas`);
+    }
   }
-  console.log(`OK: ${OUTPUT_PATH} is in sync with the committed JSON schemas`);
+  if (drift) process.exit(1);
 }
 
 // Invoked directly (tsx scripts/codegen-types.ts or node --experimental-strip-types).
@@ -397,4 +714,5 @@ export const PATHS = {
   SHARED_SCHEMA_PATH,
   EVENTS_SCHEMA_PATH,
   OUTPUT_PATH,
+  RUNTIME_EVENTS_OUTPUT_PATH,
 };
