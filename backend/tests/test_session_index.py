@@ -5,6 +5,7 @@ Covers write-path updates (create / save / rename / delete), self-heal on
 missing / malformed / schema-mismatched sidecars, and a sub-100 ms listing
 budget for 10k synthetic entries.
 """
+import concurrent.futures
 import json
 import sys
 import time
@@ -35,10 +36,11 @@ def _new_session_id() -> str:
 
 
 def _seed_synthetic_sessions_index(sessions_dir: Path, n: int) -> list[str]:
-    """Seed the sidecar directly with *n* synthetic session entries.
+    """Seed the sidecar with *n* synthetic session entries (+ stub files).
 
-    The session files themselves are not created — the fast path only needs
-    the sidecar. Tests that exercise rebuild paths create real files instead.
+    Stub session files are created alongside the sidecar because ``_load_index``
+    revalidates entries against on-disk files. The stubs are empty — if the
+    listing fell back to reading each file, titles/counts would be wrong.
     """
     sessions_dir.mkdir(parents=True, exist_ok=True)
     ids = [_new_session_id() for _ in range(n)]
@@ -57,6 +59,8 @@ def _seed_synthetic_sessions_index(sessions_dir: Path, n: int) -> list[str]:
     (sessions_dir / SESSION_INDEX_FILENAME).write_text(
         json.dumps(payload), encoding="utf-8"
     )
+    for sid in ids:
+        (sessions_dir / f"{sid}.json").touch()
     return ids
 
 
@@ -109,9 +113,9 @@ class TestSessionIndexSidecar:
         # Sorted by updated_at desc, so the highest index comes first.
         assert [row["id"] for row in listed] == list(reversed(ids))
         assert all(row["message_count"] >= 0 for row in listed)
-        # No session files were created on disk, proving the listing did not
-        # fall back to the old glob+read path.
-        assert not list(sessions_dir.glob("*-*.json"))
+        # Stub files are empty (0 bytes) — titles/counts matching the sidecar
+        # payload prove the listing did not fall back to reading each file.
+        assert all(row["title"].startswith("Session ") for row in listed)
 
     def test_list_sessions_under_100ms_for_10k_entries(self, sm, tmp_path):
         sessions_dir = tmp_path / "sessions"
@@ -241,3 +245,57 @@ class TestSessionIndexSidecar:
         assert listed == []
         sidecar = tmp_path / "sessions" / SESSION_INDEX_FILENAME
         assert not sidecar.exists()
+
+    def test_phantom_sidecar_entries_are_pruned_on_read(self, sm, tmp_path):
+        """Out-of-band deletions (e.g. retention runner) must not surface."""
+        sid_keep = sm.create_session()
+        sid_gone = sm.create_session()
+
+        sessions_dir = tmp_path / "sessions"
+        # Simulate the retention runner unlinking a session file directly
+        # without going through ``delete_session`` (and thus without updating
+        # the sidecar).
+        (sessions_dir / f"{sid_gone}.json").unlink()
+
+        listed = sm.list_sessions()
+        assert [row["id"] for row in listed] == [sid_keep]
+
+        # The sidecar was rewritten to drop the phantom entry.
+        sidecar = sessions_dir / SESSION_INDEX_FILENAME
+        payload = json.loads(sidecar.read_text())
+        assert sid_gone not in payload["sessions"]
+        assert sid_keep in payload["sessions"]
+
+    def test_concurrent_writes_do_not_race_on_tmp_path(self, tmp_path):
+        """Regression test: each writer must use a unique tmp filename.
+
+        Without per-call tmp names, concurrent writers collide on
+        ``_index.json.tmp`` and one writer's ``tmp.replace(path)`` raises
+        ``FileNotFoundError`` after another writer renamed the shared tmp
+        away. Under the fix, many parallel writers complete without error.
+        """
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+
+        ids = [_new_session_id() for _ in range(50)]
+
+        def do_upsert(sid: str) -> None:
+            upsert_session_entry(
+                sessions_dir,
+                sid,
+                title=sid,
+                updated_at=1.0,
+                message_count=0,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
+            # ``list(ex.map(...))`` re-raises any worker exception; without
+            # the fix FileNotFoundError would surface here.
+            list(ex.map(do_upsert, ids))
+
+        sidecar = sessions_dir / SESSION_INDEX_FILENAME
+        payload = json.loads(sidecar.read_text())
+        # Last writer wins under lost-update; at minimum the sidecar must be
+        # a valid payload with no leftover ``.tmp`` files.
+        assert payload["schema_version"] == SESSION_INDEX_SCHEMA_VERSION
+        assert not list(sessions_dir.glob(f"{SESSION_INDEX_FILENAME}.*.tmp"))

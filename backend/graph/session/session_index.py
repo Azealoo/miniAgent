@@ -14,6 +14,8 @@ corruption by scanning the directory once.
 from __future__ import annotations
 
 import json
+import os
+import uuid
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -114,17 +116,61 @@ def _normalize_loaded_index(raw: Any) -> dict[str, SessionIndexEntry] | None:
 
 
 def _write_index(sessions_dir: Path, index: dict[str, SessionIndexEntry]) -> None:
-    """Atomically persist the sidecar via tmp-file + rename."""
+    """Atomically persist the sidecar via tmp-file + rename.
+
+    The tmp filename is salted with pid + a uuid4 suffix so concurrent
+    writers (e.g. simultaneous ``create_session`` / ``save_message`` calls in
+    multi-request deployments) do not race on a shared tmp path and raise
+    ``FileNotFoundError`` from ``tmp.replace(path)``.
+    """
     path = _index_path(sessions_dir)
     payload: dict[str, Any] = {
         "schema_version": SESSION_INDEX_SCHEMA_VERSION,
         "sessions": index,
     }
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    tmp.replace(path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        tmp.replace(path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _existing_session_ids(sessions_dir: Path) -> set[str]:
+    """Return the set of session ids that currently have a file on disk."""
+    ids: set[str] = set()
+    if not sessions_dir.exists():
+        return ids
+    for path in sessions_dir.glob("*.json"):
+        if path.name == SESSION_INDEX_FILENAME:
+            continue
+        if _SESSION_ID_RE.match(path.stem):
+            ids.add(path.stem)
+    return ids
+
+
+def _prune_missing_sessions(
+    sessions_dir: Path, index: dict[str, SessionIndexEntry]
+) -> bool:
+    """Drop entries whose session file is no longer on disk.
+
+    Returns True if any entry was removed (so the caller can persist the
+    pruned index). A single directory scan is cheaper than stat-per-entry
+    and still much faster than the old glob+read fallback.
+    """
+    if not index:
+        return False
+    existing = _existing_session_ids(sessions_dir)
+    stale = [sid for sid in index if sid not in existing]
+    for sid in stale:
+        index.pop(sid, None)
+    return bool(stale)
 
 
 def _load_index(sessions_dir: Path) -> dict[str, SessionIndexEntry]:
@@ -134,6 +180,10 @@ def _load_index(sessions_dir: Path) -> dict[str, SessionIndexEntry]:
     except when no index file exists *and* the sessions directory has no
     session files — writing an empty sidecar in that case would pollute the
     directory on every read.
+
+    Sidecar entries are revalidated against the on-disk session files so
+    out-of-band deletions (e.g. by the retention runner, which unlinks
+    files directly) do not surface phantom sessions in ``list_sessions``.
     """
     path = _index_path(sessions_dir)
     existing_bad = False
@@ -146,6 +196,8 @@ def _load_index(sessions_dir: Path) -> dict[str, SessionIndexEntry]:
         else:
             normalized = _normalize_loaded_index(raw)
             if normalized is not None:
+                if _prune_missing_sessions(sessions_dir, normalized):
+                    _write_index(sessions_dir, normalized)
                 return normalized
             existing_bad = True
 
