@@ -56,8 +56,9 @@ Before editing, read the piece of the system you are about to touch:
   The prefix is frozen per-session via `SessionManager.freeze_session_prefix`
   on the first turn and reused verbatim by sub-agents through
   `runtime.subagent.resolve_session_stable_prefix`. **Adding a tool, skill,
-  or workspace edit mid-session breaks the cache** (one-shot
-  `session_prefix_drift` warning). Per-run cache stats land on the subagent
+  or workspace edit mid-session breaks the cache** (a `session_prefix_drift`
+  warning fires on every drifting turn so repeated degradation stays
+  visible). Per-run cache stats land on the subagent
   artifact under `cache_stats`; aggregates land on the `bioapex_prompt_cache_*`
   Prometheus metrics.
 - Frontend state: `frontend/src/lib/store.tsx`, `api.ts`,

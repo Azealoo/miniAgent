@@ -56,7 +56,7 @@ class TestFrozenSessionPrefix:
         )
         assert sm.get_frozen_session_prefix(session_id) is frozen_a
 
-    def test_drift_logs_warning_once(self, tmp_path, caplog):
+    def test_drift_logs_warning_every_time(self, tmp_path, caplog):
         from graph.session_manager import SessionManager
 
         session_id = _valid_session_id(2)
@@ -79,9 +79,18 @@ class TestFrozenSessionPrefix:
                 stable_prefix="stable-edited-again",
                 tool_names=("a",),
             )
+            # A call whose fingerprint matches the frozen snapshot must not log.
+            sm.freeze_session_prefix(
+                session_id,
+                stable_prefix="stable",
+                tool_names=("a",),
+            )
 
         drift_logs = [r for r in caplog.records if "session_prefix_drift" in r.message]
-        assert len(drift_logs) == 1, "Drift warning must log only once per session"
+        assert len(drift_logs) == 2, (
+            "Drift warning must fire on every drifting call so repeated "
+            "degradation stays visible; matching calls must not log."
+        )
 
     def test_delete_session_clears_frozen_prefix(self, tmp_path):
         from graph.session_manager import SessionManager
