@@ -107,6 +107,21 @@ class RetrievalRuntimeEvent(_RuntimeEventBase):
     results: list[dict[str, Any]]
 
 
+class RetrievalErrorRuntimeEvent(_RuntimeEventBase):
+    """Non-fatal signal that a RAG retrieval attempt raised.
+
+    Emitted when ``MemoryIndexer.retrieve`` (or the LLM-probe fallback) throws
+    during the pre-turn retrieval phase. The turn itself continues — callers
+    still record a retrieval miss via the metrics collector — but the reviewer
+    sees the failure in the UI instead of the old silent swallow.
+    """
+
+    type: Literal["retrieval_error"] = "retrieval_error"
+    query: str
+    error_type: str
+    message: str
+
+
 class TokenRuntimeEvent(_RuntimeEventBase):
     type: Literal["token"] = "token"
     content: str
@@ -302,6 +317,7 @@ class WorkflowStepFailedRuntimeEvent(_RuntimeEventBase):
 RuntimeEvent = Annotated[
     Union[
         RetrievalRuntimeEvent,
+        RetrievalErrorRuntimeEvent,
         TokenRuntimeEvent,
         ToolStartRuntimeEvent,
         ToolEndRuntimeEvent,
@@ -324,6 +340,7 @@ RuntimeEvent = Annotated[
 
 RUNTIME_EVENT_TYPES: tuple[str, ...] = (
     "retrieval",
+    "retrieval_error",
     "token",
     "tool_start",
     "tool_end",

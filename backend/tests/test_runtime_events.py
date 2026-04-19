@@ -53,6 +53,12 @@ def test_runtime_event_snapshot_lists_every_expected_event_type() -> None:
     "payload",
     [
         {"type": "retrieval", "query": "brca1", "results": [{"text": "x", "source": "a", "score": 0.1}]},
+        {
+            "type": "retrieval_error",
+            "query": "brca1",
+            "error_type": "RuntimeError",
+            "message": "index corrupt",
+        },
         {"type": "token", "content": "hello"},
         {"type": "tool_start", "tool": "read_file", "input": "x", "run_id": "run-1"},
         {
