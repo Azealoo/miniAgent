@@ -455,6 +455,110 @@ def scan_skills(base_dir: Path) -> None:
     snapshot_path.write_text(render_skills_snapshot(skill_entries), encoding="utf-8")
 
 
+def _extract_skill_body(content: str) -> str:
+    """Return the post-frontmatter body of a SKILL.md document.
+
+    If no frontmatter delimiters are present, the entire content is treated as
+    body. Leading whitespace after the closing ``---`` is stripped so callers
+    get the usable body directly.
+    """
+    if not content.startswith("---"):
+        return content
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return content
+    return parts[2].lstrip("\n")
+
+
+class SkillRegistry:
+    """Two-phase accessor for SKILL.md metadata and bodies.
+
+    Frontmatter for every discovered skill is parsed eagerly on first access
+    (cached keyed by skill name), while the post-frontmatter body is read from
+    disk only when ``get_body(name)`` is called. This keeps the default prompt
+    frontmatter-only and defers body loads to the moment the model or a user
+    slash command actually needs the full instructions.
+    """
+
+    def __init__(self, base_dir: Path, *, respect_enabled: bool = True) -> None:
+        self.base_dir = base_dir
+        self._respect_enabled = respect_enabled
+        self._frontmatter: dict[str, dict[str, Any]] | None = None
+        self._paths: dict[str, Path] = {}
+        self._body_cache: dict[str, str] = {}
+
+    def _ensure_loaded(self) -> None:
+        if self._frontmatter is not None:
+            return
+        frontmatter: dict[str, dict[str, Any]] = {}
+        paths: dict[str, Path] = {}
+        for entry in collect_skill_entries(
+            self.base_dir, respect_enabled=self._respect_enabled
+        ):
+            name = entry["name"]
+            if name in frontmatter:
+                continue
+            frontmatter[name] = entry
+            paths[name] = _resolve_skill_path(self.base_dir, entry)
+        self._frontmatter = frontmatter
+        self._paths = paths
+
+    def names(self) -> list[str]:
+        self._ensure_loaded()
+        assert self._frontmatter is not None
+        return list(self._frontmatter.keys())
+
+    def get_frontmatter(self, name: str) -> dict[str, Any] | None:
+        """Return cached frontmatter metadata for ``name`` or None if unknown."""
+        self._ensure_loaded()
+        assert self._frontmatter is not None
+        return self._frontmatter.get(name)
+
+    def get_body(self, name: str) -> str | None:
+        """Return the post-frontmatter body of ``name``'s SKILL.md on demand.
+
+        The body is read from disk the first time it is requested and cached
+        for subsequent calls; frontmatter-only consumers never pay this cost.
+        Returns None when the skill is unknown or its source file is missing.
+        """
+        if name in self._body_cache:
+            return self._body_cache[name]
+        self._ensure_loaded()
+        path = self._paths.get(name)
+        if path is None or not path.exists():
+            return None
+        content = path.read_text(encoding="utf-8")
+        body = _extract_skill_body(content)
+        self._body_cache[name] = body
+        return body
+
+
+def _resolve_skill_path(base_dir: Path, entry: dict[str, Any]) -> Path:
+    location = entry.get("location", "")
+    if isinstance(location, str) and location.startswith("./"):
+        return base_dir / location[2:]
+    if isinstance(location, str) and location:
+        candidate = Path(location)
+        if candidate.is_absolute():
+            return candidate
+        return base_dir / candidate
+    return base_dir / "skills" / entry.get("name", "") / "SKILL.md"
+
+
+def get_frontmatter(
+    base_dir: Path, name: str, *, respect_enabled: bool = True
+) -> dict[str, Any] | None:
+    """Module-level helper returning cached frontmatter for ``name``."""
+    return SkillRegistry(base_dir, respect_enabled=respect_enabled).get_frontmatter(name)
+
+
+def get_body(
+    base_dir: Path, name: str, *, respect_enabled: bool = True
+) -> str | None:
+    """Module-level helper returning the on-demand body for ``name``."""
+    return SkillRegistry(base_dir, respect_enabled=respect_enabled).get_body(name)
+
+
 def skill_required_env_satisfied(
     entry: dict[str, Any],
     *,
