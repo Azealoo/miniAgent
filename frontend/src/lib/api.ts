@@ -75,6 +75,50 @@ export class ApiError extends Error {
   }
 }
 
+export interface SessionCorruptDetail {
+  sessionId: string;
+  quarantinePath: string;
+  message: string;
+}
+
+/**
+ * Returns the structured "session_corrupt" payload when *error* is a 422
+ * response from a session endpoint, otherwise null. Drives the user-visible
+ * "session corrupt" notice in the UI.
+ */
+export function getSessionCorruptDetail(
+  error: unknown
+): SessionCorruptDetail | null {
+  if (!(error instanceof ApiError) || error.status !== 422) return null;
+  const text = error.bodyText.trim();
+  if (!text) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const detail =
+    parsed && typeof parsed === "object" && "detail" in parsed
+      ? (parsed as { detail?: unknown }).detail
+      : parsed;
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) return null;
+  const record = detail as Record<string, unknown>;
+  if (record.error !== "session_corrupt") return null;
+  const sessionId = typeof record.session_id === "string" ? record.session_id : "";
+  const quarantinePath =
+    typeof record.quarantine_path === "string" ? record.quarantine_path : "";
+  const message =
+    typeof record.message === "string" && record.message.trim()
+      ? record.message
+      : "The saved session file was corrupt and has been quarantined.";
+  return { sessionId, quarantinePath, message };
+}
+
+export function isSessionCorruptError(error: unknown): boolean {
+  return getSessionCorruptDetail(error) !== null;
+}
+
 let apiAuthProvider: ApiAuthProvider | null = null;
 
 export function setApiAuthProvider(provider: ApiAuthProvider | null): void {

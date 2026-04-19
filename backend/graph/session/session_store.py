@@ -46,7 +46,11 @@ from graph.session.session_normalizer import (
     _normalize_messages,
     _normalize_record_list,
 )
-from graph.session.session_schema import SESSION_SCHEMA_VERSION, _validate_session_id
+from graph.session.session_schema import (
+    SESSION_SCHEMA_VERSION,
+    SessionCorruptError,
+    _validate_session_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +133,7 @@ class SessionStore:
     def __init__(self, base_dir: Path) -> None:
         self.sessions_dir = base_dir / "sessions"
         self.archive_dir = self.sessions_dir / "archive"
+        self.quarantine_dir = self.sessions_dir / "_quarantine"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -166,17 +171,55 @@ class SessionStore:
         finally:
             os.close(fd)
 
-    def _read(self, session_id: str) -> dict:
+    def _quarantine_corrupt_file(self, path: Path, session_id: str) -> Path:
+        """Move *path* into ``sessions/_quarantine/`` and return the new path.
+
+        Used when a session JSON file fails to decode. Preserves the bad
+        bytes for forensic review while clearing the active slot so the
+        next read returns an empty session.
+        """
+        self.quarantine_dir.mkdir(parents=True, exist_ok=True)
+        quarantined = self.quarantine_dir / f"{int(time.time())}_{session_id}.json"
+        try:
+            path.replace(quarantined)
+        except OSError as exc:
+            logger.warning(
+                "session_quarantine_failed session_id=%s path=%s error=%s",
+                session_id,
+                path,
+                exc,
+            )
+            return quarantined
+        logger.warning(
+            "session_quarantined session_id=%s quarantine_path=%s",
+            session_id,
+            quarantined,
+        )
+        return quarantined
+
+    def _read(self, session_id: str, *, raise_on_corrupt: bool = False) -> dict:
         path = self._path(session_id)
         if not path.exists():
             return self._empty(session_id)
 
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            # Corrupted or unreadable file — return a fresh session structure
-            # rather than propagating a 500 error to the user. Log so
-            # silent data loss from a truncated write is visible in ops.
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            quarantined = self._quarantine_corrupt_file(path, session_id)
+            if raise_on_corrupt:
+                raise SessionCorruptError(
+                    session_id, str(quarantined), original_error=exc
+                ) from exc
+            # Default: behave like the pre-quarantine code path and return an
+            # empty session so internal call sites (turn runtime, files
+            # workspace summary, token stats, compaction) do not start raising
+            # generic 500s when a single session file is corrupt. The bytes
+            # were preserved in ``_quarantine`` and the API endpoints that
+            # want a typed 422 opt in via ``raise_on_corrupt=True``.
+            return self._empty(session_id)
+        except OSError as exc:
+            # Transient read failure (permissions, EBUSY, etc.) — surface as
+            # an empty session rather than destroying the file.
             logger.warning(
                 "session_read_fallback session_id=%s path=%s error=%s",
                 session_id,
@@ -247,7 +290,28 @@ class SessionStore:
         sessions = []
         for path in self.sessions_dir.glob("*.json"):
             try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
+                raw_text = path.read_text(encoding="utf-8")
+            except OSError:
+                # Transient read failure — skip this file but leave it in
+                # place so a future call can recover it.
+                continue
+            except UnicodeDecodeError:
+                # Non-UTF-8 bytes: file is corrupt at the encoding layer.
+                # Quarantine and skip so a single malformed session does not
+                # take down the entire catalog listing.
+                self._quarantine_corrupt_file(path, path.stem)
+                continue
+
+            try:
+                raw = json.loads(raw_text)
+            except json.JSONDecodeError:
+                # Corrupt file: quarantine it so the slot is freed and a
+                # subsequent direct load surfaces SessionCorruptError. Skip
+                # the entry in the listing rather than blocking the catalog.
+                self._quarantine_corrupt_file(path, path.stem)
+                continue
+
+            try:
                 if isinstance(raw, list):
                     title, updated_at, msgs = path.stem, 0.0, raw
                 else:
@@ -262,14 +326,25 @@ class SessionStore:
                         "message_count": len(msgs),
                     }
                 )
-            except Exception:
+            except (AttributeError, TypeError):
                 continue
         sessions.sort(key=lambda x: x["updated_at"], reverse=True)
         return sessions
 
-    def load_session(self, session_id: str) -> list[dict]:
-        """Return the raw message array (for display / history endpoint)."""
-        return _normalize_messages(self._read(session_id).get("messages", []))
+    def load_session(
+        self, session_id: str, *, raise_on_corrupt: bool = False
+    ) -> list[dict]:
+        """Return the raw message array (for display / history endpoint).
+
+        ``raise_on_corrupt=True`` surfaces ``SessionCorruptError`` when the
+        underlying file fails to decode; the default mirrors prior behavior
+        and returns an empty session so internal callers do not regress.
+        """
+        return _normalize_messages(
+            self._read(session_id, raise_on_corrupt=raise_on_corrupt).get(
+                "messages", []
+            )
+        )
 
     def load_request_messages(self, session_id: str, request_id: str) -> list[dict]:
         """Return normalized messages associated with a persisted request id."""
@@ -282,14 +357,20 @@ class SessionStore:
             if message.get("request_id") == normalized_request_id
         ]
 
-    def load_session_for_agent(self, session_id: str) -> list[dict]:
+    def load_session_for_agent(
+        self, session_id: str, *, raise_on_corrupt: bool = False
+    ) -> list[dict]:
         """
         Return history optimised for the LLM:
         - Consecutive assistant messages are merged into one.
         - If compressed_context exists, a synthetic system message is
           prepended containing the summary.
+
+        ``raise_on_corrupt=True`` surfaces ``SessionCorruptError`` when the
+        underlying file fails to decode; the default mirrors prior behavior
+        and returns an empty history so the turn runtime keeps working.
         """
-        data = self._read(session_id)
+        data = self._read(session_id, raise_on_corrupt=raise_on_corrupt)
         messages = self.load_session(session_id)
         compressed = data.get("compressed_context", "")
 
@@ -347,9 +428,11 @@ class SessionStore:
             data["messages"].append(msg)
             self._write(session_id, data)
 
-    def rename_session(self, session_id: str, title: str) -> None:
+    def rename_session(
+        self, session_id: str, title: str, *, raise_on_corrupt: bool = False
+    ) -> None:
         with self._locked(session_id):
-            data = self._read(session_id)
+            data = self._read(session_id, raise_on_corrupt=raise_on_corrupt)
             data["title"] = title
             self._write(session_id, data)
 

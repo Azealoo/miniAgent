@@ -10,6 +10,7 @@ migration completes — plan to remove it after one release cycle.
 from graph.session import (
     FrozenSessionPrefix,
     SESSION_SCHEMA_VERSION,
+    SessionCorruptError,
     SessionManager,
     _validate_session_id,
 )
@@ -18,5 +19,6 @@ __all__ = [
     "FrozenSessionPrefix",
     "SessionManager",
     "SESSION_SCHEMA_VERSION",
+    "SessionCorruptError",
     "_validate_session_id",
 ]
