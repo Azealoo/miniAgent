@@ -138,8 +138,16 @@ _POLICY_OVERRIDES: dict[str, ToolPolicyMetadata] = {
         activity_summary_hint="State the code goal and the data or files it will touch before executing it.",
         result_summary_hint="Summarize the computed result, warnings, and any files or variables materially changed.",
     ),
-    "fetch_url": ToolPolicyMetadata(access_scope="inspection", verifier_exposed=True),
-    "http_json": ToolPolicyMetadata(access_scope="inspection", verifier_exposed=True),
+    "fetch_url": ToolPolicyMetadata(
+        access_scope="inspection",
+        planner_exposed=True,
+        verifier_exposed=True,
+    ),
+    "http_json": ToolPolicyMetadata(
+        access_scope="inspection",
+        planner_exposed=True,
+        verifier_exposed=True,
+    ),
     "ncbi_eutils": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
@@ -148,6 +156,7 @@ _POLICY_OVERRIDES: dict[str, ToolPolicyMetadata] = {
     "evidence_retrieval": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
+        planner_exposed=True,
         verifier_exposed=True,
     ),
     "evidence_review": ToolPolicyMetadata(
@@ -162,14 +171,20 @@ _POLICY_OVERRIDES: dict[str, ToolPolicyMetadata] = {
     "uniprot_api": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
+        planner_exposed=True,
         verifier_exposed=True,
     ),
     "ensembl_api": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
+        planner_exposed=True,
         verifier_exposed=True,
     ),
-    "read_file": ToolPolicyMetadata(access_scope="inspection", verifier_exposed=True),
+    "read_file": ToolPolicyMetadata(
+        access_scope="inspection",
+        planner_exposed=True,
+        verifier_exposed=True,
+    ),
     "write_file": ToolPolicyMetadata(
         access_scope="execution",
         destructive=True,
@@ -181,21 +196,11 @@ _POLICY_OVERRIDES: dict[str, ToolPolicyMetadata] = {
     "search_knowledge_base": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
+        planner_exposed=True,
         verifier_exposed=True,
     ),
     "plan_agent": ToolPolicyMetadata(access_scope="inspection"),
     "verification_agent": ToolPolicyMetadata(access_scope="inspection"),
-}
-
-# Tools that are read-only (so would normally be planner-exposed) but whose
-# planner visibility is intentionally suppressed to nudge the planner toward a
-# richer sibling tool. See issue #126 — the raw ``ncbi_eutils`` wrapper is
-# redundant with ``evidence_retrieval`` for planner-level literature work
-# because the latter also persists durable BioAPEX evidence cards. The main
-# agent and skills still see ``ncbi_eutils``; only the planner helper agent
-# has it hidden.
-_PLANNER_HIDDEN_TOOL_NAMES = {
-    "ncbi_eutils",
 }
 
 _READ_ONLY_TOOL_NAMES = {
@@ -271,7 +276,7 @@ def build_tool_manifest_entry(tool: Any) -> ToolManifestEntry:
     read_only = policy.read_only or tool.name in _READ_ONLY_TOOL_NAMES
     destructive = policy.destructive
     concurrency_safe = policy.concurrency_safe or tool.name in _CONCURRENCY_SAFE_TOOL_NAMES
-    planner_exposed = (policy.planner_exposed or read_only) and tool.name not in _PLANNER_HIDDEN_TOOL_NAMES
+    planner_exposed = policy.planner_exposed
     verifier_exposed = policy.verifier_exposed or read_only
     interrupt_behavior = policy.interrupt_behavior or _default_interrupt_behavior(
         read_only=read_only,

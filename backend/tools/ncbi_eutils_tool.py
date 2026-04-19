@@ -5,12 +5,12 @@ Uses rate limit (no API key required; with API key can increase rate).
 Selection rule vs ``evidence_retrieval`` (issue #126): ``evidence_retrieval``
 is the canonical PubMed entry point — it wraps the same E-utilities calls and
 also persists durable BioAPEX evidence cards plus cached raw payloads. The
-planner helper agent therefore has ``ncbi_eutils`` hidden
-(``planner_exposed=False`` via ``_PLANNER_HIDDEN_TOOL_NAMES`` in
-``tools/registry.py``) so literature plans default to evidence-card output.
-The main agent and skills keep full access for cases where raw E-utilities
-are required (gene / protein DB lookups, ad-hoc esummary on non-PubMed DBs,
-XML retmode, or when evidence-card persistence is not wanted).
+planner helper agent therefore has ``ncbi_eutils`` hidden (no
+``planner_exposed=True`` in its ``tools/registry.py`` policy override) so
+literature plans default to evidence-card output. The main agent and skills
+keep full access for cases where raw E-utilities are required (gene /
+protein DB lookups, ad-hoc esummary on non-PubMed DBs, XML retmode, or when
+evidence-card persistence is not wanted).
 """
 from dataclasses import dataclass
 import json
