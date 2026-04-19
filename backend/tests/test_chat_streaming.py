@@ -638,6 +638,86 @@ async def test_agent_astream_llm_probe_below_threshold_uses_keyword_rag(
 
 
 @pytest.mark.asyncio
+async def test_agent_astream_emits_retrieval_error_when_indexer_raises(
+    isolated_chat_state, caplog
+):
+    """A broken MemoryIndexer must produce a log line, counter bump, and event.
+
+    Regression test for issue #115: ``memory_indexer.retrieve`` failures used
+    to be silently swallowed. The turn still continues (the ``retrieval_error``
+    event is non-fatal) and ``METRICS.observe_retrieval(hit=False)`` keeps
+    firing so the miss ratio stays comparable.
+    """
+    import logging
+
+    from graph.agent import agent_manager
+    from runtime.metrics_collector import METRICS
+
+    original_tools = agent_manager.tools
+    original_memory_indexer = agent_manager.memory_indexer
+
+    class FakeAgent:
+        async def astream_events(self, payload, version="v2", config=None):
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": type("Chunk", (), {"content": "ok"})()},
+            }
+
+    class BrokenIndexer:
+        def retrieve(self, *_args, **_kwargs):
+            raise RuntimeError("index corrupt")
+
+        def memory_file_count(self) -> int:
+            return 0
+
+    agent_manager.tools = []
+    agent_manager.memory_indexer = BrokenIndexer()
+
+    METRICS.reset()
+    try:
+        with caplog.at_level(logging.ERROR, logger="graph.agent"), patch(
+            "config.get_rag_mode", return_value=True
+        ), patch(
+            "graph.agent.create_agent", return_value=FakeAgent()
+        ):
+            events = [
+                event
+                async for event in agent_manager.astream(
+                    "Where are the BRCA1 notes?", []
+                )
+            ]
+    finally:
+        agent_manager.tools = original_tools
+        agent_manager.memory_indexer = original_memory_indexer
+
+    retrieval_error = next(
+        event for event in events if event["type"] == "retrieval_error"
+    )
+    assert retrieval_error["query"] == "Where are the BRCA1 notes?"
+    assert retrieval_error["error_type"] == "RuntimeError"
+    assert "index corrupt" in retrieval_error["message"]
+
+    assert any(
+        record.name == "graph.agent"
+        and record.levelno == logging.ERROR
+        and "retrieval_error" in record.getMessage()
+        for record in caplog.records
+    )
+
+    exposition = METRICS.render_exposition()
+    assert (
+        'bioapex_retrieval_errors_total{error_type="RuntimeError"} 1'
+        in exposition
+    )
+    # Non-fatal semantics: the miss counter still ticks so the hit-ratio
+    # gauge keeps its historical meaning.
+    assert "bioapex_retrieval_cache_misses_total 1" in exposition
+
+    # The turn kept running and produced the downstream token event.
+    assert any(event["type"] == "token" for event in events)
+
+
+@pytest.mark.asyncio
 async def test_agent_astream_uses_configured_executor_recursion_limit(isolated_chat_state):
     from graph.agent import agent_manager
 

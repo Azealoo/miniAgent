@@ -112,6 +112,27 @@ Where `<ROLE>` is one of `EXECUTOR`, `PLANNER`, `VERIFIER`, or `TITLE`.
 - per-role execution backend settings
 - production hardening and access defaults
 
+#### Layered config precedence
+
+The runtime config loader (`backend/runtime_config.py`) merges layers in this
+order — later layers override earlier ones, and the final value for each field
+wins:
+
+1. built-in defaults in `backend/config.py`
+2. user config (`~/.codex/bioapex/config.json`, or `BIOAPEX_USER_CONFIG`)
+3. project config (`backend/config.json`, or `BIOAPEX_PROJECT_CONFIG`)
+4. environment profile (`config.<env>.json` next to the project config, when
+   `BIOAPEX_ENV` is set — e.g. `BIOAPEX_ENV=staging` picks
+   `backend/config.staging.json`). Unset/blank `BIOAPEX_ENV` skips this layer
+   entirely; a missing `config.<env>.json` file is a no-op.
+5. local config (`backend/config.local.json`, or `BIOAPEX_LOCAL_CONFIG`)
+6. process environment variables (e.g. `BIOAPEX_PROMPT_MEMORY_STALE_DAYS`)
+7. role-specific model overrides (`BIOAPEX_<ROLE>_*`)
+
+This lets dev/staging/prod share `backend/config.json` and diverge only in a
+small `config.<env>.json` overlay, while still allowing per-machine `local`
+tweaks and per-process env-var overrides on top.
+
 ## Path Conventions
 
 Important: the running backend treats `backend/` as its project root.

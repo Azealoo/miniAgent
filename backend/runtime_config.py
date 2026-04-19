@@ -16,6 +16,7 @@ from runtime_config_types import (
 USER_CONFIG_ENV_VAR = "BIOAPEX_USER_CONFIG"
 PROJECT_CONFIG_ENV_VAR = "BIOAPEX_PROJECT_CONFIG"
 LOCAL_CONFIG_ENV_VAR = "BIOAPEX_LOCAL_CONFIG"
+ENV_PROFILE_ENV_VAR = "BIOAPEX_ENV"
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -102,11 +103,17 @@ def _load_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
-def resolve_runtime_config_paths(project_config_path: Path) -> dict[str, Path]:
+def resolve_runtime_config_paths(project_config_path: Path) -> dict[str, Path | None]:
     project_path = Path(
         os.getenv(PROJECT_CONFIG_ENV_VAR, str(project_config_path))
     ).expanduser()
     default_local_path = project_path.with_name("config.local.json")
+
+    env_profile = os.getenv(ENV_PROFILE_ENV_VAR, "").strip()
+    env_path: Path | None = (
+        project_path.with_name(f"config.{env_profile}.json") if env_profile else None
+    )
+
     return {
         "user": Path(
             os.getenv(
@@ -115,6 +122,7 @@ def resolve_runtime_config_paths(project_config_path: Path) -> dict[str, Path]:
             )
         ).expanduser(),
         "project": project_path,
+        "env": env_path,
         "local": Path(
             os.getenv(LOCAL_CONFIG_ENV_VAR, str(default_local_path))
         ).expanduser(),
@@ -148,8 +156,12 @@ def load_runtime_config(
         )
     ]
 
-    for layer_name in ("user", "project", "local"):
+    for layer_name in ("user", "project", "env", "local"):
         path = paths[layer_name]
+        if path is None:
+            # The env layer is only active when BIOAPEX_ENV is set; otherwise
+            # skip it entirely so it does not appear in provenance or layers.
+            continue
         payload = _load_json_object(path)
         if payload:
             _apply_overlay_with_provenance(

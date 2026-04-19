@@ -34,6 +34,11 @@ _TURN_STATUS_TO_EXIT: dict[str, tuple[str, int]] = {
     "ok": ("success", 0),
     "awaiting_approval": ("awaiting_approval", 4),
     "budget_exceeded": ("token_budget", 3),
+    # ``verifier_cap_exceeded`` is only carried on ``error`` events emitted
+    # by ``run_harness_turn``; the SSE adapter strips turn_status off error
+    # payloads before they leave the server, so this does not need a slot
+    # in ``DoneRuntimeEvent.turn_status``.
+    "verifier_cap_exceeded": ("token_budget", 3),
     "error": ("tool_error", 1),
     "cancelled": ("user_abort", 2),
 }
@@ -100,6 +105,21 @@ class RetrievalRuntimeEvent(_RuntimeEventBase):
     type: Literal["retrieval"] = "retrieval"
     query: str
     results: list[dict[str, Any]]
+
+
+class RetrievalErrorRuntimeEvent(_RuntimeEventBase):
+    """Non-fatal signal that a RAG retrieval attempt raised.
+
+    Emitted when ``MemoryIndexer.retrieve`` (or the LLM-probe fallback) throws
+    during the pre-turn retrieval phase. The turn itself continues — callers
+    still record a retrieval miss via the metrics collector — but the reviewer
+    sees the failure in the UI instead of the old silent swallow.
+    """
+
+    type: Literal["retrieval_error"] = "retrieval_error"
+    query: str
+    error_type: str
+    message: str
 
 
 class TokenRuntimeEvent(_RuntimeEventBase):
@@ -297,6 +317,7 @@ class WorkflowStepFailedRuntimeEvent(_RuntimeEventBase):
 RuntimeEvent = Annotated[
     Union[
         RetrievalRuntimeEvent,
+        RetrievalErrorRuntimeEvent,
         TokenRuntimeEvent,
         ToolStartRuntimeEvent,
         ToolEndRuntimeEvent,
@@ -319,6 +340,7 @@ RuntimeEvent = Annotated[
 
 RUNTIME_EVENT_TYPES: tuple[str, ...] = (
     "retrieval",
+    "retrieval_error",
     "token",
     "tool_start",
     "tool_end",

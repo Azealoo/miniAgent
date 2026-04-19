@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from graph.session.session_archive_index import remove_session_from_index
+from graph.session.session_archive_index import (
+    _atomic_write_text,
+    remove_session_from_index,
+)
 from graph.session.session_normalizer import (
     _build_blocks_from_legacy_message,
     _normalize_blocks,
@@ -123,9 +126,15 @@ class SessionStore:
             raise SessionCorruptError(
                 session_id, str(quarantined), original_error=exc
             ) from exc
-        except OSError:
+        except OSError as exc:
             # Transient read failure (permissions, EBUSY, etc.) — surface as
             # an empty session rather than destroying the file.
+            logger.warning(
+                "session_read_fallback session_id=%s path=%s error=%s",
+                session_id,
+                path,
+                exc,
+            )
             return self._empty(session_id)
 
         # v1 migration: plain list → v2 dict
@@ -146,8 +155,9 @@ class SessionStore:
         data.setdefault("schema_version", SESSION_SCHEMA_VERSION)
         data["updated_at"] = time.time()
         self._stamp_deterministic_mode(data)
-        self._path(session_id).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        _atomic_write_text(
+            self._path(session_id),
+            json.dumps(data, ensure_ascii=False, indent=2),
         )
 
     @staticmethod

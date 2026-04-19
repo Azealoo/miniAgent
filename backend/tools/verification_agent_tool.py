@@ -119,6 +119,13 @@ class VerificationAgentTool(BaseTool):
                 "answer for material correctness, completeness, evidence, and safety issues without nitpicking "
                 "trivial polish. If the answer is genuinely good enough for the task, return pass. "
                 f"{'Repair-required verdicts trigger an automatic retry, so reserve them for substantive fixes. ' if retry_on_repair_required else ''}"
+                "You have read-only lookup tools available; use them to fact-check rather than only critiquing the "
+                "text. In particular, call the lookup tools when the draft makes a load-bearing factual claim you "
+                "cannot confirm from the task context: verify gene, protein, or transcript identifiers via "
+                "ncbi_eutils, uniprot_api, or ensembl_api; cross-check cited URLs or DOIs via fetch_url or "
+                "http_json; pull supporting passages via evidence_retrieval or search_knowledge_base; and use "
+                "read_file to spot-check files the draft references. Skip tool calls for claims that are clearly "
+                "covered by the task or draft, and prefer the cheapest tool that resolves the question. "
                 "Use the tool catalog you were given, stay concise, and return only JSON."
             )
 

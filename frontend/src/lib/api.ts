@@ -21,6 +21,7 @@ import {
   type StreamCallbacks,
 } from "./chat-stream-events";
 import { RUNTIME_EVENT_SCHEMA_VERSION } from "./runtime-events";
+import { log } from "./telemetry";
 
 export { ApiPayloadError, isApiPayloadError };
 export type { StreamCallbacks };
@@ -452,9 +453,17 @@ export async function streamChat(
 
   if (!response.ok || !response.body) {
     const text = await response.text().catch(() => response.statusText);
+    const errorMessage = extractApiErrorMessage(text, response.status, response.statusText);
+    log.error({
+      event: "sse_stream_open_failed",
+      message: errorMessage,
+      requestId: options.requestId,
+      sessionId,
+      meta: { status: response.status },
+    });
     const errorEvent: ChatStreamErrorEvent = {
       type: "error",
-      error: extractApiErrorMessage(text, response.status, response.statusText),
+      error: errorMessage,
       request_id: options.requestId,
     };
     dispatcher.dispatch(errorEvent);
@@ -479,6 +488,16 @@ export async function streamChat(
       buffer = parsed.bufferedRemainder;
       for (const event of parsed.events) dispatcher.dispatch(event);
       if (parsed.overflow) {
+        log.error({
+          event: "sse_stream_overflow",
+          message: "SSE buffered remainder exceeded the cap; stream cancelled.",
+          requestId: dispatcher.lastRequestId() ?? options.requestId,
+          sessionId,
+          meta: {
+            buffered_bytes: parsed.overflow.bufferedBytes,
+            max_buffer_bytes: parsed.overflow.maxBufferBytes,
+          },
+        });
         dispatcher.dispatch({
           type: "stream_overflow",
           bufferedBytes: parsed.overflow.bufferedBytes,
@@ -501,9 +520,16 @@ export async function streamChat(
       for (const event of finalParsed.events) dispatcher.dispatch(event);
 
       if (!dispatcher.sawTerminalEvent()) {
+        const truncationMessage = "The response stream closed before completion.";
+        log.error({
+          event: "sse_stream_truncated",
+          message: truncationMessage,
+          requestId: dispatcher.lastRequestId() ?? options.requestId,
+          sessionId,
+        });
         dispatcher.dispatch({
           type: "error",
-          error: "The response stream closed before completion.",
+          error: truncationMessage,
           request_id: dispatcher.lastRequestId() ?? options.requestId,
         });
       }

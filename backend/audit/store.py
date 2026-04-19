@@ -34,6 +34,7 @@ AuditEventType = Literal[
     "export_generated",
     "model_fallback",
     "llm_escalation",
+    "client_error",
 ]
 
 
