@@ -272,7 +272,7 @@ def build_tool_manifest_entry(tool: Any) -> ToolManifestEntry:
     destructive = policy.destructive
     concurrency_safe = policy.concurrency_safe or tool.name in _CONCURRENCY_SAFE_TOOL_NAMES
     planner_exposed = (policy.planner_exposed or read_only) and tool.name not in _PLANNER_HIDDEN_TOOL_NAMES
-    verifier_exposed = policy.verifier_exposed or read_only
+    verifier_exposed = policy.verifier_exposed and not policy.destructive
     interrupt_behavior = policy.interrupt_behavior or _default_interrupt_behavior(
         read_only=read_only,
         destructive=destructive,
