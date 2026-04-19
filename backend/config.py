@@ -53,6 +53,11 @@ _DEFAULT: dict = {
         "allow_without_context": True,
         "warn_on_missing_artifact_refs": True,
     },
+    "permissions": {
+        "enabled": False,
+        "rules": [],
+        "cache_max_entries_per_session": 256,
+    },
     "access_defaults": {
         "allow_loopback_without_auth": True,
     },
@@ -178,6 +183,25 @@ def get_verification_settings() -> dict[str, Any]:
 def get_tool_policy_settings() -> dict[str, Any]:
     tool_policy = _load_runtime().get("tool_policy", {})
     return dict(tool_policy) if isinstance(tool_policy, dict) else {}
+
+
+def get_permissions_settings() -> dict[str, Any]:
+    """Return the prose permission-rules config block.
+
+    Schema:
+      {
+        "enabled": bool,
+        "rules": [{"description": str, "effect": "allow"|"deny"|"ask"}],
+        "cache_max_entries_per_session": int,
+      }
+
+    Rules are evaluated by a pluggable classifier registered via
+    ``tools.prose_policy.set_prose_classifier``; when no classifier is
+    registered the layer falls back to the hardcoded deny-list / ask-user
+    ladder documented in ``tools/prose_policy.py``.
+    """
+    permissions = _load_runtime().get("permissions", {})
+    return dict(permissions) if isinstance(permissions, dict) else {}
 
 
 def get_access_defaults() -> dict[str, Any]:
