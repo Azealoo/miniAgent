@@ -133,6 +133,11 @@ export default function ChatPanel() {
               autoScrollRef.current = false;
             }
           }}
+          role="log"
+          aria-live="polite"
+          aria-relevant="additions text"
+          aria-atomic="false"
+          aria-label="Conversation transcript"
           className="flex-1 overflow-y-auto px-4 pt-4 sm:px-6 sm:pt-5 lg:px-8 lg:pt-7"
         >
           <div className="mx-auto flex min-h-full w-full max-w-[54rem] flex-col">
