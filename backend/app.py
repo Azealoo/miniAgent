@@ -106,6 +106,7 @@ app.add_middleware(
 
 # ── Register chat-engine routers only ──────────────────────────────
 from api.access import router as access_router
+from api.audit_client import router as audit_client_router
 from api.chat import router as chat_router
 from api.config import router as config_router
 from api.debug import router as debug_router
@@ -122,6 +123,7 @@ app.include_router(files_router, prefix="/api")
 app.include_router(tokens_router, prefix="/api")
 app.include_router(debug_router, prefix="/api")
 app.include_router(metrics_router, prefix="/api")
+app.include_router(audit_client_router, prefix="/api")
 
 
 @app.get("/")
