@@ -153,6 +153,62 @@ class AgentManager:
             system_prompt = stable_prefix_with_harness or volatile_suffix
         return create_agent(self.llm, self.tools, system_prompt=system_prompt)
 
+    async def _run_llm_probe_retrieval(
+        self,
+        *,
+        query: str,
+        session_id: str | None,
+        max_payload_chars: int,
+    ) -> list[dict]:
+        """Ask the executor LLM to pick relevant memory files for ``query``.
+
+        Returns retrieval results in the same shape as ``MemoryIndexer.retrieve``
+        so the caller can render them through ``build_retrieved_memory_block``.
+        Returns ``[]`` on any failure so the caller falls back to keyword RAG.
+        """
+        indexer = self.memory_indexer
+        if indexer is None or self.llm is None:
+            return []
+        corpus_digest = indexer.memory_corpus_digest()
+        if session_id:
+            cached = indexer.get_cached_probe_selection(session_id, corpus_digest)
+            if cached:
+                return indexer.build_probe_results(cached)
+        index_body, valid_sources = indexer.build_probe_index(
+            max_chars=max_payload_chars
+        )
+        if not valid_sources:
+            return []
+        probe_prompt = (
+            "You are selecting which long-term memory files are relevant to answering "
+            "a user query. Respond ONLY with a JSON array of source paths (strings) "
+            "chosen from the provided list. Pick at most 5, sorted most-relevant first. "
+            "Return an empty array if nothing is relevant.\n\n"
+            f"User query:\n{query.strip()}\n\n"
+            f"Available memory files:\n{index_body}\n\n"
+            'Respond with JSON only, e.g. ["memory/project/foo.md"].'
+        )
+        try:
+            response = await self.llm.ainvoke([HumanMessage(content=probe_prompt)])
+        except Exception:
+            logger.debug("llm_probe invocation failed", exc_info=True)
+            return []
+        content = getattr(response, "content", "")
+        if isinstance(content, list):
+            # Some providers return a list of content blocks.
+            content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in content
+            )
+        if not isinstance(content, str) or not content.strip():
+            return []
+        picked = indexer.parse_probe_selection(content, valid_sources)
+        if not picked:
+            return []
+        if session_id:
+            indexer.cache_probe_selection(session_id, corpus_digest, picked)
+        return indexer.build_probe_results(picked)
+
     def clear_session_runtime(self, session_id: str) -> None:
         for tool in self.tools:
             runtime_tool = getattr(tool, "wrapped_tool", tool)
@@ -178,20 +234,53 @@ class AgentManager:
           done         — agent finished the full turn
           error        — unhandled exception
         """
-        from config import get_rag_mode
+        from config import (
+            RAG_MODE_LLM_PROBE,
+            get_llm_probe_max_chars,
+            get_llm_probe_min_files,
+            get_rag_mode,
+            get_rag_mode_name,
+        )
 
         assert self.base_dir is not None, "AgentManager not initialised"
 
+        # ``get_rag_mode()`` stays the on/off gate (preserves existing patch
+        # points) while ``get_rag_mode_name()`` decides which retrieval variant
+        # runs when the gate is on.
         rag_mode = get_rag_mode()
+        rag_mode_name = get_rag_mode_name() if rag_mode else "off"
 
         # ── RAG injection ──────────────────────────────────────────────
         if rag_mode and self.memory_indexer:
             from runtime.metrics_collector import METRICS
+            from tools.policy import get_tool_policy_context as _get_tool_policy_context
 
+            policy_context = _get_tool_policy_context()
+            session_id_for_probe = (
+                policy_context.session_id if policy_context is not None else None
+            )
+            results: list[dict] = []
+            retrieval_source = "keyword"
             try:
-                results = self.memory_indexer.retrieve(message, top_k=3)
+                if rag_mode_name == RAG_MODE_LLM_PROBE and (
+                    self.memory_indexer.memory_file_count()
+                    >= get_llm_probe_min_files()
+                ):
+                    results = await self._run_llm_probe_retrieval(
+                        query=message,
+                        session_id=session_id_for_probe,
+                        max_payload_chars=get_llm_probe_max_chars(),
+                    )
+                    retrieval_source = "llm_probe" if results else "llm_probe_fallback_keyword"
+                if not results:
+                    results = self.memory_indexer.retrieve(message, top_k=3)
                 if results:
-                    yield {"type": "retrieval", "query": message, "results": results}
+                    yield {
+                        "type": "retrieval",
+                        "query": message,
+                        "results": results,
+                        "mode": retrieval_source,
+                    }
                     rag_block = build_retrieved_memory_block(results)
                     # Injected as a system message so the model treats this as
                     # provided context, not as something it previously said.
