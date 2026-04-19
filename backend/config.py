@@ -40,6 +40,19 @@ _DEFAULT_PROMPT_BUDGET: dict = {
     "total_max_chars": 0,
 }
 
+_DEFAULT_LLM_PROBE_MIN_FILES = 10
+_DEFAULT_LLM_PROBE_MAX_CHARS = 8_000
+
+# Normalized values for rag_mode. Historically this was a plain bool
+# (False = no RAG, True = keyword BM25/lexical retrieval). The string form
+# ("off" / "keyword" / "llm_probe") is a superset that unlocks the LLM-probe
+# retrieval mode without breaking existing configs that set a bool.
+RAG_MODE_OFF = "off"
+RAG_MODE_KEYWORD = "keyword"
+RAG_MODE_LLM_PROBE = "llm_probe"
+_VALID_RAG_MODES = (RAG_MODE_OFF, RAG_MODE_KEYWORD, RAG_MODE_LLM_PROBE)
+
+
 _DEFAULT: dict = {
     "rag_mode": False,
     "deterministic_seed": None,
@@ -48,6 +61,8 @@ _DEFAULT: dict = {
     "prompt_context": {
         "include_git_context": False,
         "memory_stale_days": _DEFAULT_MEMORY_STALE_DAYS,
+        "llm_probe_min_files": _DEFAULT_LLM_PROBE_MIN_FILES,
+        "llm_probe_max_chars": _DEFAULT_LLM_PROBE_MAX_CHARS,
     },
     "prompt_budget": dict(_DEFAULT_PROMPT_BUDGET),
     "agent_runtime": {
@@ -236,8 +251,55 @@ def get_execution_backend_settings() -> dict[str, Any]:
     execution_backends = _load_runtime().get("execution_backends", {})
     return dict(execution_backends) if isinstance(execution_backends, dict) else {}
 
+def _normalize_rag_mode(raw: Any) -> str:
+    """Coerce the configured rag_mode into one of ``_VALID_RAG_MODES``.
+
+    Historical configs used a plain bool (False/True = off/keyword). Strings
+    are matched case-insensitively; unknown values fall back to ``off``.
+    """
+    if isinstance(raw, bool):
+        return RAG_MODE_KEYWORD if raw else RAG_MODE_OFF
+    if isinstance(raw, str):
+        token = raw.strip().lower()
+        if token in _VALID_RAG_MODES:
+            return token
+        if token in {"true", "on", "bm25", "lexical"}:
+            return RAG_MODE_KEYWORD
+        if token in {"false", ""}:
+            return RAG_MODE_OFF
+    return RAG_MODE_OFF
+
+
+def get_rag_mode_name() -> str:
+    """Return the normalized rag_mode: 'off' | 'keyword' | 'llm_probe'."""
+    return _normalize_rag_mode(_load_runtime().get("rag_mode", False))
+
+
 def get_rag_mode() -> bool:
-    return _load_runtime().get("rag_mode", False)
+    """Back-compat: True when retrieval-augmented memory is on (keyword or llm_probe)."""
+    return get_rag_mode_name() != RAG_MODE_OFF
+
+
+def get_llm_probe_min_files() -> int:
+    """Minimum memory-file count that enables the LLM-probe path."""
+    raw = get_prompt_context_settings().get(
+        "llm_probe_min_files", _DEFAULT_LLM_PROBE_MIN_FILES
+    )
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return _DEFAULT_LLM_PROBE_MIN_FILES
+
+
+def get_llm_probe_max_chars() -> int:
+    """Char budget for the compact file-index payload sent to the probe LLM."""
+    raw = get_prompt_context_settings().get(
+        "llm_probe_max_chars", _DEFAULT_LLM_PROBE_MAX_CHARS
+    )
+    try:
+        return max(500, int(raw))
+    except (TypeError, ValueError):
+        return _DEFAULT_LLM_PROBE_MAX_CHARS
 
 
 def get_llm_output_token_caps() -> tuple[int, int]:
