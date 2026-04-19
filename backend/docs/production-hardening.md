@@ -95,6 +95,33 @@ settings anonymously.
 - HPC deployments should sit behind cluster or campus authentication and should separate analyst access from operator/admin access.
 - Hosted deployments should require authenticated identity, TLS, request logging, rate limiting, and role separation for read-only inspection, execution, and admin/configuration work.
 
+### File-API rate limiting
+
+The ``/api/files*`` router ships with a per-caller token-bucket limiter
+(see ``backend/rate_limit.py``). Callers are keyed by bearer-token
+identity when ``access_control`` validated one, else by client host.
+Buckets are process-local, which is sufficient for single-worker uvicorn
+deployments; multi-worker or multi-host deployments should front
+BioAPEX with a reverse proxy that enforces global rate limiting.
+
+Defaults — overridable in ``backend/config.json`` under
+``api_rate_limits``:
+
+```json
+{
+  "api_rate_limits": {
+    "files_read":  {"rate": 30, "period_seconds": 60, "enabled": true},
+    "files_write": {"rate": 10, "period_seconds": 60, "enabled": true}
+  }
+}
+```
+
+When a caller exceeds a bucket, the router responds with HTTP ``429``
+and a ``Retry-After`` header (seconds) describing when the next token
+will be available. Setting ``BIOAPEX_RATE_LIMIT_DISABLED=1`` in the
+backend process environment disables the limiter; keep this reserved
+for local development or load testing against a single workstation.
+
 ## Secrets handling
 
 - Keep secrets in environment variables or an external secret manager. Do not store raw credentials in `backend/config.json`.
