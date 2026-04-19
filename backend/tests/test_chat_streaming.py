@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import sys
@@ -371,6 +372,119 @@ async def test_chat_stream_runs_bounded_repair_pass_as_second_segment(isolated_c
     assert second_blocks == [{"type": "text", "text": "Repaired answer with citation."}]
     assert assistant_messages[0]["content"] == "Draft answer without citation."
     assert assistant_messages[1]["content"] == "Repaired answer with citation."
+
+
+@pytest.mark.asyncio
+async def test_bounded_async_stream_force_cancels_aclose_when_inner_swallows_cancel(
+    monkeypatch,
+):
+    """Issue #227: if the inner agent's aclose() blocks (e.g. a SLURM-wait
+    tool swallowing CancelledError), the bounded stream's finally: block must
+    not hang indefinitely. It should give up after ``_ACLOSE_TIMEOUT_S``,
+    emit a warning, and force-cancel the pending aclose task so the turn can
+    return.
+    """
+    import asyncio
+    import logging
+    import time
+
+    from runtime import query_engine
+    from runtime.query_engine import _bounded_async_stream
+
+    class BlockingAgen:
+        """Stand-in for the executor's async generator.
+
+        ``aclose`` blocks until it's explicitly cancelled — modeling a tool
+        (e.g. SLURM wait) whose cleanup will hang forever unless the
+        bounded-stream wrapper escalates with its own ``task.cancel()``.
+        """
+
+        def __init__(self) -> None:
+            self.cancel_count = 0
+            self._yielded = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self._yielded:
+                self._yielded = True
+                return {"type": "token", "content": "start"}
+            await asyncio.sleep(60)
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                self.cancel_count += 1
+                # Honor the escalated cancel so the task actually completes
+                # — this is what distinguishes a forced teardown from the
+                # hang we're fixing.
+                raise
+
+    # Keep the test fast — we don't need the production 5s wait.
+    monkeypatch.setattr(query_engine, "_ACLOSE_TIMEOUT_S", 0.2)
+
+    inner = BlockingAgen()
+    # Wallclock deadline far in the future so teardown is triggered by
+    # ``aclose()`` (the caller exiting the ``async for``), not by the
+    # wallclock branch.
+    bounded = _bounded_async_stream(inner, time.monotonic() + 60.0)
+
+    observed: list[dict] = []
+    async for event in bounded:
+        observed.append(event)
+        break
+    assert observed == [{"type": "token", "content": "start"}]
+
+    start = time.monotonic()
+    with caplog_collect_warnings("runtime.query_engine") as records:
+        await bounded.aclose()
+    elapsed = time.monotonic() - start
+
+    # Teardown completes within a bounded window (first wait_for plus the
+    # force-cancel wait_for, each capped by the monkeypatched timeout).
+    assert elapsed < 2.0, f"aclose teardown took {elapsed:.2f}s"
+
+    # The inner generator's aclose received at least one cancellation —
+    # cancel was escalated rather than silently swallowed into a hang.
+    assert inner.cancel_count >= 1
+
+    # The warning log path fired, pointing operators at the stuck tool.
+    assert any(
+        "aclose exceeded" in record.getMessage() and record.levelno == logging.WARNING
+        for record in records
+    ), [r.getMessage() for r in records]
+
+
+@contextlib.contextmanager
+def caplog_collect_warnings(logger_name: str):
+    """Minimal stand-in for pytest's ``caplog`` fixture scoped to one logger.
+
+    Used by the bounded-stream teardown test so we can assert the warning
+    emitted when ``aclose()`` exceeds its budget without pulling in the
+    broader caplog fixture machinery.
+    """
+    import logging
+
+    records: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _ListHandler(level=logging.WARNING)
+    target = logging.getLogger(logger_name)
+    previous_level = target.level
+    target.addHandler(handler)
+    target.setLevel(logging.WARNING)
+    try:
+        yield records
+    finally:
+        target.removeHandler(handler)
+        target.setLevel(previous_level)
+
 
 @pytest.mark.asyncio
 async def test_agent_astream_injects_compact_source_aware_retrieved_memory(isolated_chat_state):
