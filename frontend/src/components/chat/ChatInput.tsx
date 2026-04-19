@@ -111,13 +111,15 @@ export default function ChatInput({
 
     if (!prefillText) return;
 
-    requestAnimationFrame(() => {
+    const rafId = requestAnimationFrame(() => {
       const el = textareaRef.current;
       if (!el) return;
       el.focus();
       const cursor = el.value.length;
       el.setSelectionRange(cursor, cursor);
     });
+
+    return () => cancelAnimationFrame(rafId);
   }, [prefillText, prefillRevision]);
 
   useEffect(() => {
