@@ -535,6 +535,11 @@ export async function streamChat(
       }
     }
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // The reader may already be released (e.g. after an overflow-driven
+      // cancel() resolves). Swallow so teardown cannot mask the primary flow.
+    }
   }
 }
