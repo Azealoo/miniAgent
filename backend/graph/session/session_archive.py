@@ -102,6 +102,24 @@ class SessionManager(SessionStore):
                 f"expected one of {COMPRESSION_PHASES}"
             )
 
+        with self._locked(session_id):
+            return self._compress_history_locked(
+                session_id,
+                summary,
+                n,
+                phase=phase,
+                replace_compressed_context=replace_compressed_context,
+            )
+
+    def _compress_history_locked(
+        self,
+        session_id: str,
+        summary: str,
+        n: int,
+        *,
+        phase: str | None,
+        replace_compressed_context: bool,
+    ) -> tuple[int, int]:
         data = self._read(session_id)
         messages = _normalize_messages_for_storage(data.get("messages", []))
 
