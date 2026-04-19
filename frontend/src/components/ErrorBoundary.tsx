@@ -3,6 +3,8 @@
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import React, { Component, type ErrorInfo, type ReactNode } from "react";
 
+import { log } from "@/lib/telemetry";
+
 interface ErrorBoundaryProps {
   children: ReactNode;
   /** Optional custom fallback. Receives the caught error and a `reset` callback. */
@@ -28,6 +30,17 @@ export default class ErrorBoundary extends Component<
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
+    log.error(
+      {
+        event: "error_boundary",
+        message: error.message,
+        stack: error.stack,
+        meta: {
+          label: this.props.label ?? "unknown",
+          component_stack: info.componentStack ?? "",
+        },
+      },
+    );
     this.props.onError?.(error, info);
   }
 

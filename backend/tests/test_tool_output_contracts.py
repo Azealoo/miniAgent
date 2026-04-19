@@ -318,7 +318,7 @@ def test_slurm_tool_structured_status_updates_job_record(tmp_path):
 
 
 def test_slurm_runtime_log_reader_caps_file_reads(monkeypatch):
-    import tools.slurm_tool as slurm_tool_module
+    import tools.slurm_monitor as slurm_monitor_module
 
     read_sizes: list[int] = []
 
@@ -349,16 +349,16 @@ def test_slurm_runtime_log_reader_caps_file_reads(monkeypatch):
             return _FakeReader()
 
     monkeypatch.setattr(
-        slurm_tool_module,
+        slurm_monitor_module,
         "_resolve_under_base",
         lambda *args, **kwargs: (_FakePath(), "logs/demo.stdout.log"),
     )
 
-    rendered = slurm_tool_module._read_runtime_log(Path("/tmp"), "logs/demo.stdout.log")
+    rendered = slurm_monitor_module._read_runtime_log(Path("/tmp"), "logs/demo.stdout.log")
 
-    assert read_sizes == [slurm_tool_module._MAX_OUTPUT + 1]
+    assert read_sizes == [slurm_monitor_module._MAX_OUTPUT + 1]
     assert rendered is not None
-    assert rendered.startswith("x" * slurm_tool_module._MAX_OUTPUT)
+    assert rendered.startswith("x" * slurm_monitor_module._MAX_OUTPUT)
     assert rendered.endswith("\n...[truncated]")
 
 

@@ -121,6 +121,22 @@ def _count_tokens(value: Any) -> int:
     return _count_optional_text(value)
 
 
+def _coerce_nonnegative_int(value: Any, default: int) -> int:
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return default
+    return coerced if coerced > 0 else 0
+
+
+def _coerce_nonnegative_float(value: Any, default: float) -> float:
+    try:
+        coerced = float(value)
+    except (TypeError, ValueError):
+        return default
+    return coerced if coerced > 0 else 0.0
+
+
 @dataclass(frozen=True)
 class QueryTurnInput:
     message: str
@@ -366,10 +382,23 @@ class QueryEngine:
         current_turn = turn
 
         budget = get_max_tokens_per_turn()
+        verification_settings = get_verification_settings()
+        verifier_max_wall_s = _coerce_nonnegative_float(
+            verification_settings.get("verifier_max_wall_s"), 0.0
+        )
+        verifier_max_tokens = _coerce_nonnegative_int(
+            verification_settings.get("verifier_max_tokens"), 0
+        )
+
         input_tokens = _count_tokens(turn.message) + sum(
             _count_tokens(message.get("content")) for message in turn.history
         )
         output_tokens = 0
+        # Populated the first time a ``verification_result`` helper event is
+        # observed; the wallclock + token caps only apply from that point on,
+        # and cover the single repair retry that may follow.
+        verifier_started_monotonic: float | None = None
+        verifier_start_output_tokens = 0
         METRICS.record_input_tokens(input_tokens)
 
         # Turn-level wall-clock budget (seconds). 0 disables the cap. The
@@ -416,6 +445,38 @@ class QueryEngine:
             METRICS.observe_event(event)
             return event
 
+        def _verifier_cap_breach_reason() -> str | None:
+            if verifier_started_monotonic is None:
+                return None
+            if verifier_max_wall_s > 0:
+                elapsed = time.monotonic() - verifier_started_monotonic
+                if elapsed > verifier_max_wall_s:
+                    return (
+                        f"verifier wallclock cap exceeded at {elapsed:.2f}s "
+                        f"(limit {verifier_max_wall_s:g}s)"
+                    )
+            if verifier_max_tokens > 0:
+                used = output_tokens - verifier_start_output_tokens
+                if used > verifier_max_tokens:
+                    return (
+                        f"verifier token cap exceeded at {used} output tokens "
+                        f"(limit {verifier_max_tokens})"
+                    )
+            return None
+
+        def _verifier_cap_error_event(summary: str) -> dict[str, Any]:
+            event = {
+                "type": "error",
+                "error": summary,
+                "turn_status": "verifier_cap_exceeded",
+                "exit": turn_status_to_exit(
+                    "verifier_cap_exceeded",
+                    summary=summary,
+                ).model_dump(exclude_none=True),
+            }
+            METRICS.observe_event(event)
+            return event
+
         while True:
             latest_plan_event: dict[str, Any] | None = None
             latest_verification_event: dict[str, Any] | None = None
@@ -447,6 +508,10 @@ class QueryEngine:
                         if _budget_exceeded():
                             yield _budget_error_event()
                             return
+                        cap_reason = _verifier_cap_breach_reason()
+                        if cap_reason is not None:
+                            yield _verifier_cap_error_event(cap_reason)
+                            return
                         continue
 
                     if event_type == "new_response":
@@ -475,11 +540,18 @@ class QueryEngine:
                             latest_plan_event = helper_event
                         elif helper_event["type"] == "verification_result":
                             latest_verification_event = helper_event
+                            if verifier_started_monotonic is None:
+                                verifier_started_monotonic = time.monotonic()
+                                verifier_start_output_tokens = output_tokens
                         METRICS.observe_event(helper_event)
                         yield helper_event
 
                     if _budget_exceeded():
                         yield _budget_error_event()
+                        return
+                    cap_reason = _verifier_cap_breach_reason()
+                    if cap_reason is not None:
+                        yield _verifier_cap_error_event(cap_reason)
                         return
             except asyncio.TimeoutError:
                 # Turn wallclock budget exceeded. asyncio.wait_for has
@@ -500,6 +572,10 @@ class QueryEngine:
 
             if _budget_exceeded():
                 yield _budget_error_event()
+                return
+            cap_reason = _verifier_cap_breach_reason()
+            if cap_reason is not None:
+                yield _verifier_cap_error_event(cap_reason)
                 return
 
             should_retry = (

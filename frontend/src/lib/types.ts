@@ -34,6 +34,7 @@ export type {
   ChatStreamCompactionEvent,
   ChatStreamDoneEvent,
   ChatStreamErrorEvent,
+  ChatStreamRetrievalErrorEvent,
   ChatStreamToolStartEvent,
   ChatStreamToolChunkEvent,
   ChatStreamWorkflowStepStartedEvent,
@@ -60,6 +61,7 @@ import type {
   ChatStreamCompactionEvent,
   ChatStreamDoneEvent,
   ChatStreamErrorEvent,
+  ChatStreamRetrievalErrorEvent,
   TurnExit,
   ChatStreamWorkflowStepStartedEvent,
   ChatStreamWorkflowStepEndedEvent,
@@ -268,6 +270,7 @@ export interface ChatStreamWarningEvent {
 
 export type ChatStreamEvent =
   | ChatStreamRetrievalEvent
+  | ChatStreamRetrievalErrorEvent
   | ChatStreamTokenEvent
   | ChatStreamToolStartEvent
   | ChatStreamToolEndEvent
