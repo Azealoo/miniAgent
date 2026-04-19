@@ -8,5 +8,11 @@ cycle.
 
 from graph.session.session_archive import SessionManager
 from graph.session.session_schema import SESSION_SCHEMA_VERSION, _validate_session_id
+from graph.session.session_store import FrozenSessionPrefix
 
-__all__ = ["SessionManager", "SESSION_SCHEMA_VERSION", "_validate_session_id"]
+__all__ = [
+    "FrozenSessionPrefix",
+    "SessionManager",
+    "SESSION_SCHEMA_VERSION",
+    "_validate_session_id",
+]
