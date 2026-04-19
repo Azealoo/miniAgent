@@ -57,6 +57,12 @@ interface AppContextValue {
   sessionHistoryError: string | null;
   sessionContinuitySummaries: SessionContinuitySummary[];
   lastFailedTurn: FailedTurnState | null;
+  /**
+   * Count of malformed SSE payloads the parser has surfaced for the active
+   * session. Drives the parse-error row in UsagePanel so dropped events are
+   * observable instead of silently swallowed.
+   */
+  parseErrorCount: number;
   draftMessage: string;
   draftRevision: number;
   inspectorTab: InspectorTab;
@@ -251,6 +257,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         sessionHistoryError: catalog.sessionHistoryError,
         sessionContinuitySummaries: catalog.sessionContinuitySummaries,
         lastFailedTurn: catalog.lastFailedTurn,
+        parseErrorCount: catalog.parseErrorCount,
         draftMessage,
         draftRevision,
         inspectorTab,

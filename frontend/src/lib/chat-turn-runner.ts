@@ -4,7 +4,11 @@ import {
   createOptimisticAssistantMessage,
 } from "./chat-stream-reducer";
 import { uid } from "./utils";
-import type { ChatStreamEvent, Message } from "./types";
+import type {
+  ChatStreamEvent,
+  ChatStreamParseErrorEvent,
+  Message,
+} from "./types";
 
 export interface ChatTurnRefs {
   messagesRef: React.MutableRefObject<Message[]>;
@@ -23,6 +27,12 @@ export interface ChatTurnCallbacks {
    * the caller-supplied override or the backend-generated id, if any).
    */
   onTurnError?: (requestId: string | undefined) => void;
+  /**
+   * Fired for every synthetic `parse_error` event surfaced by the stream
+   * parser. Used by the catalog to maintain a session-level counter so the
+   * UsagePanel can surface dropped-event telemetry.
+   */
+  onParseError?: (event: ChatStreamParseErrorEvent) => void;
 }
 
 export interface RunChatTurnParams {
@@ -74,6 +84,9 @@ export async function runChatTurn({
   refs.userStoppedStreamRef.current = false;
 
   const applyAndCommitEvent = (event: ChatStreamEvent) => {
+    if (event.type === "parse_error") {
+      callbacks.onParseError?.(event);
+    }
     const reduced = applyStreamEvent(
       {
         messages: refs.messagesRef.current,
