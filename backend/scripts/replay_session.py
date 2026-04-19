@@ -268,7 +268,18 @@ async def _replay_all(session_id: str, turns: list[Turn], sandbox: Path) -> dict
 # ---------------------------------------------------------------------------
 
 
-_VOLATILE_TOP_LEVEL = {"created_at", "updated_at", "deterministic", "schema_version", "title"}
+_VOLATILE_TOP_LEVEL = {
+    "created_at",
+    "updated_at",
+    "deterministic",
+    "schema_version",
+    "title",
+    # ``runtime_config`` carries the per-turn config-freeze timestamp stamped
+    # by the query engine. It is non-deterministic by design (wall-clock) and
+    # not part of the user-visible session content, so it must be ignored
+    # when diffing a replay against the recorded session.
+    "runtime_config",
+}
 
 
 def _ordinalize(value: str, table: dict[str, str], prefix: str) -> str:

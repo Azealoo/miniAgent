@@ -33,6 +33,7 @@ AuditEventType = Literal[
     "job_submitted",
     "export_generated",
     "model_fallback",
+    "llm_escalation",
 ]
 
 
@@ -393,6 +394,43 @@ def append_job_submitted_event(
     )
 
 
+def append_llm_escalation_event(
+    base_dir: Path | str,
+    *,
+    role: str,
+    provider: str,
+    model: str,
+    default_max_tokens: int,
+    escalated_max_tokens: int,
+    outcome: Literal["retried", "still_capped", "retry_failed"],
+    session_id: str | None = None,
+    run_id: str | None = None,
+    stop_reason: str | None = None,
+    error: str | None = None,
+) -> Path | None:
+    summary = (
+        f"Output-token cap hit for {role}/{model}; "
+        f"escalated {default_max_tokens} -> {escalated_max_tokens} ({outcome})."
+    )
+    return append_audit_event(
+        base_dir,
+        event_type="llm_escalation",
+        summary=summary,
+        outcome=outcome,
+        session_id=session_id,
+        run_id=run_id,
+        details={
+            "role": role,
+            "provider": provider,
+            "model": model,
+            "default_max_tokens": default_max_tokens,
+            "escalated_max_tokens": escalated_max_tokens,
+            "stop_reason": _clean_optional_text(stop_reason),
+            "error": _clean_optional_text(error),
+        },
+    )
+
+
 def append_export_generated_event(
     base_dir: Path | str,
     *,
@@ -565,6 +603,7 @@ __all__ = [
     "append_export_generated_event",
     "append_file_written_event",
     "append_job_submitted_event",
+    "append_llm_escalation_event",
     "append_tool_approval_decision_event",
     "append_tool_invocation_event",
     "audit_log_path",

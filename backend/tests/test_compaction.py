@@ -124,6 +124,7 @@ async def test_200_turn_session_stays_under_budget_and_archives_remain_readable(
         assert event["from_turn"] < event["to_turn"]
         assert event["summary"].startswith(STRUCTURED_SUMMARY_HEADER)
         assert event["saved_tokens"] >= 0
+        assert event["phase"] in {"snip", "microcompact", "collapse", "autocompact"}
 
     # Archived ranges are monotonically increasing and non-overlapping.
     for earlier, later in zip(compaction_events, compaction_events[1:]):

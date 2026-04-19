@@ -4,6 +4,7 @@ Index build/retrieve tests that need OpenAI embeddings are skipped unless
 the OPENAI_API_KEY env var is set. All other logic (path discovery, hashing,
 and empty-state handling) runs without any API calls.
 """
+import json
 import os
 import sys
 from pathlib import Path
@@ -832,3 +833,147 @@ class TestIncrementalRebuild:
             f"Single-file edit in {total_files}-file tree took {elapsed:.3f}s"
         )
         assert parse_calls == ["memory/project/bucket_042/note_04237.md"]
+
+
+class TestLLMProbeRetrieval:
+    """Exercise the LLM-probe retrieval helpers that support rag_mode=llm_probe."""
+
+    def _write_typed_file(self, tmp_path, relative, name, description, body="Body."):
+        content = (
+            "---\n"
+            "type: project_fact\n"
+            f"name: {name}\n"
+            f"description: {description}\n"
+            "---\n"
+            f"{body}\n"
+        )
+        _write_memory_file(tmp_path, relative, content)
+
+    def test_build_probe_index_lists_sources_with_name_and_description(
+        self, indexer, tmp_path
+    ):
+        self._write_typed_file(
+            tmp_path,
+            "memory/project/a.md",
+            "Alpha",
+            "A description.",
+        )
+        self._write_typed_file(
+            tmp_path,
+            "memory/user/b.md",
+            "Beta",
+            "B description.",
+        )
+
+        rendered, valid_sources = indexer.build_probe_index(max_chars=10_000)
+
+        assert "memory/project/a.md" in rendered
+        assert "Alpha" in rendered
+        assert "A description" in rendered
+        assert "memory/user/b.md" in rendered
+        assert set(valid_sources) == {"memory/project/a.md", "memory/user/b.md"}
+
+    def test_build_probe_index_respects_char_budget(self, indexer, tmp_path):
+        for i in range(20):
+            self._write_typed_file(
+                tmp_path,
+                f"memory/project/note_{i:02d}.md",
+                f"Note {i}",
+                "Some descriptive text for the probe index listing.",
+            )
+
+        rendered, valid_sources = indexer.build_probe_index(max_chars=200)
+
+        assert len(rendered) <= 200 + 50  # a bit of slack for the final entry
+        assert 0 < len(valid_sources) < 20
+
+    def test_parse_probe_selection_extracts_json_array(self, indexer):
+        valid = ["memory/project/a.md", "memory/user/b.md", "memory/agent/c.md"]
+        response = (
+            "Here are the relevant files:\n"
+            '["memory/user/b.md", "memory/project/a.md"]\n'
+        )
+
+        picked = indexer.parse_probe_selection(response, valid)
+
+        assert picked == ["memory/user/b.md", "memory/project/a.md"]
+
+    def test_parse_probe_selection_filters_unknown_paths(self, indexer):
+        valid = ["memory/project/a.md"]
+        response = '["memory/project/hallucinated.md", "memory/project/a.md"]'
+
+        picked = indexer.parse_probe_selection(response, valid)
+
+        assert picked == ["memory/project/a.md"]
+
+    def test_parse_probe_selection_falls_back_to_line_based_parse(self, indexer):
+        valid = ["memory/project/a.md", "memory/user/b.md"]
+        response = "- memory/project/a.md\n- memory/user/b.md\n"
+
+        picked = indexer.parse_probe_selection(response, valid)
+
+        assert picked == ["memory/project/a.md", "memory/user/b.md"]
+
+    def test_parse_probe_selection_caps_to_top_k(self, indexer):
+        valid = [f"memory/project/f{i}.md" for i in range(10)]
+        response = json.dumps(valid)
+
+        picked = indexer.parse_probe_selection(response, valid, top_k=3)
+
+        assert picked == valid[:3]
+
+    def test_parse_probe_selection_empty_response(self, indexer):
+        assert indexer.parse_probe_selection("", ["memory/a.md"]) == []
+        assert indexer.parse_probe_selection("[]", ["memory/a.md"]) == []
+
+    def test_build_probe_results_shape_matches_retrieval_contract(
+        self, indexer, tmp_path
+    ):
+        self._write_typed_file(
+            tmp_path,
+            "memory/project/a.md",
+            "Alpha",
+            "A description.",
+            body="Alpha details body.",
+        )
+        indexer.build_probe_index(max_chars=10_000)  # triggers rebuild
+
+        results = indexer.build_probe_results(["memory/project/a.md"])
+
+        assert len(results) == 1
+        result = results[0]
+        assert set(result.keys()) >= {"text", "score", "source"}
+        assert result["source"].startswith("memory/project/a.md")
+        assert result["memory_name"] == "Alpha"
+        assert 0 < result["score"] <= 1.0
+
+    def test_probe_cache_invalidates_on_corpus_change(self, indexer, tmp_path):
+        self._write_typed_file(
+            tmp_path, "memory/project/a.md", "Alpha", "A description."
+        )
+        indexer.build_probe_index(max_chars=10_000)
+        digest_before = indexer.memory_corpus_digest()
+
+        indexer.cache_probe_selection(
+            "session-1", digest_before, ["memory/project/a.md"]
+        )
+        assert indexer.get_cached_probe_selection("session-1", digest_before) == [
+            "memory/project/a.md"
+        ]
+
+        self._write_typed_file(
+            tmp_path, "memory/project/b.md", "Beta", "B description."
+        )
+        indexer.build_probe_index(max_chars=10_000)
+        digest_after = indexer.memory_corpus_digest()
+
+        assert digest_after != digest_before
+        assert indexer.get_cached_probe_selection("session-1", digest_after) is None
+
+    def test_memory_file_count_reflects_eligible_files(self, indexer, tmp_path):
+        assert indexer.memory_file_count() == 0
+        _write_memory_file(tmp_path, "memory/MEMORY.md", "# Index\n")
+        _write_memory_file(
+            tmp_path, "memory/project/one.md", "# One\nBody.\n"
+        )
+        assert indexer.memory_file_count() == 2

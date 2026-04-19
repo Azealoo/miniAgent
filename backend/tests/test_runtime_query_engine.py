@@ -67,7 +67,7 @@ async def test_query_engine_run_harness_turn_delegates_to_agent_manager():
 
     assert events == [
         {"type": "token", "content": "ok"},
-        {"type": "done", "turn_status": "ok"},
+        {"type": "done", "turn_status": "ok", "exit": {"reason": "success", "exit_code": 0}},
     ]
 
 
@@ -195,7 +195,7 @@ async def test_query_engine_run_harness_turn_emits_plan_created_then_plan_update
             },
             "tool_trace": [{"tool": "search_memory", "summary": "memory"}],
         },
-        {"type": "done", "turn_status": "ok"},
+        {"type": "done", "turn_status": "ok", "exit": {"reason": "success", "exit_code": 0}},
     ]
 
 
@@ -266,7 +266,7 @@ async def test_query_engine_run_harness_turn_emits_verification_result_event():
             },
             "tool_trace": [{"tool": "read_file", "summary": "result"}],
         },
-        {"type": "done", "turn_status": "ok"},
+        {"type": "done", "turn_status": "ok", "exit": {"reason": "success", "exit_code": 0}},
     ]
 
 
@@ -423,7 +423,7 @@ async def test_query_engine_run_harness_turn_runs_single_repair_pass_with_latest
         },
         {"type": "new_response"},
         {"type": "token", "content": "Repaired answer with citation."},
-        {"type": "done", "turn_status": "ok"},
+        {"type": "done", "turn_status": "ok", "exit": {"reason": "success", "exit_code": 0}},
     ]
 
 
@@ -505,7 +505,11 @@ async def test_query_engine_run_harness_turn_stops_after_one_repair_retry():
     assert manager.calls == 2
     assert [event["type"] for event in events].count("new_response") == 1
     assert [event["type"] for event in events].count("verification_result") == 2
-    assert events[-1] == {"type": "done", "turn_status": "ok"}
+    assert events[-1] == {
+        "type": "done",
+        "turn_status": "ok",
+        "exit": {"reason": "success", "exit_code": 0},
+    }
 
 
 @pytest.mark.asyncio
@@ -558,7 +562,11 @@ async def test_query_engine_can_treat_repair_required_as_advisory():
 
     assert manager.calls == 1
     assert [event["type"] for event in events].count("new_response") == 0
-    assert events[-1] == {"type": "done", "turn_status": "ok"}
+    assert events[-1] == {
+        "type": "done",
+        "turn_status": "ok",
+        "exit": {"reason": "success", "exit_code": 0},
+    }
 
 
 @pytest.mark.asyncio
@@ -603,6 +611,8 @@ async def test_query_engine_stops_runaway_planner_when_budget_exceeded():
     error = error_events[0]
     assert error["error"].startswith("turn budget exceeded at ")
     assert error["turn_status"] == "budget_exceeded"
+    assert error["exit"]["reason"] == "token_budget"
+    assert error["exit"]["exit_code"] == 3
     assert events[-1] is error
 
     tool_end_events = [event for event in events if event.get("type") == "tool_end"]
@@ -683,7 +693,7 @@ async def test_query_engine_run_harness_turn_uses_agent_path_when_not_protocol_o
 
     assert events == [
         {"type": "token", "content": "ok"},
-        {"type": "done", "turn_status": "ok"},
+        {"type": "done", "turn_status": "ok", "exit": {"reason": "success", "exit_code": 0}},
     ]
 
 

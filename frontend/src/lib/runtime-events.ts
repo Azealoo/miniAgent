@@ -12,7 +12,29 @@
  */
 import { z } from "zod";
 
-export const RUNTIME_EVENT_SCHEMA_VERSION = 1 as const;
+export const RUNTIME_EVENT_SCHEMA_VERSION = 2 as const;
+
+export const TURN_EXIT_REASONS = [
+  "success",
+  "tool_error",
+  "user_abort",
+  "context_limit",
+  "token_budget",
+  "approval_denied",
+  "awaiting_approval",
+] as const;
+
+export type TurnExitReason = (typeof TURN_EXIT_REASONS)[number];
+
+export const TurnExitSchema = z
+  .object({
+    reason: z.enum(TURN_EXIT_REASONS),
+    exit_code: z.number().int(),
+    summary: z.string().nullish(),
+  })
+  .strict();
+
+export type TurnExit = z.infer<typeof TurnExitSchema>;
 
 export const RUNTIME_EVENT_TYPES = [
   "retrieval",
@@ -184,6 +206,15 @@ const NewResponseRuntimeEventSchema = z
   })
   .strict();
 
+export const COMPACTION_PHASES = [
+  "snip",
+  "microcompact",
+  "collapse",
+  "autocompact",
+] as const;
+
+export type CompactionPhase = (typeof COMPACTION_PHASES)[number];
+
 const CompactionRuntimeEventSchema = z
   .object({
     type: z.literal("compaction_event"),
@@ -194,6 +225,7 @@ const CompactionRuntimeEventSchema = z
     to_turn: z.number().int(),
     summary: z.string(),
     saved_tokens: z.number().int(),
+    phase: z.enum(COMPACTION_PHASES).nullish(),
   })
   .strict();
 
@@ -223,6 +255,7 @@ const DoneRuntimeEventSchema = z
     turn_status: z
       .enum(["ok", "awaiting_approval", "budget_exceeded", "error", "cancelled"])
       .nullish(),
+    exit: TurnExitSchema.nullish(),
   })
   .strict();
 

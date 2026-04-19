@@ -1,4 +1,6 @@
 import os
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -11,8 +13,15 @@ from runtime_config import load_runtime_config
 from runtime_config_types import LoadedRuntimeConfig
 
 _CONFIG_FILE = Path(__file__).parent / "config.json"
+
+# Env var that lets dev machines opt back into live config reloads. When set to
+# "1", writes to tracked runtime config files are permitted; otherwise a turn
+# treats ``backend/config.json`` + env overrides as frozen.
+ALLOW_CONFIG_RELOAD_ENV_VAR = "BIOAPEX_ALLOW_CONFIG_RELOAD"
 _DEFAULT_MEMORY_STALE_DAYS = 30
 _DEFAULT_MAX_TOKENS_PER_TURN = 200_000
+_DEFAULT_LLM_OUTPUT_TOKEN_CAP = 8_000
+_DEFAULT_LLM_OUTPUT_TOKEN_CAP_ESCALATED = 65_536
 
 # Per-section character budgets used by graph.prompt_builder. Each value is the
 # upper bound for one assembled section; the prompt builder truncates a section
@@ -31,6 +40,19 @@ _DEFAULT_PROMPT_BUDGET: dict = {
     "total_max_chars": 0,
 }
 
+_DEFAULT_LLM_PROBE_MIN_FILES = 10
+_DEFAULT_LLM_PROBE_MAX_CHARS = 8_000
+
+# Normalized values for rag_mode. Historically this was a plain bool
+# (False = no RAG, True = keyword BM25/lexical retrieval). The string form
+# ("off" / "keyword" / "llm_probe") is a superset that unlocks the LLM-probe
+# retrieval mode without breaking existing configs that set a bool.
+RAG_MODE_OFF = "off"
+RAG_MODE_KEYWORD = "keyword"
+RAG_MODE_LLM_PROBE = "llm_probe"
+_VALID_RAG_MODES = (RAG_MODE_OFF, RAG_MODE_KEYWORD, RAG_MODE_LLM_PROBE)
+
+
 _DEFAULT: dict = {
     "rag_mode": False,
     "deterministic_seed": None,
@@ -39,6 +61,8 @@ _DEFAULT: dict = {
     "prompt_context": {
         "include_git_context": False,
         "memory_stale_days": _DEFAULT_MEMORY_STALE_DAYS,
+        "llm_probe_min_files": _DEFAULT_LLM_PROBE_MIN_FILES,
+        "llm_probe_max_chars": _DEFAULT_LLM_PROBE_MAX_CHARS,
     },
     "prompt_budget": dict(_DEFAULT_PROMPT_BUDGET),
     "agent_runtime": {
@@ -48,10 +72,19 @@ _DEFAULT: dict = {
     "verification": {
         "retry_on_repair_required": True,
     },
+    "llm_output_token_cap": {
+        "default": _DEFAULT_LLM_OUTPUT_TOKEN_CAP,
+        "escalated": _DEFAULT_LLM_OUTPUT_TOKEN_CAP_ESCALATED,
+    },
     "tool_policy": {
         "enabled": True,
         "allow_without_context": True,
         "warn_on_missing_artifact_refs": True,
+    },
+    "permissions": {
+        "enabled": False,
+        "rules": [],
+        "cache_max_entries_per_session": 256,
     },
     "access_defaults": {
         "allow_loopback_without_auth": True,
@@ -113,6 +146,40 @@ def _load_runtime() -> dict:
 def get_loaded_runtime_config() -> LoadedRuntimeConfig:
     """Return the merged runtime config together with per-layer provenance."""
     return _load_loaded_runtime()
+
+
+@dataclass(frozen=True)
+class RuntimeConfigSnapshot:
+    """A point-in-time capture of the merged runtime config.
+
+    ``config`` is the ``LoadedRuntimeConfig`` produced by ``load_runtime_config``
+    at capture time. ``loaded_at`` is the unix timestamp (seconds) when the
+    snapshot was taken; it is stamped into session metadata so that a turn's
+    decisions can be traced back to the exact config that was live when it
+    started.
+    """
+
+    config: LoadedRuntimeConfig
+    loaded_at: float
+
+
+def snapshot_runtime_config() -> RuntimeConfigSnapshot:
+    """Capture the current runtime config and the time it was read.
+
+    Callers at turn-entry boundaries use this to freeze config for the
+    duration of the turn. Mid-turn writes to the backing files are rejected
+    at the file API layer, so later ``get_*`` calls in the same turn will
+    return the same values the snapshot did.
+    """
+    return RuntimeConfigSnapshot(
+        config=_load_loaded_runtime(),
+        loaded_at=time.time(),
+    )
+
+
+def config_reload_allowed() -> bool:
+    """Return True when the dev override env var lets callers rewrite config."""
+    return os.getenv(ALLOW_CONFIG_RELOAD_ENV_VAR, "").strip() == "1"
 
 def get_prompt_context_settings() -> dict[str, Any]:
     prompt_context = _load_runtime().get("prompt_context", {})
@@ -184,6 +251,25 @@ def get_tool_policy_settings() -> dict[str, Any]:
     return dict(tool_policy) if isinstance(tool_policy, dict) else {}
 
 
+def get_permissions_settings() -> dict[str, Any]:
+    """Return the prose permission-rules config block.
+
+    Schema:
+      {
+        "enabled": bool,
+        "rules": [{"description": str, "effect": "allow"|"deny"|"ask"}],
+        "cache_max_entries_per_session": int,
+      }
+
+    Rules are evaluated by a pluggable classifier registered via
+    ``tools.prose_policy.set_prose_classifier``; when no classifier is
+    registered the layer falls back to the hardcoded deny-list / ask-user
+    ladder documented in ``tools/prose_policy.py``.
+    """
+    permissions = _load_runtime().get("permissions", {})
+    return dict(permissions) if isinstance(permissions, dict) else {}
+
+
 def get_access_defaults() -> dict[str, Any]:
     access_defaults = _load_runtime().get("access_defaults", {})
     return dict(access_defaults) if isinstance(access_defaults, dict) else {}
@@ -193,8 +279,80 @@ def get_execution_backend_settings() -> dict[str, Any]:
     execution_backends = _load_runtime().get("execution_backends", {})
     return dict(execution_backends) if isinstance(execution_backends, dict) else {}
 
+def _normalize_rag_mode(raw: Any) -> str:
+    """Coerce the configured rag_mode into one of ``_VALID_RAG_MODES``.
+
+    Historical configs used a plain bool (False/True = off/keyword). Strings
+    are matched case-insensitively; unknown values fall back to ``off``.
+    """
+    if isinstance(raw, bool):
+        return RAG_MODE_KEYWORD if raw else RAG_MODE_OFF
+    if isinstance(raw, str):
+        token = raw.strip().lower()
+        if token in _VALID_RAG_MODES:
+            return token
+        if token in {"true", "on", "bm25", "lexical"}:
+            return RAG_MODE_KEYWORD
+        if token in {"false", ""}:
+            return RAG_MODE_OFF
+    return RAG_MODE_OFF
+
+
+def get_rag_mode_name() -> str:
+    """Return the normalized rag_mode: 'off' | 'keyword' | 'llm_probe'."""
+    return _normalize_rag_mode(_load_runtime().get("rag_mode", False))
+
+
 def get_rag_mode() -> bool:
-    return _load_runtime().get("rag_mode", False)
+    """Back-compat: True when retrieval-augmented memory is on (keyword or llm_probe)."""
+    return get_rag_mode_name() != RAG_MODE_OFF
+
+
+def get_llm_probe_min_files() -> int:
+    """Minimum memory-file count that enables the LLM-probe path."""
+    raw = get_prompt_context_settings().get(
+        "llm_probe_min_files", _DEFAULT_LLM_PROBE_MIN_FILES
+    )
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return _DEFAULT_LLM_PROBE_MIN_FILES
+
+
+def get_llm_probe_max_chars() -> int:
+    """Char budget for the compact file-index payload sent to the probe LLM."""
+    raw = get_prompt_context_settings().get(
+        "llm_probe_max_chars", _DEFAULT_LLM_PROBE_MAX_CHARS
+    )
+    try:
+        return max(500, int(raw))
+    except (TypeError, ValueError):
+        return _DEFAULT_LLM_PROBE_MAX_CHARS
+
+
+def get_llm_output_token_caps() -> tuple[int, int]:
+    """Return (default, escalated) per-request output token caps.
+
+    0 or negative values disable the cap (pass no ``max_tokens`` through).
+    The escalated cap is the upper bound used after a single
+    ``finish_reason="length"`` retry in ``invoke_with_escalation``.
+    """
+    raw = _load_runtime().get("llm_output_token_cap", {})
+    if not isinstance(raw, dict):
+        raw = {}
+
+    def _resolve(key: str, default: int) -> int:
+        value = raw.get(key, default)
+        try:
+            resolved = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0, resolved)
+
+    return (
+        _resolve("default", _DEFAULT_LLM_OUTPUT_TOKEN_CAP),
+        _resolve("escalated", _DEFAULT_LLM_OUTPUT_TOKEN_CAP_ESCALATED),
+    )
 
 
 def get_max_tokens_per_turn() -> int:

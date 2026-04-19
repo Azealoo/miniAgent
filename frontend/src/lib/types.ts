@@ -39,6 +39,7 @@ export type {
   ChatStreamWorkflowStepStartedEvent,
   ChatStreamWorkflowStepEndedEvent,
   ChatStreamWorkflowStepFailedEvent,
+  TurnExit,
 } from "./types.generated";
 
 import type {
@@ -59,6 +60,7 @@ import type {
   ChatStreamCompactionEvent,
   ChatStreamDoneEvent,
   ChatStreamErrorEvent,
+  TurnExit,
   ChatStreamWorkflowStepStartedEvent,
   ChatStreamWorkflowStepEndedEvent,
   ChatStreamWorkflowStepFailedEvent,
@@ -317,6 +319,13 @@ export interface Message {
    * Transport-only state — not persisted in session JSON.
    */
   workflowSteps?: WorkflowStepState[];
+  /**
+   * Terminal exit payload from the last ``done`` event of this turn. Drives the
+   * reason-specific pill/banner the UI renders under the assistant message.
+   * Absent until the stream terminates; preserved across re-renders so the
+   * outcome stays visible after streaming completes.
+   */
+  exit?: TurnExit;
 }
 
 export interface SessionHistoryMessage {

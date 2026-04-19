@@ -307,6 +307,7 @@ function reduceDoneEvent(
         : message.blocks,
       isStreaming: false,
       endedAtMs: now,
+      exit: event.exit ?? message.exit,
     };
   });
 }

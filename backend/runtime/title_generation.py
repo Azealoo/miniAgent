@@ -4,6 +4,8 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from runtime.model_factory import invoke_with_escalation
+
 _TITLE_SYSTEM_PROMPT = "You generate concise chat titles. Reply with ONLY the title."
 
 
@@ -20,11 +22,16 @@ async def generate_chat_title(agent_manager: Any, first_message: str) -> str:
     if title_llm is None:
         raise RuntimeError("title model is not configured")
 
-    response = await title_llm.ainvoke(
-        [
-            SystemMessage(content=_TITLE_SYSTEM_PROMPT),
-            HumanMessage(content=_build_title_request(first_message)),
-        ]
+    messages = [
+        SystemMessage(content=_TITLE_SYSTEM_PROMPT),
+        HumanMessage(content=_build_title_request(first_message)),
+    ]
+    response = await invoke_with_escalation(
+        "title",
+        messages,
+        model=title_llm,
+        base_dir=getattr(agent_manager, "base_dir", None),
+        streaming=False,
     )
     content = getattr(response, "content", "")
     if isinstance(content, list):

@@ -18,6 +18,54 @@ class TestConfig:
         with patch("config._CONFIG_FILE", cfg_file):
             import config
             assert config.get_rag_mode() is False
+            assert config.get_rag_mode_name() == "off"
+
+    def test_rag_mode_string_keyword(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"rag_mode": "keyword"}), encoding="utf-8")
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+            assert config.get_rag_mode_name() == "keyword"
+            assert config.get_rag_mode() is True
+
+    def test_rag_mode_string_llm_probe(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"rag_mode": "llm_probe"}), encoding="utf-8")
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+            assert config.get_rag_mode_name() == "llm_probe"
+            assert config.get_rag_mode() is True
+
+    def test_rag_mode_bool_true_maps_to_keyword(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"rag_mode": True}), encoding="utf-8")
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+            assert config.get_rag_mode_name() == "keyword"
+
+    def test_rag_mode_unknown_string_falls_back_to_off(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(json.dumps({"rag_mode": "banana"}), encoding="utf-8")
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+            assert config.get_rag_mode_name() == "off"
+            assert config.get_rag_mode() is False
+
+    def test_llm_probe_min_files_default(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+            assert config.get_llm_probe_min_files() == 10
+
+    def test_llm_probe_min_files_override(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(
+            json.dumps({"prompt_context": {"llm_probe_min_files": 3}}),
+            encoding="utf-8",
+        )
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+            assert config.get_llm_probe_min_files() == 3
 
     def test_project_config_can_enable_rag_mode(self, tmp_path):
         cfg_file = tmp_path / "config.json"

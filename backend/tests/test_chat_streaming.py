@@ -436,6 +436,208 @@ async def test_agent_astream_injects_compact_source_aware_retrieved_memory(isola
 
 
 @pytest.mark.asyncio
+async def test_agent_astream_llm_probe_picks_files_and_falls_back(isolated_chat_state):
+    """rag_mode=llm_probe asks the executor LLM to pick files, with keyword RAG fallback."""
+    from graph.agent import agent_manager
+
+    original_tools = agent_manager.tools
+    original_memory_indexer = agent_manager.memory_indexer
+    original_llm = agent_manager.llm
+
+    class FakeAgent:
+        async def astream_events(self, payload, version="v2", config=None):
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": type("Chunk", (), {"content": "ok"})()},
+            }
+
+    class FakeLLM:
+        def __init__(self, response_text: str):
+            self.response_text = response_text
+            self.calls = 0
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            return type("Resp", (), {"content": self.response_text})()
+
+    fake_indexer = MagicMock()
+    fake_indexer.memory_file_count.return_value = 12  # above threshold
+    fake_indexer.memory_corpus_digest.return_value = "digest-abc"
+    fake_indexer.get_cached_probe_selection.return_value = None
+    fake_indexer.build_probe_index.return_value = (
+        "- memory/project/a.md — Alpha: A desc.\n- memory/user/b.md — Beta: B desc.",
+        ["memory/project/a.md", "memory/user/b.md"],
+    )
+    fake_indexer.parse_probe_selection.return_value = ["memory/project/a.md"]
+    fake_indexer.build_probe_results.return_value = [
+        {
+            "text": "alpha body",
+            "score": 1.0,
+            "source": "memory/project/a.md",
+            "memory_name": "Alpha",
+            "memory_description": "A desc.",
+            "memory_type": "project_fact",
+            "memory_type_label": "project fact",
+        }
+    ]
+
+    agent_manager.tools = []
+    agent_manager.memory_indexer = fake_indexer
+    fake_llm = FakeLLM('["memory/project/a.md"]')
+    agent_manager.llm = fake_llm
+
+    try:
+        with patch("config.get_rag_mode", return_value=True), patch(
+            "config.get_rag_mode_name", return_value="llm_probe"
+        ), patch("config.get_llm_probe_min_files", return_value=10), patch(
+            "graph.agent.create_agent", return_value=FakeAgent()
+        ):
+            events = [
+                event
+                async for event in agent_manager.astream(
+                    "Where are the alpha notes?", []
+                )
+            ]
+    finally:
+        agent_manager.tools = original_tools
+        agent_manager.memory_indexer = original_memory_indexer
+        agent_manager.llm = original_llm
+
+    assert fake_llm.calls == 1
+    retrieval = next(event for event in events if event["type"] == "retrieval")
+    assert retrieval["mode"] == "llm_probe"
+    assert retrieval["results"][0]["source"] == "memory/project/a.md"
+    fake_indexer.parse_probe_selection.assert_called_once()
+    # Keyword RAG must not be invoked when the probe produces a hit.
+    fake_indexer.retrieve.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_astream_llm_probe_falls_back_to_keyword_on_failure(
+    isolated_chat_state,
+):
+    """When the probe LLM raises, retrieval falls back to keyword RAG transparently."""
+    from graph.agent import agent_manager
+
+    original_tools = agent_manager.tools
+    original_memory_indexer = agent_manager.memory_indexer
+    original_llm = agent_manager.llm
+
+    class FakeAgent:
+        async def astream_events(self, payload, version="v2", config=None):
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": type("Chunk", (), {"content": "ok"})()},
+            }
+
+    class ExplodingLLM:
+        async def ainvoke(self, messages):
+            raise RuntimeError("probe model unreachable")
+
+    fake_indexer = MagicMock()
+    fake_indexer.memory_file_count.return_value = 20
+    fake_indexer.memory_corpus_digest.return_value = "digest-xyz"
+    fake_indexer.get_cached_probe_selection.return_value = None
+    fake_indexer.build_probe_index.return_value = (
+        "- memory/project/a.md — Alpha: A desc.",
+        ["memory/project/a.md"],
+    )
+    fake_indexer.retrieve.return_value = [
+        {
+            "text": "keyword fallback hit",
+            "score": 0.5,
+            "source": "memory/project/a.md",
+            "memory_type": "project_fact",
+            "memory_type_label": "project fact",
+            "memory_name": "Alpha",
+            "memory_description": "A desc.",
+        }
+    ]
+
+    agent_manager.tools = []
+    agent_manager.memory_indexer = fake_indexer
+    agent_manager.llm = ExplodingLLM()
+
+    try:
+        with patch("config.get_rag_mode", return_value=True), patch(
+            "config.get_rag_mode_name", return_value="llm_probe"
+        ), patch("config.get_llm_probe_min_files", return_value=10), patch(
+            "graph.agent.create_agent", return_value=FakeAgent()
+        ):
+            events = [
+                event
+                async for event in agent_manager.astream(
+                    "Where are the alpha notes?", []
+                )
+            ]
+    finally:
+        agent_manager.tools = original_tools
+        agent_manager.memory_indexer = original_memory_indexer
+        agent_manager.llm = original_llm
+
+    retrieval = next(event for event in events if event["type"] == "retrieval")
+    assert retrieval["mode"] == "llm_probe_fallback_keyword"
+    assert retrieval["results"][0]["text"] == "keyword fallback hit"
+    fake_indexer.retrieve.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_agent_astream_llm_probe_below_threshold_uses_keyword_rag(
+    isolated_chat_state,
+):
+    """Too few memory files skips the probe and goes straight to keyword RAG."""
+    from graph.agent import agent_manager
+
+    original_tools = agent_manager.tools
+    original_memory_indexer = agent_manager.memory_indexer
+    original_llm = agent_manager.llm
+
+    class FakeAgent:
+        async def astream_events(self, payload, version="v2", config=None):
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": type("Chunk", (), {"content": "ok"})()},
+            }
+
+    fake_indexer = MagicMock()
+    fake_indexer.memory_file_count.return_value = 3  # below threshold
+    fake_indexer.retrieve.return_value = [
+        {
+            "text": "keyword hit",
+            "score": 0.5,
+            "source": "memory/project/a.md",
+            "memory_type": "project_fact",
+            "memory_type_label": "project fact",
+            "memory_name": "Alpha",
+            "memory_description": "A desc.",
+        }
+    ]
+
+    agent_manager.tools = []
+    agent_manager.memory_indexer = fake_indexer
+
+    try:
+        with patch("config.get_rag_mode", return_value=True), patch(
+            "config.get_rag_mode_name", return_value="llm_probe"
+        ), patch("config.get_llm_probe_min_files", return_value=10), patch(
+            "graph.agent.create_agent", return_value=FakeAgent()
+        ):
+            events = [
+                event
+                async for event in agent_manager.astream("query", [])
+            ]
+    finally:
+        agent_manager.tools = original_tools
+        agent_manager.memory_indexer = original_memory_indexer
+        agent_manager.llm = original_llm
+
+    # No probe was invoked (build_probe_index is the probe entry point).
+    fake_indexer.build_probe_index.assert_not_called()
+    retrieval = next(event for event in events if event["type"] == "retrieval")
+    assert retrieval["mode"] == "keyword"
+
+
+@pytest.mark.asyncio
 async def test_agent_astream_uses_configured_executor_recursion_limit(isolated_chat_state):
     from graph.agent import agent_manager
 
@@ -807,6 +1009,71 @@ async def test_chat_stream_emits_monotonic_event_index_and_terminal_done(
         range(1, len(payloads) + 1)
     )
     assert len({item["request_id"] for item in payloads}) == 1
+    assert payloads[-1]["exit"] == {"reason": "success", "exit_code": 0}
+    assert payloads[-1]["schema_version"] == 2
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_schema_version_deprecation_warning_for_v1_clients(
+    isolated_chat_state,
+):
+    """Issue #90: v1 clients should receive a one-shot ``warning`` with
+    ``kind="schema_version_deprecated"`` before the stream body so callers
+    know to migrate to reading ``done.exit``.
+    """
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    async def fake_astream(_message, _history):
+        yield {"type": "token", "content": "ok"}
+        yield {"type": "done"}
+
+    http_request = _request(
+        "/api/chat",
+        headers=[(b"x-runtime-event-schema-version", b"1")],
+    )
+    with patch.object(agent_manager, "astream", fake_astream):
+        response = await chat(
+            ChatRequest(message="anything", session_id=session_id),
+            http_request=http_request,
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    warnings = [item for item in payloads if item["type"] == "warning"]
+    assert len(warnings) == 1
+    assert warnings[0]["kind"] == "schema_version_deprecated"
+    assert "done.exit" in warnings[0]["message"]
+    assert payloads[-1]["type"] == "done"
+    assert payloads[-1]["exit"]["reason"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_omits_deprecation_warning_when_header_matches_current(
+    isolated_chat_state,
+):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    async def fake_astream(_message, _history):
+        yield {"type": "token", "content": "ok"}
+        yield {"type": "done"}
+
+    http_request = _request(
+        "/api/chat",
+        headers=[(b"x-runtime-event-schema-version", b"2")],
+    )
+    with patch.object(agent_manager, "astream", fake_astream):
+        response = await chat(
+            ChatRequest(message="anything", session_id=session_id),
+            http_request=http_request,
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    assert not any(item["type"] == "warning" for item in payloads)
 
 
 @pytest.mark.asyncio

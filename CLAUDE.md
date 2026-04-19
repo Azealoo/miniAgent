@@ -48,6 +48,15 @@ Before editing, read the piece of the system you are about to touch:
   `README.md` ("Tools"), each wrapped via `backend/tools/policy_wrappers.py`
   with access scope, read-only/destructive flags, and planner/verifier
   exposure.
+- Prompt cache: the system prompt is split into a *stable prefix* and a
+  *volatile suffix* by `backend/graph/prompt_builder.py::build_system_prompt_blocks`.
+  The prefix is frozen per-session via `SessionManager.freeze_session_prefix`
+  on the first turn and reused verbatim by sub-agents through
+  `runtime.subagent.resolve_session_stable_prefix`. **Adding a tool, skill,
+  or workspace edit mid-session breaks the cache** (one-shot
+  `session_prefix_drift` warning). Per-run cache stats land on the subagent
+  artifact under `cache_stats`; aggregates land on the `bioapex_prompt_cache_*`
+  Prometheus metrics.
 - Frontend state: `frontend/src/lib/store.tsx`, `api.ts`,
   `chat-stream-reducer.ts`, `message-blocks.ts`, `types.ts`.
 
@@ -96,6 +105,11 @@ files over new abstractions.
   `workflows/report_templates/`. Artifact plumbing lives under
   `backend/artifacts/` — keep schema, registry, and provenance changes
   together rather than scattered.
+- Rejected approaches — regex-only permissions, single-phase
+  compaction, and `bash`/`python_repl` as default execution — are
+  documented in [`docs/anti-patterns.md`](docs/anti-patterns.md).
+  Skim it before reshaping the policy, compaction, or tool-execution
+  surfaces.
 
 ### 4. Goal-Driven Execution
 

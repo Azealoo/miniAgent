@@ -19,6 +19,7 @@ read my frontend: http://localhost:3000/
    - backward compatibility: existing session files, SSE contracts, file APIs, and skill loading behavior are preserved unless intentionally changed
    - frontend contract fit: frontend types and UI handling match any new backend payloads or states
    - verification: relevant tests, build checks, linting, or manual flow validation were completed
+   - anti-pattern check: the change does not reintroduce any pattern rejected in `docs/anti-patterns.md` (regex-only permissions, single-phase compaction, `bash`/`python_repl` as default execution); cite the doc if you flag one
 6. Report findings in this order:
    - blockers
    - important issues
