@@ -25,6 +25,7 @@ export default function UsagePanel() {
     messages,
     isStreaming,
     parseErrorCount,
+    requestIdMismatchCount,
   } = useApp();
 
   const [tokens, setTokens] = useState<TokenStats | null>(null);
@@ -177,6 +178,12 @@ export default function UsagePanel() {
                 <UsageMetricRow
                   label="Parse errors"
                   value={parseErrorCount.toLocaleString()}
+                />
+              ) : null}
+              {requestIdMismatchCount > 0 ? (
+                <UsageMetricRow
+                  label="Request-id drops"
+                  value={requestIdMismatchCount.toLocaleString()}
                 />
               ) : null}
             </div>

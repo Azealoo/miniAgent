@@ -313,12 +313,31 @@ export interface StreamCallbacks {
    * cancel the reader after dispatching this event.
    */
   onStreamOverflow?: (event: ChatStreamOverflowEvent) => void;
+  /**
+   * Called when an incoming event carries a `request_id` that doesn't match
+   * the one the dispatcher latched on to for this stream. The event is
+   * dropped before any other callback runs so stale-response payloads never
+   * reach the reducer.
+   */
+  onRequestIdMismatch?: (event: ChatStreamEvent) => void;
 }
 
 export interface ChatStreamDispatcher {
   dispatch: (event: ChatStreamEvent) => void;
   sawTerminalEvent: () => boolean;
   lastRequestId: () => string | undefined;
+  expectedRequestId: () => string | undefined;
+}
+
+export interface CreateChatStreamDispatcherOptions {
+  /**
+   * Pre-seed the expected request id. When set, any event whose
+   * `request_id` is present and differs is dropped as a stale response
+   * before callbacks run. When omitted, the dispatcher latches on to the
+   * first backend-emitted `request_id` it sees and compares subsequent
+   * events against it.
+   */
+  expectedRequestId?: string;
 }
 
 /**
@@ -328,13 +347,21 @@ export interface ChatStreamDispatcher {
  * + reader loop.
  */
 export function createChatStreamDispatcher(
-  callbacks: StreamCallbacks
+  callbacks: StreamCallbacks,
+  options: CreateChatStreamDispatcherOptions = {}
 ): ChatStreamDispatcher {
   let sawTerminalEvent = false;
   let lastRequestId: string | undefined;
+  let expectedRequestId: string | undefined = options.expectedRequestId;
 
   const dispatch = (event: ChatStreamEvent) => {
     if (event.request_id) {
+      if (expectedRequestId === undefined) {
+        expectedRequestId = event.request_id;
+      } else if (event.request_id !== expectedRequestId) {
+        callbacks.onRequestIdMismatch?.(event);
+        return;
+      }
       lastRequestId = event.request_id;
     }
     if (
@@ -401,5 +428,6 @@ export function createChatStreamDispatcher(
     dispatch,
     sawTerminalEvent: () => sawTerminalEvent,
     lastRequestId: () => lastRequestId,
+    expectedRequestId: () => expectedRequestId,
   };
 }

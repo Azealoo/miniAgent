@@ -85,6 +85,108 @@ describe("parseChatStreamChunk overflow", () => {
   });
 });
 
+describe("createChatStreamDispatcher request-id correlation", () => {
+  it("latches on to the first request_id and applies events that match", () => {
+    const onEvent = vi.fn();
+    const onRequestIdMismatch = vi.fn();
+    const onToken = vi.fn();
+    const dispatcher = createChatStreamDispatcher({
+      onEvent,
+      onToken,
+      onRequestIdMismatch,
+    });
+
+    dispatcher.dispatch({ type: "token", content: "hello ", request_id: "req-1" });
+    dispatcher.dispatch({ type: "token", content: "world", request_id: "req-1" });
+
+    expect(onEvent).toHaveBeenCalledTimes(2);
+    expect(onToken).toHaveBeenNthCalledWith(1, "hello ");
+    expect(onToken).toHaveBeenNthCalledWith(2, "world");
+    expect(onRequestIdMismatch).not.toHaveBeenCalled();
+    expect(dispatcher.expectedRequestId()).toBe("req-1");
+  });
+
+  it("drops subsequent events that carry a mismatched request_id", () => {
+    const onEvent = vi.fn();
+    const onToken = vi.fn();
+    const onRequestIdMismatch = vi.fn();
+    const dispatcher = createChatStreamDispatcher({
+      onEvent,
+      onToken,
+      onRequestIdMismatch,
+    });
+
+    dispatcher.dispatch({ type: "token", content: "first", request_id: "req-1" });
+    dispatcher.dispatch({
+      type: "token",
+      content: "stale echo",
+      request_id: "req-stale",
+    });
+
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(onToken).toHaveBeenCalledTimes(1);
+    expect(onToken).toHaveBeenCalledWith("first");
+    expect(onRequestIdMismatch).toHaveBeenCalledTimes(1);
+    const [droppedEvent] = onRequestIdMismatch.mock.calls[0];
+    expect(droppedEvent.type).toBe("token");
+    expect(droppedEvent.request_id).toBe("req-stale");
+    expect(dispatcher.expectedRequestId()).toBe("req-1");
+  });
+
+  it("applies events without a request_id regardless of the latched id", () => {
+    const onEvent = vi.fn();
+    const onToken = vi.fn();
+    const onRequestIdMismatch = vi.fn();
+    const dispatcher = createChatStreamDispatcher({
+      onEvent,
+      onToken,
+      onRequestIdMismatch,
+    });
+
+    dispatcher.dispatch({ type: "token", content: "pinned", request_id: "req-1" });
+    dispatcher.dispatch({ type: "token", content: "no-id-token" });
+
+    expect(onEvent).toHaveBeenCalledTimes(2);
+    expect(onToken).toHaveBeenNthCalledWith(2, "no-id-token");
+    expect(onRequestIdMismatch).not.toHaveBeenCalled();
+  });
+
+  it("applies events when no expected id has been set yet", () => {
+    const onEvent = vi.fn();
+    const onToken = vi.fn();
+    const onRequestIdMismatch = vi.fn();
+    const dispatcher = createChatStreamDispatcher({
+      onEvent,
+      onToken,
+      onRequestIdMismatch,
+    });
+
+    dispatcher.dispatch({ type: "token", content: "before-id" });
+    dispatcher.dispatch({ type: "token", content: "also-before-id" });
+
+    expect(onEvent).toHaveBeenCalledTimes(2);
+    expect(onRequestIdMismatch).not.toHaveBeenCalled();
+    expect(dispatcher.expectedRequestId()).toBeUndefined();
+  });
+
+  it("honors a pre-seeded expected request id", () => {
+    const onEvent = vi.fn();
+    const onRequestIdMismatch = vi.fn();
+    const dispatcher = createChatStreamDispatcher(
+      { onEvent, onRequestIdMismatch },
+      { expectedRequestId: "req-seeded" }
+    );
+
+    dispatcher.dispatch({ type: "token", content: "match", request_id: "req-seeded" });
+    dispatcher.dispatch({ type: "token", content: "drop", request_id: "req-other" });
+    dispatcher.dispatch({ type: "token", content: "always-apply" });
+
+    expect(onEvent).toHaveBeenCalledTimes(2);
+    expect(onRequestIdMismatch).toHaveBeenCalledTimes(1);
+    expect(dispatcher.expectedRequestId()).toBe("req-seeded");
+  });
+});
+
 describe("parseChatStreamDataPayload", () => {
   it("preserves the raw payload when the JSON parser rejects it", () => {
     const event = parseChatStreamDataPayload("definitely not json");

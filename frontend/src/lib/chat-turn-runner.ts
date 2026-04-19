@@ -33,6 +33,12 @@ export interface ChatTurnCallbacks {
    * UsagePanel can surface dropped-event telemetry.
    */
   onParseError?: (event: ChatStreamParseErrorEvent) => void;
+  /**
+   * Fired when the stream dispatcher drops an event because its
+   * `request_id` doesn't match the one latched for this turn. Used by the
+   * catalog to maintain a session-level counter alongside parse errors.
+   */
+  onRequestIdMismatch?: (event: ChatStreamEvent) => void;
 }
 
 export interface RunChatTurnParams {
@@ -120,6 +126,9 @@ export async function runChatTurn({
       {
         signal: abortController.signal,
         onEvent: applyAndCommitEvent,
+        onRequestIdMismatch: (event) => {
+          callbacks.onRequestIdMismatch?.(event);
+        },
       },
       { requestId }
     );

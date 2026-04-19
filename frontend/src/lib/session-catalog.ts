@@ -62,6 +62,12 @@ export interface UseSessionCatalogResult {
    * turns so UsagePanel can show cumulative drop telemetry.
    */
   parseErrorCount: number;
+  /**
+   * Number of stream events the dispatcher dropped because their
+   * `request_id` didn't match the in-flight turn. Resets on session
+   * switch; parallels `parseErrorCount` in UsagePanel.
+   */
+  requestIdMismatchCount: number;
   refreshSessions: () => Promise<void>;
   reloadCurrentSession: () => Promise<void>;
   createSession: () => Promise<void>;
@@ -106,6 +112,7 @@ export function useSessionCatalog(
     null
   );
   const [parseErrorCount, setParseErrorCount] = useState(0);
+  const [requestIdMismatchCount, setRequestIdMismatchCount] = useState(0);
 
   const streamingIdRef = useRef<string | null>(null);
   const streamAbortControllerRef = useRef<AbortController | null>(null);
@@ -163,6 +170,7 @@ export function useSessionCatalog(
     setSessionHistoryError(null);
     setSessionContinuitySummaries([]);
     setParseErrorCount(0);
+    setRequestIdMismatchCount(0);
   }, [accessByScope.inspection.status, hasLoadedApiAuthState]);
 
   // Load session list and rehydrate current session once inspection access arrives.
@@ -322,6 +330,7 @@ export function useSessionCatalog(
     setSessionHistoryError(null);
     setSessionContinuitySummaries([]);
     setParseErrorCount(0);
+    setRequestIdMismatchCount(0);
     resetDraftAndInspector();
   }, [hasExecutionAccess, resetDraftAndInspector]);
 
@@ -341,6 +350,7 @@ export function useSessionCatalog(
           getSessionHistoryErrorMessage
         );
         setParseErrorCount(0);
+    setRequestIdMismatchCount(0);
         resetDraftAndInspector();
       } catch (error) {
         promoteInspectionScopeError(error);
@@ -368,6 +378,7 @@ export function useSessionCatalog(
         setSessionHistoryError(null);
         setSessionContinuitySummaries([]);
         setParseErrorCount(0);
+    setRequestIdMismatchCount(0);
         resetDraftAndInspector();
       }
     },
@@ -503,6 +514,9 @@ export function useSessionCatalog(
           onParseError: () => {
             setParseErrorCount((count) => count + 1);
           },
+          onRequestIdMismatch: () => {
+            setRequestIdMismatchCount((count) => count + 1);
+          },
         },
       });
     },
@@ -541,6 +555,7 @@ export function useSessionCatalog(
     sessionContinuitySummaries,
     lastFailedTurn,
     parseErrorCount,
+    requestIdMismatchCount,
     refreshSessions,
     reloadCurrentSession,
     createSession,
