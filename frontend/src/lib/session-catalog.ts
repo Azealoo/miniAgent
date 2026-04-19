@@ -56,6 +56,12 @@ export interface UseSessionCatalogResult {
   sessionHistoryError: string | null;
   sessionContinuitySummaries: SessionContinuitySummary[];
   lastFailedTurn: FailedTurnState | null;
+  /**
+   * Number of malformed SSE payloads the parser has surfaced for the active
+   * session. Resets when the user switches sessions; otherwise persists across
+   * turns so UsagePanel can show cumulative drop telemetry.
+   */
+  parseErrorCount: number;
   refreshSessions: () => Promise<void>;
   reloadCurrentSession: () => Promise<void>;
   createSession: () => Promise<void>;
@@ -99,6 +105,7 @@ export function useSessionCatalog(
   const [lastFailedTurn, setLastFailedTurn] = useState<FailedTurnState | null>(
     null
   );
+  const [parseErrorCount, setParseErrorCount] = useState(0);
 
   const streamingIdRef = useRef<string | null>(null);
   const streamAbortControllerRef = useRef<AbortController | null>(null);
@@ -155,6 +162,7 @@ export function useSessionCatalog(
     setSessionHistoryStatus("idle");
     setSessionHistoryError(null);
     setSessionContinuitySummaries([]);
+    setParseErrorCount(0);
   }, [accessByScope.inspection.status, hasLoadedApiAuthState]);
 
   // Load session list and rehydrate current session once inspection access arrives.
@@ -313,6 +321,7 @@ export function useSessionCatalog(
     setSessionHistoryStatus("ready");
     setSessionHistoryError(null);
     setSessionContinuitySummaries([]);
+    setParseErrorCount(0);
     resetDraftAndInspector();
   }, [hasExecutionAccess, resetDraftAndInspector]);
 
@@ -331,6 +340,7 @@ export function useSessionCatalog(
           loadSessionSetters,
           getSessionHistoryErrorMessage
         );
+        setParseErrorCount(0);
         resetDraftAndInspector();
       } catch (error) {
         promoteInspectionScopeError(error);
@@ -357,6 +367,7 @@ export function useSessionCatalog(
         setSessionHistoryStatus("idle");
         setSessionHistoryError(null);
         setSessionContinuitySummaries([]);
+        setParseErrorCount(0);
         resetDraftAndInspector();
       }
     },
@@ -489,6 +500,9 @@ export function useSessionCatalog(
               requestId: failedRequestId ?? options?.requestId,
             });
           },
+          onParseError: () => {
+            setParseErrorCount((count) => count + 1);
+          },
         },
       });
     },
@@ -526,6 +540,7 @@ export function useSessionCatalog(
     sessionHistoryError,
     sessionContinuitySummaries,
     lastFailedTurn,
+    parseErrorCount,
     refreshSessions,
     reloadCurrentSession,
     createSession,
