@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -123,6 +124,14 @@ class MemoryIndexer:
         # In-process only: invalidates on restart and whenever the memory
         # corpus digest changes (i.e. any file added/modified/removed).
         self._probe_cache: dict[tuple[str, str], list[str]] = {}
+        # Background rebuild coordination. `_schedule_lock` guards the
+        # `_rebuild_in_flight` flag so concurrent `_maybe_rebuild` callers
+        # coalesce to a single worker rather than queueing duplicates.
+        # `_rebuild_thread` is retained so callers (tests, shutdown paths) can
+        # join the worker when they need deterministic completion.
+        self._schedule_lock = threading.Lock()
+        self._rebuild_in_flight: bool = False
+        self._rebuild_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
@@ -596,25 +605,61 @@ class MemoryIndexer:
             return
         # First-ever build (cold start or empty state) — hand off to the full
         # rebuild path so the persisted-index fast-load has a chance to run.
+        # The cold path must block: callers have no retrievable state yet.
         if not self._file_states or self._index is None and not self._sections:
             self.rebuild_index(
                 current_map=current_map, current_digest=current_digest
             )
             return
-        added, modified, removed = self._diff_state_maps(
-            self._file_states, current_map
-        )
-        if not (added or modified or removed):
-            self._file_states = dict(current_map)
-            self._last_md5 = current_digest
-            return
-        self._apply_incremental_update(
-            added=added,
-            modified=modified,
-            removed=removed,
-            current_map=current_map,
-            current_digest=current_digest,
-        )
+        # Warm-cache path: hand the diff-and-update work to a single daemon
+        # worker so the calling agent turn does not block on a re-embed of a
+        # large corpus change. Readers keep serving the current (now-stale)
+        # sections/index/nodes until the worker commits the new state.
+        with self._schedule_lock:
+            if self._rebuild_in_flight:
+                # A worker is already handling the divergence. It re-scans on
+                # entry, so any change that arrived between scheduling and
+                # worker start is picked up there; otherwise the next
+                # `_maybe_rebuild` call after the worker exits will catch it.
+                return
+            self._rebuild_in_flight = True
+            thread = threading.Thread(
+                target=self._run_background_rebuild,
+                name="memory-indexer-rebuild",
+                daemon=True,
+            )
+            self._rebuild_thread = thread
+        thread.start()
+
+    def _run_background_rebuild(self) -> None:
+        try:
+            current_map = self._memory_state_map()
+            current_digest = self._digest_state_map(current_map)
+            if current_digest == self._last_md5:
+                return
+            added, modified, removed = self._diff_state_maps(
+                self._file_states, current_map
+            )
+            if not (added or modified or removed):
+                self._file_states = dict(current_map)
+                self._last_md5 = current_digest
+                return
+            self._apply_incremental_update(
+                added=added,
+                modified=modified,
+                removed=removed,
+                current_map=current_map,
+                current_digest=current_digest,
+            )
+        except Exception:
+            # `_last_md5` / `_file_states` are only updated at the tail of
+            # `_apply_incremental_update`, so an exception above leaves the
+            # existing snapshot intact. The next `_maybe_rebuild` call will
+            # see a divergent digest and schedule another attempt.
+            logger.exception("Background memory-index rebuild failed")
+        finally:
+            with self._schedule_lock:
+                self._rebuild_in_flight = False
 
     def _apply_incremental_update(
         self,

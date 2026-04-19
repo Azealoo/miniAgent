@@ -752,6 +752,8 @@ class TestIncrementalRebuild:
         )
 
         indexer._maybe_rebuild()
+        if indexer._rebuild_thread is not None:
+            indexer._rebuild_thread.join(timeout=5.0)
 
         assert parse_calls == ["memory/project/beta.md"]
         assert any(
@@ -775,6 +777,8 @@ class TestIncrementalRebuild:
 
         target.unlink()
         indexer._maybe_rebuild()
+        if indexer._rebuild_thread is not None:
+            indexer._rebuild_thread.join(timeout=5.0)
 
         assert "memory/project/drop.md" not in indexer._file_sections
         assert "memory/project/keep.md" in indexer._file_sections
@@ -832,7 +836,180 @@ class TestIncrementalRebuild:
         assert elapsed < 1.0, (
             f"Single-file edit in {total_files}-file tree took {elapsed:.3f}s"
         )
+        if indexer._rebuild_thread is not None:
+            indexer._rebuild_thread.join(timeout=10.0)
         assert parse_calls == ["memory/project/bucket_042/note_04237.md"]
+
+
+class TestBackgroundRebuild:
+    """Warm-cache `_maybe_rebuild` dispatches off the hot path.
+
+    See issue #116: a large corpus mutation used to freeze the next agent
+    turn while `_apply_incremental_update` re-embedded everything inline.
+    The warm path now schedules the rebuild on a daemon worker so `retrieve()`
+    and `build_probe_index()` return promptly using the current (stale)
+    sections.
+    """
+
+    def _seed_warm_cache(self, indexer, tmp_path):
+        _write_memory_file(
+            tmp_path,
+            "memory/project/alpha.md",
+            "# Alpha\nAlpha body content.\n",
+        )
+        _write_memory_file(
+            tmp_path,
+            "memory/project/beta.md",
+            "# Beta\nBeta body content.\n",
+        )
+        indexer._maybe_rebuild()  # cold-start populates `_file_states`
+        # Nothing scheduled — cold path is inline.
+        assert indexer._rebuild_thread is None
+        assert indexer._file_states
+        assert indexer._sections
+
+    def test_retrieve_returns_promptly_while_background_rebuild_runs(
+        self, indexer, tmp_path, monkeypatch
+    ):
+        import threading
+        import time
+
+        self._seed_warm_cache(indexer, tmp_path)
+
+        worker_started = threading.Event()
+        release_worker = threading.Event()
+
+        real_apply = indexer._apply_incremental_update
+
+        def slow_apply(**kwargs):
+            worker_started.set()
+            # Simulate the long re-embed work without actually embedding.
+            assert release_worker.wait(5.0), "test harness never released worker"
+            real_apply(**kwargs)
+
+        monkeypatch.setattr(indexer, "_apply_incremental_update", slow_apply)
+
+        # Mutate one of the seeded files so the warm diff has work to do.
+        (tmp_path / "memory" / "project" / "alpha.md").write_text(
+            "# Alpha\nAlpha body content — updated in place.\n", encoding="utf-8"
+        )
+
+        start = time.perf_counter()
+        results = indexer.retrieve("Alpha body content", top_k=2)
+        elapsed = time.perf_counter() - start
+
+        # The hot-path agent turn must not block while the background worker
+        # is re-embedding the corpus.
+        assert elapsed < 0.5, (
+            f"retrieve() blocked for {elapsed:.2f}s on warm-cache rebuild"
+        )
+        assert worker_started.wait(2.0), "background rebuild thread never started"
+        assert indexer._rebuild_in_flight is True
+        # Stale sections are still served from before the mutation committed.
+        assert any(
+            r["source"].startswith("memory/project/alpha.md")
+            and "updated in place" not in r["text"]
+            for r in results
+        ), f"expected stale alpha sections, got {[r['source'] for r in results]}"
+
+        # Let the background worker finish and verify it eventually catches up.
+        release_worker.set()
+        indexer._rebuild_thread.join(timeout=5.0)
+        assert indexer._rebuild_in_flight is False
+        fresh = indexer.retrieve("updated in place", top_k=2)
+        assert any("updated in place" in r["text"] for r in fresh)
+
+    def test_cold_start_rebuild_still_blocks(self, indexer, tmp_path, monkeypatch):
+        import time
+
+        _write_memory_file(
+            tmp_path,
+            "memory/project/a.md",
+            "# A\nAlpha body.\n",
+        )
+
+        call_order: list[str] = []
+        original_rebuild = indexer.rebuild_index
+
+        def slow_rebuild(**kwargs):
+            call_order.append("enter")
+            time.sleep(0.3)
+            call_order.append("exit")
+            original_rebuild(**kwargs)
+
+        monkeypatch.setattr(indexer, "rebuild_index", slow_rebuild)
+
+        start = time.perf_counter()
+        indexer._maybe_rebuild()
+        elapsed = time.perf_counter() - start
+
+        # Cold path must block so callers have a populated index to query.
+        assert elapsed >= 0.3, (
+            f"cold-start rebuild did not block; took {elapsed:.2f}s"
+        )
+        assert call_order == ["enter", "exit"]
+        # No daemon worker is spawned on the cold path.
+        assert indexer._rebuild_thread is None
+        assert indexer._rebuild_in_flight is False
+
+    def test_duplicate_maybe_rebuild_calls_coalesce_to_single_worker(
+        self, indexer, tmp_path, monkeypatch
+    ):
+        import threading
+
+        self._seed_warm_cache(indexer, tmp_path)
+
+        apply_calls = [0]
+        release_worker = threading.Event()
+        real_apply = indexer._apply_incremental_update
+
+        def counted_apply(**kwargs):
+            apply_calls[0] += 1
+            assert release_worker.wait(5.0), "test harness never released worker"
+            real_apply(**kwargs)
+
+        monkeypatch.setattr(indexer, "_apply_incremental_update", counted_apply)
+
+        (tmp_path / "memory" / "project" / "alpha.md").write_text(
+            "# Alpha\nAlpha rev1.\n", encoding="utf-8"
+        )
+        indexer._maybe_rebuild()
+        first_thread = indexer._rebuild_thread
+        assert first_thread is not None
+        # Subsequent calls while a worker is in flight must be no-ops.
+        indexer._maybe_rebuild()
+        indexer._maybe_rebuild()
+        assert indexer._rebuild_thread is first_thread
+
+        release_worker.set()
+        first_thread.join(timeout=5.0)
+        assert apply_calls[0] == 1
+
+    def test_worker_exception_does_not_poison_last_md5(
+        self, indexer, tmp_path, monkeypatch, caplog
+    ):
+        self._seed_warm_cache(indexer, tmp_path)
+        prior_md5 = indexer._last_md5
+        prior_states = dict(indexer._file_states)
+
+        def boom(**kwargs):
+            raise RuntimeError("simulated rebuild failure")
+
+        monkeypatch.setattr(indexer, "_apply_incremental_update", boom)
+
+        (tmp_path / "memory" / "project" / "alpha.md").write_text(
+            "# Alpha\nAlpha rev2.\n", encoding="utf-8"
+        )
+        with caplog.at_level("ERROR", logger="graph.memory_indexer"):
+            indexer._maybe_rebuild()
+            assert indexer._rebuild_thread is not None
+            indexer._rebuild_thread.join(timeout=5.0)
+
+        assert indexer._rebuild_in_flight is False
+        # `_last_md5` stays on the pre-failure digest so the next attempt
+        # still sees divergence and re-schedules.
+        assert indexer._last_md5 == prior_md5
+        assert indexer._file_states == prior_states
 
 
 class TestLLMProbeRetrieval:
