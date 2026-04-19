@@ -1065,9 +1065,11 @@ class TestCorruptSessionQuarantine:
 
 
 class TestPerSessionLockConcurrency:
-    """Guards for issue #109 — concurrent get_or_create must not create two
-    distinct asyncio.Lock instances for the same session id, and the lock
-    registry must not grow unbounded as sessions come and go.
+    """Guards for issues #109 and #222 — concurrent get_or_create must not
+    create two distinct asyncio.Lock instances for the same session id, the
+    registry must hold strong references (no GC race between insert and a
+    concurrent observer), and eviction via ``delete_session`` must keep the
+    registry bounded as sessions come and go.
     """
 
     @pytest.mark.parametrize(
@@ -1110,33 +1112,73 @@ class TestPerSessionLockConcurrency:
             ("_turn_locks", "get_or_create_turn_lock"),
         ],
     )
-    def test_lock_registry_does_not_grow_unbounded_under_churn(
+    def test_lock_registry_holds_strong_reference(
         self, sm, registry_attr, lock_method
     ):
+        """Regression for #222: the registry must keep a strong reference so a
+        freshly installed Lock cannot be GC'd before a concurrent caller grabs
+        its own strong ref. Dropping the transient returned by the first call
+        must not cause the entry to disappear.
+        """
         from graph.session import session_store
 
         registry = getattr(session_store, registry_attr)
-        assert isinstance(registry, weakref.WeakValueDictionary), (
-            "Registry must be a WeakValueDictionary so entries for closed "
-            "sessions are GC-collected."
+        assert isinstance(registry, dict) and not isinstance(
+            registry, weakref.WeakValueDictionary
+        ), (
+            "Registry must be a plain dict that pins locks with a strong "
+            "reference; a WeakValueDictionary races GC against concurrent "
+            "lookups (issue #222)."
         )
 
         grab = getattr(sm, lock_method)
-        baseline = len(registry)
+        sid = _valid_session_id(777)
 
-        # Simulate long-run churn: create a unique session-lock per iteration
-        # without retaining any strong reference to the returned Lock.
-        for i in range(500):
-            grab(_valid_session_id(10_000 + i))
-
+        first = grab(sid)
+        del first
         gc.collect()
 
-        # With the WeakValueDictionary, once the transient Lock returned from
-        # grab() falls out of scope the mapping is cleared. Allow some slack
-        # for locks whose finalizers haven't yet cleared their entry.
-        assert len(registry) - baseline < 50, (
-            f"{registry_attr} grew to {len(registry)} entries under churn — "
-            "expected weakref-based GC to keep it near-empty."
+        second = grab(sid)
+        assert registry.get(sid) is second, (
+            "Lock was evicted between calls — the strong-ref invariant is "
+            "broken and the GC race from issue #222 can re-emerge."
+        )
+
+    @pytest.mark.parametrize(
+        "registry_attr, lock_method",
+        [
+            ("_compress_locks", "get_or_create_compress_lock"),
+            ("_turn_locks", "get_or_create_turn_lock"),
+        ],
+    )
+    def test_lock_registry_does_not_grow_unbounded_under_churn(
+        self, sm, registry_attr, lock_method
+    ):
+        """Growth is bounded by ``delete_session`` eviction rather than
+        weakref GC. Populate+delete churn must return the registry to
+        baseline — this is the strong-ref design's replacement for the
+        weakref GC guarantee removed by issue #222.
+        """
+        from graph.session import session_store
+
+        registry = getattr(session_store, registry_attr)
+        grab = getattr(sm, lock_method)
+        baseline = len(registry)
+
+        sids = [_valid_session_id(10_000 + i) for i in range(50)]
+        for sid in sids:
+            grab(sid)
+        # Strong-ref registry pins every entry until explicit eviction.
+        assert len(registry) - baseline >= len(sids)
+
+        for sid in sids:
+            sm.delete_session(sid)
+
+        # ``delete_session`` must evict the per-session lock; otherwise
+        # long-running servers accumulate one Lock per ever-seen session id.
+        assert len(registry) - baseline == 0, (
+            f"{registry_attr} retained {len(registry) - baseline} entries "
+            "after delete_session — explicit eviction is broken."
         )
 
 
