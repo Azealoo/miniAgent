@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { streamChat } from "./api";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "./runtime-events";
 import { makeGenericToolResultEnvelope } from "@/test/fixtures";
 import { sseResponse } from "@/test/mock-fetch";
 
@@ -171,6 +172,54 @@ describe("streamChat", () => {
       message: "Review the RNA-seq dataset.",
       session_id: "session-1",
     });
+    const headers = new Headers(init?.headers as HeadersInit);
+    expect(headers.get("X-Runtime-Event-Schema-Version")).toBe(
+      String(RUNTIME_EVENT_SCHEMA_VERSION)
+    );
+  });
+
+  it("surfaces the structured exit payload on done events to the reducer", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      sseResponse(
+        [
+          {
+            type: "done",
+            content: "final",
+            session_id: "session-exit",
+            turn_status: "budget_exceeded",
+            exit: {
+              reason: "token_budget",
+              exit_code: 3,
+              summary: "turn budget exceeded at 9001 tokens",
+            },
+            event_index: 1,
+          },
+        ],
+        { chunkSize: 32 }
+      )
+    );
+
+    const capturedEvents: Array<{ type: string; exit?: unknown }> = [];
+    await streamChat("Test exit.", "session-exit", {
+      onEvent: (event) => {
+        if (event.type === "done") {
+          capturedEvents.push({ type: event.type, exit: event.exit });
+        } else {
+          capturedEvents.push({ type: event.type });
+        }
+      },
+    });
+
+    expect(capturedEvents).toEqual([
+      {
+        type: "done",
+        exit: {
+          reason: "token_budget",
+          exit_code: 3,
+          summary: "turn budget exceeded at 9001 tokens",
+        },
+      },
+    ]);
   });
 
   it("surfaces typed error events without crashing on malformed SSE chunks", async () => {
