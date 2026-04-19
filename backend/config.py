@@ -98,24 +98,28 @@ _DEFAULT: dict = {
                     "model": "deepseek-chat",
                     "temperature": 0.3,
                     "streaming": True,
+                    "fallback_model": None,
                 },
                 "planner": {
                     "provider": "openai",
                     "model": "gpt-5.4-mini",
                     "temperature": 0.2,
                     "streaming": True,
+                    "fallback_model": None,
                 },
                 "verifier": {
                     "provider": "openai",
                     "model": "gpt-5.4-mini",
                     "temperature": 0.2,
                     "streaming": True,
+                    "fallback_model": None,
                 },
                 "title": {
                     "provider": "openai",
                     "model": "gpt-5-mini",
                     "temperature": 0.2,
                     "streaming": False,
+                    "fallback_model": None,
                 },
             },
         }
