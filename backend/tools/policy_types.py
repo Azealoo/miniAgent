@@ -74,18 +74,22 @@ class ToolPolicyExecutionContext:
     request_id: str | None = None
     turn_id: str | None = None
     allowed_access_scope: ToolAccessScope = "execution"
-    # Set of `tool_name` (or `f"{tool_name}:{run_id}"`) strings the user has
-    # already approved this turn. The runtime is responsible for populating
-    # this from the approval API; the policy layer only consults it.
-    approved_tool_runs: frozenset[str] = frozenset()
+    # Set of ``(tool_name, args_hash)`` tuples the reviewer has approved for
+    # this session. ``args_hash`` is the stable digest over the tool's
+    # canonical-JSON kwargs computed at gate-evaluation time; an approval for
+    # one argument set does not authorize a call with different arguments.
+    # Destructive manifests are filtered out at lookup time so they always
+    # re-prompt — see ``tools.policy._user_has_approved``.
+    approved_tool_runs: frozenset[tuple[str, str]] = frozenset()
     # Skills the router selected for this turn. When any active skill
     # declares a non-empty ``tools_allowed`` list, tool dispatch is
     # restricted to the union of those allowlists across active skills.
     active_skills: tuple[ActiveSkillSpec, ...] = ()
-    # Tool names the reviewer explicitly denied for this turn. Denied tools
-    # hard-block (rather than re-prompt) so the agent sees a blocked envelope
-    # and routes around the capability instead of spinning on the same gate.
-    denied_tool_runs: frozenset[str] = frozenset()
+    # ``(tool_name, args_hash)`` tuples the reviewer explicitly denied. Denied
+    # tools hard-block (rather than re-prompt) so the agent sees a blocked
+    # envelope and routes around the capability instead of spinning on the
+    # same gate.
+    denied_tool_runs: frozenset[tuple[str, str]] = frozenset()
 
 
 @dataclass(frozen=True)

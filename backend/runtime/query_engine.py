@@ -717,16 +717,15 @@ class QueryEngine:
 
         request_id = str(uuid.uuid4())
         base_dir = getattr(self.agent_manager, "base_dir", None)
-        approved_tool_runs: frozenset[str] = frozenset()
-        denied_tool_runs: frozenset[str] = frozenset()
+        approved_tool_runs: frozenset[tuple[str, str]] = frozenset()
+        denied_tool_runs: frozenset[tuple[str, str]] = frozenset()
         if base_dir is not None:
             try:
-                approved_tool_runs = approval_store.approved_tool_names(
+                approved_tool_runs = approval_store.approved_tool_runs(
                     base_dir, session_id
                 )
-                denied_tool_runs = frozenset(
-                    record["tool_name"]
-                    for record in approval_store.denied_records(base_dir, session_id)
+                denied_tool_runs = approval_store.denied_tool_runs(
+                    base_dir, session_id
                 )
             except Exception:
                 approved_tool_runs = frozenset()
