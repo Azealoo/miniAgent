@@ -80,6 +80,22 @@ EVICTION_ORDER: tuple[str, ...] = (
     "soul",
 )
 
+# Static guidance blocks are pinned (never evicted) and live in the cache
+# prefix. They are not listed in EVICTION_ORDER because they must always be
+# emitted. Every emitted section id must appear in either EVICTION_ORDER or
+# ``STATIC_GUIDANCE_SECTION_IDS`` — an orphan id would silently bypass the
+# stable/volatile partition and break prompt-cache fingerprinting.
+STATIC_GUIDANCE_SECTION_IDS: frozenset[str] = frozenset({
+    "_tool_result_error_contract",
+    "_tool_selection_guidance",
+    "_rag_memory_guidance",
+})
+
+# The closed set of section ids this module is allowed to emit. Used by the
+# runtime invariant check in ``_assemble_sections`` to prevent a newly added
+# section from being silently treated as volatile.
+KNOWN_SECTION_IDS: frozenset[str] = frozenset(EVICTION_ORDER) | STATIC_GUIDANCE_SECTION_IDS
+
 # Sections that belong to the prompt's stable prefix for prefix-cache reuse.
 # Anything not in this set is treated as volatile (per-turn state) and placed
 # after the cache breakpoint. Static guidance blocks (``_rag_memory_guidance``,
@@ -96,6 +112,15 @@ SECTIONS_IN_STABLE_PREFIX: frozenset[str] = frozenset({
     "_tool_selection_guidance",
     "_rag_memory_guidance",
 })
+
+# Module-load invariant: every id claimed as stable must be a known id. A
+# mismatch here (e.g. renaming a section without updating the set) would make
+# the stable/volatile split silently drop the renamed section from the cache
+# prefix.
+assert SECTIONS_IN_STABLE_PREFIX <= KNOWN_SECTION_IDS, (
+    "SECTIONS_IN_STABLE_PREFIX contains unknown section ids: "
+    f"{sorted(SECTIONS_IN_STABLE_PREFIX - KNOWN_SECTION_IDS)}"
+)
 
 _MEMORY_SCOPE_DIRS = ("project", "user", "agent")
 
@@ -618,6 +643,20 @@ def _assemble_sections(
     git_context = _build_git_context(base_dir, budget=budget)
     if git_context:
         sections.append(("git_context", git_context))
+
+    # Invariant: every emitted section id must be classified into the
+    # stable/volatile partition that drives prefix-cache fingerprinting. A
+    # new id that is neither in EVICTION_ORDER nor a static guidance id would
+    # default to the volatile suffix and silently break cache reuse the next
+    # time the prompt is assembled.
+    unknown = {sid for sid, _ in sections if sid not in KNOWN_SECTION_IDS}
+    if unknown:
+        raise AssertionError(
+            "prompt_builder emitted unclassified section ids: "
+            f"{sorted(unknown)}. Add them to EVICTION_ORDER or "
+            "STATIC_GUIDANCE_SECTION_IDS, and decide stable vs volatile via "
+            "SECTIONS_IN_STABLE_PREFIX."
+        )
 
     return _apply_eviction(
         sections,
