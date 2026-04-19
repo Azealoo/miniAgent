@@ -12,9 +12,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tools.skills_scanner import (
+    SkillRegistry,
     _parse_frontmatter,
     collect_skill_entries,
     describe_skill_registry,
+    get_body,
+    get_frontmatter,
     scan_skills,
     skill_required_env_satisfied,
 )
@@ -675,3 +678,121 @@ class TestExtendedSkillContract:
         )
         entry = collect_skill_entries(tmp_path, respect_enabled=False)[0]
         assert entry["required_env"] == ["FOO_TOKEN", "BAR_TOKEN"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SkillRegistry — two-phase frontmatter / body access
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+_BODY_MARKER = "UNIQUE_BODY_MARKER_8f3a1c"
+
+
+def _write_skill_with_body(
+    base: Path, name: str, *, body: str, description: str = "Two-phase skill"
+) -> Path:
+    skill_dir = base / "skills" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skill_dir / "SKILL.md"
+    skill_path.write_text(
+        (
+            f"---\nname: {name}\ndescription: {description}\ncategory: bio/literature\n"
+            "requires_tools: [read_file]\nrequires_network: false\nuser_invocable: true\n"
+            "species: any\nmodality: literature\nstage: analysis\n"
+            "stability: experimental\nsafety_level: low\n"
+            f"---\n{body}"
+        ),
+        encoding="utf-8",
+    )
+    return skill_path
+
+
+class TestSkillRegistryTwoPhase:
+    def test_snapshot_contains_frontmatter_only_no_body_text(self, tmp_path):
+        _write_skill_with_body(
+            tmp_path,
+            "two_phase_skill",
+            body=f"# Steps\n{_BODY_MARKER}\nLots of private body instructions.\n",
+        )
+
+        scan_skills(tmp_path)
+        content = (tmp_path / "SKILLS_SNAPSHOT.md").read_text()
+
+        assert "two_phase_skill" in content  # frontmatter name is present
+        assert _BODY_MARKER not in content
+        assert "private body instructions" not in content
+        assert "# Steps" not in content
+
+    def test_get_body_loads_post_frontmatter_content_on_demand(self, tmp_path):
+        body_text = f"# Steps\n{_BODY_MARKER}\n1. Do the thing.\n"
+        skill_path = _write_skill_with_body(
+            tmp_path, "on_demand_skill", body=body_text
+        )
+
+        registry = SkillRegistry(tmp_path, respect_enabled=False)
+
+        frontmatter = registry.get_frontmatter("on_demand_skill")
+        assert frontmatter is not None
+        assert frontmatter["name"] == "on_demand_skill"
+        assert _BODY_MARKER not in repr(frontmatter)
+
+        loaded_body = registry.get_body("on_demand_skill")
+        assert loaded_body is not None
+        assert loaded_body.startswith("# Steps")
+        assert _BODY_MARKER in loaded_body
+        # Closing frontmatter delimiter must not leak into the body.
+        assert not loaded_body.lstrip().startswith("---")
+        assert "category: bio/literature" not in loaded_body
+
+        # Body must match what's on disk after the frontmatter block.
+        raw = skill_path.read_text(encoding="utf-8")
+        assert loaded_body == raw.split("---", 2)[2].lstrip("\n")
+
+    def test_get_body_returns_none_for_unknown_skill(self, tmp_path):
+        _write_skill_with_body(tmp_path, "known_skill", body="# hi\n")
+        registry = SkillRegistry(tmp_path, respect_enabled=False)
+        assert registry.get_body("does_not_exist") is None
+        assert registry.get_frontmatter("does_not_exist") is None
+
+    def test_get_body_is_lazy_then_cached(self, tmp_path):
+        skill_path = _write_skill_with_body(
+            tmp_path, "lazy_skill", body=f"original\n{_BODY_MARKER}\n"
+        )
+        registry = SkillRegistry(tmp_path, respect_enabled=False)
+
+        # Constructing the registry and inspecting frontmatter must not
+        # pre-load the body — the first get_body() call picks up the
+        # current on-disk body.
+        assert registry.get_frontmatter("lazy_skill") is not None
+
+        header = skill_path.read_text(encoding="utf-8").split("---", 2)
+        skill_path.write_text(
+            f"---{header[1]}---\nupdated\n{_BODY_MARKER}\n", encoding="utf-8"
+        )
+
+        first_body = registry.get_body("lazy_skill")
+        assert first_body is not None
+        assert first_body.startswith("updated")
+
+        # After the first read the body is cached; later on-disk edits are
+        # intentionally not re-read.
+        skill_path.write_text(
+            skill_path.read_text(encoding="utf-8").replace("updated", "changed_again"),
+            encoding="utf-8",
+        )
+        assert registry.get_body("lazy_skill") == first_body
+
+    def test_module_level_helpers_expose_same_two_phase_api(self, tmp_path):
+        _write_skill_with_body(
+            tmp_path,
+            "helper_skill",
+            body=f"body-line\n{_BODY_MARKER}\n",
+        )
+        frontmatter = get_frontmatter(tmp_path, "helper_skill", respect_enabled=False)
+        body = get_body(tmp_path, "helper_skill", respect_enabled=False)
+
+        assert frontmatter is not None
+        assert frontmatter["name"] == "helper_skill"
+        assert body is not None
+        assert _BODY_MARKER in body
+        assert "helper_skill" not in body  # name lived in frontmatter only
