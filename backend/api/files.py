@@ -298,6 +298,35 @@ def _iter_file_range(target: Path, start: int, length: int, chunk_size: int):
             yield chunk
 
 
+@router.head("/files/stream")
+def head_stream_file(
+    path: str = Query(..., description="Relative file path"),
+    request: Request = None,
+):
+    """Return size + content-type metadata for a streamable file without a body.
+
+    Lets clients sniff `Content-Length`, `Content-Type`, and the `Accept-Ranges`
+    advertisement before deciding whether to issue Range requests. The handler
+    only `stat()`s the file — no read I/O — so a HEAD against a multi-GiB
+    artifact stays cheap.
+    """
+    require_inspection_access(request)
+    target, _ = _check_path(path, write=False)
+    if not target.exists():
+        raise HTTPException(404, f"File not found: {path}")
+    if not target.is_file():
+        raise HTTPException(400, f"Not a file: {path}")
+
+    stat = target.stat()
+    headers = {
+        "Accept-Ranges": "bytes",
+        "ETag": _etag_for(stat),
+        "Last-Modified": formatdate(stat.st_mtime, usegmt=True),
+        "Content-Length": str(stat.st_size),
+    }
+    return Response(status_code=200, media_type=_guess_media_type(target), headers=headers)
+
+
 @router.get("/files/stream")
 def stream_file(
     path: str = Query(..., description="Relative file path"),
