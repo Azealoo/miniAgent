@@ -138,15 +138,17 @@ _POLICY_OVERRIDES: dict[str, ToolPolicyMetadata] = {
         activity_summary_hint="State the code goal and the data or files it will touch before executing it.",
         result_summary_hint="Summarize the computed result, warnings, and any files or variables materially changed.",
     ),
-    "fetch_url": ToolPolicyMetadata(access_scope="inspection"),
-    "http_json": ToolPolicyMetadata(access_scope="inspection"),
+    "fetch_url": ToolPolicyMetadata(access_scope="inspection", verifier_exposed=True),
+    "http_json": ToolPolicyMetadata(access_scope="inspection", verifier_exposed=True),
     "ncbi_eutils": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
+        verifier_exposed=True,
     ),
     "evidence_retrieval": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
+        verifier_exposed=True,
     ),
     "evidence_review": ToolPolicyMetadata(
         access_scope="execution",
@@ -160,12 +162,14 @@ _POLICY_OVERRIDES: dict[str, ToolPolicyMetadata] = {
     "uniprot_api": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
+        verifier_exposed=True,
     ),
     "ensembl_api": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
+        verifier_exposed=True,
     ),
-    "read_file": ToolPolicyMetadata(access_scope="inspection"),
+    "read_file": ToolPolicyMetadata(access_scope="inspection", verifier_exposed=True),
     "write_file": ToolPolicyMetadata(
         access_scope="execution",
         destructive=True,
@@ -177,6 +181,7 @@ _POLICY_OVERRIDES: dict[str, ToolPolicyMetadata] = {
     "search_knowledge_base": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
+        verifier_exposed=True,
     ),
     "plan_agent": ToolPolicyMetadata(access_scope="inspection"),
     "verification_agent": ToolPolicyMetadata(access_scope="inspection"),
