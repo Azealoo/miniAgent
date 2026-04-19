@@ -3,6 +3,7 @@
 import { useCallback, useState } from "react";
 import { AppProvider } from "@/lib/store";
 import InspectorPanel from "@/components/editor/InspectorPanel";
+import ErrorBoundary from "@/components/ErrorBoundary";
 import Navbar from "@/components/layout/Navbar";
 import ResizeHandle from "@/components/layout/ResizeHandle";
 import Sidebar from "@/components/layout/Sidebar";
@@ -32,37 +33,45 @@ export default function AppShell() {
 
   return (
     <AppProvider>
-      <div className="app-shell-viewport flex min-h-0 flex-col overflow-hidden bg-[var(--shell-canvas)] text-slate-900">
-        <Navbar />
+      <ErrorBoundary label="App">
+        <div className="app-shell-viewport flex min-h-0 flex-col overflow-hidden bg-[var(--shell-canvas)] text-slate-900">
+          <Navbar />
 
-        <main className="min-h-0 flex-1 overflow-hidden">
-          <div className="mx-auto flex h-full min-h-0 w-full max-w-[1420px] box-border gap-2.5 px-3 py-3 sm:gap-3 sm:px-5 sm:py-5">
-            <div className="flex min-h-0 flex-1 items-stretch gap-0">
-              <div
-                style={{ width: sidebarWidth }}
-                className="min-h-0 flex-shrink-0 overflow-hidden"
-              >
-                <Sidebar />
-              </div>
+          <main className="min-h-0 flex-1 overflow-hidden">
+            <div className="mx-auto flex h-full min-h-0 w-full max-w-[1420px] box-border gap-2.5 px-3 py-3 sm:gap-3 sm:px-5 sm:py-5">
+              <div className="flex min-h-0 flex-1 items-stretch gap-0">
+                <div
+                  style={{ width: sidebarWidth }}
+                  className="min-h-0 flex-shrink-0 overflow-hidden"
+                >
+                  <ErrorBoundary label="Sidebar">
+                    <Sidebar />
+                  </ErrorBoundary>
+                </div>
 
-              <ResizeHandle onResize={resizeSidebar} />
+                <ResizeHandle onResize={resizeSidebar} />
 
-              <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
-                <WorkspacePanel />
-              </div>
+                <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+                  <ErrorBoundary label="Workspace">
+                    <WorkspacePanel />
+                  </ErrorBoundary>
+                </div>
 
-              <ResizeHandle onResize={resizeInspector} />
+                <ResizeHandle onResize={resizeInspector} />
 
-              <div
-                style={{ width: inspectorWidth }}
-                className="min-h-0 flex-shrink-0 overflow-hidden"
-              >
-                <InspectorPanel />
+                <div
+                  style={{ width: inspectorWidth }}
+                  className="min-h-0 flex-shrink-0 overflow-hidden"
+                >
+                  <ErrorBoundary label="Inspector">
+                    <InspectorPanel />
+                  </ErrorBoundary>
+                </div>
               </div>
             </div>
-          </div>
-        </main>
-      </div>
+          </main>
+        </div>
+      </ErrorBoundary>
     </AppProvider>
   );
 }
