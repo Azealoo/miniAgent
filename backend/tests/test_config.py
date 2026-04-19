@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
@@ -151,7 +153,12 @@ class TestConfig:
         assert policy.api.admin_bearer_token_env_var == "BIOAPEX_ADMIN_TOKEN"
         assert policy.api.cors_allowed_origins == ["https://bioapex.example.org"]
 
-    def test_malformed_production_hardening_policy_fails_closed(self, tmp_path):
+    def test_malformed_production_hardening_policy_raises_at_startup(self, tmp_path):
+        """Typos like ``terminal_enabledd`` fail loudly at load time under
+        the pydantic-validated config (issue #124), instead of silently
+        collapsing to fail-closed at first getter call."""
+        import pydantic
+
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(
             json.dumps(
@@ -170,14 +177,10 @@ class TestConfig:
         with patch("config._CONFIG_FILE", cfg_file):
             import config
 
-            policy = config.get_production_hardening_policy()
+            with pytest.raises(pydantic.ValidationError) as exc_info:
+                config.snapshot_runtime_config()
 
-        assert policy.tools.terminal_enabled is False
-        assert policy.tools.python_repl_enabled is False
-        assert policy.tools.slurm_enabled is False
-        assert policy.api.files_write_enabled is False
-        assert policy.api.allow_loopback_without_auth is False
-        assert policy.api.cors_allowed_origins == []
+        assert "terminal_enabledd" in str(exc_info.value)
 
     def test_runtime_config_layers_apply_user_project_local_precedence(self, tmp_path):
         user_cfg = tmp_path / "user-config.json"
@@ -276,7 +279,12 @@ class TestConfig:
         assert agent_runtime["executor_recursion_limit"] == 320
         assert agent_runtime["helper_agent_recursion_limit"] == 180
 
-    def test_invalid_agent_runtime_limit_falls_back_to_default(self, tmp_path):
+    def test_invalid_agent_runtime_limit_raises_at_startup(self, tmp_path):
+        """A string where an int is expected must fail loudly at load time
+        (issue #124) so operators see the problem immediately instead of
+        discovering it later through the getter fallback."""
+        import pydantic
+
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(
             json.dumps(
@@ -292,8 +300,8 @@ class TestConfig:
         with patch("config._CONFIG_FILE", cfg_file):
             import config
 
-            assert config.get_agent_runtime_limit("executor_recursion_limit", 1000) == 1000
-            assert config.get_agent_runtime_limit("helper_agent_recursion_limit", 1000) == 1000
+            with pytest.raises(pydantic.ValidationError):
+                config.snapshot_runtime_config()
 
     def test_effective_config_endpoint_reports_per_field_provenance(self, tmp_path):
         user_cfg = tmp_path / "user-config.json"

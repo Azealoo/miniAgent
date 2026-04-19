@@ -13,7 +13,7 @@ from typing import Any, AsyncGenerator, Optional
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from config import get_agent_runtime_limit
+from config import get_agent_runtime_limit, get_max_sections_per_file
 from evidence.integrity import (
     build_citation_mismatch_event,
     check_citation_integrity,
@@ -123,7 +123,9 @@ class AgentManager:
 
         self.tools = get_runtime_tools(base_dir)
         self.session_manager = SessionManager(base_dir)
-        self.memory_indexer = MemoryIndexer(base_dir)
+        self.memory_indexer = MemoryIndexer(
+            base_dir, max_sections_per_file=get_max_sections_per_file()
+        )
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #

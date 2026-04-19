@@ -65,7 +65,12 @@ class TestDeterministicSeedConfig:
 
             assert config.get_deterministic_seed() == 42
 
-    def test_invalid_seed_falls_back_to_none(self, tmp_path):
+    def test_invalid_seed_raises_at_startup(self, tmp_path):
+        """A non-integer ``deterministic_seed`` now fails validation at load
+        time (issue #124) so the typo surfaces at startup, not on the first
+        LLM call."""
+        import pydantic
+
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(
             json.dumps({"deterministic_seed": "not-a-number"}),
@@ -74,7 +79,8 @@ class TestDeterministicSeedConfig:
         with patch("config._CONFIG_FILE", cfg_file):
             import config
 
-            assert config.get_deterministic_seed() is None
+            with pytest.raises(pydantic.ValidationError):
+                config.get_deterministic_seed()
 
 
 class TestDeterministicSeedModelFactory:

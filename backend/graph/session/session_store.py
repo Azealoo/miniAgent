@@ -1,15 +1,40 @@
-"""Session disk I/O: atomic reads/writes, CRUD, and per-session compress locks."""
+"""Session disk I/O: atomic reads/writes, CRUD, and per-session compress locks.
+
+Inter-process safety
+--------------------
+``SessionStore`` guards its write path with a POSIX ``fcntl.flock`` advisory
+lock on a per-session lock file (``{sessions_dir}/{session_id}.lock``).
+Combined with write-temp-then-``os.replace`` the session JSON is safe against
+two uvicorn workers (or any other cooperating processes) racing on the same
+session id: the lock serialises read-modify-write, and the atomic rename
+means a concurrent reader ever sees only the pre- or post-write blob, never
+a torn file. Pure readers don't take the lock — they rely on the atomic
+rename alone.
+
+**NFS caveat.** Advisory ``flock`` is only reliable on a local filesystem.
+On NFSv3, ``flock`` is typically a no-op (silently ignored by the server)
+and on NFSv4 it only works when the server's ``lockd``/``nfsd`` stack is
+configured for byte-range locking. If ``sessions/`` lives on a networked
+volume, keep it on NFSv4 with locking enabled or, better, move it to local
+disk. Running with multiple uvicorn workers against an NFSv3-mounted
+``sessions/`` will reintroduce the lost-write bug this lock is meant to
+prevent.
+"""
 
 import asyncio
+import contextlib
+import fcntl
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from graph.session.session_archive_index import (
     _atomic_write_text,
@@ -30,13 +55,23 @@ from graph.session.session_schema import (
 logger = logging.getLogger(__name__)
 
 # Per-session locks prevent two concurrent requests from compressing the same
-# session simultaneously (which would double-archive messages).
-_compress_locks: dict[str, asyncio.Lock] = {}
+# session simultaneously (which would double-archive messages). Stored weakly
+# so entries for closed sessions get GC'd without relying on delete_session.
+_compress_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
+    weakref.WeakValueDictionary()
+)
 
 # Per-session turn locks serialize /api/chat execution for a single session id so
 # that two overlapping turns (e.g. a double-click or client retry) cannot
 # interleave writes to the session JSON, memory, or turn ledger.
-_turn_locks: dict[str, asyncio.Lock] = {}
+_turn_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
+    weakref.WeakValueDictionary()
+)
+
+# Guards creation of entries in the two WeakValueDictionaries above so
+# concurrent callers cannot race and end up with two distinct asyncio.Lock
+# instances for the same session id.
+_lock_creation_mutex = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -60,6 +95,28 @@ class FrozenSessionPrefix:
 _frozen_prefixes: dict[str, FrozenSessionPrefix] = {}
 _frozen_prefix_drift_logged: set[str] = set()
 _frozen_prefix_lock = threading.Lock()
+
+
+def _get_or_create_lock(
+    registry: "weakref.WeakValueDictionary[str, asyncio.Lock]",
+    session_id: str,
+) -> asyncio.Lock:
+    """Return an asyncio.Lock for *session_id*, creating at most one.
+
+    Double-checked locking under ``_lock_creation_mutex`` keeps two concurrent
+    callers from installing distinct Lock instances for the same session id.
+    Entries live in a WeakValueDictionary, so once every caller drops its
+    reference the lock is GC'd and its dict slot disappears.
+    """
+    lock = registry.get(session_id)
+    if lock is not None:
+        return lock
+    with _lock_creation_mutex:
+        lock = registry.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            registry[session_id] = lock
+        return lock
 
 
 def _fingerprint_prefix(stable_prefix: str, tool_names: tuple[str, ...]) -> str:
@@ -87,6 +144,32 @@ class SessionStore:
     def _path(self, session_id: str) -> Path:
         _validate_session_id(session_id)
         return self.sessions_dir / f"{session_id}.json"
+
+    def _lock_path(self, session_id: str) -> Path:
+        _validate_session_id(session_id)
+        return self.sessions_dir / f"{session_id}.lock"
+
+    @contextlib.contextmanager
+    def _locked(self, session_id: str) -> Iterator[None]:
+        """Hold a POSIX exclusive advisory lock for *session_id*.
+
+        Callers that perform a read-modify-write sequence must wrap the whole
+        sequence — locking ``_read`` and ``_write`` independently is not
+        enough, because another process could slip in between and cause a
+        lost update. The lock is keyed on a dedicated ``{session_id}.lock``
+        file rather than the session JSON itself so ``os.replace`` (which
+        swaps inodes) does not invalidate an outstanding lock.
+        """
+        lock_path = self._lock_path(session_id)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
     def _quarantine_corrupt_file(self, path: Path, session_id: str) -> Path:
         """Move *path* into ``sessions/_quarantine/`` and return the new path.
@@ -199,7 +282,8 @@ class SessionStore:
     def create_session(self) -> str:
         session_id = str(uuid.uuid4())
         data = self._empty(session_id)
-        self._write(session_id, data)
+        with self._locked(session_id):
+            self._write(session_id, data)
         return session_id
 
     def list_sessions(self) -> list[dict]:
@@ -320,7 +404,6 @@ class SessionStore:
         request_id: str | None = None,
         blocks: Optional[list[dict[str, Any]]] = None,
     ) -> None:
-        data = self._read(session_id)
         msg: dict = {"role": role, "content": content}
         normalized_blocks = _normalize_blocks(blocks)
 
@@ -337,15 +420,21 @@ class SessionStore:
         if normalized_blocks:
             msg["blocks"] = normalized_blocks
 
-        data["messages"].append(msg)
-        self._write(session_id, data)
+        # Hold the inter-process lock across read-append-write so a second
+        # worker racing on the same session_id cannot read a stale message
+        # list and clobber our append when it writes back.
+        with self._locked(session_id):
+            data = self._read(session_id)
+            data["messages"].append(msg)
+            self._write(session_id, data)
 
     def rename_session(
         self, session_id: str, title: str, *, raise_on_corrupt: bool = False
     ) -> None:
-        data = self._read(session_id, raise_on_corrupt=raise_on_corrupt)
-        data["title"] = title
-        self._write(session_id, data)
+        with self._locked(session_id):
+            data = self._read(session_id, raise_on_corrupt=raise_on_corrupt)
+            data["title"] = title
+            self._write(session_id, data)
 
     def delete_session(self, session_id: str) -> None:
         path = self._path(session_id)
@@ -365,14 +454,19 @@ class SessionStore:
             # Fire-and-forget: scheduling failures must never block deletion.
             pass
 
-        if path.exists():
-            path.unlink()
-        for archive_path in self.archive_dir.glob(f"{session_id}_*.json"):
-            try:
-                archive_path.unlink()
-            except FileNotFoundError:
-                continue
+        with self._locked(session_id):
+            if path.exists():
+                path.unlink()
+            for archive_path in self.archive_dir.glob(f"{session_id}_*.json"):
+                try:
+                    archive_path.unlink()
+                except FileNotFoundError:
+                    continue
         remove_session_from_index(self.archive_dir, session_id)
+        # Best-effort cleanup of the on-disk lock file — failure is fine
+        # (a concurrent worker may still hold it open).
+        with contextlib.suppress(FileNotFoundError):
+            self._lock_path(session_id).unlink()
         # Clean up the per-session locks to prevent unbounded memory growth
         _compress_locks.pop(session_id, None)
         _turn_locks.pop(session_id, None)
@@ -380,15 +474,11 @@ class SessionStore:
 
     def get_or_create_compress_lock(self, session_id: str) -> asyncio.Lock:
         """Return (creating if needed) the asyncio.Lock for *session_id*."""
-        if session_id not in _compress_locks:
-            _compress_locks[session_id] = asyncio.Lock()
-        return _compress_locks[session_id]
+        return _get_or_create_lock(_compress_locks, session_id)
 
     def get_or_create_turn_lock(self, session_id: str) -> asyncio.Lock:
         """Return (creating if needed) the turn-serialization Lock for *session_id*."""
-        if session_id not in _turn_locks:
-            _turn_locks[session_id] = asyncio.Lock()
-        return _turn_locks[session_id]
+        return _get_or_create_lock(_turn_locks, session_id)
 
     # ------------------------------------------------------------------ #
     # Frozen prompt-cache prefix                                          #
@@ -479,10 +569,11 @@ class SessionStore:
             # Nothing to stamp if the session file has not been materialized
             # yet; the first save_message call will create it.
             return
-        data = self._read(session_id)
-        runtime_config = data.get("runtime_config")
-        if not isinstance(runtime_config, dict):
-            runtime_config = {}
-        runtime_config["_loaded_at"] = float(loaded_at)
-        data["runtime_config"] = runtime_config
-        self._write(session_id, data)
+        with self._locked(session_id):
+            data = self._read(session_id)
+            runtime_config = data.get("runtime_config")
+            if not isinstance(runtime_config, dict):
+                runtime_config = {}
+            runtime_config["_loaded_at"] = float(loaded_at)
+            data["runtime_config"] = runtime_config
+            self._write(session_id, data)
