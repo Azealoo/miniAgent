@@ -240,6 +240,20 @@ export interface ChatStreamParseErrorEvent {
   raw?: string;
 }
 
+/**
+ * Client-side synthetic event emitted when the SSE parser's buffered remainder
+ * grows past the configured cap (default 4 MB) without a record terminator.
+ * The transport treats this as terminal and cancels the reader to defend
+ * against a memory-exhaustion DoS.
+ */
+export interface ChatStreamOverflowEvent {
+  request_id?: string;
+  event_index?: number;
+  type: "stream_overflow";
+  bufferedBytes: number;
+  maxBufferBytes: number;
+}
+
 export interface ChatStreamWarningEvent {
   request_id?: string;
   event_index?: number;
@@ -270,7 +284,8 @@ export type ChatStreamEvent =
   | ChatStreamWorkflowStepStartedEvent
   | ChatStreamWorkflowStepEndedEvent
   | ChatStreamWorkflowStepFailedEvent
-  | ChatStreamParseErrorEvent;
+  | ChatStreamParseErrorEvent
+  | ChatStreamOverflowEvent;
 
 export type ChatStreamEventType = ChatStreamEvent["type"];
 

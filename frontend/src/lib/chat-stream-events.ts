@@ -1,7 +1,8 @@
 import { parseRuntimeEvent } from "./runtime-events";
-import { parseSseChunk } from "./sse-parser";
+import { parseSseChunk, type SseOverflowSignal } from "./sse-parser";
 import type {
   ChatStreamEvent,
+  ChatStreamOverflowEvent,
   ChatStreamParseErrorEvent,
   ChatStreamPlanCreatedEvent,
   ChatStreamPlanUpdatedEvent,
@@ -15,10 +16,12 @@ import type {
 interface ParsedChatStreamChunk {
   bufferedRemainder: string;
   events: ChatStreamEvent[];
+  overflow?: SseOverflowSignal;
 }
 
 interface ParseChatStreamChunkOptions {
   flush?: boolean;
+  maxBufferBytes?: number;
 }
 
 function readOptionalString(value: unknown): string | undefined {
@@ -264,7 +267,7 @@ export function parseChatStreamChunk(
   decodedChunk: string,
   options: ParseChatStreamChunkOptions = {}
 ): ParsedChatStreamChunk {
-  const { bufferedRemainder, payloads } = parseSseChunk(
+  const { bufferedRemainder, payloads, overflow } = parseSseChunk(
     previousBuffer,
     decodedChunk,
     options
@@ -272,6 +275,7 @@ export function parseChatStreamChunk(
   return {
     bufferedRemainder,
     events: payloads.map(parseChatStreamDataPayload),
+    overflow,
   };
 }
 
@@ -304,6 +308,11 @@ export interface StreamCallbacks {
    * stream keeps running — malformed events are surfaced, not terminal.
    */
   onParseError?: (event: ChatStreamParseErrorEvent) => void;
+  /**
+   * Called when the SSE buffer cap is exceeded. Terminal: the transport will
+   * cancel the reader after dispatching this event.
+   */
+  onStreamOverflow?: (event: ChatStreamOverflowEvent) => void;
 }
 
 export interface ChatStreamDispatcher {
@@ -328,7 +337,11 @@ export function createChatStreamDispatcher(
     if (event.request_id) {
       lastRequestId = event.request_id;
     }
-    if (event.type === "done" || event.type === "error") {
+    if (
+      event.type === "done" ||
+      event.type === "error" ||
+      event.type === "stream_overflow"
+    ) {
       sawTerminalEvent = true;
     }
 
@@ -377,6 +390,9 @@ export function createChatStreamDispatcher(
         break;
       case "parse_error":
         callbacks.onParseError?.(event);
+        break;
+      case "stream_overflow":
+        callbacks.onStreamOverflow?.(event);
         break;
     }
   };

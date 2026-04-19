@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseSseChunk } from "./sse-parser";
+import { DEFAULT_SSE_MAX_BUFFER_BYTES, parseSseChunk } from "./sse-parser";
 
 describe("parseSseChunk", () => {
   it("returns an empty result when no full event has been received yet", () => {
@@ -86,5 +86,59 @@ describe("parseSseChunk", () => {
     const result = parseSseChunk("", "data: {not-json}\n\n");
     expect(result.payloads).toEqual(["{not-json}"]);
     expect(result.bufferedRemainder).toBe("");
+  });
+
+  it("does not surface an overflow signal when the buffered remainder stays under the cap", () => {
+    const result = parseSseChunk("", "data: {\"type\":\"tok", { maxBufferBytes: 1024 });
+    expect(result.overflow).toBeUndefined();
+    expect(result.bufferedRemainder).toBe('data: {"type":"tok');
+  });
+
+  it("surfaces an overflow signal when the buffered remainder exceeds the cap", () => {
+    const cap = 64;
+    const oversized = "data: " + "x".repeat(cap + 16);
+    const result = parseSseChunk("", oversized, { maxBufferBytes: cap });
+    expect(result.payloads).toEqual([]);
+    expect(result.bufferedRemainder).toBe(oversized);
+    expect(result.overflow).toEqual({
+      bufferedBytes: oversized.length,
+      maxBufferBytes: cap,
+    });
+  });
+
+  it("still emits complete payloads alongside the overflow signal when the same chunk has both", () => {
+    const cap = 32;
+    const completed = 'data: {"type":"token","content":"a"}\n\n';
+    const oversizedTail = "data: " + "y".repeat(cap + 8);
+    const result = parseSseChunk("", completed + oversizedTail, { maxBufferBytes: cap });
+    expect(result.payloads).toEqual(['{"type":"token","content":"a"}']);
+    expect(result.bufferedRemainder).toBe(oversizedTail);
+    expect(result.overflow?.maxBufferBytes).toBe(cap);
+    expect(result.overflow?.bufferedBytes).toBe(oversizedTail.length);
+  });
+
+  it("uses the 4 MB default cap when none is passed", () => {
+    const justUnder = "x".repeat(DEFAULT_SSE_MAX_BUFFER_BYTES);
+    const underResult = parseSseChunk("", justUnder);
+    expect(underResult.overflow).toBeUndefined();
+
+    const justOver = "x".repeat(DEFAULT_SSE_MAX_BUFFER_BYTES + 1);
+    const overResult = parseSseChunk("", justOver);
+    expect(overResult.overflow?.maxBufferBytes).toBe(DEFAULT_SSE_MAX_BUFFER_BYTES);
+    expect(overResult.overflow?.bufferedBytes).toBe(DEFAULT_SSE_MAX_BUFFER_BYTES + 1);
+  });
+
+  it("trips the cap when an unterminated payload is fed in across multiple chunks", () => {
+    const cap = 128;
+    let buffer = "data: ";
+    let lastResult = parseSseChunk("", buffer, { maxBufferBytes: cap });
+    expect(lastResult.overflow).toBeUndefined();
+    buffer = lastResult.bufferedRemainder;
+    for (let i = 0; i < 4; i += 1) {
+      lastResult = parseSseChunk(buffer, "z".repeat(64), { maxBufferBytes: cap });
+      buffer = lastResult.bufferedRemainder;
+    }
+    expect(lastResult.overflow).toBeDefined();
+    expect(lastResult.overflow?.bufferedBytes).toBeGreaterThan(cap);
   });
 });

@@ -227,6 +227,17 @@ export function applyStreamEvent(
         streamingMessageId: state.streamingMessageId,
         finished: false,
       };
+    case "stream_overflow":
+      return reduceErrorEvent(
+        state,
+        {
+          type: "error",
+          error: `SSE buffer overflow: ${event.bufferedBytes} bytes exceeded the ${event.maxBufferBytes}-byte cap.`,
+          request_id: event.request_id,
+          event_index: event.event_index,
+        },
+        options.now
+      );
   }
 }
 
