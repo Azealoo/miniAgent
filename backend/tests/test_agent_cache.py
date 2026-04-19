@@ -38,7 +38,7 @@ class _FakeTool:
         self.name = name
 
 
-def test_build_agent_cache_hits_on_consecutive_calls(tmp_path):
+async def test_build_agent_cache_hits_on_consecutive_calls(tmp_path):
     manager = _fresh_manager(tmp_path)
     session_id = _valid_session_id(1)
 
@@ -49,14 +49,14 @@ def test_build_agent_cache_hits_on_consecutive_calls(tmp_path):
         "graph.agent.build_system_prompt_blocks",
         return_value=("STABLE", "VOLATILE"),
     ):
-        first = manager._build_agent(session_id=session_id)
-        second = manager._build_agent(session_id=session_id)
+        first = await manager._build_agent(session_id=session_id)
+        second = await manager._build_agent(session_id=session_id)
 
     assert first is second, "Cached agent must be reused across turns"
     assert creator.call_count == 1
 
 
-def test_build_agent_cache_invalidates_on_prompt_change(tmp_path):
+async def test_build_agent_cache_invalidates_on_prompt_change(tmp_path):
     manager = _fresh_manager(tmp_path)
     session_id = _valid_session_id(2)
 
@@ -69,14 +69,14 @@ def test_build_agent_cache_invalidates_on_prompt_change(tmp_path):
         "graph.agent.build_system_prompt_blocks",
         side_effect=lambda *args, **kwargs: next(prompts),
     ):
-        first = manager._build_agent(session_id=session_id)
-        second = manager._build_agent(session_id=session_id)
+        first = await manager._build_agent(session_id=session_id)
+        second = await manager._build_agent(session_id=session_id)
 
     assert first is not second
     assert creator.call_count == 2
 
 
-def test_build_agent_cache_invalidates_on_tool_change(tmp_path):
+async def test_build_agent_cache_invalidates_on_tool_change(tmp_path):
     manager = _fresh_manager(tmp_path)
     manager.tools = [_FakeTool("read_file")]
     session_id = _valid_session_id(3)
@@ -88,15 +88,15 @@ def test_build_agent_cache_invalidates_on_tool_change(tmp_path):
         "graph.agent.build_system_prompt_blocks",
         return_value=("STABLE", "VOLATILE"),
     ):
-        first = manager._build_agent(session_id=session_id)
+        first = await manager._build_agent(session_id=session_id)
         manager.tools = [_FakeTool("read_file"), _FakeTool("run_bash")]
-        second = manager._build_agent(session_id=session_id)
+        second = await manager._build_agent(session_id=session_id)
 
     assert first is not second
     assert creator.call_count == 2
 
 
-def test_build_agent_fallback_llm_bypasses_cache(tmp_path):
+async def test_build_agent_fallback_llm_bypasses_cache(tmp_path):
     manager = _fresh_manager(tmp_path)
     session_id = _valid_session_id(4)
     fallback_llm = MagicMock(name="fallback_llm")
@@ -108,13 +108,13 @@ def test_build_agent_fallback_llm_bypasses_cache(tmp_path):
         "graph.agent.build_system_prompt_blocks",
         return_value=("STABLE", "VOLATILE"),
     ):
-        primary = manager._build_agent(session_id=session_id)
-        manager._build_agent(
+        primary = await manager._build_agent(session_id=session_id)
+        await manager._build_agent(
             session_id=session_id,
             llm=fallback_llm,
             use_cache=False,
         )
-        primary_again = manager._build_agent(session_id=session_id)
+        primary_again = await manager._build_agent(session_id=session_id)
 
     assert primary is primary_again, (
         "Fallback build must not evict or overwrite the primary cache entry"
@@ -123,7 +123,7 @@ def test_build_agent_fallback_llm_bypasses_cache(tmp_path):
     assert creator.call_count == 2
 
 
-def test_clear_session_runtime_drops_cached_agent(tmp_path):
+async def test_clear_session_runtime_drops_cached_agent(tmp_path):
     manager = _fresh_manager(tmp_path)
     session_id = _valid_session_id(5)
 
@@ -134,15 +134,15 @@ def test_clear_session_runtime_drops_cached_agent(tmp_path):
         "graph.agent.build_system_prompt_blocks",
         return_value=("STABLE", "VOLATILE"),
     ):
-        first = manager._build_agent(session_id=session_id)
+        first = await manager._build_agent(session_id=session_id)
         manager.clear_session_runtime(session_id)
-        second = manager._build_agent(session_id=session_id)
+        second = await manager._build_agent(session_id=session_id)
 
     assert first is not second
     assert creator.call_count == 2
 
 
-def test_build_agent_without_session_id_does_not_cache(tmp_path):
+async def test_build_agent_without_session_id_does_not_cache(tmp_path):
     manager = _fresh_manager(tmp_path)
 
     with patch(
@@ -152,8 +152,8 @@ def test_build_agent_without_session_id_does_not_cache(tmp_path):
         "graph.agent.build_system_prompt_blocks",
         return_value=("STABLE", "VOLATILE"),
     ):
-        first = manager._build_agent(session_id=None)
-        second = manager._build_agent(session_id=None)
+        first = await manager._build_agent(session_id=None)
+        second = await manager._build_agent(session_id=None)
 
     assert first is not second
     assert creator.call_count == 2

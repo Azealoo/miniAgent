@@ -100,12 +100,20 @@ class AgentManager:
         self.session_manager: Optional[SessionManager] = None
         self.memory_indexer: Optional[MemoryIndexer] = None
         self.base_dir: Optional[Path] = None
-        # Per-session cache of built agents. Keyed by session_id; value is
-        # ``(role_config_hash, agent)``. On a hit we skip create_agent and its
-        # tool-manifest / graph-assembly cost; on a miss we rebuild and replace.
+        # Per-session cache of built agents. Keyed by ``(session_id,
+        # role_config_hash)`` so distinct config hashes for the same session
+        # cannot clobber each other mid-write. The cache is still capped at
+        # one entry per session_id (see ``_build_agent``): when a build uses
+        # a new hash, any prior entry for that session is evicted to avoid
+        # unbounded growth across long-lived sessions that swap roles.
         # Fallback-LLM builds intentionally bypass this cache so they do not
         # evict the primary entry.
-        self._agent_cache: dict[str, tuple[str, Any]] = {}
+        self._agent_cache: dict[tuple[str, str], Any] = {}
+        # Serializes concurrent cache reads/writes when turns from different
+        # sessions race inside _build_agent. Under single-threaded asyncio,
+        # dict get/set don't yield, so true corruption is unlikely; the lock
+        # hardens the invariant and makes future async additions safe.
+        self._cache_lock: asyncio.Lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ #
     # Initialisation                                                       #
@@ -146,7 +154,7 @@ class AgentManager:
                 messages.append(SystemMessage(content=content))
         return messages
 
-    def _build_agent(
+    async def _build_agent(
         self,
         rag_mode: bool = False,
         *,
@@ -195,14 +203,24 @@ class AgentManager:
             role_config_hash = _role_config_hash(
                 effective_llm, tool_names, system_prompt
             )
-            cached = self._agent_cache.get(session_id)
-            if cached is not None and cached[0] == role_config_hash:
-                return cached[1]
-            agent = create_agent(
-                effective_llm, self.tools, system_prompt=system_prompt
-            )
-            self._agent_cache[session_id] = (role_config_hash, agent)
-            return agent
+            key = (session_id, role_config_hash)
+            async with self._cache_lock:
+                cached = self._agent_cache.get(key)
+                if cached is not None:
+                    return cached
+                agent = create_agent(
+                    effective_llm, self.tools, system_prompt=system_prompt
+                )
+                # Cap at one entry per session_id: drop any stale entry for
+                # this session that used a different role_config_hash.
+                stale_keys = [
+                    k for k in self._agent_cache
+                    if k[0] == session_id and k != key
+                ]
+                for stale in stale_keys:
+                    self._agent_cache.pop(stale, None)
+                self._agent_cache[key] = agent
+                return agent
 
         return create_agent(effective_llm, self.tools, system_prompt=system_prompt)
 
@@ -263,7 +281,13 @@ class AgentManager:
         return indexer.build_probe_results(picked)
 
     def clear_session_runtime(self, session_id: str) -> None:
-        self._agent_cache.pop(session_id, None)
+        # Drop every cache entry for this session regardless of
+        # role_config_hash. Called from sync FastAPI handlers, so we can't
+        # ``await`` the asyncio.Lock — dict pops are atomic under CPython,
+        # and the cap-at-one invariant means at most one entry exists.
+        stale_keys = [k for k in list(self._agent_cache) if k[0] == session_id]
+        for key in stale_keys:
+            self._agent_cache.pop(key, None)
         for tool in self.tools:
             runtime_tool = getattr(tool, "wrapped_tool", tool)
             clear_session_state = getattr(runtime_tool, "clear_session_state", None)
@@ -380,7 +404,7 @@ class AgentManager:
         set_active_skills_on_current_context(selected_skill_entries)
         policy_context = get_tool_policy_context()
         session_id = policy_context.session_id if policy_context is not None else None
-        agent = self._build_agent(
+        agent = await self._build_agent(
             rag_mode,
             skill_entries=selected_skill_entries,
             session_id=session_id,
@@ -530,7 +554,7 @@ class AgentManager:
                             role="executor",
                             exc=exc,
                         )
-                        agent = self._build_agent(
+                        agent = await self._build_agent(
                             rag_mode,
                             skill_entries=selected_skill_entries,
                             llm=fallback_llm,
