@@ -167,10 +167,17 @@ def _layer_stat_signature(layer_name: str, path: Path) -> tuple:
 
 def _runtime_config_signature() -> tuple:
     paths = resolve_runtime_config_paths(_CONFIG_FILE)
-    return tuple(
-        _layer_stat_signature(layer_name, paths[layer_name])
-        for layer_name in ("user", "project", "local")
-    )
+    parts: list[tuple] = []
+    for layer_name in ("user", "project", "env", "local"):
+        path = paths[layer_name]
+        if path is None:
+            # ``env`` is the only layer that can be absent (when BIOAPEX_ENV is
+            # unset). Keep it in the signature so flipping the env profile on
+            # or off — or switching between profiles — invalidates the cache.
+            parts.append((layer_name, None, None, None))
+        else:
+            parts.append(_layer_stat_signature(layer_name, path))
+    return tuple(parts)
 
 
 def _load_loaded_runtime() -> LoadedRuntimeConfig:

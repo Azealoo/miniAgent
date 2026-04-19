@@ -574,6 +574,46 @@ class TestRuntimeConfigCache:
 
             assert config.get_rag_mode() is True
 
+    def test_env_profile_change_invalidates_cache(self, tmp_path, monkeypatch):
+        project_cfg = tmp_path / "config.json"
+        staging_cfg = tmp_path / "config.staging.json"
+        prod_cfg = tmp_path / "config.prod.json"
+        project_cfg.write_text(json.dumps({"rag_mode": False}), encoding="utf-8")
+        staging_cfg.write_text(json.dumps({"rag_mode": True}), encoding="utf-8")
+        prod_cfg.write_text(json.dumps({"rag_mode": False}), encoding="utf-8")
+        monkeypatch.setenv("BIOAPEX_ALLOW_CONFIG_RELOAD", "1")
+
+        with patch("config._CONFIG_FILE", project_cfg):
+            import config
+
+            monkeypatch.delenv("BIOAPEX_ENV", raising=False)
+            assert config.get_rag_mode() is False
+
+            monkeypatch.setenv("BIOAPEX_ENV", "staging")
+            assert config.get_rag_mode() is True
+
+            monkeypatch.setenv("BIOAPEX_ENV", "prod")
+            assert config.get_rag_mode() is False
+
+    def test_env_profile_file_edit_invalidates_cache(self, tmp_path, monkeypatch):
+        project_cfg = tmp_path / "config.json"
+        staging_cfg = tmp_path / "config.staging.json"
+        project_cfg.write_text(json.dumps({"rag_mode": False}), encoding="utf-8")
+        staging_cfg.write_text(json.dumps({"rag_mode": False}), encoding="utf-8")
+        monkeypatch.setenv("BIOAPEX_ALLOW_CONFIG_RELOAD", "1")
+        monkeypatch.setenv("BIOAPEX_ENV", "staging")
+
+        with patch("config._CONFIG_FILE", project_cfg):
+            import config
+
+            assert config.get_rag_mode() is False
+
+            staging_cfg.write_text(json.dumps({"rag_mode": True}), encoding="utf-8")
+            st = staging_cfg.stat()
+            os.utime(staging_cfg, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+            assert config.get_rag_mode() is True
+
     def test_snapshot_reflects_current_file_state(self, tmp_path, monkeypatch):
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(json.dumps({"rag_mode": False}), encoding="utf-8")
