@@ -36,8 +36,17 @@ from starlette.requests import ClientDisconnect
 
 router = APIRouter()
 
-# Paths the API is allowed to serve (relative to base_dir)
-_READ_ALLOWED_PREFIXES = ("workspace/", "memory/", "skills/", "knowledge/", "artifacts/")
+# Paths the API is allowed to serve (relative to base_dir).
+# ``storage/tool-outputs/`` is included so the chat UI can fetch the full-text
+# spill file linked from a ``tool_output_overflow`` ToolArtifactRef (issue #129).
+_READ_ALLOWED_PREFIXES = (
+    "workspace/",
+    "memory/",
+    "skills/",
+    "knowledge/",
+    "artifacts/",
+    "storage/tool-outputs/",
+)
 _WRITE_ALLOWED_PREFIXES = ("workspace/", "memory/", "skills/", "knowledge/")
 # Streamed writes are gated strictly to artifacts/ so the editor POST whitelist
 # is not widened for large, tool-produced payloads.
