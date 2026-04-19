@@ -213,6 +213,17 @@ async def maybe_compact_turn_boundary(
 
         to_compact = raw_messages[:n]
         archived_tokens = estimate_history_tokens(to_compact)
+        # Collect request_ids in first-seen order without dedup-shuffling them,
+        # so the tombstone list matches the archive order. Messages that
+        # predate the request_id stamp (legacy sessions) are silently skipped;
+        # the frontend reducer must still handle a partial list.
+        seen_request_ids: set[str] = set()
+        archived_request_ids: list[str] = []
+        for message in to_compact:
+            request_id = message.get("request_id")
+            if isinstance(request_id, str) and request_id and request_id not in seen_request_ids:
+                seen_request_ids.add(request_id)
+                archived_request_ids.append(request_id)
 
         prior_archived = sum(
             batch.get("message_count", 0)
@@ -266,4 +277,5 @@ async def maybe_compact_turn_boundary(
         "to_turn": prior_archived + archived_count,
         "summary": summary,
         "saved_tokens": saved_tokens,
+        "archived_request_ids": archived_request_ids,
     }

@@ -565,7 +565,7 @@ describe("applyStreamEvent per-event coverage", () => {
     expect(state.streamingMessageId).toBe(state.messages[1].id);
   });
 
-  it("compaction_event is a no-op for the live message tree", () => {
+  it("compaction_event without archived_request_ids is a no-op", () => {
     const state = freshState();
     const result = applyStreamEvent(
       state,
@@ -581,6 +581,120 @@ describe("applyStreamEvent per-event coverage", () => {
     expect(result.finished).toBe(false);
     expect(result.messages).toBe(state.messages);
     expect(result.streamingMessageId).toBe(state.streamingMessageId);
+  });
+
+  it("compaction_event removes messages whose request_id is tombstoned (issue #88)", () => {
+    const archivedUser: Message = {
+      id: "user-old",
+      role: "user",
+      content: "early question",
+      request_id: "req-0",
+      blocks: [{ type: "text", text: "early question" }],
+    };
+    const archivedAssistant: Message = {
+      id: "assistant-old",
+      role: "assistant",
+      content: "early answer",
+      request_id: "req-0",
+      blocks: [{ type: "text", text: "early answer" }],
+    };
+    const keptUser: Message = {
+      id: "user-live",
+      role: "user",
+      content: "latest question",
+      request_id: "req-1",
+      blocks: [{ type: "text", text: "latest question" }],
+    };
+    const streaming = createOptimisticAssistantMessage(
+      "assistant-live",
+      200,
+      "req-2"
+    );
+
+    const state: StreamReducerState = {
+      messages: [archivedUser, archivedAssistant, keptUser, streaming],
+      streamingMessageId: streaming.id,
+    };
+
+    const result = applyStreamEvent(
+      state,
+      {
+        type: "compaction_event",
+        from_turn: 0,
+        to_turn: 2,
+        summary: "archived earliest turn",
+        saved_tokens: 420,
+        archived_request_ids: ["req-0"],
+      },
+      { createMessageId: () => "unused", now: 300 }
+    );
+
+    expect(result.finished).toBe(false);
+    expect(result.messages.map((m) => m.id)).toEqual([
+      keptUser.id,
+      streaming.id,
+    ]);
+    // The streaming turn is preserved so a tombstone can never delete the
+    // user's in-flight message.
+    expect(result.streamingMessageId).toBe(streaming.id);
+  });
+
+  it("compaction_event never prunes the currently streaming message even if tombstoned", () => {
+    const streaming = createOptimisticAssistantMessage(
+      "assistant-live",
+      200,
+      "req-live"
+    );
+    const state: StreamReducerState = {
+      messages: [streaming],
+      streamingMessageId: streaming.id,
+    };
+
+    const result = applyStreamEvent(
+      state,
+      {
+        type: "compaction_event",
+        from_turn: 0,
+        to_turn: 1,
+        summary: "pretend archive",
+        saved_tokens: 10,
+        archived_request_ids: ["req-live"],
+      },
+      { createMessageId: () => "unused", now: 300 }
+    );
+
+    expect(result.messages).toEqual([streaming]);
+    expect(result.streamingMessageId).toBe(streaming.id);
+  });
+
+  it("compaction_event leaves messages with no request_id alone (legacy data)", () => {
+    const legacy: Message = {
+      id: "legacy-1",
+      role: "user",
+      content: "old message, no request_id",
+      blocks: [{ type: "text", text: "old message, no request_id" }],
+    };
+    const state: StreamReducerState = {
+      messages: [legacy, createOptimisticAssistantMessage("assistant-1", 200)],
+      streamingMessageId: "assistant-1",
+    };
+
+    const result = applyStreamEvent(
+      state,
+      {
+        type: "compaction_event",
+        from_turn: 0,
+        to_turn: 1,
+        summary: "archived a tagged message",
+        saved_tokens: 50,
+        archived_request_ids: ["req-nonexistent"],
+      },
+      { createMessageId: () => "unused", now: 300 }
+    );
+
+    // No message had a matching request_id, so the tree is unchanged and
+    // the reducer returns the original reference.
+    expect(result.messages).toBe(state.messages);
   });
 
   it("done finalizes the streaming message and backfills missing content", () => {

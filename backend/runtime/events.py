@@ -200,6 +200,18 @@ class CompactionRuntimeEvent(_RuntimeEventBase):
             "ladder (issue #82)."
         ),
     )
+    archived_request_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "request_ids of the messages archived by this compaction. Acts as "
+            "a tombstone hint: the frontend reducer prunes any live message "
+            "whose request_id is in this list so the UI stops showing "
+            "messages the backend has already folded into the summary "
+            "(issue #88). request_id is the only identifier backend session "
+            "state and the frontend Message tree already share, so no new "
+            "per-message ID scheme is introduced."
+        ),
+    )
 
 
 class WarningRuntimeEvent(_RuntimeEventBase):

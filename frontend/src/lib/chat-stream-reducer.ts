@@ -195,11 +195,7 @@ export function applyStreamEvent(
     case "new_response":
       return reduceNewResponseEvent(state, event, options);
     case "compaction_event":
-      return {
-        messages: state.messages,
-        streamingMessageId: state.streamingMessageId,
-        finished: false,
-      };
+      return reduceCompactionEvent(state, event);
     case "warning":
       return updateStreamingMessage(state, event, (message) => ({
         ...message,
@@ -255,6 +251,49 @@ function updateStreamingMessage(
 
   return {
     messages: changed ? messages : state.messages,
+    streamingMessageId: state.streamingMessageId,
+    finished: false,
+  };
+}
+
+function reduceCompactionEvent(
+  state: StreamReducerState,
+  event: Extract<ChatStreamEvent, { type: "compaction_event" }>
+): StreamReducerResult {
+  const tombstoned = event.archived_request_ids ?? [];
+  if (tombstoned.length === 0) {
+    return {
+      messages: state.messages,
+      streamingMessageId: state.streamingMessageId,
+      finished: false,
+    };
+  }
+
+  // Never prune the currently-streaming message: the backend only archives
+  // fully-persisted turns, so a tombstone matching the in-flight turn would
+  // be a backend bug. Guarding here keeps a misbehaving producer from
+  // deleting the user's live turn mid-stream.
+  const tombstoneSet = new Set(tombstoned);
+  const nextMessages = state.messages.filter((message) => {
+    if (message.id === state.streamingMessageId) {
+      return true;
+    }
+    if (!message.request_id) {
+      return true;
+    }
+    return !tombstoneSet.has(message.request_id);
+  });
+
+  if (nextMessages.length === state.messages.length) {
+    return {
+      messages: state.messages,
+      streamingMessageId: state.streamingMessageId,
+      finished: false,
+    };
+  }
+
+  return {
+    messages: nextMessages,
     streamingMessageId: state.streamingMessageId,
     finished: false,
   };

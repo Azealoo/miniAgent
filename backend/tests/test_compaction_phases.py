@@ -368,6 +368,80 @@ async def test_autocompact_consolidates_prior_compressed_context(sm, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_compaction_event_carries_archived_request_ids_as_tombstone_hint(
+    sm, monkeypatch
+):
+    """Issue #88: compaction_event lists request_ids the frontend should prune.
+
+    ``request_id`` is the only identifier backend session state and the
+    frontend Message tree already share, so it is reused as the tombstone
+    correlation key. The ordered list must match the archived messages in
+    first-seen order and dedupe duplicates (user+assistant of one turn share
+    a request_id).
+    """
+    monkeypatch.setattr(compaction_module, "get_max_tokens_per_turn", lambda: 10_000)
+
+    session_id = sm.create_session()
+    _fill_session(sm, session_id, turns=10, words=12)
+
+    llm = _TrackingLLM(_structured_summary("tombstone run"))
+    event = await _run_at_ratio(
+        sm, session_id, llm, target_ratio=PHASE_THRESHOLDS["collapse"]
+    )
+
+    assert event is not None
+    archived_ids = event["archived_request_ids"]
+    assert archived_ids, "tombstone list must not be empty when messages are archived"
+    # Archive order must match the session's original turn order.
+    assert archived_ids == sorted(archived_ids, key=lambda s: int(s.split("-")[1]))
+    # Dedupe: the seeding helper stamps each message with a unique request_id,
+    # so the count equals the archive size; with shared-turn ids (the runtime
+    # pattern) it would be lower, but never higher.
+    assert len(archived_ids) == len(set(archived_ids))
+    assert len(archived_ids) <= event["to_turn"] - event["from_turn"]
+
+
+@pytest.mark.asyncio
+async def test_compaction_event_tombstone_handles_legacy_messages_without_request_id(
+    sm, monkeypatch
+):
+    """Legacy sessions that predate the request_id stamp must not crash.
+
+    The tombstone list silently skips messages with no ``request_id`` — a
+    downgrade the frontend reducer handles as a partial prune (those
+    legacy messages will simply linger until the session is reloaded from
+    disk, at which point the backend archive is authoritative).
+    """
+    monkeypatch.setattr(compaction_module, "get_max_tokens_per_turn", lambda: 10_000)
+
+    session_id = sm.create_session()
+    # Mix of messages with and without request_id.
+    sm.save_message(session_id, "user", "legacy user message, no request_id")
+    sm.save_message(session_id, "assistant", "legacy assistant reply, no request_id")
+    for i in range(8):
+        sm.save_message(
+            session_id,
+            "user" if i % 2 == 0 else "assistant",
+            f"turn {i} filler " + ("alpha beta gamma delta " * 3),
+            request_id=f"req-{i}",
+        )
+
+    llm = _TrackingLLM(_structured_summary("mixed"))
+    event = await _run_at_ratio(
+        sm, session_id, llm, target_ratio=PHASE_THRESHOLDS["collapse"]
+    )
+
+    assert event is not None
+    archived_ids = event["archived_request_ids"]
+    # Must not include None/empty; every entry must be a real id.
+    assert all(isinstance(x, str) and x for x in archived_ids)
+    # Legacy messages contribute nothing to the tombstone list but do not
+    # prevent the event from firing.
+    archive_span = event["to_turn"] - event["from_turn"]
+    assert len(archived_ids) < archive_span or archive_span == 0
+
+
+@pytest.mark.asyncio
 async def test_below_snip_threshold_does_nothing(sm, monkeypatch):
     """Any ratio below the ``snip`` floor leaves the session untouched."""
     monkeypatch.setattr(compaction_module, "get_max_tokens_per_turn", lambda: 10_000)

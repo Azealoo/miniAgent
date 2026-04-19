@@ -226,6 +226,7 @@ const CompactionRuntimeEventSchema = z
     summary: z.string(),
     saved_tokens: z.number().int(),
     phase: z.enum(COMPACTION_PHASES).nullish(),
+    archived_request_ids: z.array(z.string()).default([]),
   })
   .strict();
 

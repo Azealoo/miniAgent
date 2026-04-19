@@ -117,6 +117,7 @@ export type SessionContentBlock =
  * source: backend/runtime/events.schema.json
  * ======================================================= */
 export interface ChatStreamCompactionEvent {
+  archived_request_ids?: string[];
   event_index?: number;
   from_turn: number;
   phase?: "snip" | "microcompact" | "collapse" | "autocompact";
