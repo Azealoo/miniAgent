@@ -15,6 +15,11 @@ import {
   withScopeBearerToken,
 } from "./access-control";
 import * as api from "./api";
+import {
+  clearApiAuthState,
+  loadApiAuthState,
+  saveApiAuthState,
+} from "./auth-storage";
 import { useAccessScopeState } from "./access-scope-state";
 import {
   useSessionCatalog,
@@ -121,6 +126,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const apiAuthStateRef = useRef(apiAuthState);
 
   useEffect(() => {
+    // Hydrate persisted bearer tokens keyed by backend base URL so reloads
+    // don't force the user back through sign-in. Runs once on mount (client
+    // only) — the server-render pass leaves the empty initial state intact.
+    setApiAuthState(loadApiAuthState());
     setHasLoadedApiAuthState(true);
   }, []);
 
@@ -192,10 +201,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const setAccessToken = useCallback((scope: AccessScope, token: string) => {
-    setApiAuthState((current) => withScopeBearerToken(current, scope, token));
+    setApiAuthState((current) => {
+      const next = withScopeBearerToken(current, scope, token);
+      saveApiAuthState(next);
+      return next;
+    });
   }, []);
 
   const clearAccessTokens = useCallback(() => {
+    clearApiAuthState();
     setApiAuthState(clearAllBearerTokens());
   }, []);
 
