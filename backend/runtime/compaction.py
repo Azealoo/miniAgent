@@ -120,6 +120,17 @@ def _messages_to_archive(phase: str, total: int) -> int:
     raise ValueError(f"Unknown compaction phase: {phase!r}")
 
 
+# Per-phase upper bound on summary length. Snip archives ~2 messages and
+# must stay tight enough that its summary is genuinely cheaper than what it
+# replaced — otherwise repeated snip firings grow ``compressed_context``
+# unbounded. Collapse and autocompact share the default 2000-char cap so
+# the LLM-authored summaries aren't forcibly truncated.
+PHASE_SUMMARY_MAX_CHARS: dict[str, int] = {
+    "snip": 280,
+    "microcompact": 800,
+}
+
+
 async def _build_phase_summary(phase: str, messages: list[dict], llm) -> str | None:
     """Produce the summary string for *phase*, or ``None`` on LLM failure.
 
@@ -128,7 +139,9 @@ async def _build_phase_summary(phase: str, messages: list[dict], llm) -> str | N
     skips compaction this turn instead of breaking the user's request.
     """
     if phase in ("snip", "microcompact"):
-        return build_deterministic_summary(messages)
+        return build_deterministic_summary(
+            messages, max_chars=PHASE_SUMMARY_MAX_CHARS[phase]
+        )
 
     try:
         return await generate_structured_summary(messages, llm)
@@ -154,27 +167,38 @@ async def maybe_compact_turn_boundary(
     failed).
 
     ``budget_ratio`` is accepted for backward compatibility: when provided it
-    overrides the ``collapse`` threshold so legacy callers that tuned a
-    single ratio still affect the primary LLM rung. Prefer
-    ``phase_thresholds`` for new code.
+    scales every rung of the ladder proportionally so the caller's global
+    gating intent is preserved. A legacy caller passing ``budget_ratio=0.95``
+    still delays *all* compaction until 95% of budget; passing ``0.50``
+    brings every rung down by the same factor (0.50/0.85 ≈ 0.59). Prefer
+    ``phase_thresholds`` for per-rung tuning.
     """
     budget = get_max_tokens_per_turn()
     if budget <= 0:
         return None
 
     thresholds = dict(PHASE_THRESHOLDS)
+    if budget_ratio is not None:
+        # Scale every rung so the single-ratio legacy contract still gates
+        # the whole ladder, not just ``collapse``. ``collapse`` was always the
+        # anchor (its 0.85 default matched the pre-ladder single-pass
+        # threshold), so we scale the others against it.
+        anchor = PHASE_THRESHOLDS["collapse"]
+        scale = budget_ratio / anchor if anchor > 0 else 1.0
+        thresholds = {name: value * scale for name, value in PHASE_THRESHOLDS.items()}
     if phase_thresholds:
         thresholds.update(phase_thresholds)
-    if budget_ratio is not None:
-        thresholds["collapse"] = budget_ratio
 
     history = session_manager.load_session_for_agent(session_id)
     current_tokens = estimate_history_tokens(history)
     ratio = current_tokens / budget if budget > 0 else 0.0
 
-    # Skip the lock acquisition on the cold path — the cheapest phase needs
-    # at least ``snip``'s threshold, so anything below that is a no-op.
-    if ratio < thresholds["snip"]:
+    # Skip the lock acquisition on the cold path — only bail when no phase
+    # can possibly fire. ``phase_thresholds`` callers may pass a
+    # non-monotonic override (e.g., a high ``snip`` with a low ``collapse``),
+    # so use the minimum effective threshold rather than assuming ``snip``
+    # is the floor.
+    if ratio < min(thresholds.values()):
         return None
 
     async with session_manager.get_or_create_compress_lock(session_id):
@@ -195,12 +219,41 @@ async def maybe_compact_turn_boundary(
             for batch in session_manager.list_archived_history_batches(session_id)
         )
 
-        summary = await _build_phase_summary(phase, to_compact, llm)
+        # Autocompact folds the existing ``compressed_context`` into the
+        # new summary so cheap-phase summaries that accumulated across
+        # snip/microcompact rungs don't keep growing the prompt. The prior
+        # summary text is injected as a synthetic ``assistant`` message
+        # alongside the messages being archived, giving the LLM enough
+        # signal to consolidate the whole history into a single entry.
+        summary_input = to_compact
+        replace_compressed_context = False
+        if phase == "autocompact":
+            prior_compressed = (
+                session_manager.get_compressed_context(session_id).strip()
+            )
+            if prior_compressed:
+                summary_input = [
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "[Prior compressed context — fold into the rewrite]\n"
+                            + prior_compressed
+                        ),
+                    },
+                    *to_compact,
+                ]
+            replace_compressed_context = True
+
+        summary = await _build_phase_summary(phase, summary_input, llm)
         if summary is None:
             return None
 
         archived_count, _ = session_manager.compress_history(
-            session_id, summary, n, phase=phase
+            session_id,
+            summary,
+            n,
+            phase=phase,
+            replace_compressed_context=replace_compressed_context,
         )
 
     summary_tokens = _count_tokens(summary)

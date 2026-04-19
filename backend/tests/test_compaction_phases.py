@@ -226,6 +226,148 @@ async def test_ladder_picks_most_aggressive_applicable_phase(sm, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_budget_ratio_legacy_override_scales_all_rungs(sm, monkeypatch):
+    """Legacy ``budget_ratio`` gates the whole ladder, not just collapse."""
+    monkeypatch.setattr(compaction_module, "get_max_tokens_per_turn", lambda: 10_000)
+
+    session_id = sm.create_session()
+    _fill_session(sm, session_id, turns=10, words=10)
+
+    llm = _TrackingLLM(_structured_summary("scaled"))
+
+    # With budget_ratio=0.95, every rung is scaled by 0.95/0.85 ≈ 1.12 —
+    # snip's effective threshold is ~0.67. A 0.65 ratio should stay below
+    # every scaled rung and trigger no compaction.
+    import runtime.compaction as mod
+
+    async def _call_at(ratio: float, budget_ratio: float):
+        synthetic = int(10_000 * ratio)
+
+        def _fake(_h):
+            return synthetic
+
+        original = mod.estimate_history_tokens
+        mod.estimate_history_tokens = _fake  # type: ignore[assignment]
+        try:
+            return await maybe_compact_turn_boundary(
+                sm, session_id, llm, budget_ratio=budget_ratio
+            )
+        finally:
+            mod.estimate_history_tokens = original  # type: ignore[assignment]
+
+    below_scaled = await _call_at(0.65, 0.95)
+    assert below_scaled is None, (
+        "budget_ratio=0.95 should delay every rung, not just collapse"
+    )
+
+    # At ratio 0.98 with budget_ratio=0.95, snip (0.67 scaled) and
+    # microcompact (0.84 scaled) and collapse (0.95 scaled) all qualify;
+    # the ladder picks the highest available rung — collapse — since
+    # autocompact's scaled threshold (~1.06) is out of reach. The key
+    # property is that snip did *not* fire at 0.65 even though its
+    # unscaled threshold is 0.60.
+    above_scaled = await _call_at(0.98, 0.95)
+    assert above_scaled is not None
+    assert above_scaled["phase"] == "collapse"
+
+
+@pytest.mark.asyncio
+async def test_non_monotonic_custom_thresholds_honored(sm, monkeypatch):
+    """A low collapse threshold still fires even when snip is raised above it."""
+    monkeypatch.setattr(compaction_module, "get_max_tokens_per_turn", lambda: 10_000)
+
+    session_id = sm.create_session()
+    _fill_session(sm, session_id, turns=10, words=10)
+
+    llm = _TrackingLLM(_structured_summary("non-monotonic"))
+
+    # snip is raised to 0.95, but collapse is left at 0.85. A 0.90 ratio
+    # must still trigger collapse — the cold-path guard previously assumed
+    # snip was the floor and would have returned None here.
+    event = await _run_at_ratio(
+        sm, session_id, llm, target_ratio=0.90
+    )
+    # Without overrides, 0.90 falls into the collapse band. Re-run with a
+    # custom override that raises snip to prove the early exit doesn't skip
+    # the whole ladder when the cheapest rung is pushed above a higher one.
+    import runtime.compaction as mod
+
+    synthetic = int(10_000 * 0.90)
+
+    def _fake(_h):
+        return synthetic
+
+    original = mod.estimate_history_tokens
+    mod.estimate_history_tokens = _fake  # type: ignore[assignment]
+    try:
+        event = await maybe_compact_turn_boundary(
+            sm,
+            session_id,
+            llm,
+            phase_thresholds={"snip": 0.95},
+        )
+    finally:
+        mod.estimate_history_tokens = original  # type: ignore[assignment]
+
+    assert event is not None
+    assert event["phase"] == "collapse"
+
+
+@pytest.mark.asyncio
+async def test_compressed_phase_cleared_when_later_call_has_no_phase(sm, monkeypatch):
+    """Unphased ``compress_history`` calls must clear a stale phase tag."""
+    monkeypatch.setattr(compaction_module, "get_max_tokens_per_turn", lambda: 10_000)
+
+    session_id = sm.create_session()
+    _fill_session(sm, session_id, turns=6, words=8)
+
+    # Plant a phase via the ladder.
+    llm = _TrackingLLM(_structured_summary("stale"))
+    event = await _run_at_ratio(
+        sm, session_id, llm, target_ratio=PHASE_THRESHOLDS["snip"]
+    )
+    assert event is not None
+    assert sm.get_context_compression_phase(session_id) == "snip"
+
+    # Simulate a later ``auto_compress_if_needed``-style unphased rewrite.
+    sm.compress_history(session_id, _structured_summary("unphased"), 2)
+    assert sm.get_context_compression_phase(session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_autocompact_consolidates_prior_compressed_context(sm, monkeypatch):
+    """Autocompact must replace, not append, so cheap-phase accumulation clears."""
+    monkeypatch.setattr(compaction_module, "get_max_tokens_per_turn", lambda: 10_000)
+
+    session_id = sm.create_session()
+    _fill_session(sm, session_id, turns=10, words=10)
+
+    llm = _TrackingLLM(_structured_summary("consolidated"))
+
+    # Fire several cheap snips to accumulate compressed_context.
+    for _ in range(3):
+        await _run_at_ratio(
+            sm, session_id, llm, target_ratio=PHASE_THRESHOLDS["snip"]
+        )
+    accumulated = sm.get_compressed_context(session_id)
+    assert accumulated.count("[Scientific Continuity Summary v1]") >= 2, (
+        "snip runs should append multiple summary sections"
+    )
+
+    # Autocompact must fold them into a single rewrite.
+    final = await _run_at_ratio(
+        sm, session_id, llm, target_ratio=PHASE_THRESHOLDS["autocompact"]
+    )
+    assert final is not None
+    assert final["phase"] == "autocompact"
+
+    rewritten = sm.get_compressed_context(session_id)
+    assert rewritten.count("[Scientific Continuity Summary v1]") == 1, (
+        "autocompact must leave exactly one summary entry"
+    )
+
+
+@pytest.mark.asyncio
 async def test_below_snip_threshold_does_nothing(sm, monkeypatch):
     """Any ratio below the ``snip`` floor leaves the session untouched."""
     monkeypatch.setattr(compaction_module, "get_max_tokens_per_turn", lambda: 10_000)

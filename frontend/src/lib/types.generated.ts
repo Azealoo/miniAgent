@@ -119,6 +119,7 @@ export type SessionContentBlock =
 export interface ChatStreamCompactionEvent {
   event_index?: number;
   from_turn: number;
+  phase?: "snip" | "microcompact" | "collapse" | "autocompact";
   request_id?: string;
   saved_tokens: number;
   schema_version?: number;

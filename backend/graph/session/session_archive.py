@@ -76,6 +76,7 @@ class SessionManager(SessionStore):
         n: int,
         *,
         phase: str | None = None,
+        replace_compressed_context: bool = False,
     ) -> tuple[int, int]:
         """
         Archive the first *n* messages and store *summary* in compressed_context.
@@ -86,6 +87,13 @@ class SessionManager(SessionStore):
         this compression. It is persisted on the session JSON as
         ``context_compression_phase`` so the UI and audit tools can surface
         the most recent rung without replaying the SSE stream.
+
+        ``replace_compressed_context`` switches the ``compressed_context``
+        update from the default append-and-accumulate behavior to a full
+        rewrite: the prior context is discarded, the new ``summary`` becomes
+        the sole entry, and the archive index is compacted to just this
+        batch. The ``autocompact`` rung uses this so cheap-phase summary
+        accumulation cannot grow the prompt without bound.
         """
         if phase is not None and phase not in COMPRESSION_PHASES:
             raise ValueError(
@@ -112,17 +120,35 @@ class SessionManager(SessionStore):
             self.archive_dir, session_id, archive_id, len(archived)
         )
 
-        # Append to compressed_context (multiple compressions separated by ---)
-        existing = data.get("compressed_context", "").strip()
-        archive_index = _pad_archive_index(
-            _normalize_archive_index(data.get("compressed_archive_index")),
-            len(parse_compressed_context(existing)),
-        )
-        archive_index.append({"archive_id": archive_id, "message_count": len(archived)})
-        data["compressed_context"] = append_compressed_summary(existing, summary)
-        data["compressed_archive_index"] = archive_index
+        if replace_compressed_context:
+            # Autocompact rewrite: prior summaries are folded into ``summary``
+            # by the caller, so the on-disk context collapses to a single
+            # entry. Older archive files stay on disk (so
+            # ``load_archived_history`` remains useful for audit), but the
+            # in-session index only points at this new batch.
+            data["compressed_context"] = summary.strip()
+            data["compressed_archive_index"] = [
+                {"archive_id": archive_id, "message_count": len(archived)}
+            ]
+        else:
+            existing = data.get("compressed_context", "").strip()
+            archive_index = _pad_archive_index(
+                _normalize_archive_index(data.get("compressed_archive_index")),
+                len(parse_compressed_context(existing)),
+            )
+            archive_index.append(
+                {"archive_id": archive_id, "message_count": len(archived)}
+            )
+            data["compressed_context"] = append_compressed_summary(existing, summary)
+            data["compressed_archive_index"] = archive_index
+
         data["messages"] = remaining
-        if phase is not None:
+        # Always overwrite the stored phase so a later unphased compression
+        # (e.g., ``auto_compress_if_needed``) clears the stale rung rather
+        # than leaving a misleading value in session metadata.
+        if phase is None:
+            data.pop("context_compression_phase", None)
+        else:
             data["context_compression_phase"] = phase
         self._write(session_id, data)
 

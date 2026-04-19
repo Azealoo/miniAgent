@@ -265,7 +265,9 @@ async def generate_structured_summary(messages: Sequence[dict], llm) -> str:
     return normalize_generated_summary(str(response.content).strip())
 
 
-def build_deterministic_summary(messages: Sequence[dict]) -> str:
+def build_deterministic_summary(
+    messages: Sequence[dict], *, max_chars: int = MAX_SUMMARY_CHARS
+) -> str:
     """Build a structured continuity summary without calling an LLM.
 
     Used by the cheap ``snip`` and ``microcompact`` phases of the compaction
@@ -274,7 +276,10 @@ def build_deterministic_summary(messages: Sequence[dict]) -> str:
     stable IDs, file paths, URLs, tool run IDs, risk/approval lines) and
     deposit them into the appropriate register. The output is enforced
     through :func:`enforce_summary_size_limit` so both LLM and deterministic
-    summaries share a single size contract.
+    summaries share a single size contract; callers can tighten it further
+    via ``max_chars`` — the ``snip`` rung in particular must keep its
+    summary smaller than what it archived or compaction grows the prompt
+    instead of shrinking it.
     """
     summary = ScientificContinuitySummary()
 
@@ -357,7 +362,7 @@ def build_deterministic_summary(messages: Sequence[dict]) -> str:
             "See archived batch for full message text and tool outputs."
         )
 
-    return enforce_summary_size_limit(summary)
+    return enforce_summary_size_limit(summary, max_chars=max_chars)
 
 
 def enforce_summary_size_limit(
