@@ -71,6 +71,15 @@ _DEFAULT: dict = {
     },
     "verification": {
         "retry_on_repair_required": True,
+        # Wallclock seconds allowed for the verifier + single repair retry,
+        # measured from the first ``verification_result`` helper event. 0
+        # disables the cap. Breach emits a ``verifier_cap_exceeded`` error
+        # through the same path as the per-turn token budget breach.
+        "verifier_max_wall_s": 0,
+        # Output-token ceiling for the verifier + single repair retry,
+        # measured as the delta from the first ``verification_result`` helper
+        # event. 0 disables the cap.
+        "verifier_max_tokens": 0,
     },
     "llm_output_token_cap": {
         "default": _DEFAULT_LLM_OUTPUT_TOKEN_CAP,

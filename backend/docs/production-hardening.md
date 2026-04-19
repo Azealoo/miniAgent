@@ -106,6 +106,40 @@ settings anonymously.
 - Rotate credentials if a secret-like file appears in a writable BioAPEX path or if an audit review finds unsafe secret exposure.
 - Review audit and session retention before production use so secret values are not persisted in logs or chat history.
 
+## Client-side telemetry
+
+- Unhandled frontend errors and SSE transport failures are reported to
+  the backend audit log through `POST /api/audit/client`, which writes
+  an event of type `client_error` via the same
+  `audit_redaction.v1` policy the backend uses for every other audit
+  event. Source: `frontend/src/lib/telemetry.ts` → `backend/api/audit_client.py`.
+- The route is guarded by an in-process per-client token bucket (burst
+  of 20 events, one token every 2 seconds). Repeated 429s cause the
+  frontend logger to disable itself for the rest of the session so a
+  stuck browser tab cannot DoS the audit log.
+- **PII scrub policy** — enforced in the browser before the request is
+  sent; the backend then re-applies its own size caps as defence in
+  depth:
+  - URLs in `message` and string-valued `meta` entries have their query
+    string and fragment removed; bearer tokens, identifiers, and search
+    params never leave the browser.
+  - `message` is trimmed and truncated to 500 characters so a hostile
+    error cannot be used as a silent exfil channel.
+  - `stack` is filtered frame-by-frame. Frames that reference an
+    absolute filesystem path (`/home/...`, `C:\\...`, `file://...`) are
+    dropped so browsers that include the OS username in stacks do not
+    leak it. Webpack / Next.js chunk paths and workspace-relative paths
+    are kept.
+  - `meta` keys matching `/token|password|auth|cookie|secret|api[_-]?key/i`
+    are replaced with `"[redacted]"`; the key count is capped at 24 and
+    each string value at 1,000 characters.
+  - The logger never reads `document.cookie`, `window.location.search`,
+    or request bodies. Callers must not pass those values as `meta`.
+- When reviewing audit logs for secret exposure (see *Secrets handling*
+  above), treat `event_type: client_error` entries the same way as every
+  other audit record — the scrub is best-effort, not a replacement for
+  rotation if a secret still slips through.
+
 ## Backup and restore expectations
 
 The minimum backup set is:

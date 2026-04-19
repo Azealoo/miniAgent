@@ -1,6 +1,16 @@
 """
 NCBI E-utilities helper: esearch, efetch, esummary for PubMed, Gene, etc.
 Uses rate limit (no API key required; with API key can increase rate).
+
+Selection rule vs ``evidence_retrieval`` (issue #126): ``evidence_retrieval``
+is the canonical PubMed entry point — it wraps the same E-utilities calls and
+also persists durable BioAPEX evidence cards plus cached raw payloads. The
+planner helper agent therefore has ``ncbi_eutils`` hidden
+(``planner_exposed=False`` via ``_PLANNER_HIDDEN_TOOL_NAMES`` in
+``tools/registry.py``) so literature plans default to evidence-card output.
+The main agent and skills keep full access for cases where raw E-utilities
+are required (gene / protein DB lookups, ad-hoc esummary on non-PubMed DBs,
+XML retmode, or when evidence-card persistence is not wanted).
 """
 from dataclasses import dataclass
 import json
@@ -104,7 +114,12 @@ class NcbiEutilsInput(BaseModel):
 class NcbiEutilsTool(BaseTool):
     name: str = "ncbi_eutils"
     description: str = (
-        "Query NCBI E-utilities (PubMed, Gene, etc.). "
+        "Thin NCBI E-utilities wrapper (PubMed, Gene, Protein, etc.). "
+        "For PubMed literature retrieval prefer evidence_retrieval — it wraps "
+        "this same API and persists durable BioAPEX evidence cards. Use "
+        "ncbi_eutils directly only when raw esearch/efetch/esummary output is "
+        "needed (non-PubMed DBs, XML retmode, or ad-hoc lookups that should "
+        "NOT produce evidence-card artifacts). "
         "Operations: esearch (search by term), efetch (fetch by ID), esummary (summaries by ID). "
         "Input: operation, db, and either term (esearch) or id (efetch/esummary)."
     )

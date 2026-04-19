@@ -21,10 +21,16 @@ export interface FeedPlanningDescriptor {
   tone?: FeedTone;
 }
 
+export interface FeedLineFullOutputLink {
+  href: string;
+  label?: string;
+}
+
 export interface FeedLineDescriptor {
   kind: "line";
   text: string;
   tone?: FeedTone;
+  fullOutput?: FeedLineFullOutputLink;
 }
 
 export interface FeedGateDescriptor {

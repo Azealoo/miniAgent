@@ -1016,3 +1016,109 @@ class TestPerSessionLockConcurrency:
             f"{registry_attr} grew to {len(registry)} entries under churn — "
             "expected weakref-based GC to keep it near-empty."
         )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Atomic session writes (tmp-file + rename)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestAtomicSessionWrite:
+    """Session writes must go through tmp-file + rename so a crash between
+    the write and the rename leaves the prior file intact — not truncated
+    into silent data loss.
+    """
+
+    def test_crash_between_tmp_write_and_rename_preserves_original_session(
+        self, sm, tmp_path, monkeypatch
+    ):
+        sid = sm.create_session()
+        sm.save_message(sid, "user", "first durable message")
+        sm.save_message(sid, "assistant", "first durable reply")
+
+        session_path = tmp_path / "sessions" / f"{sid}.json"
+        original_bytes = session_path.read_bytes()
+
+        real_replace = Path.replace
+
+        def exploding_replace(self, target):
+            if str(self).endswith(f"{sid}.json.tmp"):
+                raise OSError("simulated crash between tmp write and rename")
+            return real_replace(self, target)
+
+        monkeypatch.setattr(Path, "replace", exploding_replace)
+
+        with pytest.raises(OSError):
+            sm.save_message(sid, "user", "write that never lands")
+
+        # Original file untouched (same bytes) — the aborted write did not
+        # truncate it, and no empty session was silently persisted.
+        assert session_path.read_bytes() == original_bytes
+        # And a straggling *.tmp must not masquerade as the session file.
+        assert not (tmp_path / "sessions" / f"{sid}.json.tmp").exists() or (
+            tmp_path / "sessions" / f"{sid}.json.tmp"
+        ).read_bytes() != b""
+
+        monkeypatch.undo()
+
+        # After the crash path is cleared, reads return the original history
+        # rather than the empty-session fallback.
+        msgs = sm.load_session(sid)
+        assert [m["content"] for m in msgs] == [
+            "first durable message",
+            "first durable reply",
+        ]
+        assert sm.get_session_meta(sid)["message_count"] == 2
+
+    def test_crash_during_archive_write_preserves_prior_session_state(
+        self, sm, tmp_path, monkeypatch
+    ):
+        sid = sm.create_session()
+        for i in range(6):
+            sm.save_message(sid, "user" if i % 2 == 0 else "assistant", f"msg{i}")
+
+        session_path = tmp_path / "sessions" / f"{sid}.json"
+        original_bytes = session_path.read_bytes()
+        archive_dir = tmp_path / "sessions" / "archive"
+
+        real_replace = Path.replace
+
+        def exploding_replace(self, target):
+            # Fail only on archive batch writes (ignore the session JSON
+            # and the _index.json sidecar so the simulated crash is scoped
+            # to the archive batch file itself).
+            if str(self).endswith(".json.tmp") and f"{sid}_" in self.name:
+                raise OSError("simulated crash writing archive batch")
+            return real_replace(self, target)
+
+        monkeypatch.setattr(Path, "replace", exploding_replace)
+
+        with pytest.raises(OSError):
+            sm.compress_history(sid, "summary", 4)
+
+        # Session file untouched (compress_history never reached _write).
+        assert session_path.read_bytes() == original_bytes
+
+        monkeypatch.undo()
+
+        # All messages still readable after the aborted compression.
+        msgs = sm.load_session(sid)
+        assert len(msgs) == 6
+        # No partial archive batch file exists for this session.
+        assert not list(archive_dir.glob(f"{sid}_*.json"))
+
+    def test_read_fallback_logs_when_session_file_is_corrupt(
+        self, sm, tmp_path, caplog
+    ):
+        sid = sm.create_session()
+        session_path = tmp_path / "sessions" / f"{sid}.json"
+        # Simulate a truncated/corrupt write on disk.
+        session_path.write_text("{not valid json", encoding="utf-8")
+
+        with caplog.at_level("WARNING", logger="graph.session.session_store"):
+            result = sm.load_session(sid)
+
+        assert result == []
+        assert any(
+            "session_read_fallback" in record.message for record in caplog.records
+        )
