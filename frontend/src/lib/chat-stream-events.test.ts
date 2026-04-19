@@ -41,6 +41,50 @@ describe("parseChatStreamChunk", () => {
   });
 });
 
+describe("parseChatStreamChunk overflow", () => {
+  it("propagates the overflow signal from the underlying SSE parser", () => {
+    const cap = 32;
+    const oversized = "data: " + "x".repeat(cap + 16);
+
+    const { events, bufferedRemainder, overflow } = parseChatStreamChunk("", oversized, {
+      maxBufferBytes: cap,
+    });
+
+    expect(events).toEqual([]);
+    expect(bufferedRemainder).toBe(oversized);
+    expect(overflow).toEqual({
+      bufferedBytes: oversized.length,
+      maxBufferBytes: cap,
+    });
+  });
+
+  it("dispatches a stream_overflow event through onStreamOverflow and treats it as terminal", () => {
+    const onStreamOverflow = vi.fn();
+    const onEvent = vi.fn();
+    const onError = vi.fn();
+    const dispatcher = createChatStreamDispatcher({
+      onStreamOverflow,
+      onEvent,
+      onError,
+    });
+
+    dispatcher.dispatch({
+      type: "stream_overflow",
+      bufferedBytes: 4_194_305,
+      maxBufferBytes: 4_194_304,
+    });
+
+    expect(onStreamOverflow).toHaveBeenCalledTimes(1);
+    const [arg] = onStreamOverflow.mock.calls[0];
+    expect(arg.type).toBe("stream_overflow");
+    expect(arg.bufferedBytes).toBe(4_194_305);
+    expect(arg.maxBufferBytes).toBe(4_194_304);
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+    expect(dispatcher.sawTerminalEvent()).toBe(true);
+  });
+});
+
 describe("parseChatStreamDataPayload", () => {
   it("preserves the raw payload when the JSON parser rejects it", () => {
     const event = parseChatStreamDataPayload("definitely not json");

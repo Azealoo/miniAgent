@@ -381,6 +381,12 @@ export interface StreamChatOptions {
    * per-turn request_id; this override is not forwarded in the request body.
    */
   requestId?: string;
+  /**
+   * Cap on the SSE parser's unterminated buffered remainder. Defaults to the
+   * parser's own default (4 MB). When exceeded, a synthetic
+   * `stream_overflow` event is dispatched and the reader is cancelled.
+   */
+  maxBufferBytes?: number;
 }
 
 export async function streamChat(
@@ -413,27 +419,50 @@ export async function streamChat(
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
+  const parseOptions = { maxBufferBytes: options.maxBufferBytes };
   let buffer = "";
+  let aborted = false;
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const parsed = parseChatStreamChunk(buffer, decoder.decode(value, { stream: true }));
+      const parsed = parseChatStreamChunk(
+        buffer,
+        decoder.decode(value, { stream: true }),
+        parseOptions
+      );
       buffer = parsed.bufferedRemainder;
       for (const event of parsed.events) dispatcher.dispatch(event);
+      if (parsed.overflow) {
+        dispatcher.dispatch({
+          type: "stream_overflow",
+          bufferedBytes: parsed.overflow.bufferedBytes,
+          maxBufferBytes: parsed.overflow.maxBufferBytes,
+          request_id: dispatcher.lastRequestId() ?? options.requestId,
+        });
+        buffer = "";
+        aborted = true;
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
     }
 
-    const finalParsed = parseChatStreamChunk(buffer, decoder.decode(), { flush: true });
-    buffer = finalParsed.bufferedRemainder;
-    for (const event of finalParsed.events) dispatcher.dispatch(event);
-
-    if (!dispatcher.sawTerminalEvent()) {
-      dispatcher.dispatch({
-        type: "error",
-        error: "The response stream closed before completion.",
-        request_id: dispatcher.lastRequestId() ?? options.requestId,
+    if (!aborted) {
+      const finalParsed = parseChatStreamChunk(buffer, decoder.decode(), {
+        ...parseOptions,
+        flush: true,
       });
+      buffer = finalParsed.bufferedRemainder;
+      for (const event of finalParsed.events) dispatcher.dispatch(event);
+
+      if (!dispatcher.sawTerminalEvent()) {
+        dispatcher.dispatch({
+          type: "error",
+          error: "The response stream closed before completion.",
+          request_id: dispatcher.lastRequestId() ?? options.requestId,
+        });
+      }
     }
   } finally {
     reader.releaseLock();

@@ -388,6 +388,64 @@ describe("streamChat", () => {
     expect(surfacedRequestIds).toEqual(["request-truncated-1"]);
   });
 
+  it("dispatches stream_overflow and cancels the reader when the buffered remainder exceeds the cap", async () => {
+    const cap = 256;
+    // A `data:` line with no terminator longer than the cap, followed by a
+    // legitimate `done` event. The cancel() should fire before `done` is
+    // surfaced to the dispatcher, so onDone must not be called.
+    const oversizedLine = "data: " + "x".repeat(cap + 64);
+    const trailingDone = `data: ${JSON.stringify({
+      type: "done",
+      content: "should not be reached",
+      request_id: "request-overflow-trailing",
+      event_index: 99,
+    })}\n\n`;
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      sseResponse([oversizedLine, trailingDone], { chunkSize: 64 })
+    );
+
+    const eventTypes: string[] = [];
+    const overflows: Array<{
+      bufferedBytes: number;
+      maxBufferBytes: number;
+    }> = [];
+    let sawDone = false;
+    const surfacedErrors: string[] = [];
+
+    await streamChat(
+      "Send a giant payload.",
+      "session-overflow",
+      {
+        onEvent: (event) => {
+          eventTypes.push(event.type);
+        },
+        onStreamOverflow: (event) => {
+          overflows.push({
+            bufferedBytes: event.bufferedBytes,
+            maxBufferBytes: event.maxBufferBytes,
+          });
+        },
+        onDone: () => {
+          sawDone = true;
+        },
+        onError: (error) => {
+          surfacedErrors.push(error);
+        },
+      },
+      { maxBufferBytes: cap }
+    );
+
+    expect(overflows).toHaveLength(1);
+    expect(overflows[0].maxBufferBytes).toBe(cap);
+    expect(overflows[0].bufferedBytes).toBeGreaterThan(cap);
+    expect(eventTypes).toContain("stream_overflow");
+    // Overflow is terminal — no synthetic "stream closed before completion"
+    // error and no surfaced trailing `done` event.
+    expect(sawDone).toBe(false);
+    expect(surfacedErrors).toEqual([]);
+  });
+
   it("cancels the in-flight fetch when the AbortController is aborted", async () => {
     let receivedSignal: AbortSignal | undefined;
 
