@@ -516,3 +516,62 @@ class TestConfig:
             import config
 
             assert config.get_memory_stale_days() == 99
+
+
+class TestToolWallclockOverride:
+    """``get_tool_wallclock_override_s`` must distinguish an explicit
+    operator disable (``0``/negative) from an unparseable typo (``"30s"``,
+    ``true``, ...). A typo must return ``None`` so the manifest sandbox
+    default and ``tool_wallclock.default_seconds`` still apply."""
+
+    def _write(self, tmp_path, overrides):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(
+            json.dumps({"tool_wallclock": {"overrides": overrides}}),
+            encoding="utf-8",
+        )
+        return cfg_file
+
+    def test_numeric_override_returned(self, tmp_path):
+        cfg_file = self._write(tmp_path, {"foo": 12.5})
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+            assert config.get_tool_wallclock_override_s("foo") == 12.5
+
+    def test_numeric_string_override_parsed(self, tmp_path):
+        cfg_file = self._write(tmp_path, {"foo": "5"})
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+            assert config.get_tool_wallclock_override_s("foo") == 5.0
+
+    def test_zero_override_disables_cap(self, tmp_path):
+        cfg_file = self._write(tmp_path, {"foo": 0})
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+            # 0.0 == explicit disable, distinct from None (no override).
+            assert config.get_tool_wallclock_override_s("foo") == 0.0
+
+    def test_negative_override_disables_cap(self, tmp_path):
+        cfg_file = self._write(tmp_path, {"foo": -1})
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+            assert config.get_tool_wallclock_override_s("foo") == 0.0
+
+    def test_non_numeric_string_falls_back_to_none(self, tmp_path):
+        # A typo like "30s" must NOT silently disable the cap.
+        cfg_file = self._write(tmp_path, {"foo": "30s"})
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+            assert config.get_tool_wallclock_override_s("foo") is None
+
+    def test_bool_override_falls_back_to_none(self, tmp_path):
+        cfg_file = self._write(tmp_path, {"foo": True})
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+            assert config.get_tool_wallclock_override_s("foo") is None
+
+    def test_missing_tool_returns_none(self, tmp_path):
+        cfg_file = self._write(tmp_path, {"other": 5})
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+            assert config.get_tool_wallclock_override_s("foo") is None

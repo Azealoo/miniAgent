@@ -15,6 +15,10 @@ from typing import Any
 from langchain_core.tools import BaseTool
 from pydantic import ConfigDict, Field
 
+from config import (
+    get_tool_wallclock_default_s,
+    get_tool_wallclock_override_s,
+)
 from runtime import hooks as runtime_hooks
 
 from .contracts import (
@@ -519,10 +523,24 @@ class PolicyWrappedTool(BaseTool):
         return None
 
     def _sandbox_wall_clock(self) -> float | None:
+        """Resolve the per-tool wall-clock budget actually enforced at dispatch.
+
+        Resolution order (first hit wins, ``None`` means "no cap"):
+          1. ``tool_wallclock.overrides[<tool_name>]`` from runtime config.
+             A configured value of ``0`` disables the cap explicitly.
+          2. ``SandboxSpec.max_wall_clock_seconds`` declared on the tool
+             manifest (today set in ``tools/registry.py`` for high-risk tools).
+          3. ``tool_wallclock.default_seconds`` from runtime config as the
+             project-wide floor for tools without a sandbox declaration.
+        """
+        override = get_tool_wallclock_override_s(self.name)
+        if override is not None:
+            return override if override > 0 else None
         sandbox = self.manifest.sandbox
-        if sandbox is None:
-            return None
-        return sandbox.max_wall_clock_seconds
+        if sandbox is not None and sandbox.max_wall_clock_seconds is not None:
+            return sandbox.max_wall_clock_seconds
+        default = get_tool_wallclock_default_s()
+        return default if default > 0 else None
 
     def _sandbox_env_allowlist(self) -> tuple[str, ...] | None:
         sandbox = self.manifest.sandbox
