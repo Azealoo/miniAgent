@@ -413,3 +413,39 @@ def test_evaluate_sandbox_arguments_network_none_blocks_any_url():
     )
     assert decision.status == "blocked"
     assert decision.block_reason == "sandbox_network_scope_violation"
+
+
+def test_public_network_blocks_loopback_ip_even_when_in_allowed_hosts():
+    """Regression: an allowed_hosts entry of '127.0.0.1' must not admit loopback."""
+    manifest = _manifest_with(
+        SandboxSpec(network_scope="public", allowed_hosts=("127.0.0.1",))
+    )
+    decision = evaluate_sandbox_arguments(
+        manifest, (), {"url": "http://127.0.0.1/admin"}
+    )
+    assert decision.status == "blocked"
+    assert decision.block_reason == "sandbox_network_scope_violation"
+    assert "private/reserved" in (decision.block_message or "")
+
+
+def test_public_network_blocks_localhost_even_when_in_allowed_hosts():
+    """Regression: an allowed_hosts entry of 'localhost' must not admit loopback resolution."""
+    manifest = _manifest_with(
+        SandboxSpec(network_scope="public", allowed_hosts=("localhost",))
+    )
+    decision = evaluate_sandbox_arguments(
+        manifest, (), {"url": "http://localhost/admin"}
+    )
+    assert decision.status == "blocked"
+    assert decision.block_reason == "sandbox_network_scope_violation"
+
+
+def test_public_network_admits_valid_public_host_in_allowed_hosts():
+    """The admit path still works for a genuinely public host."""
+    manifest = _manifest_with(
+        SandboxSpec(network_scope="public", allowed_hosts=("8.8.8.8",))
+    )
+    decision = evaluate_sandbox_arguments(
+        manifest, (), {"url": "http://8.8.8.8/dns"}
+    )
+    assert decision.status == "allow"
