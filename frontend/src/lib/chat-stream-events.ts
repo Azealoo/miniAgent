@@ -145,6 +145,7 @@ export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent {
         to_turn: event.to_turn,
         summary: event.summary,
         saved_tokens: event.saved_tokens,
+        phase: event.phase ?? undefined,
         ...base,
       };
     case "warning":
