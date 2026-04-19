@@ -324,6 +324,15 @@ body {
   }
 }
 
+/* Browser-native virtualization for long transcripts: skips layout/paint for
+   off-screen rows while preserving variable heights, collapsible state, and
+   scroll math. The intrinsic-size hint reserves space so unrendered rows
+   don't collapse scroll position. */
+.apex-virtualize-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
+}
+
 /* ── Highlight.js theme (GitHub light) ────────────── */
 .hljs {
   background: #1e1e1e;

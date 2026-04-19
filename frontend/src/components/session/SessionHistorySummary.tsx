@@ -352,7 +352,7 @@ export default function SessionHistorySummary({
             return (
               <div
                 key={`${summary.archive_id ?? "summary"}-${index}`}
-                className="rounded-[18px] border border-[rgba(211,219,210,0.9)] bg-[rgba(248,250,246,0.92)] p-4"
+                className="apex-virtualize-row rounded-[18px] border border-[rgba(211,219,210,0.9)] bg-[rgba(248,250,246,0.92)] p-4"
               >
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div className="min-w-0 flex-1">
@@ -423,7 +423,7 @@ export default function SessionHistorySummary({
             return (
               <div
                 key={turn.id}
-                className="rounded-[18px] border border-[rgba(211,219,210,0.9)] bg-[rgba(248,250,246,0.92)] p-4"
+                className="apex-virtualize-row rounded-[18px] border border-[rgba(211,219,210,0.9)] bg-[rgba(248,250,246,0.92)] p-4"
               >
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div className="min-w-0 flex-1">
@@ -479,7 +479,9 @@ export default function SessionHistorySummary({
       ) : null}
 
       {recentMessages.map((message) => (
-        <ChatMessage key={message.id} message={message} />
+        <div key={message.id} className="apex-virtualize-row">
+          <ChatMessage message={message} />
+        </div>
       ))}
     </div>
   );
