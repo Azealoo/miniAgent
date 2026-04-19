@@ -31,7 +31,6 @@ import os
 import threading
 import time
 import uuid
-import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -60,22 +59,22 @@ from graph.session.session_schema import (
 logger = logging.getLogger(__name__)
 
 # Per-session locks prevent two concurrent requests from compressing the same
-# session simultaneously (which would double-archive messages). Stored weakly
-# so entries for closed sessions get GC'd without relying on delete_session.
-_compress_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
-    weakref.WeakValueDictionary()
-)
+# session simultaneously (which would double-archive messages). Entries are
+# held with a strong reference and evicted explicitly from
+# ``SessionStore.delete_session``; a prior ``WeakValueDictionary`` design had
+# a GC race where a freshly installed Lock could be collected before a
+# concurrent caller observed it, yielding two distinct locks for one
+# session id and interleaved writes (see issue #222).
+_compress_locks: dict[str, asyncio.Lock] = {}
 
-# Per-session turn locks serialize /api/chat execution for a single session id so
-# that two overlapping turns (e.g. a double-click or client retry) cannot
+# Per-session turn locks serialize /api/chat execution for a single session id
+# so that two overlapping turns (e.g. a double-click or client retry) cannot
 # interleave writes to the session JSON, memory, or turn ledger.
-_turn_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
-    weakref.WeakValueDictionary()
-)
+_turn_locks: dict[str, asyncio.Lock] = {}
 
-# Guards creation of entries in the two WeakValueDictionaries above so
-# concurrent callers cannot race and end up with two distinct asyncio.Lock
-# instances for the same session id.
+# Guards creation of entries in the two registries above so concurrent callers
+# cannot race and end up with two distinct asyncio.Lock instances for the
+# same session id.
 _lock_creation_mutex = threading.Lock()
 
 
@@ -103,15 +102,17 @@ _frozen_prefix_lock = threading.Lock()
 
 
 def _get_or_create_lock(
-    registry: "weakref.WeakValueDictionary[str, asyncio.Lock]",
+    registry: dict[str, asyncio.Lock],
     session_id: str,
 ) -> asyncio.Lock:
     """Return an asyncio.Lock for *session_id*, creating at most one.
 
     Double-checked locking under ``_lock_creation_mutex`` keeps two concurrent
     callers from installing distinct Lock instances for the same session id.
-    Entries live in a WeakValueDictionary, so once every caller drops its
-    reference the lock is GC'd and its dict slot disappears.
+    The registry is a plain ``dict`` that holds a strong reference, so a
+    freshly installed lock cannot be collected before a concurrent caller
+    observes it (issue #222). Eviction is explicit via
+    :meth:`SessionStore.delete_session`.
     """
     lock = registry.get(session_id)
     if lock is not None:
@@ -444,9 +445,15 @@ class SessionStore:
         # (a concurrent worker may still hold it open).
         with contextlib.suppress(FileNotFoundError):
             self._lock_path(session_id).unlink()
-        # Clean up the per-session locks to prevent unbounded memory growth
-        _compress_locks.pop(session_id, None)
-        _turn_locks.pop(session_id, None)
+        # Clean up the per-session locks to prevent unbounded memory growth.
+        # Holding ``_lock_creation_mutex`` keeps this consistent with
+        # ``_get_or_create_lock`` so a concurrent creator observes either the
+        # pre-delete lock (and proceeds on a dying session, which the outer
+        # file-lock guards) or installs a fresh one; it cannot observe a
+        # half-removed state.
+        with _lock_creation_mutex:
+            _compress_locks.pop(session_id, None)
+            _turn_locks.pop(session_id, None)
         self.clear_frozen_session_prefix(session_id)
 
     def get_or_create_compress_lock(self, session_id: str) -> asyncio.Lock:
