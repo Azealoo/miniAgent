@@ -1,4 +1,5 @@
 import * as api from "./api";
+import { getSessionCorruptDetail } from "./api";
 import {
   normalizeMessageContent,
   normalizeTurnMessages,
@@ -84,6 +85,18 @@ function getPreservedSessionLoadErrorMessage(baseMessage: string): string {
   return `BioAPEX could not open that saved session, so the previous conversation is still in view. ${trimmed}`;
 }
 
+function buildSessionCorruptMessage(
+  detail: ReturnType<typeof getSessionCorruptDetail>
+): string {
+  if (!detail) {
+    return "Session corrupt: this saved session's file could not be read and has been quarantined.";
+  }
+  const base = `Session corrupt: ${detail.message}`;
+  return detail.quarantinePath
+    ? `${base} (moved to ${detail.quarantinePath})`
+    : base;
+}
+
 export async function loadSession(
   id: string,
   snapshot: SessionLoadSnapshot,
@@ -108,10 +121,14 @@ export async function loadSession(
     setters.setSessionHistoryStatus("ready");
     setters.setSessionHistoryError(null);
   } catch (error) {
+    const corruptDetail = getSessionCorruptDetail(error);
+    const baseMessage = corruptDetail
+      ? buildSessionCorruptMessage(corruptDetail)
+      : getErrorMessage(error);
     const nextErrorMessage =
       hadPriorContext && snapshot.currentSessionId !== id
-        ? getPreservedSessionLoadErrorMessage(getErrorMessage(error))
-        : getErrorMessage(error);
+        ? getPreservedSessionLoadErrorMessage(baseMessage)
+        : baseMessage;
 
     if (hadPriorContext) {
       setters.setCurrentSessionId(snapshot.currentSessionId);
