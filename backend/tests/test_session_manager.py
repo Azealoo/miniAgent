@@ -1,9 +1,12 @@
 """
 Tests for SessionManager — all file I/O uses tmp_path (no side effects).
 """
+import gc
 import json
 import sys
+import threading
 import time
+import weakref
 from pathlib import Path
 
 import pytest
@@ -932,3 +935,84 @@ class TestDeleteSessionDistillationHook:
         assert not (tmp_path / "sessions" / f"{session_id}.json").exists()
         # Failure is surfaced via the in-memory set the debug endpoint exposes.
         assert session_id in get_failed_distillations()
+
+
+# --------------------------------------------------------------------- #
+# Concurrency-safe per-session lock creation                            #
+# --------------------------------------------------------------------- #
+
+
+class TestPerSessionLockConcurrency:
+    """Guards for issue #109 — concurrent get_or_create must not create two
+    distinct asyncio.Lock instances for the same session id, and the lock
+    registry must not grow unbounded as sessions come and go.
+    """
+
+    @pytest.mark.parametrize(
+        "lock_method",
+        ["get_or_create_compress_lock", "get_or_create_turn_lock"],
+    )
+    def test_concurrent_get_or_create_returns_single_identity(self, sm, lock_method):
+        sid = _valid_session_id(42)
+        grab = getattr(sm, lock_method)
+
+        results: list = []
+        errors: list = []
+        barrier = threading.Barrier(32)
+
+        def worker():
+            try:
+                barrier.wait(timeout=5)
+                results.append(grab(sid))
+            except Exception as exc:  # pragma: no cover — surfaced via assert
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(32)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, errors
+        assert len(results) == 32
+        first = results[0]
+        assert all(lock is first for lock in results), (
+            "Concurrent callers received distinct Lock instances for the same "
+            "session id — double-checked locking is broken."
+        )
+
+    @pytest.mark.parametrize(
+        "registry_attr, lock_method",
+        [
+            ("_compress_locks", "get_or_create_compress_lock"),
+            ("_turn_locks", "get_or_create_turn_lock"),
+        ],
+    )
+    def test_lock_registry_does_not_grow_unbounded_under_churn(
+        self, sm, registry_attr, lock_method
+    ):
+        from graph.session import session_store
+
+        registry = getattr(session_store, registry_attr)
+        assert isinstance(registry, weakref.WeakValueDictionary), (
+            "Registry must be a WeakValueDictionary so entries for closed "
+            "sessions are GC-collected."
+        )
+
+        grab = getattr(sm, lock_method)
+        baseline = len(registry)
+
+        # Simulate long-run churn: create a unique session-lock per iteration
+        # without retaining any strong reference to the returned Lock.
+        for i in range(500):
+            grab(_valid_session_id(10_000 + i))
+
+        gc.collect()
+
+        # With the WeakValueDictionary, once the transient Lock returned from
+        # grab() falls out of scope the mapping is cleared. Allow some slack
+        # for locks whose finalizers haven't yet cleared their entry.
+        assert len(registry) - baseline < 50, (
+            f"{registry_attr} grew to {len(registry)} entries under churn — "
+            "expected weakref-based GC to keep it near-empty."
+        )

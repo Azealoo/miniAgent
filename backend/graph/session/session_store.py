@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -23,13 +24,23 @@ from graph.session.session_schema import SESSION_SCHEMA_VERSION, _validate_sessi
 logger = logging.getLogger(__name__)
 
 # Per-session locks prevent two concurrent requests from compressing the same
-# session simultaneously (which would double-archive messages).
-_compress_locks: dict[str, asyncio.Lock] = {}
+# session simultaneously (which would double-archive messages). Stored weakly
+# so entries for closed sessions get GC'd without relying on delete_session.
+_compress_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
+    weakref.WeakValueDictionary()
+)
 
 # Per-session turn locks serialize /api/chat execution for a single session id so
 # that two overlapping turns (e.g. a double-click or client retry) cannot
 # interleave writes to the session JSON, memory, or turn ledger.
-_turn_locks: dict[str, asyncio.Lock] = {}
+_turn_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
+    weakref.WeakValueDictionary()
+)
+
+# Guards creation of entries in the two WeakValueDictionaries above so
+# concurrent callers cannot race and end up with two distinct asyncio.Lock
+# instances for the same session id.
+_lock_creation_mutex = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -53,6 +64,28 @@ class FrozenSessionPrefix:
 _frozen_prefixes: dict[str, FrozenSessionPrefix] = {}
 _frozen_prefix_drift_logged: set[str] = set()
 _frozen_prefix_lock = threading.Lock()
+
+
+def _get_or_create_lock(
+    registry: "weakref.WeakValueDictionary[str, asyncio.Lock]",
+    session_id: str,
+) -> asyncio.Lock:
+    """Return an asyncio.Lock for *session_id*, creating at most one.
+
+    Double-checked locking under ``_lock_creation_mutex`` keeps two concurrent
+    callers from installing distinct Lock instances for the same session id.
+    Entries live in a WeakValueDictionary, so once every caller drops its
+    reference the lock is GC'd and its dict slot disappears.
+    """
+    lock = registry.get(session_id)
+    if lock is not None:
+        return lock
+    with _lock_creation_mutex:
+        lock = registry.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            registry[session_id] = lock
+        return lock
 
 
 def _fingerprint_prefix(stable_prefix: str, tool_names: tuple[str, ...]) -> str:
@@ -286,15 +319,11 @@ class SessionStore:
 
     def get_or_create_compress_lock(self, session_id: str) -> asyncio.Lock:
         """Return (creating if needed) the asyncio.Lock for *session_id*."""
-        if session_id not in _compress_locks:
-            _compress_locks[session_id] = asyncio.Lock()
-        return _compress_locks[session_id]
+        return _get_or_create_lock(_compress_locks, session_id)
 
     def get_or_create_turn_lock(self, session_id: str) -> asyncio.Lock:
         """Return (creating if needed) the turn-serialization Lock for *session_id*."""
-        if session_id not in _turn_locks:
-            _turn_locks[session_id] = asyncio.Lock()
-        return _turn_locks[session_id]
+        return _get_or_create_lock(_turn_locks, session_id)
 
     # ------------------------------------------------------------------ #
     # Frozen prompt-cache prefix                                          #
