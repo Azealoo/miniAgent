@@ -471,14 +471,30 @@ def get_tool_wallclock_override_s(tool_name: str) -> float | None:
 
     A returned value of 0.0 means the operator explicitly disabled the cap
     for this tool — callers should treat that as "do not enforce" rather
-    than falling back to the manifest sandbox default.
+    than falling back to the manifest sandbox default. Invalid override
+    values (non-numeric strings like ``"30s"``, booleans, ...) are treated
+    as absent so a typo cannot silently strip both the manifest timeout
+    and the global default.
     """
     overrides = _tool_wallclock_block().get("overrides", {})
     if not isinstance(overrides, dict):
         return None
     if tool_name not in overrides:
         return None
-    return _coerce_positive_seconds(overrides[tool_name])
+    raw = overrides[tool_name]
+    # bool is an int subclass; reject it so ``true``/``false`` cannot be
+    # coerced to 1.0/0.0 and accidentally disable the cap.
+    if isinstance(raw, bool):
+        return None
+    if not isinstance(raw, (int, float, str)):
+        return None
+    try:
+        resolved = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if resolved <= 0:
+        return 0.0
+    return resolved
 
 
 def get_deterministic_seed() -> int | None:
