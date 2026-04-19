@@ -4,6 +4,7 @@ and memory indexer. Rebuilds the agent on every request via create_agent
 so that live workspace edits are always reflected in the system prompt.
 """
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +59,26 @@ def _extract_llm_usage_event(event: dict) -> dict | None:
         "cache_creation_tokens": cache_creation,
     }
 
+def _role_config_hash(
+    llm: Any,
+    tool_names: tuple[str, ...],
+    system_prompt: str,
+) -> str:
+    """Digest the inputs to ``create_agent`` that change the built runnable.
+
+    The llm is identified by ``id()``; AgentManager holds the primary executor
+    on ``self.llm`` for the session, so identity is stable across turns. A
+    swapped-in fallback llm has a different id, which is why fallback builds
+    bypass the cache via ``use_cache=False``.
+    """
+    parts = [
+        str(id(llm)),
+        "\x1f".join(tool_names),
+        system_prompt,
+    ]
+    return hashlib.sha256("\x1e".join(parts).encode("utf-8")).hexdigest()
+
+
 _HARNESS_GUIDANCE = """
 <!-- Runtime Harness Guidance -->
 For non-trivial tasks, use the helper-agent tools deliberately:
@@ -79,6 +100,12 @@ class AgentManager:
         self.session_manager: Optional[SessionManager] = None
         self.memory_indexer: Optional[MemoryIndexer] = None
         self.base_dir: Optional[Path] = None
+        # Per-session cache of built agents. Keyed by session_id; value is
+        # ``(role_config_hash, agent)``. On a hit we skip create_agent and its
+        # tool-manifest / graph-assembly cost; on a miss we rebuild and replace.
+        # Fallback-LLM builds intentionally bypass this cache so they do not
+        # evict the primary entry.
+        self._agent_cache: dict[str, tuple[str, Any]] = {}
 
     # ------------------------------------------------------------------ #
     # Initialisation                                                       #
@@ -124,10 +151,12 @@ class AgentManager:
         skill_entries: list[dict] | None = None,
         llm: Any = None,
         session_id: str | None = None,
+        use_cache: bool = True,
     ):
         """
-        Rebuild the agent from scratch, ensuring the latest workspace edits
-        and RAG configuration are reflected in the system prompt.
+        Return (possibly cached) agent, rebuilding when any input that changes
+        the runnable — llm identity, tool names, or assembled system prompt —
+        has changed since the last build for this session.
 
         The stable prefix half of the prompt (workspace files, skill snapshot,
         tool-result contract, harness guidance) is frozen on the session on
@@ -144,17 +173,36 @@ class AgentManager:
         stable_prefix_with_harness = (
             f"{stable_prefix}\n\n{_HARNESS_GUIDANCE}" if stable_prefix else _HARNESS_GUIDANCE
         )
+        tool_names = tuple(
+            getattr(tool, "name", type(tool).__name__) for tool in self.tools
+        )
         if session_id and self.session_manager is not None:
             self.session_manager.freeze_session_prefix(
                 session_id,
                 stable_prefix=stable_prefix_with_harness,
-                tool_names=tuple(getattr(tool, "name", type(tool).__name__) for tool in self.tools),
+                tool_names=tool_names,
             )
         if stable_prefix_with_harness and volatile_suffix:
             system_prompt = f"{stable_prefix_with_harness}\n\n{volatile_suffix}"
         else:
             system_prompt = stable_prefix_with_harness or volatile_suffix
-        return create_agent(llm or self.llm, self.tools, system_prompt=system_prompt)
+
+        effective_llm = llm or self.llm
+
+        if use_cache and session_id:
+            role_config_hash = _role_config_hash(
+                effective_llm, tool_names, system_prompt
+            )
+            cached = self._agent_cache.get(session_id)
+            if cached is not None and cached[0] == role_config_hash:
+                return cached[1]
+            agent = create_agent(
+                effective_llm, self.tools, system_prompt=system_prompt
+            )
+            self._agent_cache[session_id] = (role_config_hash, agent)
+            return agent
+
+        return create_agent(effective_llm, self.tools, system_prompt=system_prompt)
 
     async def _run_llm_probe_retrieval(
         self,
@@ -213,6 +261,7 @@ class AgentManager:
         return indexer.build_probe_results(picked)
 
     def clear_session_runtime(self, session_id: str) -> None:
+        self._agent_cache.pop(session_id, None)
         for tool in self.tools:
             runtime_tool = getattr(tool, "wrapped_tool", tool)
             clear_session_state = getattr(runtime_tool, "clear_session_state", None)
@@ -469,6 +518,7 @@ class AgentManager:
                             skill_entries=selected_skill_entries,
                             llm=fallback_llm,
                             session_id=session_id,
+                            use_cache=False,
                         )
                         used_fallback = True
                         after_tool = False
