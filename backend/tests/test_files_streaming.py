@@ -59,15 +59,24 @@ def _chunk_generator(total: int, chunk_size: int):
 
 
 @pytest.fixture
-def streaming_app(tmp_path):
+def streaming_app(tmp_path, monkeypatch):
     """Build a minimal FastAPI app exposing only the files router.
 
     Avoids importing the full ``app.py`` (which triggers LlamaIndex / memory
     index rebuilds) while still exercising the live access-control and audit
     hooks.
+
+    Disables the file-API rate limiter so the 2 GiB memory-flat test (which
+    streams a payload through ~128 back-to-back Range reads) isn't tripped by
+    the production 30-reads/min default. Rate-limit behavior is covered in
+    ``test_files_rate_limit.py``.
     """
     from graph.agent import agent_manager
     from api.files import router as files_router
+    from rate_limit import clear_buckets
+
+    monkeypatch.setenv("BIOAPEX_RATE_LIMIT_DISABLED", "1")
+    clear_buckets()
 
     original_base_dir = agent_manager.base_dir
     original_memory_indexer = agent_manager.memory_indexer
@@ -85,6 +94,7 @@ def streaming_app(tmp_path):
     finally:
         agent_manager.base_dir = original_base_dir
         agent_manager.memory_indexer = original_memory_indexer
+        clear_buckets()
 
 
 def _loopback_client(app: FastAPI) -> TestClient:

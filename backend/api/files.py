@@ -32,6 +32,7 @@ from fastapi.responses import Response, StreamingResponse
 from graph.memory_types import validate_memory_write
 from hardening import is_secret_like_path
 from pydantic import BaseModel
+from rate_limit import check_rate_limit
 from starlette.requests import ClientDisconnect
 
 router = APIRouter()
@@ -176,6 +177,7 @@ def _read_raw_content(target: Path, clean_path: str) -> str:
 @router.get("/files")
 def read_file(path: str = Query(..., description="Relative file path"), request: Request = None):
     require_inspection_access(request)
+    check_rate_limit(request, "files_read")
     target, _ = _check_path(path, write=False)
     if not target.exists():
         raise HTTPException(404, f"File not found: {path}")
@@ -189,6 +191,7 @@ def read_file(path: str = Query(..., description="Relative file path"), request:
 @router.get("/files/raw")
 def read_raw_file(path: str = Query(..., description="Relative file path"), request: Request = None):
     require_inspection_access(request)
+    check_rate_limit(request, "files_read")
     target, clean = _check_path(path, write=False)
     if not target.exists():
         raise HTTPException(404, f"File not found: {path}")
@@ -286,6 +289,7 @@ def stream_file(
 ):
     """Stream a whitelisted file, honoring HTTP Range / If-Range semantics."""
     require_inspection_access(request)
+    check_rate_limit(request, "files_read")
     target, _ = _check_path(path, write=False)
     if not target.exists():
         raise HTTPException(404, f"File not found: {path}")
@@ -356,6 +360,7 @@ class SaveRequest(BaseModel):
 @router.post("/files")
 def save_file(body: SaveRequest, request: Request = None):
     require_execution_access(request)
+    check_rate_limit(request, "files_write")
     base_dir = _base_dir()
     byte_count = len(body.content.encode("utf-8"))
     policy = cfg.get_production_hardening_policy()
@@ -491,6 +496,7 @@ async def stream_write_file(
     number of bytes already persisted.
     """
     require_execution_access(request)
+    check_rate_limit(request, "files_write")
     base_dir = _base_dir()
     policy = cfg.get_production_hardening_policy()
 
@@ -563,6 +569,7 @@ async def stream_write_file(
 def list_skills(request: Request = None):
     """Return the active runtime-selected skill summary used by compatibility clients."""
     require_inspection_access(request)
+    check_rate_limit(request, "files_read")
     base = _base_dir()
     from tools.skills_scanner import collect_skill_entries
 
@@ -585,6 +592,7 @@ def list_skills(request: Request = None):
 def list_skills_registry(request: Request = None):
     """Return the full runtime registry, including disabled entries and optional hint metadata."""
     require_inspection_access(request)
+    check_rate_limit(request, "files_read")
     base = _base_dir()
     from tools.skills_scanner import describe_skill_registry
 

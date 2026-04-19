@@ -89,6 +89,10 @@ _DEFAULT: dict = {
     "access_defaults": {
         "allow_loopback_without_auth": True,
     },
+    "api_rate_limits": {
+        "files_read": {"rate": 30, "period_seconds": 60, "enabled": True},
+        "files_write": {"rate": 10, "period_seconds": 60, "enabled": True},
+    },
     "execution_backends": {
         "llm": {
             "provider": "deepseek",
@@ -273,6 +277,28 @@ def get_permissions_settings() -> dict[str, Any]:
 def get_access_defaults() -> dict[str, Any]:
     access_defaults = _load_runtime().get("access_defaults", {})
     return dict(access_defaults) if isinstance(access_defaults, dict) else {}
+
+
+def get_api_rate_limits() -> dict[str, Any]:
+    """Return the ``api_rate_limits`` block used by ``rate_limit.py``.
+
+    Shape::
+
+        {
+          "<bucket_name>": {
+            "rate": <int>,
+            "period_seconds": <int>,
+            "enabled": <bool>,
+          },
+          ...
+        }
+
+    Bucket names currently consumed by the backend: ``files_read`` and
+    ``files_write``. Missing or malformed entries fall back to the
+    built-in defaults declared in ``rate_limit.DEFAULT_LIMITS``.
+    """
+    raw = _load_runtime().get("api_rate_limits", {})
+    return dict(raw) if isinstance(raw, dict) else {}
 
 
 def get_execution_backend_settings() -> dict[str, Any]:
