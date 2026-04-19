@@ -1,15 +1,40 @@
-"""Session disk I/O: atomic reads/writes, CRUD, and per-session compress locks."""
+"""Session disk I/O: atomic reads/writes, CRUD, and per-session compress locks.
+
+Inter-process safety
+--------------------
+``SessionStore`` guards its write path with a POSIX ``fcntl.flock`` advisory
+lock on a per-session lock file (``{sessions_dir}/{session_id}.lock``).
+Combined with write-temp-then-``os.replace`` the session JSON is safe against
+two uvicorn workers (or any other cooperating processes) racing on the same
+session id: the lock serialises read-modify-write, and the atomic rename
+means a concurrent reader ever sees only the pre- or post-write blob, never
+a torn file. Pure readers don't take the lock — they rely on the atomic
+rename alone.
+
+**NFS caveat.** Advisory ``flock`` is only reliable on a local filesystem.
+On NFSv3, ``flock`` is typically a no-op (silently ignored by the server)
+and on NFSv4 it only works when the server's ``lockd``/``nfsd`` stack is
+configured for byte-range locking. If ``sessions/`` lives on a networked
+volume, keep it on NFSv4 with locking enabled or, better, move it to local
+disk. Running with multiple uvicorn workers against an NFSv3-mounted
+``sessions/`` will reintroduce the lost-write bug this lock is meant to
+prevent.
+"""
 
 import asyncio
+import contextlib
+import fcntl
 import hashlib
 import json
 import logging
+import os
+import tempfile
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from graph.session.session_archive_index import remove_session_from_index
 from graph.session.session_normalizer import (
@@ -80,6 +105,32 @@ class SessionStore:
         _validate_session_id(session_id)
         return self.sessions_dir / f"{session_id}.json"
 
+    def _lock_path(self, session_id: str) -> Path:
+        _validate_session_id(session_id)
+        return self.sessions_dir / f"{session_id}.lock"
+
+    @contextlib.contextmanager
+    def _locked(self, session_id: str) -> Iterator[None]:
+        """Hold a POSIX exclusive advisory lock for *session_id*.
+
+        Callers that perform a read-modify-write sequence must wrap the whole
+        sequence — locking ``_read`` and ``_write`` independently is not
+        enough, because another process could slip in between and cause a
+        lost update. The lock is keyed on a dedicated ``{session_id}.lock``
+        file rather than the session JSON itself so ``os.replace`` (which
+        swaps inodes) does not invalidate an outstanding lock.
+        """
+        lock_path = self._lock_path(session_id)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
     def _read(self, session_id: str) -> dict:
         path = self._path(session_id)
         if not path.exists():
@@ -110,9 +161,25 @@ class SessionStore:
         data.setdefault("schema_version", SESSION_SCHEMA_VERSION)
         data["updated_at"] = time.time()
         self._stamp_deterministic_mode(data)
-        self._path(session_id).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        target = self._path(session_id)
+        payload = json.dumps(data, ensure_ascii=False, indent=2)
+        # Write to a sibling temp file and rename into place so a concurrent
+        # reader on another worker never observes a truncated/partial JSON.
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{session_id}.",
+            suffix=".tmp",
+            dir=str(target.parent),
         )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                tmp.write(payload)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_name, target)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp_name)
+            raise
 
     @staticmethod
     def _stamp_deterministic_mode(data: dict) -> None:
@@ -145,7 +212,8 @@ class SessionStore:
     def create_session(self) -> str:
         session_id = str(uuid.uuid4())
         data = self._empty(session_id)
-        self._write(session_id, data)
+        with self._locked(session_id):
+            self._write(session_id, data)
         return session_id
 
     def list_sessions(self) -> list[dict]:
@@ -228,7 +296,6 @@ class SessionStore:
         request_id: str | None = None,
         blocks: Optional[list[dict[str, Any]]] = None,
     ) -> None:
-        data = self._read(session_id)
         msg: dict = {"role": role, "content": content}
         normalized_blocks = _normalize_blocks(blocks)
 
@@ -245,13 +312,19 @@ class SessionStore:
         if normalized_blocks:
             msg["blocks"] = normalized_blocks
 
-        data["messages"].append(msg)
-        self._write(session_id, data)
+        # Hold the inter-process lock across read-append-write so a second
+        # worker racing on the same session_id cannot read a stale message
+        # list and clobber our append when it writes back.
+        with self._locked(session_id):
+            data = self._read(session_id)
+            data["messages"].append(msg)
+            self._write(session_id, data)
 
     def rename_session(self, session_id: str, title: str) -> None:
-        data = self._read(session_id)
-        data["title"] = title
-        self._write(session_id, data)
+        with self._locked(session_id):
+            data = self._read(session_id)
+            data["title"] = title
+            self._write(session_id, data)
 
     def delete_session(self, session_id: str) -> None:
         path = self._path(session_id)
@@ -271,14 +344,19 @@ class SessionStore:
             # Fire-and-forget: scheduling failures must never block deletion.
             pass
 
-        if path.exists():
-            path.unlink()
-        for archive_path in self.archive_dir.glob(f"{session_id}_*.json"):
-            try:
-                archive_path.unlink()
-            except FileNotFoundError:
-                continue
+        with self._locked(session_id):
+            if path.exists():
+                path.unlink()
+            for archive_path in self.archive_dir.glob(f"{session_id}_*.json"):
+                try:
+                    archive_path.unlink()
+                except FileNotFoundError:
+                    continue
         remove_session_from_index(self.archive_dir, session_id)
+        # Best-effort cleanup of the on-disk lock file — failure is fine
+        # (a concurrent worker may still hold it open).
+        with contextlib.suppress(FileNotFoundError):
+            self._lock_path(session_id).unlink()
         # Clean up the per-session locks to prevent unbounded memory growth
         _compress_locks.pop(session_id, None)
         _turn_locks.pop(session_id, None)
@@ -385,10 +463,11 @@ class SessionStore:
             # Nothing to stamp if the session file has not been materialized
             # yet; the first save_message call will create it.
             return
-        data = self._read(session_id)
-        runtime_config = data.get("runtime_config")
-        if not isinstance(runtime_config, dict):
-            runtime_config = {}
-        runtime_config["_loaded_at"] = float(loaded_at)
-        data["runtime_config"] = runtime_config
-        self._write(session_id, data)
+        with self._locked(session_id):
+            data = self._read(session_id)
+            runtime_config = data.get("runtime_config")
+            if not isinstance(runtime_config, dict):
+                runtime_config = {}
+            runtime_config["_loaded_at"] = float(loaded_at)
+            data["runtime_config"] = runtime_config
+            self._write(session_id, data)
