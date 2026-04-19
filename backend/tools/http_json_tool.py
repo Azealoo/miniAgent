@@ -1,6 +1,11 @@
 """
 Structured HTTP tool: GET or POST with JSON response parsing, timeout, retries, and size cap.
-Use for APIs instead of raw fetch_url when JSON is expected.
+
+Canonical REST-API client for BioAPEX (issue #126). Use this for every
+structured JSON endpoint (NCBI, UniProt, Enrichr, etc.). ``fetch_url`` stays
+for unstructured HTML/article content; it is NOT a drop-in substitute for
+``http_json`` because its output cap is an order of magnitude smaller and it
+runs HTML through a Markdown rewriter that mangles JSON payloads.
 """
 import ipaddress
 import re
@@ -55,7 +60,9 @@ class HttpJsonTool(BaseTool):
     name: str = "http_json"
     description: str = (
         "Make an HTTP GET or POST request and return the response as JSON. "
-        "Use for REST APIs (e.g. NCBI, UniProt, Enrichr). "
+        "Canonical REST-API client — use for NCBI, UniProt, Enrichr, and any "
+        "other structured JSON endpoint. Prefer this over fetch_url for JSON "
+        "APIs: larger output cap, automatic retries, JSON parsing. "
         "Input: method (GET/POST), url, and optional json_body for POST."
     )
     args_schema: Type[BaseModel] = HttpJsonInput
