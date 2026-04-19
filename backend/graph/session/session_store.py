@@ -38,7 +38,12 @@ from typing import Any, Iterator, Optional
 
 from graph.session.session_archive_index import (
     _atomic_write_text,
-    remove_session_from_index,
+    remove_session_from_index as _remove_session_from_archive_index,
+)
+from graph.session.session_index import (
+    list_index_entries as _list_session_index_entries,
+    remove_session_from_index as _remove_session_from_session_index,
+    upsert_session_entry as _upsert_session_index_entry,
 )
 from graph.session.session_normalizer import (
     _build_blocks_from_legacy_message,
@@ -250,6 +255,14 @@ class SessionStore:
             self._path(session_id),
             json.dumps(data, ensure_ascii=False, indent=2),
         )
+        messages = data.get("messages", [])
+        _upsert_session_index_entry(
+            self.sessions_dir,
+            session_id,
+            title=data.get("title", session_id),
+            updated_at=data.get("updated_at", 0.0),
+            message_count=len(messages) if isinstance(messages, list) else 0,
+        )
 
     @staticmethod
     def _stamp_deterministic_mode(data: dict) -> None:
@@ -287,49 +300,12 @@ class SessionStore:
         return session_id
 
     def list_sessions(self) -> list[dict]:
-        sessions = []
-        for path in self.sessions_dir.glob("*.json"):
-            try:
-                raw_text = path.read_text(encoding="utf-8")
-            except OSError:
-                # Transient read failure — skip this file but leave it in
-                # place so a future call can recover it.
-                continue
-            except UnicodeDecodeError:
-                # Non-UTF-8 bytes: file is corrupt at the encoding layer.
-                # Quarantine and skip so a single malformed session does not
-                # take down the entire catalog listing.
-                self._quarantine_corrupt_file(path, path.stem)
-                continue
-
-            try:
-                raw = json.loads(raw_text)
-            except json.JSONDecodeError:
-                # Corrupt file: quarantine it so the slot is freed and a
-                # subsequent direct load surfaces SessionCorruptError. Skip
-                # the entry in the listing rather than blocking the catalog.
-                self._quarantine_corrupt_file(path, path.stem)
-                continue
-
-            try:
-                if isinstance(raw, list):
-                    title, updated_at, msgs = path.stem, 0.0, raw
-                else:
-                    title = raw.get("title", path.stem)
-                    updated_at = raw.get("updated_at", 0.0)
-                    msgs = raw.get("messages", [])
-                sessions.append(
-                    {
-                        "id": path.stem,
-                        "title": title,
-                        "updated_at": updated_at,
-                        "message_count": len(msgs),
-                    }
-                )
-            except (AttributeError, TypeError):
-                continue
-        sessions.sort(key=lambda x: x["updated_at"], reverse=True)
-        return sessions
+        # Reads the ``_index.json`` sidecar so we avoid an O(N) glob+open of
+        # every session file. ``_load_index`` self-heals if the sidecar is
+        # missing, malformed, or has an unknown schema version. Corrupt
+        # session files are quarantined on demand by ``_read`` when any caller
+        # attempts to load them directly.
+        return _list_session_index_entries(self.sessions_dir)
 
     def load_session(
         self, session_id: str, *, raise_on_corrupt: bool = False
@@ -462,7 +438,8 @@ class SessionStore:
                     archive_path.unlink()
                 except FileNotFoundError:
                     continue
-        remove_session_from_index(self.archive_dir, session_id)
+        _remove_session_from_archive_index(self.archive_dir, session_id)
+        _remove_session_from_session_index(self.sessions_dir, session_id)
         # Best-effort cleanup of the on-disk lock file — failure is fine
         # (a concurrent worker may still hold it open).
         with contextlib.suppress(FileNotFoundError):
