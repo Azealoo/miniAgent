@@ -170,6 +170,16 @@ export interface ChatStreamPlanUpdatedEvent {
   tool_trace?: JsonObject[];
   type: "plan_updated";
 }
+/** Non-fatal signal that a RAG retrieval attempt raised. */
+export interface ChatStreamRetrievalErrorEvent {
+  error_type: string;
+  event_index?: number;
+  message: string;
+  query: string;
+  request_id?: string;
+  schema_version?: number;
+  type: "retrieval_error";
+}
 export interface ChatStreamRetrievalEvent {
   event_index?: number;
   query: string;
@@ -306,6 +316,7 @@ export interface ChatStreamWorkflowStepStartedEvent {
 /** Discriminated union of every backend-emitted streaming event. */
 export type ChatStreamEventDTO =
   | ChatStreamRetrievalEvent
+  | ChatStreamRetrievalErrorEvent
   | ChatStreamTokenEvent
   | ChatStreamToolStartEvent
   | ChatStreamToolEndEvent

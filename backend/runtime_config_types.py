@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-RuntimeConfigLayerName = Literal["defaults", "user", "project", "local"]
+RuntimeConfigLayerName = Literal["defaults", "user", "project", "env", "local"]
 
 
 @dataclass(frozen=True)

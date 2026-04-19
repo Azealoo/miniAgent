@@ -65,6 +65,15 @@ export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent {
         results: event.results as unknown as RetrievalResult[],
         ...base,
       };
+    case "retrieval_error":
+      return {
+        type: "retrieval_error",
+        query: event.query,
+        error_type: event.error_type,
+        message: event.message,
+        schema_version: event.schema_version,
+        ...base,
+      };
     case "token":
       return {
         type: "token",

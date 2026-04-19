@@ -382,3 +382,137 @@ class TestConfig:
         # Backwards-compatible layer summary remains alongside field_provenance.
         layer_names = [layer["name"] for layer in response["config_layers"]]
         assert layer_names == ["defaults", "user", "project", "local"]
+
+    def test_env_layer_overlays_project_when_bioapex_env_is_set(self, tmp_path):
+        project_cfg = tmp_path / "config.json"
+        env_cfg = tmp_path / "config.staging.json"
+        project_cfg.write_text(
+            json.dumps(
+                {
+                    "rag_mode": False,
+                    "tool_policy": {"enabled": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        env_cfg.write_text(
+            json.dumps(
+                {
+                    "rag_mode": True,
+                    "tool_policy": {"enabled": False},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("config._CONFIG_FILE", project_cfg), patch.dict(
+            os.environ, {"BIOAPEX_ENV": "staging"}, clear=False
+        ):
+            from runtime_config import load_runtime_config
+
+            loaded = load_runtime_config(
+                default_config={"rag_mode": False, "tool_policy": {"enabled": True}},
+                project_config_path=project_cfg,
+            )
+
+        assert loaded.data["rag_mode"] is True
+        assert loaded.data["tool_policy"]["enabled"] is False
+
+        provenance = loaded.field_provenance
+        assert provenance["rag_mode"].source_layer == "env"
+        assert provenance["rag_mode"].path == str(env_cfg)
+        assert provenance["tool_policy.enabled"].source_layer == "env"
+
+        layer_names = [layer.name for layer in loaded.layers]
+        assert layer_names == ["defaults", "user", "project", "env", "local"]
+
+    def test_env_layer_missing_file_is_noop(self, tmp_path):
+        project_cfg = tmp_path / "config.json"
+        project_cfg.write_text(
+            json.dumps({"rag_mode": True}), encoding="utf-8"
+        )
+
+        # config.prod.json does not exist on disk.
+        with patch("config._CONFIG_FILE", project_cfg), patch.dict(
+            os.environ, {"BIOAPEX_ENV": "prod"}, clear=False
+        ):
+            from runtime_config import load_runtime_config
+
+            loaded = load_runtime_config(
+                default_config={"rag_mode": False},
+                project_config_path=project_cfg,
+            )
+
+        # Project wins; env layer is present but un-applied.
+        assert loaded.data["rag_mode"] is True
+        assert loaded.field_provenance["rag_mode"].source_layer == "project"
+
+        env_layer = next(layer for layer in loaded.layers if layer.name == "env")
+        assert env_layer.exists is False
+        assert env_layer.applied is False
+        assert env_layer.path == str(tmp_path / "config.prod.json")
+
+    def test_env_layer_skipped_when_bioapex_env_unset(self, tmp_path):
+        project_cfg = tmp_path / "config.json"
+        project_cfg.write_text(json.dumps({"rag_mode": True}), encoding="utf-8")
+
+        # Explicitly clear BIOAPEX_ENV (and treat blank the same as unset).
+        env_patch = {"BIOAPEX_ENV": ""}
+        with patch("config._CONFIG_FILE", project_cfg), patch.dict(
+            os.environ, env_patch, clear=False
+        ):
+            from runtime_config import load_runtime_config
+
+            loaded = load_runtime_config(
+                default_config={"rag_mode": False},
+                project_config_path=project_cfg,
+            )
+
+        layer_names = [layer.name for layer in loaded.layers]
+        assert "env" not in layer_names
+        assert layer_names == ["defaults", "user", "project", "local"]
+
+    def test_env_layer_is_overridden_by_local_and_env_vars(self, tmp_path):
+        project_cfg = tmp_path / "config.json"
+        env_cfg = tmp_path / "config.staging.json"
+        local_cfg = tmp_path / "config.local.json"
+
+        project_cfg.write_text(
+            json.dumps({"prompt_context": {"memory_stale_days": 10}}),
+            encoding="utf-8",
+        )
+        env_cfg.write_text(
+            json.dumps({"prompt_context": {"memory_stale_days": 20}}),
+            encoding="utf-8",
+        )
+        local_cfg.write_text(
+            json.dumps({"prompt_context": {"memory_stale_days": 30}}),
+            encoding="utf-8",
+        )
+
+        # local beats env (file layer precedence).
+        with patch("config._CONFIG_FILE", project_cfg), patch.dict(
+            os.environ,
+            {
+                "BIOAPEX_ENV": "staging",
+                "BIOAPEX_LOCAL_CONFIG": str(local_cfg),
+            },
+            clear=False,
+        ):
+            import config
+
+            assert config.get_memory_stale_days() == 30
+
+        # Process env var beats every file layer, including env-profile.
+        with patch("config._CONFIG_FILE", project_cfg), patch.dict(
+            os.environ,
+            {
+                "BIOAPEX_ENV": "staging",
+                "BIOAPEX_LOCAL_CONFIG": str(local_cfg),
+                "BIOAPEX_PROMPT_MEMORY_STALE_DAYS": "99",
+            },
+            clear=False,
+        ):
+            import config
+
+            assert config.get_memory_stale_days() == 99
