@@ -298,13 +298,15 @@ normalized `AIMessage.usage_metadata` (`input_token_details.cache_read` and
   per-run `cache_hit_rate`.
 
 **Adding a tool, skill, or workspace edit mid-session breaks the cache.**
-The frozen prefix is sticky for the lifetime of the session; if the prompt
-assembly changes after the first turn (a skill is enabled, a workspace file
-is edited, the runtime is reconfigured) the new prefix no longer matches the
-frozen one and provider prefix caching falls through. The runtime logs a
-single `session_prefix_drift` warning the first time it sees a divergent
-prefix for a given session id so the loss of cache eligibility is visible.
-To recover the cache hit rate, start a new chat session.
+The stable prefix is re-fingerprinted every turn. When a prompt-assembly
+input changes after the first turn (a skill is enabled, a workspace file is
+edited, the runtime is reconfigured) the runtime drops the stale snapshot,
+installs the fresh prefix, emits a `session_prefix_invalidated` log line,
+and streams a `prefix_invalidated` SSE event so the UI can surface that the
+provider-side cache was invalidated. Sub-agents launched on subsequent turns
+read the fresh prefix via `resolve_session_stable_prefix`. The current turn
+pays a full cache-creation cost; following turns rehydrate against the new
+prefix.
 
 ### Tools
 
