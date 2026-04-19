@@ -1,4 +1,6 @@
 import os
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,11 @@ from runtime_config import load_runtime_config
 from runtime_config_types import LoadedRuntimeConfig
 
 _CONFIG_FILE = Path(__file__).parent / "config.json"
+
+# Env var that lets dev machines opt back into live config reloads. When set to
+# "1", writes to tracked runtime config files are permitted; otherwise a turn
+# treats ``backend/config.json`` + env overrides as frozen.
+ALLOW_CONFIG_RELOAD_ENV_VAR = "BIOAPEX_ALLOW_CONFIG_RELOAD"
 _DEFAULT_MEMORY_STALE_DAYS = 30
 _DEFAULT_MAX_TOKENS_PER_TURN = 200_000
 
@@ -109,6 +116,40 @@ def _load_runtime() -> dict:
 def get_loaded_runtime_config() -> LoadedRuntimeConfig:
     """Return the merged runtime config together with per-layer provenance."""
     return _load_loaded_runtime()
+
+
+@dataclass(frozen=True)
+class RuntimeConfigSnapshot:
+    """A point-in-time capture of the merged runtime config.
+
+    ``config`` is the ``LoadedRuntimeConfig`` produced by ``load_runtime_config``
+    at capture time. ``loaded_at`` is the unix timestamp (seconds) when the
+    snapshot was taken; it is stamped into session metadata so that a turn's
+    decisions can be traced back to the exact config that was live when it
+    started.
+    """
+
+    config: LoadedRuntimeConfig
+    loaded_at: float
+
+
+def snapshot_runtime_config() -> RuntimeConfigSnapshot:
+    """Capture the current runtime config and the time it was read.
+
+    Callers at turn-entry boundaries use this to freeze config for the
+    duration of the turn. Mid-turn writes to the backing files are rejected
+    at the file API layer, so later ``get_*`` calls in the same turn will
+    return the same values the snapshot did.
+    """
+    return RuntimeConfigSnapshot(
+        config=_load_loaded_runtime(),
+        loaded_at=time.time(),
+    )
+
+
+def config_reload_allowed() -> bool:
+    """Return True when the dev override env var lets callers rewrite config."""
+    return os.getenv(ALLOW_CONFIG_RELOAD_ENV_VAR, "").strip() == "1"
 
 def get_prompt_context_settings() -> dict[str, Any]:
     prompt_context = _load_runtime().get("prompt_context", {})

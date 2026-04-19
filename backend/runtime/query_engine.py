@@ -7,7 +7,11 @@ import uuid
 from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable, AsyncGenerator, Sequence
 
-from config import get_max_tokens_per_turn, get_verification_settings
+from config import (
+    get_max_tokens_per_turn,
+    get_verification_settings,
+    snapshot_runtime_config,
+)
 from runtime.events import dump_runtime_event
 from runtime.metrics_collector import METRICS
 from runtime.turn_ledger import TurnLedger, TurnResult
@@ -493,6 +497,24 @@ class QueryEngine:
 
         session_manager = self.agent_manager.session_manager
         assert session_manager is not None
+
+        # Freeze runtime config for the duration of the turn. Mid-turn edits
+        # to backend/config.json or env overrides are rejected at the file
+        # API boundary, and the captured ``loaded_at`` is stamped onto the
+        # session so later inspection tools can trace which config shaped
+        # this turn's decisions.
+        runtime_snapshot = snapshot_runtime_config()
+        try:
+            session_manager.stamp_runtime_config_snapshot(
+                session_id,
+                loaded_at=runtime_snapshot.loaded_at,
+            )
+        except Exception:
+            _logger.warning(
+                "Failed to stamp runtime-config snapshot onto session %s",
+                session_id,
+                exc_info=True,
+            )
 
         await session_manager.auto_compress_if_needed(
             session_id,

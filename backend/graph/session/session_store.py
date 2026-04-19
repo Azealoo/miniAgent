@@ -258,10 +258,42 @@ class SessionStore:
 
     def get_session_meta(self, session_id: str) -> dict:
         data = self._read(session_id)
-        return {
+        meta = {
             "id": session_id,
             "title": data.get("title", ""),
             "created_at": data.get("created_at", 0.0),
             "updated_at": data.get("updated_at", 0.0),
             "message_count": len(data.get("messages", [])),
         }
+        runtime_config = data.get("runtime_config")
+        if isinstance(runtime_config, dict):
+            meta["runtime_config"] = {
+                "_loaded_at": runtime_config.get("_loaded_at"),
+            }
+        return meta
+
+    def stamp_runtime_config_snapshot(
+        self,
+        session_id: str,
+        *,
+        loaded_at: float,
+    ) -> None:
+        """Record when the runtime config was frozen for the current turn.
+
+        The timestamp is written under the ``runtime_config._loaded_at``
+        key on the session JSON. Later inspection tools can use it to prove
+        that a turn's behavior was bound to the config that was live at
+        turn entry — not a mid-turn mutation.
+        """
+        path = self._path(session_id)
+        if not path.exists():
+            # Nothing to stamp if the session file has not been materialized
+            # yet; the first save_message call will create it.
+            return
+        data = self._read(session_id)
+        runtime_config = data.get("runtime_config")
+        if not isinstance(runtime_config, dict):
+            runtime_config = {}
+        runtime_config["_loaded_at"] = float(loaded_at)
+        data["runtime_config"] = runtime_config
+        self._write(session_id, data)
