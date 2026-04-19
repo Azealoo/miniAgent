@@ -160,6 +160,19 @@ export const NewResponseRuntimeEventSchema = z
     type: z.literal("new_response"),
   })
   .strict();
+/** Frozen prompt-cache prefix was replaced mid-session. */
+export const PrefixInvalidatedRuntimeEventSchema = z
+  .object({
+    current_fingerprint: z.string().nullish(),
+    event_index: z.number().int().min(1).nullish(),
+    previous_fingerprint: z.string().nullish(),
+    reason: z.string().nullish(),
+    request_id: z.string().nullish(),
+    schema_version: z.number().int().default(RUNTIME_EVENT_SCHEMA_VERSION),
+    session_id: z.string().nullish(),
+    type: z.literal("prefix_invalidated"),
+  })
+  .strict();
 export const CompactionRuntimeEventSchema = z
   .object({
     event_index: z.number().int().min(1).nullish(),
@@ -270,6 +283,7 @@ export const ChatStreamEventSchema = z.discriminatedUnion("type", [
   PlanUpdatedRuntimeEventSchema,
   VerificationResultRuntimeEventSchema,
   NewResponseRuntimeEventSchema,
+  PrefixInvalidatedRuntimeEventSchema,
   CompactionRuntimeEventSchema,
   WarningRuntimeEventSchema,
   DoneRuntimeEventSchema,
@@ -282,7 +296,7 @@ export const RuntimeEventSchema = ChatStreamEventSchema;
 export type ChatStreamEvent = z.infer<typeof ChatStreamEventSchema>;
 export type RuntimeEvent = ChatStreamEvent;
 
-export const RUNTIME_EVENT_TYPES = ["retrieval", "retrieval_error", "token", "tool_start", "tool_end", "tool_awaiting_approval", "tool_chunk", "plan_created", "plan_updated", "verification_result", "new_response", "compaction_event", "warning", "done", "error", "workflow_step_started", "workflow_step_ended", "workflow_step_failed"] as const;
+export const RUNTIME_EVENT_TYPES = ["retrieval", "retrieval_error", "token", "tool_start", "tool_end", "tool_awaiting_approval", "tool_chunk", "plan_created", "plan_updated", "verification_result", "new_response", "prefix_invalidated", "compaction_event", "warning", "done", "error", "workflow_step_started", "workflow_step_ended", "workflow_step_failed"] as const;
 export type RuntimeEventType = (typeof RUNTIME_EVENT_TYPES)[number];
 
 export const RUNTIME_EVENT_SCHEMAS: Record<RuntimeEventType, z.ZodTypeAny> = {
@@ -297,6 +311,7 @@ export const RUNTIME_EVENT_SCHEMAS: Record<RuntimeEventType, z.ZodTypeAny> = {
   plan_updated: PlanUpdatedRuntimeEventSchema,
   verification_result: VerificationResultRuntimeEventSchema,
   new_response: NewResponseRuntimeEventSchema,
+  prefix_invalidated: PrefixInvalidatedRuntimeEventSchema,
   compaction_event: CompactionRuntimeEventSchema,
   warning: WarningRuntimeEventSchema,
   done: DoneRuntimeEventSchema,

@@ -204,6 +204,18 @@ export function applyStreamEvent(
       }));
     case "new_response":
       return reduceNewResponseEvent(state, event, options);
+    case "prefix_invalidated":
+      return updateStreamingMessage(state, event, (message) => ({
+        ...message,
+        request_id: event.request_id ?? message.request_id,
+        blocks: appendSessionBlock(message.blocks, {
+          type: "prefix_invalidated",
+          session_id: event.session_id,
+          previous_fingerprint: event.previous_fingerprint,
+          current_fingerprint: event.current_fingerprint,
+          reason: event.reason,
+        }),
+      }));
     case "compaction_event":
       return {
         messages: state.messages,

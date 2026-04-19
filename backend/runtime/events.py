@@ -206,6 +206,33 @@ class NewResponseRuntimeEvent(_RuntimeEventBase):
     type: Literal["new_response"] = "new_response"
 
 
+class PrefixInvalidatedRuntimeEvent(_RuntimeEventBase):
+    """Frozen prompt-cache prefix was replaced mid-session.
+
+    Emitted by ``graph.agent.AgentManager.astream`` on the first turn where the
+    re-fingerprinted stable prefix diverges from the snapshot installed on an
+    earlier turn (typical trigger: a workspace file edited under
+    ``backend/workspace/*.md`` or a skill enabled/added under
+    ``backend/skills/``). Sub-agents spawned after this event will read the
+    fresh prefix through ``runtime.subagent.resolve_session_stable_prefix``
+    — their provider prompt cache is dropped for this turn, then warms again
+    against the new bytes.
+    """
+
+    type: Literal["prefix_invalidated"] = "prefix_invalidated"
+    session_id: Optional[str] = None
+    previous_fingerprint: Optional[str] = None
+    current_fingerprint: Optional[str] = None
+    reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "Short tag describing why the prefix was invalidated "
+            "(e.g. ``workspace_or_skills_edit``). Free-form for forward "
+            "compatibility; the UI surfaces it as a pill."
+        ),
+    )
+
+
 class CompactionRuntimeEvent(_RuntimeEventBase):
     type: Literal["compaction_event"] = "compaction_event"
     from_turn: int
@@ -327,6 +354,7 @@ RuntimeEvent = Annotated[
         PlanUpdatedRuntimeEvent,
         VerificationResultRuntimeEvent,
         NewResponseRuntimeEvent,
+        PrefixInvalidatedRuntimeEvent,
         CompactionRuntimeEvent,
         WarningRuntimeEvent,
         DoneRuntimeEvent,
@@ -350,6 +378,7 @@ RUNTIME_EVENT_TYPES: tuple[str, ...] = (
     "plan_updated",
     "verification_result",
     "new_response",
+    "prefix_invalidated",
     "compaction_event",
     "warning",
     "done",

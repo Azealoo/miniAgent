@@ -457,6 +457,102 @@
       "title": "PlanUpdatedRuntimeEvent",
       "type": "object"
     },
+    "PrefixInvalidatedRuntimeEvent": {
+      "additionalProperties": false,
+      "description": "Frozen prompt-cache prefix was replaced mid-session.\n\nEmitted by ``graph.agent.AgentManager.astream`` on the first turn where the\nre-fingerprinted stable prefix diverges from the snapshot installed on an\nearlier turn (typical trigger: a workspace file edited under\n``backend/workspace/*.md`` or a skill enabled/added under\n``backend/skills/``). Sub-agents spawned after this event will read the\nfresh prefix through ``runtime.subagent.resolve_session_stable_prefix``\n\u2014 their provider prompt cache is dropped for this turn, then warms again\nagainst the new bytes.",
+      "properties": {
+        "current_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Current Fingerprint"
+        },
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
+        },
+        "previous_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Previous Fingerprint"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Short tag describing why the prefix was invalidated (e.g. ``workspace_or_skills_edit``). Free-form for forward compatibility; the UI surfaces it as a pill.",
+          "title": "Reason"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
+        },
+        "schema_version": {
+          "default": 2,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "type": {
+          "const": "prefix_invalidated",
+          "default": "prefix_invalidated",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "PrefixInvalidatedRuntimeEvent",
+      "type": "object"
+    },
     "RetrievalErrorRuntimeEvent": {
       "additionalProperties": false,
       "description": "Non-fatal signal that a RAG retrieval attempt raised.\n\nEmitted when ``MemoryIndexer.retrieve`` (or the LLM-probe fallback) throws\nduring the pre-turn retrieval phase. The turn itself continues \u2014 callers\nstill record a retrieval miss via the metrics collector \u2014 but the reviewer\nsees the failure in the UI instead of the old silent swallow.",
@@ -1495,6 +1591,7 @@
       "new_response": "#/$defs/NewResponseRuntimeEvent",
       "plan_created": "#/$defs/PlanCreatedRuntimeEvent",
       "plan_updated": "#/$defs/PlanUpdatedRuntimeEvent",
+      "prefix_invalidated": "#/$defs/PrefixInvalidatedRuntimeEvent",
       "retrieval": "#/$defs/RetrievalRuntimeEvent",
       "retrieval_error": "#/$defs/RetrievalErrorRuntimeEvent",
       "token": "#/$defs/TokenRuntimeEvent",
@@ -1543,6 +1640,9 @@
     },
     {
       "$ref": "#/$defs/NewResponseRuntimeEvent"
+    },
+    {
+      "$ref": "#/$defs/PrefixInvalidatedRuntimeEvent"
     },
     {
       "$ref": "#/$defs/CompactionRuntimeEvent"

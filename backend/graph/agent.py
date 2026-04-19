@@ -169,10 +169,17 @@ class AgentManager:
         has changed since the last build for this session.
 
         The stable prefix half of the prompt (workspace files, skill snapshot,
-        tool-result contract, harness guidance) is frozen on the session on
-        first call so sub-agent runs can reuse it for provider prompt-cache
-        hits. The volatile suffix (memory index, git context) is appended
-        fresh each turn and is intentionally excluded from the frozen prefix.
+        tool-result contract, harness guidance) is re-fingerprinted every turn
+        so workspace/skills edits mid-session drop the stale frozen snapshot
+        and install the fresh prefix sub-agents will see. The volatile suffix
+        (memory index, git context) is appended fresh each turn and is
+        intentionally excluded from the frozen prefix.
+
+        Returns ``(agent, registration)``. ``registration`` is the
+        :class:`FrozenPrefixRegistration` returned by the session manager on
+        this turn when ``session_id`` was supplied, otherwise ``None``.
+        Callers use ``registration.invalidated`` to surface a
+        ``prefix_invalidated`` SSE event to the UI.
         """
         assert self.base_dir is not None, "AgentManager not initialised"
         stable_prefix, volatile_suffix = build_system_prompt_blocks(
@@ -186,8 +193,9 @@ class AgentManager:
         tool_names = tuple(
             getattr(tool, "name", type(tool).__name__) for tool in self.tools
         )
+        prefix_registration = None
         if session_id and self.session_manager is not None:
-            self.session_manager.freeze_session_prefix(
+            prefix_registration = self.session_manager.freeze_session_prefix(
                 session_id,
                 stable_prefix=stable_prefix_with_harness,
                 tool_names=tool_names,
@@ -207,7 +215,7 @@ class AgentManager:
             async with self._cache_lock:
                 cached = self._agent_cache.get(key)
                 if cached is not None:
-                    return cached
+                    return cached, prefix_registration
                 agent = create_agent(
                     effective_llm, self.tools, system_prompt=system_prompt
                 )
@@ -220,9 +228,12 @@ class AgentManager:
                 for stale in stale_keys:
                     self._agent_cache.pop(stale, None)
                 self._agent_cache[key] = agent
-                return agent
+                return agent, prefix_registration
 
-        return create_agent(effective_llm, self.tools, system_prompt=system_prompt)
+        return (
+            create_agent(effective_llm, self.tools, system_prompt=system_prompt),
+            prefix_registration,
+        )
 
     async def _run_llm_probe_retrieval(
         self,
@@ -404,7 +415,7 @@ class AgentManager:
         set_active_skills_on_current_context(selected_skill_entries)
         policy_context = get_tool_policy_context()
         session_id = policy_context.session_id if policy_context is not None else None
-        agent = await self._build_agent(
+        agent, prefix_registration = await self._build_agent(
             rag_mode,
             skill_entries=selected_skill_entries,
             session_id=session_id,
@@ -416,6 +427,16 @@ class AgentManager:
         turn_started_at = datetime.now(timezone.utc)
         streamed_any_event = False
         used_fallback = False
+
+        if prefix_registration is not None and prefix_registration.invalidated:
+            streamed_any_event = True
+            yield {
+                "type": "prefix_invalidated",
+                "session_id": session_id,
+                "previous_fingerprint": prefix_registration.previous_fingerprint,
+                "current_fingerprint": prefix_registration.frozen.prefix_fingerprint,
+                "reason": "workspace_or_skills_edit",
+            }
 
         # Biology requests with retrieval and multi-step reasoning often need
         # far more graph turns than LangGraph's small default budget.
@@ -554,7 +575,7 @@ class AgentManager:
                             role="executor",
                             exc=exc,
                         )
-                        agent = await self._build_agent(
+                        agent, _ = await self._build_agent(
                             rag_mode,
                             skill_entries=selected_skill_entries,
                             llm=fallback_llm,

@@ -56,7 +56,7 @@ async def test_concurrent_build_agent_across_sessions_preserves_both_entries(
     ):
         task_a = asyncio.create_task(manager._build_agent(session_id=session_a))
         task_b = asyncio.create_task(manager._build_agent(session_id=session_b))
-        agent_a, agent_b = await asyncio.gather(task_a, task_b)
+        (agent_a, _reg_a), (agent_b, _reg_b) = await asyncio.gather(task_a, task_b)
 
     # Both session entries survive — neither clobbered the other.
     keys = list(manager._agent_cache.keys())

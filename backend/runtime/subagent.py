@@ -85,9 +85,11 @@ class SubAgentContract:
     turn of the parent session. When set, ``run_subagent`` prepends it verbatim
     to ``system_prompt`` so the provider's prefix cache matches the parent
     agent's leading bytes and ~95% of the sub-agent's input is served from
-    cache. Adding a skill or editing workspace files mid-session silently
-    invalidates the prefix and degrades the cache hit rate; see
-    :meth:`SessionManager.freeze_session_prefix` for the drift warning hook.
+    cache. Adding a skill or editing workspace files mid-session re-fingerprints
+    the prefix: the stale snapshot is dropped, the fresh one is installed,
+    a ``prefix_invalidated`` SSE event is emitted, and sub-agents launched on
+    subsequent turns read the fresh prefix. See
+    :meth:`SessionManager.freeze_session_prefix` for invalidation semantics.
     """
 
     name: str
