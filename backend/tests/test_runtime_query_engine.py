@@ -570,6 +570,197 @@ async def test_query_engine_can_treat_repair_required_as_advisory():
 
 
 @pytest.mark.asyncio
+async def test_query_engine_emits_typed_error_when_verifier_token_cap_exceeded():
+    class _CapBreachingAgentManager(_FakeAgentManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def astream(self, message: str, history: list[dict]) -> AsyncGenerator[dict, None]:
+            self.calls += 1
+            if self.calls == 1:
+                yield {"type": "token", "content": "First draft."}
+                yield {
+                    "type": "tool_end",
+                    "tool": "verification_agent",
+                    "output": "verifier summary",
+                    "run_id": "verify-run-1",
+                    "result": {
+                        "status": "success",
+                        "summary": "Verifier verdict: repair_required.",
+                        "structured_payload": {
+                            "agent_type": "verification",
+                            "verification": {
+                                "verdict": "repair_required",
+                                "summary": "Needs repair.",
+                                "checks": [],
+                                "issues": ["issue"],
+                                "repair_instructions": ["fix"],
+                            },
+                            "tool_trace": [],
+                        },
+                    },
+                }
+                yield {"type": "done"}
+                return
+
+            # Repair retry: emit a large token that blows the verifier token cap.
+            yield {"type": "token", "content": "blown budget " * 200}
+            yield {"type": "done"}
+
+    manager = _CapBreachingAgentManager()
+    engine = QueryEngine(manager)
+    turn = QueryTurnInput(message="hello", history=[{"role": "system", "content": "ctx"}])
+
+    with patch(
+        "runtime.query_engine.get_verification_settings",
+        return_value={
+            "retry_on_repair_required": True,
+            "verifier_max_wall_s": 0,
+            "verifier_max_tokens": 5,
+        },
+    ):
+        events = [event async for event in engine.run_harness_turn(turn)]
+
+    error_events = [event for event in events if event.get("type") == "error"]
+    assert len(error_events) == 1
+    error = error_events[0]
+    assert error["turn_status"] == "verifier_cap_exceeded"
+    assert error["error"].startswith("verifier token cap exceeded at ")
+    assert error["exit"]["reason"] == "token_budget"
+    assert error["exit"]["exit_code"] == 3
+    assert events[-1] is error
+
+    assert manager.calls == 2, "cap must fire during the first repair retry"
+    assert [event["type"] for event in events].count("new_response") == 1
+    assert not any(event.get("type") == "done" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_query_engine_emits_typed_error_when_verifier_wallclock_cap_exceeded():
+    class _SlowRepairAgentManager(_FakeAgentManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def astream(self, message: str, history: list[dict]) -> AsyncGenerator[dict, None]:
+            self.calls += 1
+            if self.calls == 1:
+                yield {"type": "token", "content": "draft"}
+                yield {
+                    "type": "tool_end",
+                    "tool": "verification_agent",
+                    "output": "verifier summary",
+                    "run_id": "verify-run-1",
+                    "result": {
+                        "status": "success",
+                        "summary": "Verifier verdict: repair_required.",
+                        "structured_payload": {
+                            "agent_type": "verification",
+                            "verification": {
+                                "verdict": "repair_required",
+                                "summary": "Needs repair.",
+                                "checks": [],
+                                "issues": ["issue"],
+                                "repair_instructions": ["fix"],
+                            },
+                            "tool_trace": [],
+                        },
+                    },
+                }
+                yield {"type": "done"}
+                return
+
+            await asyncio.sleep(0.15)
+            yield {"type": "token", "content": "slow repair"}
+            yield {"type": "done"}
+
+    manager = _SlowRepairAgentManager()
+    engine = QueryEngine(manager)
+    turn = QueryTurnInput(message="hello", history=[{"role": "system", "content": "ctx"}])
+
+    with patch(
+        "runtime.query_engine.get_verification_settings",
+        return_value={
+            "retry_on_repair_required": True,
+            "verifier_max_wall_s": 0.05,
+            "verifier_max_tokens": 0,
+        },
+    ):
+        events = [event async for event in engine.run_harness_turn(turn)]
+
+    error_events = [event for event in events if event.get("type") == "error"]
+    assert len(error_events) == 1
+    error = error_events[0]
+    assert error["turn_status"] == "verifier_cap_exceeded"
+    assert error["error"].startswith("verifier wallclock cap exceeded at ")
+    assert error["exit"]["reason"] == "token_budget"
+    assert manager.calls == 2, "cap must fire during the first repair retry"
+
+
+@pytest.mark.asyncio
+async def test_query_engine_run_turn_attaches_turn_result_to_verifier_cap_error():
+    class _CapBreachingAgentManager(_FakeAgentManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def astream(self, message: str, history: list[dict]) -> AsyncGenerator[dict, None]:
+            self.calls += 1
+            if self.calls == 1:
+                yield {"type": "token", "content": "partial draft "}
+                yield {
+                    "type": "tool_end",
+                    "tool": "verification_agent",
+                    "output": "verifier summary",
+                    "run_id": "verify-run-1",
+                    "result": {
+                        "status": "success",
+                        "summary": "Verifier verdict: repair_required.",
+                        "structured_payload": {
+                            "agent_type": "verification",
+                            "verification": {
+                                "verdict": "repair_required",
+                                "summary": "Needs repair.",
+                                "checks": [],
+                                "issues": ["issue"],
+                                "repair_instructions": ["fix"],
+                            },
+                            "tool_trace": [],
+                        },
+                    },
+                }
+                yield {"type": "done"}
+                return
+
+            yield {"type": "token", "content": "oversized repair " * 100}
+            yield {"type": "done"}
+
+    engine = QueryEngine(_CapBreachingAgentManager())
+    turn = QueryTurnInput(message="hello", history=[])
+
+    with patch(
+        "runtime.query_engine.get_verification_settings",
+        return_value={
+            "retry_on_repair_required": True,
+            "verifier_max_wall_s": 0,
+            "verifier_max_tokens": 5,
+        },
+    ):
+        events = [event async for event in engine.run_turn(turn)]
+
+    error_events = [event for event in events if event.get("type") == "error"]
+    assert len(error_events) == 1
+    error = error_events[0]
+    assert error["turn_status"] == "verifier_cap_exceeded"
+    turn_result = error["turn_result"]
+    assert turn_result.turn_status == "verifier_cap_exceeded"
+    assert any(
+        "partial draft" in seg.content for seg in turn_result.segments
+    ), "partial streamed content must be preserved on verifier cap error"
+
+
+@pytest.mark.asyncio
 async def test_query_engine_stops_runaway_planner_when_budget_exceeded():
     class _RunawayPlannerAgentManager(_FakeAgentManager):
         def __init__(self) -> None:

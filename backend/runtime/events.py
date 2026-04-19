@@ -34,6 +34,11 @@ _TURN_STATUS_TO_EXIT: dict[str, tuple[str, int]] = {
     "ok": ("success", 0),
     "awaiting_approval": ("awaiting_approval", 4),
     "budget_exceeded": ("token_budget", 3),
+    # ``verifier_cap_exceeded`` is only carried on ``error`` events emitted
+    # by ``run_harness_turn``; the SSE adapter strips turn_status off error
+    # payloads before they leave the server, so this does not need a slot
+    # in ``DoneRuntimeEvent.turn_status``.
+    "verifier_cap_exceeded": ("token_budget", 3),
     "error": ("tool_error", 1),
     "cancelled": ("user_abort", 2),
 }

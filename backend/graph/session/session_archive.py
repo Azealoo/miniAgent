@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 from graph.session.session_archive_index import (
+    _atomic_write_text,
     append_archive_entry,
     list_archive_entries,
 )
@@ -128,8 +129,8 @@ class SessionManager(SessionStore):
         # Write archive file
         archive_id = str(time.time_ns())
         archive_path = self.archive_dir / f"{session_id}_{archive_id}.json"
-        archive_path.write_text(
-            json.dumps(archived, ensure_ascii=False, indent=2), encoding="utf-8"
+        _atomic_write_text(
+            archive_path, json.dumps(archived, ensure_ascii=False, indent=2)
         )
 
         # Update the on-disk sidecar so ``list_archived_history_batches`` can

@@ -28,7 +28,6 @@ import hashlib
 import json
 import logging
 import os
-import tempfile
 import threading
 import time
 import uuid
@@ -36,7 +35,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from graph.session.session_archive_index import remove_session_from_index
+from graph.session.session_archive_index import (
+    _atomic_write_text,
+    remove_session_from_index,
+)
 from graph.session.session_normalizer import (
     _build_blocks_from_legacy_message,
     _normalize_blocks,
@@ -138,9 +140,16 @@ class SessionStore:
 
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as exc:
             # Corrupted or unreadable file — return a fresh session structure
-            # rather than propagating a 500 error to the user.
+            # rather than propagating a 500 error to the user. Log so
+            # silent data loss from a truncated write is visible in ops.
+            logger.warning(
+                "session_read_fallback session_id=%s path=%s error=%s",
+                session_id,
+                path,
+                exc,
+            )
             return self._empty(session_id)
 
         # v1 migration: plain list → v2 dict
@@ -161,25 +170,10 @@ class SessionStore:
         data.setdefault("schema_version", SESSION_SCHEMA_VERSION)
         data["updated_at"] = time.time()
         self._stamp_deterministic_mode(data)
-        target = self._path(session_id)
-        payload = json.dumps(data, ensure_ascii=False, indent=2)
-        # Write to a sibling temp file and rename into place so a concurrent
-        # reader on another worker never observes a truncated/partial JSON.
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{session_id}.",
-            suffix=".tmp",
-            dir=str(target.parent),
+        _atomic_write_text(
+            self._path(session_id),
+            json.dumps(data, ensure_ascii=False, indent=2),
         )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
-                tmp.write(payload)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-            os.replace(tmp_name, target)
-        except BaseException:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(tmp_name)
-            raise
 
     @staticmethod
     def _stamp_deterministic_mode(data: dict) -> None:

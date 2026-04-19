@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-RuntimeConfigLayerName = Literal["defaults", "user", "project", "local"]
+RuntimeConfigLayerName = Literal["defaults", "user", "project", "env", "local"]
 
 
 @dataclass(frozen=True)

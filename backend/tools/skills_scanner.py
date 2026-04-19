@@ -9,6 +9,8 @@ Supports:
 - Per-skill enable/disable via config skills.entries.<name>.enabled
 """
 import os
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -326,8 +328,73 @@ def parse_skill_entry(base_dir: Path, source: SkillSource, skill_md: Path) -> Op
         return None
 
 
+# Short TTL safety net on top of mtime-based invalidation — long enough to
+# elide re-walks within a single chat turn, short enough that out-of-band
+# edits (including those that don't change mtime, e.g. on coarse-grained
+# filesystems) still surface quickly.
+_CACHE_TTL_SECONDS = 5.0
+_REGISTRY_CACHE: dict[
+    tuple[str, tuple[str, ...], bool],
+    tuple[float, tuple[tuple[str, int], ...], list[dict[str, Any]]],
+] = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def _registry_fingerprint(
+    skill_files: list[tuple[SkillSource, Path]],
+) -> tuple[tuple[str, int], ...]:
+    fingerprint: list[tuple[str, int]] = []
+    for _, path in skill_files:
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            mtime_ns = 0
+        fingerprint.append((str(path), mtime_ns))
+    return tuple(fingerprint)
+
+
+def _clear_registry_cache() -> None:
+    """Drop any cached registry entries (primarily for tests)."""
+    with _CACHE_LOCK:
+        _REGISTRY_CACHE.clear()
+
+
 def _build_registry_entries(
     base_dir: Path,
+    *,
+    respect_enabled_for_selection: bool,
+) -> list[dict[str, Any]]:
+    skill_files = iter_skill_files(base_dir)
+    source_roots = tuple(sorted({str(source.root_dir) for source, _ in skill_files}))
+    fingerprint = _registry_fingerprint(skill_files)
+    cache_key = (str(base_dir), source_roots, respect_enabled_for_selection)
+    now = time.monotonic()
+
+    with _CACHE_LOCK:
+        cached = _REGISTRY_CACHE.get(cache_key)
+        if cached is not None:
+            expiry, cached_fingerprint, cached_entries = cached
+            if expiry > now and cached_fingerprint == fingerprint:
+                return cached_entries
+
+    entries = _compute_registry_entries(
+        base_dir,
+        skill_files,
+        respect_enabled_for_selection=respect_enabled_for_selection,
+    )
+
+    with _CACHE_LOCK:
+        _REGISTRY_CACHE[cache_key] = (
+            now + _CACHE_TTL_SECONDS,
+            fingerprint,
+            entries,
+        )
+    return entries
+
+
+def _compute_registry_entries(
+    base_dir: Path,
+    skill_files: list[tuple[SkillSource, Path]],
     *,
     respect_enabled_for_selection: bool,
 ) -> list[dict[str, Any]]:
@@ -336,7 +403,7 @@ def _build_registry_entries(
     selected_names: set[str] = set()
     registry_entries: list[dict[str, Any]] = []
 
-    for source, skill_md in iter_skill_files(base_dir):
+    for source, skill_md in skill_files:
         entry = parse_skill_entry(base_dir, source, skill_md)
         if not entry:
             continue
