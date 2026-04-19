@@ -940,13 +940,13 @@ class TestDeleteSessionDistillationHook:
 
 
 class TestCorruptSessionQuarantine:
-    def test_corrupt_file_quarantined_and_raises(self, sm, tmp_path):
+    def test_corrupt_file_quarantined_and_raises_when_opted_in(self, sm, tmp_path):
         sid = sm.create_session()
         path = tmp_path / "sessions" / f"{sid}.json"
         path.write_text("{not-json", encoding="utf-8")
 
         with pytest.raises(SessionCorruptError) as excinfo:
-            sm.load_session(sid)
+            sm.load_session(sid, raise_on_corrupt=True)
 
         # Original session_id is exposed on the typed error.
         assert excinfo.value.session_id == sid
@@ -964,6 +964,40 @@ class TestCorruptSessionQuarantine:
 
         # Active session slot is freed.
         assert not path.exists()
+
+    def test_corrupt_file_returns_empty_by_default(self, sm, tmp_path):
+        """Internal callers (turn runtime, files workspace, tokens) must keep
+        working when a single session file is corrupt. ``_read`` quarantines
+        the file but returns an empty session unless ``raise_on_corrupt`` is
+        opted in."""
+        sid = sm.create_session()
+        path = tmp_path / "sessions" / f"{sid}.json"
+        path.write_text("{not-json", encoding="utf-8")
+
+        # Default behavior: no exception, just an empty history.
+        assert sm.load_session(sid) == []
+        assert sm.load_session_for_agent(sid) == []
+
+        # Quarantine still happens so the bad bytes are preserved.
+        quarantined = list(
+            (tmp_path / "sessions" / "_quarantine").glob(f"*_{sid}.json")
+        )
+        assert len(quarantined) == 1
+
+    def test_corrupt_utf8_quarantined_and_raises_when_opted_in(self, sm, tmp_path):
+        sid = sm.create_session()
+        path = tmp_path / "sessions" / f"{sid}.json"
+        # Bytes that cannot be decoded as UTF-8.
+        path.write_bytes(b"\xff\xfe\x00not-utf8")
+
+        with pytest.raises(SessionCorruptError) as excinfo:
+            sm.load_session(sid, raise_on_corrupt=True)
+
+        assert excinfo.value.session_id == sid
+        quarantined = list(
+            (tmp_path / "sessions" / "_quarantine").glob(f"*_{sid}.json")
+        )
+        assert len(quarantined) == 1
 
     def test_quarantined_session_not_in_active_list(self, sm, tmp_path):
         good_sid = sm.create_session()
@@ -985,6 +1019,26 @@ class TestCorruptSessionQuarantine:
         quarantine_dir = tmp_path / "sessions" / "_quarantine"
         assert list(quarantine_dir.glob(f"*_{bad_sid}.json"))
 
+    def test_list_sessions_skips_non_utf8_files(self, sm, tmp_path):
+        """A single file with invalid UTF-8 bytes must not abort the catalog."""
+        good_sid = sm.create_session()
+        bad_sid = sm.create_session()
+
+        # Write bytes that cannot be decoded as UTF-8.
+        (tmp_path / "sessions" / f"{bad_sid}.json").write_bytes(
+            b"\xff\xfe\x00not-utf8"
+        )
+
+        listed = sm.list_sessions()
+        listed_ids = {s["id"] for s in listed}
+
+        assert good_sid in listed_ids
+        assert bad_sid not in listed_ids
+
+        # Quarantined rather than left in the active slot to break the next pass.
+        quarantine_dir = tmp_path / "sessions" / "_quarantine"
+        assert list(quarantine_dir.glob(f"*_{bad_sid}.json"))
+
     def test_quarantine_filename_uses_unix_ts_prefix(self, sm, tmp_path):
         sid = sm.create_session()
         (tmp_path / "sessions" / f"{sid}.json").write_text(
@@ -992,7 +1046,7 @@ class TestCorruptSessionQuarantine:
         )
 
         with pytest.raises(SessionCorruptError):
-            sm._read(sid)
+            sm._read(sid, raise_on_corrupt=True)
 
         quarantined = list(
             (tmp_path / "sessions" / "_quarantine").glob(f"*_{sid}.json")

@@ -115,7 +115,7 @@ def rename_session(session_id: str, body: RenameRequest, request: Request = None
     require_execution_access(request)
     _check_session_id(session_id)
     try:
-        _sm().rename_session(session_id, body.title)
+        _sm().rename_session(session_id, body.title, raise_on_corrupt=True)
         return _sm().get_session_meta(session_id)
     except SessionCorruptError as exc:
         raise _session_corrupt_response(exc) from exc
@@ -142,7 +142,7 @@ def get_history(session_id: str, request: Request = None):
     require_inspection_access(request)
     _check_session_id(session_id)
     try:
-        return _sm().load_session(session_id)
+        return _sm().load_session(session_id, raise_on_corrupt=True)
     except SessionCorruptError as exc:
         raise _session_corrupt_response(exc) from exc
 
@@ -183,7 +183,7 @@ async def generate_title(session_id: str, request: Request = None):
     from graph.agent import agent_manager
 
     try:
-        messages = _sm().load_session(session_id)
+        messages = _sm().load_session(session_id, raise_on_corrupt=True)
     except SessionCorruptError as exc:
         raise _session_corrupt_response(exc) from exc
     if not messages:
@@ -201,7 +201,7 @@ async def generate_title(session_id: str, request: Request = None):
         raise HTTPException(500, str(exc))
 
     try:
-        _sm().rename_session(session_id, title)
+        _sm().rename_session(session_id, title, raise_on_corrupt=True)
     except SessionCorruptError as exc:
         raise _session_corrupt_response(exc) from exc
     return {"session_id": session_id, "title": title}

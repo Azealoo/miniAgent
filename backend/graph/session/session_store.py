@@ -114,18 +114,26 @@ class SessionStore:
         )
         return quarantined
 
-    def _read(self, session_id: str) -> dict:
+    def _read(self, session_id: str, *, raise_on_corrupt: bool = False) -> dict:
         path = self._path(session_id)
         if not path.exists():
             return self._empty(session_id)
 
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             quarantined = self._quarantine_corrupt_file(path, session_id)
-            raise SessionCorruptError(
-                session_id, str(quarantined), original_error=exc
-            ) from exc
+            if raise_on_corrupt:
+                raise SessionCorruptError(
+                    session_id, str(quarantined), original_error=exc
+                ) from exc
+            # Default: behave like the pre-quarantine code path and return an
+            # empty session so internal call sites (turn runtime, files
+            # workspace summary, token stats, compaction) do not start raising
+            # generic 500s when a single session file is corrupt. The bytes
+            # were preserved in ``_quarantine`` and the API endpoints that
+            # want a typed 422 opt in via ``raise_on_corrupt=True``.
+            return self._empty(session_id)
         except OSError as exc:
             # Transient read failure (permissions, EBUSY, etc.) — surface as
             # an empty session rather than destroying the file.
@@ -203,6 +211,12 @@ class SessionStore:
                 # Transient read failure — skip this file but leave it in
                 # place so a future call can recover it.
                 continue
+            except UnicodeDecodeError:
+                # Non-UTF-8 bytes: file is corrupt at the encoding layer.
+                # Quarantine and skip so a single malformed session does not
+                # take down the entire catalog listing.
+                self._quarantine_corrupt_file(path, path.stem)
+                continue
 
             try:
                 raw = json.loads(raw_text)
@@ -233,9 +247,20 @@ class SessionStore:
         sessions.sort(key=lambda x: x["updated_at"], reverse=True)
         return sessions
 
-    def load_session(self, session_id: str) -> list[dict]:
-        """Return the raw message array (for display / history endpoint)."""
-        return _normalize_messages(self._read(session_id).get("messages", []))
+    def load_session(
+        self, session_id: str, *, raise_on_corrupt: bool = False
+    ) -> list[dict]:
+        """Return the raw message array (for display / history endpoint).
+
+        ``raise_on_corrupt=True`` surfaces ``SessionCorruptError`` when the
+        underlying file fails to decode; the default mirrors prior behavior
+        and returns an empty session so internal callers do not regress.
+        """
+        return _normalize_messages(
+            self._read(session_id, raise_on_corrupt=raise_on_corrupt).get(
+                "messages", []
+            )
+        )
 
     def load_request_messages(self, session_id: str, request_id: str) -> list[dict]:
         """Return normalized messages associated with a persisted request id."""
@@ -248,14 +273,20 @@ class SessionStore:
             if message.get("request_id") == normalized_request_id
         ]
 
-    def load_session_for_agent(self, session_id: str) -> list[dict]:
+    def load_session_for_agent(
+        self, session_id: str, *, raise_on_corrupt: bool = False
+    ) -> list[dict]:
         """
         Return history optimised for the LLM:
         - Consecutive assistant messages are merged into one.
         - If compressed_context exists, a synthetic system message is
           prepended containing the summary.
+
+        ``raise_on_corrupt=True`` surfaces ``SessionCorruptError`` when the
+        underlying file fails to decode; the default mirrors prior behavior
+        and returns an empty history so the turn runtime keeps working.
         """
-        data = self._read(session_id)
+        data = self._read(session_id, raise_on_corrupt=raise_on_corrupt)
         messages = self.load_session(session_id)
         compressed = data.get("compressed_context", "")
 
@@ -309,8 +340,10 @@ class SessionStore:
         data["messages"].append(msg)
         self._write(session_id, data)
 
-    def rename_session(self, session_id: str, title: str) -> None:
-        data = self._read(session_id)
+    def rename_session(
+        self, session_id: str, title: str, *, raise_on_corrupt: bool = False
+    ) -> None:
+        data = self._read(session_id, raise_on_corrupt=raise_on_corrupt)
         data["title"] = title
         self._write(session_id, data)
 
