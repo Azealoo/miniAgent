@@ -13,6 +13,8 @@ from runtime_config_types import LoadedRuntimeConfig
 _CONFIG_FILE = Path(__file__).parent / "config.json"
 _DEFAULT_MEMORY_STALE_DAYS = 30
 _DEFAULT_MAX_TOKENS_PER_TURN = 200_000
+_DEFAULT_LLM_OUTPUT_TOKEN_CAP = 8_000
+_DEFAULT_LLM_OUTPUT_TOKEN_CAP_ESCALATED = 65_536
 
 # Per-section character budgets used by graph.prompt_builder. Each value is the
 # upper bound for one assembled section; the prompt builder truncates a section
@@ -47,6 +49,10 @@ _DEFAULT: dict = {
     },
     "verification": {
         "retry_on_repair_required": True,
+    },
+    "llm_output_token_cap": {
+        "default": _DEFAULT_LLM_OUTPUT_TOKEN_CAP,
+        "escalated": _DEFAULT_LLM_OUTPUT_TOKEN_CAP_ESCALATED,
     },
     "tool_policy": {
         "enabled": True,
@@ -191,6 +197,31 @@ def get_execution_backend_settings() -> dict[str, Any]:
 
 def get_rag_mode() -> bool:
     return _load_runtime().get("rag_mode", False)
+
+
+def get_llm_output_token_caps() -> tuple[int, int]:
+    """Return (default, escalated) per-request output token caps.
+
+    0 or negative values disable the cap (pass no ``max_tokens`` through).
+    The escalated cap is the upper bound used after a single
+    ``finish_reason="length"`` retry in ``invoke_with_escalation``.
+    """
+    raw = _load_runtime().get("llm_output_token_cap", {})
+    if not isinstance(raw, dict):
+        raw = {}
+
+    def _resolve(key: str, default: int) -> int:
+        value = raw.get(key, default)
+        try:
+            resolved = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0, resolved)
+
+    return (
+        _resolve("default", _DEFAULT_LLM_OUTPUT_TOKEN_CAP),
+        _resolve("escalated", _DEFAULT_LLM_OUTPUT_TOKEN_CAP_ESCALATED),
+    )
 
 
 def get_max_tokens_per_turn() -> int:
