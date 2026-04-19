@@ -98,23 +98,33 @@ def _check_path(relative_path: str, *, write: bool = False) -> tuple[Path, str]:
 
     Returns (resolved_absolute_path, normalized_relative_path).
     Raises HTTPException on any violation.
+
+    Ordering contract: strip -> reject '..' -> resolve -> confirm under base
+    via relative_to() -> derive the normalized relative path from the resolved
+    target -> run frozen-config / whitelist / secret checks against that
+    derived path. Applying the whitelist to raw input is fragile (prefix-name
+    tricks, symlink traversal); deriving from the resolved target fixes that.
     """
     # Strip leading slash or ./
     clean = relative_path.strip().lstrip("/").removeprefix("./")
 
-    # Traversal guard (before whitelist check)
+    # Traversal guard — reject '..' before any disk access.
     if ".." in clean.split("/"):
         raise HTTPException(403, "Path traversal is not allowed.")
 
-    base = _base_dir()
+    base = _base_dir().resolve()
     target = (base / clean).resolve()
 
-    # Use relative_to() instead of startswith() to prevent prefix-name attacks:
-    # e.g. /project/backend_evil would falsely pass startswith(/project/backend)
+    # Confirm target lives under base. This is what defeats prefix-name and
+    # symlink escapes; the whitelist below is then applied to the *resolved*
+    # relative path rather than the raw user input.
     try:
-        target.relative_to(base.resolve())
+        resolved_relative = target.relative_to(base)
     except ValueError:
         raise HTTPException(403, "Path is outside the project directory.")
+
+    # Platform-independent relative path for whitelist / audit comparisons.
+    clean = resolved_relative.as_posix()
 
     # Runtime config files are frozen during a turn. Reject writes with a
     # clear, specific message (instead of the generic whitelist error) unless
@@ -122,7 +132,7 @@ def _check_path(relative_path: str, *, write: bool = False) -> tuple[Path, str]:
     if write and _is_frozen_config_path(clean) and not cfg.config_reload_allowed():
         raise HTTPException(403, _FROZEN_CONFIG_MESSAGE)
 
-    # Whitelist check
+    # Whitelist check — against the resolved relative path.
     allowed_prefixes = _WRITE_ALLOWED_PREFIXES if write else _READ_ALLOWED_PREFIXES
     allowed = any(clean.startswith(p) for p in allowed_prefixes) or (
         clean in _ALLOWED_ROOT_FILES
@@ -461,19 +471,22 @@ def save_file(body: SaveRequest, request: Request = None):
 def _check_stream_write_path(relative_path: str) -> tuple[Path, str]:
     """Path check for the streaming PUT. Strictly restricted to artifacts/.
 
-    Mirrors the safety checks in `_check_path` but uses a tighter whitelist so
-    the editor POST surface is not widened by large streamed uploads.
+    Mirrors the resolve-first ordering in `_check_path` but with a tighter
+    whitelist so the editor POST surface is not widened by large streamed
+    uploads.
     """
     clean = relative_path.strip().lstrip("/").removeprefix("./")
     if ".." in clean.split("/"):
         raise HTTPException(403, "Path traversal is not allowed.")
 
-    base = _base_dir()
+    base = _base_dir().resolve()
     target = (base / clean).resolve()
     try:
-        target.relative_to(base.resolve())
+        resolved_relative = target.relative_to(base)
     except ValueError:
         raise HTTPException(403, "Path is outside the project directory.")
+
+    clean = resolved_relative.as_posix()
 
     if not any(clean.startswith(p) for p in _STREAM_WRITE_ALLOWED_PREFIXES):
         raise HTTPException(
