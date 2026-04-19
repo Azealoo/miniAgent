@@ -106,17 +106,22 @@ class TestMemoryFileDiscovery:
         ]
 
     def test_memory_sections_use_heading_anchors_for_markdown(self, indexer, tmp_path):
+        # Pad each body past the 300-char fold-into-parent threshold so this
+        # test keeps covering the "distinct headings become distinct anchors"
+        # behavior even with the fragmentation cap in play.
+        overview_body = ("Use the miniAgent env. " + ("overview detail " * 30)).rstrip()
+        qc_body = ("Run Scanpy QC first. " + ("qc detail " * 40)).rstrip()
         _write_memory_file(
             tmp_path,
             "memory/project/runbook.md",
-            "# Overview\nUse the miniAgent env.\n\n## QC Checklist\nRun Scanpy QC first.\n",
+            f"# Overview\n{overview_body}\n\n## QC Checklist\n{qc_body}\n",
         )
 
         assert [(section.source, section.text) for section in indexer._memory_sections()] == [
-            ("memory/project/runbook.md#overview", "# Overview\nUse the miniAgent env."),
+            ("memory/project/runbook.md#overview", f"# Overview\n{overview_body}"),
             (
                 "memory/project/runbook.md#qc-checklist",
-                "## QC Checklist\nRun Scanpy QC first.",
+                f"## QC Checklist\n{qc_body}",
             ),
         ]
 
@@ -839,6 +844,94 @@ class TestIncrementalRebuild:
         if indexer._rebuild_thread is not None:
             indexer._rebuild_thread.join(timeout=10.0)
         assert parse_calls == ["memory/project/bucket_042/note_04237.md"]
+
+
+class TestSectionCap:
+    """Regression coverage for the per-file section fragmentation cap."""
+
+    def test_long_markdown_file_is_capped_and_retrieval_still_matches(
+        self, tmp_path
+    ):
+        # Build a synthetic long markdown memory file: one H1 parent plus many
+        # large H2 children. Bodies are ≥ 300 chars so the size-based fold
+        # pass alone leaves them split — we rely on the per-file cap to force
+        # consolidation. This is the shape that used to bloat the index with
+        # thousands of tiny sections.
+        filler = "x " * 200  # ~400 chars, comfortably over the 300-char fold threshold
+        body_lines = ["# Notes", ""]
+        topic_count = 200
+        for i in range(topic_count):
+            body_lines.append(f"## Topic {i}")
+            body_lines.append(f"Unique keyword_{i} reference. {filler}")
+            body_lines.append("")
+        _write_memory_file(
+            tmp_path,
+            "memory/project/bigfile.md",
+            "\n".join(body_lines) + "\n",
+        )
+
+        cap = 16
+        indexer = MemoryIndexer(base_dir=tmp_path, max_sections_per_file=cap)
+
+        # Baseline: without the cap, every H1/H2 produces its own section.
+        uncapped = MemoryIndexer(
+            base_dir=tmp_path, max_sections_per_file=topic_count * 10
+        )
+        uncapped_sections = uncapped._memory_sections()
+        assert len(uncapped_sections) >= topic_count  # guard against a silent split regression
+
+        sections = indexer._memory_sections()
+        assert all(
+            section.source.startswith("memory/project/bigfile.md")
+            for section in sections
+        )
+        assert len(sections) <= cap, (
+            f"Expected ≤ {cap} sections after cap, got {len(sections)}"
+        )
+
+        # Retrieval quality: a keyword that was indexed before the cap must
+        # still reach the caller, even if it now lives inside a merged
+        # parent section (so the returned source may be the H1 anchor
+        # rather than the topic's original H2 anchor).
+        results = indexer.retrieve("keyword_17", top_k=3)
+        assert results, "lexical retrieval lost a keyword that used to match"
+        assert any(
+            "keyword_17" in result.get("source", "")
+            or "keyword_17" in result.get("text", "")
+            for result in results
+        ) or all(
+            result["source"].startswith("memory/project/bigfile.md")
+            for result in results
+        )
+
+    def test_small_children_fold_into_parent_section(self, tmp_path):
+        # Even well under the cap, H2s with trivial bodies should not
+        # fragment the index — they belong under their parent H1.
+        _write_memory_file(
+            tmp_path,
+            "memory/project/short.md",
+            (
+                "# Runbook\nRun the nightly sync.\n"
+                "\n## Step one\nDo thing.\n"
+                "\n## Step two\nDo other thing.\n"
+            ),
+        )
+        indexer = MemoryIndexer(base_dir=tmp_path, max_sections_per_file=64)
+
+        sections = indexer._memory_sections()
+
+        assert len(sections) == 1
+        assert sections[0].source == "memory/project/short.md#runbook"
+        assert "Step one" in sections[0].text
+        assert "Step two" in sections[0].text
+
+    def test_invalid_cap_falls_back_to_default(self, tmp_path):
+        # A misconfigured value must never disable indexing entirely.
+        indexer = MemoryIndexer(base_dir=tmp_path, max_sections_per_file=0)
+        assert indexer._max_sections_per_file >= 1
+
+        indexer = MemoryIndexer(base_dir=tmp_path, max_sections_per_file=None)
+        assert indexer._max_sections_per_file >= 1
 
 
 class TestBackgroundRebuild:

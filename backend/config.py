@@ -43,6 +43,12 @@ _DEFAULT_PROMPT_BUDGET: dict = {
 _DEFAULT_LLM_PROBE_MIN_FILES = 10
 _DEFAULT_LLM_PROBE_MAX_CHARS = 8_000
 
+# Upper bound on the number of sections a single markdown memory file may
+# produce in ``MemoryIndexer._split_document_sections``. Long files fragment
+# at every H2-H6 heading and can otherwise yield thousands of tiny sections
+# that bloat the index.
+_DEFAULT_MAX_SECTIONS_PER_FILE = 64
+
 # Normalized values for rag_mode. Historically this was a plain bool
 # (False = no RAG, True = keyword BM25/lexical retrieval). The string form
 # ("off" / "keyword" / "llm_probe") is a superset that unlocks the LLM-probe
@@ -140,6 +146,9 @@ _DEFAULT: dict = {
     "skills": {
         "extra_dirs": [],
         "entries": {},
+    },
+    "memory_indexer": {
+        "max_sections_per_file": _DEFAULT_MAX_SECTIONS_PER_FILE,
     },
     "read_file_extra_roots": [],
     "retention": {
@@ -383,6 +392,28 @@ def get_llm_probe_max_chars() -> int:
         return max(500, int(raw))
     except (TypeError, ValueError):
         return _DEFAULT_LLM_PROBE_MAX_CHARS
+
+
+def get_memory_indexer_settings() -> dict[str, Any]:
+    memory_indexer = _load_runtime().get("memory_indexer", {})
+    return dict(memory_indexer) if isinstance(memory_indexer, dict) else {}
+
+
+def get_max_sections_per_file() -> int:
+    """Return the per-file section cap used by ``MemoryIndexer``.
+
+    Resolution order: runtime ``memory_indexer.max_sections_per_file``, then
+    the built-in default. Invalid / non-positive values fall back to the
+    default so a misconfigured value can never disable indexing entirely.
+    """
+    raw = get_memory_indexer_settings().get(
+        "max_sections_per_file", _DEFAULT_MAX_SECTIONS_PER_FILE
+    )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_SECTIONS_PER_FILE
+    return value if value >= 1 else _DEFAULT_MAX_SECTIONS_PER_FILE
 
 
 def get_llm_output_token_caps() -> tuple[int, int]:
