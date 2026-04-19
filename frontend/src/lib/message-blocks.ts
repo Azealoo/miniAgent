@@ -896,10 +896,26 @@ export function deriveMessageBlocks(
   return message.role === "assistant" ? augmentHelperBlocks(blocks) : blocks;
 }
 
+// Per-message cache for the zero-option fast path. ChatMessage calls this on
+// every render during token streaming; the store keeps a stable reference for
+// non-streaming messages, so looking up the previous result avoids re-running
+// the full block derivation and sanitizer pipeline for every untouched row.
+const normalizedContentCache = new WeakMap<object, NormalizedMessageContent>();
+
 export function normalizeMessageContent(
   message: BlockCompatibleMessage,
   options: NormalizeMessageContentOptions = {}
 ): NormalizedMessageContent {
+  const hasOptions =
+    options.forceHasPlan !== undefined ||
+    options.forceHasVerification !== undefined ||
+    options.forceHasProcessActivity !== undefined;
+  if (!hasOptions && typeof message === "object" && message !== null) {
+    const cached = normalizedContentCache.get(message as object);
+    if (cached) {
+      return cached;
+    }
+  }
   const blocks = deriveMessageBlocks(message);
   const hasTextBlock = blocks.some((block) => block.type === "text");
   const hasPlan = hasBlockType(blocks, "plan");
@@ -979,7 +995,7 @@ export function normalizeMessageContent(
     }
   });
 
-  return {
+  const result: NormalizedMessageContent = {
     blocks,
     content: hasTextBlock ? textParts.join("") : (message.content ?? ""),
     toolCalls:
@@ -987,6 +1003,10 @@ export function normalizeMessageContent(
     retrievals:
       retrievals.length > 0 ? retrievals : [...(message.retrievals ?? [])],
   };
+  if (!hasOptions && typeof message === "object" && message !== null) {
+    normalizedContentCache.set(message as object, result);
+  }
+  return result;
 }
 
 export function messageHasProcessTrail(
