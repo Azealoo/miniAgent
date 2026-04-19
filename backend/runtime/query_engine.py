@@ -8,7 +8,11 @@ from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable, AsyncGenerator, Sequence
 
 from config import get_max_tokens_per_turn, get_verification_settings
-from runtime.events import dump_runtime_event
+from runtime.events import (
+    RUNTIME_EVENT_SCHEMA_VERSION,
+    dump_runtime_event,
+    turn_status_to_exit,
+)
 from runtime.metrics_collector import METRICS
 from runtime.turn_ledger import TurnLedger, TurnResult
 from tools.registry import ToolManifestEntry, is_concurrency_safe_tier
@@ -286,11 +290,15 @@ class QueryEngine:
         async for event in self.run_harness_turn(turn):
             if event.get("type") == "done":
                 turn_status = event.get("turn_status") or event.get("status", "ok")
-                yield {
+                forwarded: dict[str, Any] = {
                     "type": "done",
                     "turn_status": turn_status,
                     "turn_result": ledger.finalize(turn_status=turn_status),
                 }
+                exit_payload = event.get("exit")
+                if isinstance(exit_payload, dict):
+                    forwarded["exit"] = exit_payload
+                yield forwarded
                 return
             if event.get("type") == "error":
                 turn_status = event.get("turn_status", "error")
@@ -325,6 +333,10 @@ class QueryEngine:
                 "type": "error",
                 "error": f"turn budget exceeded at {total} tokens",
                 "turn_status": "budget_exceeded",
+                "exit": turn_status_to_exit(
+                    "budget_exceeded",
+                    summary=f"turn budget exceeded at {total} tokens",
+                ).model_dump(exclude_none=True),
             }
             METRICS.observe_event(event)
             return event
@@ -405,7 +417,13 @@ class QueryEngine:
                 and latest_verification_event is not None
             )
             if not should_retry:
-                done_event = {"type": "done", "turn_status": turn_status}
+                done_event: dict[str, Any] = {
+                    "type": "done",
+                    "turn_status": turn_status,
+                    "exit": turn_status_to_exit(turn_status).model_dump(
+                        exclude_none=True
+                    ),
+                }
                 METRICS.observe_event(done_event)
                 yield done_event
                 return
@@ -474,6 +492,7 @@ class QueryEngine:
         *,
         message: str,
         session_id: str,
+        client_schema_version: int | None = None,
     ) -> AsyncGenerator[str, None]:
         """Run a turn and yield fully-shaped SSE payload strings.
 
@@ -482,6 +501,11 @@ class QueryEngine:
           - tool policy context for the turn
           - SSE envelope formatting for every runtime event
           - persistence of the user message and assistant segments via ``TurnLedger``
+
+        ``client_schema_version`` is taken from the ``X-Runtime-Event-Schema-Version``
+        request header. When a v1 client connects, a single ``warning`` event with
+        ``kind="schema_version_deprecated"`` is emitted before the stream body so
+        the consumer learns that it should migrate to reading ``done.exit``.
         """
         # Deferred imports: ``tools`` pulls in langchain at module load time,
         # which some QueryEngine unit tests avoid by importing the class
@@ -557,6 +581,22 @@ class QueryEngine:
 
         with tool_policy_context(policy_context):
             try:
+                if (
+                    isinstance(client_schema_version, int)
+                    and client_schema_version < RUNTIME_EVENT_SCHEMA_VERSION
+                ):
+                    yield _sse(
+                        {
+                            "type": "warning",
+                            "kind": "schema_version_deprecated",
+                            "message": (
+                                f"client requested RuntimeEvent schema_version="
+                                f"{client_schema_version}; server is on "
+                                f"{RUNTIME_EVENT_SCHEMA_VERSION}. Read ``done.exit`` "
+                                "(reason/exit_code/summary) instead of ``done.turn_status``."
+                            ),
+                        }
+                    )
                 if compaction_event is not None:
                     METRICS.observe_event(compaction_event)
                     yield _sse(compaction_event)
@@ -581,6 +621,9 @@ class QueryEngine:
                         }
                         if isinstance(turn_status, str) and turn_status not in {"", "ok"}:
                             done_payload["turn_status"] = turn_status
+                        done_payload["exit"] = turn_status_to_exit(
+                            turn_status if isinstance(turn_status, str) else None,
+                        ).model_dump(exclude_none=True)
                         if (
                             base_dir is not None
                             and turn_status != "awaiting_approval"

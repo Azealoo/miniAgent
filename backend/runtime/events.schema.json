@@ -39,7 +39,7 @@
           "type": "integer"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -89,6 +89,18 @@
           "description": "Monotonic 1-based sequence number within a single turn.",
           "title": "Event Index"
         },
+        "exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnExit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Structured terminal-state payload introduced in schema_version=2. ``reason`` covers success|tool_error|user_abort|context_limit|token_budget|approval_denied|awaiting_approval and ``exit_code`` is shell-style (0 for success, non-zero per reason). Absent on v1 payloads during rollout but stamped on every producer path here."
+        },
         "request_id": {
           "anyOf": [
             {
@@ -103,7 +115,7 @@
           "title": "Request Id"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -137,7 +149,7 @@
             }
           ],
           "default": null,
-          "description": "Terminal state of the turn. Absent or 'ok' means the turn completed normally; 'awaiting_approval' means the runtime paused on a gated tool and the client must call /api/chat/approval before the next turn; 'cancelled' means the client disconnected or otherwise cancelled the turn before it finished (partial assistant segments are still persisted).",
+          "description": "Legacy v1 terminal state indicator, retained for clients that have not migrated to the ``exit`` payload. New consumers must branch on ``exit.reason`` instead \u2014 the canonical taxonomy is defined there.",
           "title": "Turn Status"
         },
         "type": {
@@ -188,7 +200,7 @@
           "title": "Request Id"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -237,7 +249,7 @@
           "title": "Request Id"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -300,7 +312,7 @@
           "title": "Run Id"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -387,7 +399,7 @@
           "title": "Run Id"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -469,7 +481,7 @@
           "type": "array"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -523,7 +535,7 @@
           "title": "Request Id"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -615,7 +627,7 @@
           "type": "string"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -686,7 +698,7 @@
           "type": "string"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -781,7 +793,7 @@
           "type": "string"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -844,7 +856,7 @@
           "type": "string"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -866,6 +878,50 @@
         "run_id"
       ],
       "title": "ToolStartRuntimeEvent",
+      "type": "object"
+    },
+    "TurnExit": {
+      "additionalProperties": false,
+      "description": "Structured terminal-state payload carried on every ``done`` event.\n\nReplaces the v1 convention of inferring exit state from ``turn_status``\nalone: callers should branch on ``reason`` and treat ``exit_code`` as the\nshell-style result (0 = success, non-zero = failure class).",
+      "properties": {
+        "exit_code": {
+          "description": "Shell-style exit code \u2014 0 for success, non-zero per reason.",
+          "title": "Exit Code",
+          "type": "integer"
+        },
+        "reason": {
+          "description": "Canonical exit reason for the turn.",
+          "enum": [
+            "success",
+            "tool_error",
+            "user_abort",
+            "context_limit",
+            "token_budget",
+            "approval_denied",
+            "awaiting_approval"
+          ],
+          "title": "Reason",
+          "type": "string"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human-readable one-liner describing the exit.",
+          "title": "Summary"
+        }
+      },
+      "required": [
+        "reason",
+        "exit_code"
+      ],
+      "title": "TurnExit",
       "type": "object"
     },
     "VerificationResultRuntimeEvent": {
@@ -911,7 +967,7 @@
           "title": "Run Id"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -1038,7 +1094,7 @@
           "title": "Review Path"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -1110,7 +1166,7 @@
           "type": "string"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -1210,7 +1266,7 @@
           "type": "string"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -1307,7 +1363,7 @@
           "type": "string"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"

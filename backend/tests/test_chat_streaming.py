@@ -807,6 +807,71 @@ async def test_chat_stream_emits_monotonic_event_index_and_terminal_done(
         range(1, len(payloads) + 1)
     )
     assert len({item["request_id"] for item in payloads}) == 1
+    assert payloads[-1]["exit"] == {"reason": "success", "exit_code": 0}
+    assert payloads[-1]["schema_version"] == 2
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_schema_version_deprecation_warning_for_v1_clients(
+    isolated_chat_state,
+):
+    """Issue #90: v1 clients should receive a one-shot ``warning`` with
+    ``kind="schema_version_deprecated"`` before the stream body so callers
+    know to migrate to reading ``done.exit``.
+    """
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    async def fake_astream(_message, _history):
+        yield {"type": "token", "content": "ok"}
+        yield {"type": "done"}
+
+    http_request = _request(
+        "/api/chat",
+        headers=[(b"x-runtime-event-schema-version", b"1")],
+    )
+    with patch.object(agent_manager, "astream", fake_astream):
+        response = await chat(
+            ChatRequest(message="anything", session_id=session_id),
+            http_request=http_request,
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    warnings = [item for item in payloads if item["type"] == "warning"]
+    assert len(warnings) == 1
+    assert warnings[0]["kind"] == "schema_version_deprecated"
+    assert "done.exit" in warnings[0]["message"]
+    assert payloads[-1]["type"] == "done"
+    assert payloads[-1]["exit"]["reason"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_omits_deprecation_warning_when_header_matches_current(
+    isolated_chat_state,
+):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    async def fake_astream(_message, _history):
+        yield {"type": "token", "content": "ok"}
+        yield {"type": "done"}
+
+    http_request = _request(
+        "/api/chat",
+        headers=[(b"x-runtime-event-schema-version", b"2")],
+    )
+    with patch.object(agent_manager, "astream", fake_astream):
+        response = await chat(
+            ChatRequest(message="anything", session_id=session_id),
+            http_request=http_request,
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    assert not any(item["type"] == "warning" for item in payloads)
 
 
 @pytest.mark.asyncio

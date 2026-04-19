@@ -13,9 +13,67 @@ from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-RUNTIME_EVENT_SCHEMA_VERSION: int = 1
+RUNTIME_EVENT_SCHEMA_VERSION: int = 2
 
 SCHEMA_SNAPSHOT_PATH = Path(__file__).with_name("events.schema.json")
+
+# Canonical reason taxonomy for the terminal ``DoneRuntimeEvent.exit`` payload.
+# ``turn_status`` is retained alongside ``exit`` for v1 clients; new consumers
+# should branch on ``exit.reason``.
+TurnExitReason = Literal[
+    "success",
+    "tool_error",
+    "user_abort",
+    "context_limit",
+    "token_budget",
+    "approval_denied",
+    "awaiting_approval",
+]
+
+_TURN_STATUS_TO_EXIT: dict[str, tuple[str, int]] = {
+    "ok": ("success", 0),
+    "awaiting_approval": ("awaiting_approval", 4),
+    "budget_exceeded": ("token_budget", 3),
+    "error": ("tool_error", 1),
+    "cancelled": ("user_abort", 2),
+}
+
+
+class TurnExit(BaseModel):
+    """Structured terminal-state payload carried on every ``done`` event.
+
+    Replaces the v1 convention of inferring exit state from ``turn_status``
+    alone: callers should branch on ``reason`` and treat ``exit_code`` as the
+    shell-style result (0 = success, non-zero = failure class).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: TurnExitReason = Field(
+        description="Canonical exit reason for the turn.",
+    )
+    exit_code: int = Field(
+        description="Shell-style exit code — 0 for success, non-zero per reason.",
+    )
+    summary: Optional[str] = Field(
+        default=None,
+        description="Optional human-readable one-liner describing the exit.",
+    )
+
+
+def turn_status_to_exit(
+    turn_status: Optional[str],
+    *,
+    summary: Optional[str] = None,
+) -> TurnExit:
+    """Map a legacy ``turn_status`` string onto a structured ``TurnExit``.
+
+    Unknown statuses fall back to ``tool_error`` so v2 consumers always see a
+    populated ``exit`` payload.
+    """
+    status = turn_status if isinstance(turn_status, str) and turn_status else "ok"
+    reason, code = _TURN_STATUS_TO_EXIT.get(status, ("tool_error", 1))
+    return TurnExit(reason=reason, exit_code=code, summary=summary)  # type: ignore[arg-type]
 
 
 class _RuntimeEventBase(BaseModel):
@@ -164,11 +222,19 @@ class DoneRuntimeEvent(_RuntimeEventBase):
     ] = Field(
         default=None,
         description=(
-            "Terminal state of the turn. Absent or 'ok' means the turn completed "
-            "normally; 'awaiting_approval' means the runtime paused on a gated tool "
-            "and the client must call /api/chat/approval before the next turn; "
-            "'cancelled' means the client disconnected or otherwise cancelled the "
-            "turn before it finished (partial assistant segments are still persisted)."
+            "Legacy v1 terminal state indicator, retained for clients that have "
+            "not migrated to the ``exit`` payload. New consumers must branch on "
+            "``exit.reason`` instead — the canonical taxonomy is defined there."
+        ),
+    )
+    exit: Optional[TurnExit] = Field(
+        default=None,
+        description=(
+            "Structured terminal-state payload introduced in schema_version=2. "
+            "``reason`` covers success|tool_error|user_abort|context_limit|"
+            "token_budget|approval_denied|awaiting_approval and ``exit_code`` is "
+            "shell-style (0 for success, non-zero per reason). Absent on v1 "
+            "payloads during rollout but stamped on every producer path here."
         ),
     )
 
