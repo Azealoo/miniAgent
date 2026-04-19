@@ -10,7 +10,7 @@ from hardening import (
     ProductionHardeningPolicy,
 )
 from runtime_config import load_runtime_config
-from runtime_config_types import LoadedRuntimeConfig
+from runtime_config_types import LoadedRuntimeConfig, validate_runtime_config
 
 _CONFIG_FILE = Path(__file__).parent / "config.json"
 
@@ -52,6 +52,12 @@ _DEFAULT_LLM_PROBE_MAX_CHARS = 8_000
 # and the ``default_seconds`` fallback). A value ``<= 0`` disables the cap.
 _DEFAULT_MAX_TURN_WALLCLOCK_S = 0.0
 _DEFAULT_TOOL_WALLCLOCK_DEFAULT_S = 0.0
+
+# Upper bound on the number of sections a single markdown memory file may
+# produce in ``MemoryIndexer._split_document_sections``. Long files fragment
+# at every H2-H6 heading and can otherwise yield thousands of tiny sections
+# that bloat the index.
+_DEFAULT_MAX_SECTIONS_PER_FILE = 64
 
 # Normalized values for rag_mode. Historically this was a plain bool
 # (False = no RAG, True = keyword BM25/lexical retrieval). The string form
@@ -156,6 +162,9 @@ _DEFAULT: dict = {
         "extra_dirs": [],
         "entries": {},
     },
+    "memory_indexer": {
+        "max_sections_per_file": _DEFAULT_MAX_SECTIONS_PER_FILE,
+    },
     "read_file_extra_roots": [],
     "retention": {
         # Off by default — callers opt in per-directory. ``dry_run`` in the
@@ -169,10 +178,16 @@ _DEFAULT: dict = {
 
 
 def _load_loaded_runtime() -> LoadedRuntimeConfig:
-    return load_runtime_config(
+    loaded = load_runtime_config(
         default_config=_DEFAULT,
         project_config_path=_CONFIG_FILE,
     )
+    # Fail loud at startup (app import / first snapshot) if the merged config
+    # has bad types, invalid enums, or unknown fields — better than surfacing
+    # the same problem later at first tool dispatch. See
+    # ``runtime_config_types.RuntimeConfigModel`` for the schema.
+    validate_runtime_config(loaded.data)
+    return loaded
 
 
 def _load_runtime() -> dict:
@@ -392,6 +407,28 @@ def get_llm_probe_max_chars() -> int:
         return max(500, int(raw))
     except (TypeError, ValueError):
         return _DEFAULT_LLM_PROBE_MAX_CHARS
+
+
+def get_memory_indexer_settings() -> dict[str, Any]:
+    memory_indexer = _load_runtime().get("memory_indexer", {})
+    return dict(memory_indexer) if isinstance(memory_indexer, dict) else {}
+
+
+def get_max_sections_per_file() -> int:
+    """Return the per-file section cap used by ``MemoryIndexer``.
+
+    Resolution order: runtime ``memory_indexer.max_sections_per_file``, then
+    the built-in default. Invalid / non-positive values fall back to the
+    default so a misconfigured value can never disable indexing entirely.
+    """
+    raw = get_memory_indexer_settings().get(
+        "max_sections_per_file", _DEFAULT_MAX_SECTIONS_PER_FILE
+    )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_SECTIONS_PER_FILE
+    return value if value >= 1 else _DEFAULT_MAX_SECTIONS_PER_FILE
 
 
 def get_llm_output_token_caps() -> tuple[int, int]:
