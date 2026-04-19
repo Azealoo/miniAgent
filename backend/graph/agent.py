@@ -291,9 +291,24 @@ class AgentManager:
                         history = history + [{"role": "system", "content": rag_block}]
                 else:
                     METRICS.observe_retrieval(hit=False)
-            except Exception:
+            except Exception as exc:
+                # RAG failure is non-fatal — the turn still runs without
+                # retrieved memory, but the reviewer needs to see the failure
+                # instead of the old silent swallow (issue #115).
+                error_type = type(exc).__name__
+                logger.exception(
+                    "retrieval_error: memory_indexer.retrieve raised for query=%r (%s)",
+                    message,
+                    error_type,
+                )
                 METRICS.observe_retrieval(hit=False)
-                pass  # RAG failure is non-fatal
+                METRICS.observe_retrieval_error(error_type=error_type)
+                yield {
+                    "type": "retrieval_error",
+                    "query": message,
+                    "error_type": error_type,
+                    "message": str(exc),
+                }
 
         # ── Build message list ─────────────────────────────────────────
         lc_messages = (

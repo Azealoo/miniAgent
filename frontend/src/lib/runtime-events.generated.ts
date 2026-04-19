@@ -40,6 +40,18 @@ export const RetrievalRuntimeEventSchema = z
     type: z.literal("retrieval"),
   })
   .strict();
+/** Non-fatal signal that a RAG retrieval attempt raised. */
+export const RetrievalErrorRuntimeEventSchema = z
+  .object({
+    error_type: z.string(),
+    event_index: z.number().int().min(1).nullish(),
+    message: z.string(),
+    query: z.string(),
+    request_id: z.string().nullish(),
+    schema_version: z.number().int().default(RUNTIME_EVENT_SCHEMA_VERSION),
+    type: z.literal("retrieval_error"),
+  })
+  .strict();
 export const TokenRuntimeEventSchema = z
   .object({
     content: z.string(),
@@ -248,6 +260,7 @@ export const WorkflowStepFailedRuntimeEventSchema = z
 
 export const ChatStreamEventSchema = z.discriminatedUnion("type", [
   RetrievalRuntimeEventSchema,
+  RetrievalErrorRuntimeEventSchema,
   TokenRuntimeEventSchema,
   ToolStartRuntimeEventSchema,
   ToolEndRuntimeEventSchema,
@@ -269,11 +282,12 @@ export const RuntimeEventSchema = ChatStreamEventSchema;
 export type ChatStreamEvent = z.infer<typeof ChatStreamEventSchema>;
 export type RuntimeEvent = ChatStreamEvent;
 
-export const RUNTIME_EVENT_TYPES = ["retrieval", "token", "tool_start", "tool_end", "tool_awaiting_approval", "tool_chunk", "plan_created", "plan_updated", "verification_result", "new_response", "compaction_event", "warning", "done", "error", "workflow_step_started", "workflow_step_ended", "workflow_step_failed"] as const;
+export const RUNTIME_EVENT_TYPES = ["retrieval", "retrieval_error", "token", "tool_start", "tool_end", "tool_awaiting_approval", "tool_chunk", "plan_created", "plan_updated", "verification_result", "new_response", "compaction_event", "warning", "done", "error", "workflow_step_started", "workflow_step_ended", "workflow_step_failed"] as const;
 export type RuntimeEventType = (typeof RUNTIME_EVENT_TYPES)[number];
 
 export const RUNTIME_EVENT_SCHEMAS: Record<RuntimeEventType, z.ZodTypeAny> = {
   retrieval: RetrievalRuntimeEventSchema,
+  retrieval_error: RetrievalErrorRuntimeEventSchema,
   token: TokenRuntimeEventSchema,
   tool_start: ToolStartRuntimeEventSchema,
   tool_end: ToolEndRuntimeEventSchema,

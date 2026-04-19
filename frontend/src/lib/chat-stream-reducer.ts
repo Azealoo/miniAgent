@@ -53,6 +53,16 @@ export function applyStreamEvent(
         request_id: event.request_id ?? message.request_id,
         blocks: replaceRetrievalBlock(message.blocks, event.query, event.results),
       }));
+    case "retrieval_error":
+      // Non-fatal RAG failure — the backend already logged it, bumped the
+      // retrieval-error counter, and continued the turn without retrieved
+      // memory. Surface nothing new in the message tree for now; the event is
+      // captured in the SSE log so the reviewer can inspect it there.
+      return {
+        messages: state.messages,
+        streamingMessageId: state.streamingMessageId,
+        finished: false,
+      };
     case "token":
       return updateStreamingMessage(state, event, (message) => ({
         ...message,
