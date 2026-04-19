@@ -117,6 +117,7 @@ class _RecordingSessionManager:
     def __init__(self, history: list[dict] | None = None) -> None:
         self._history = list(history or [])
         self.saved: list[dict[str, Any]] = []
+        self.batches: list[list[dict[str, Any]]] = []
 
     async def auto_compress_if_needed(self, session_id: str, llm) -> None:
         return None
@@ -143,6 +144,24 @@ class _RecordingSessionManager:
                 "blocks": list(blocks) if blocks else None,
             }
         )
+
+    def save_messages_batch(
+        self,
+        session_id: str,
+        messages: list[dict[str, Any]],
+    ) -> None:
+        batch: list[dict[str, Any]] = []
+        for msg in messages:
+            record = {
+                "session_id": session_id,
+                "role": msg["role"],
+                "content": msg.get("content", ""),
+                "request_id": msg.get("request_id"),
+                "blocks": list(msg["blocks"]) if msg.get("blocks") else None,
+            }
+            self.saved.append(record)
+            batch.append(record)
+        self.batches.append(batch)
 
 
 class _PartialThenStallAgentManager:

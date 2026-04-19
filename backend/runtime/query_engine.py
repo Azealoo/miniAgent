@@ -822,10 +822,12 @@ class QueryEngine:
                         return
 
                     if event_type == "error":
-                        ledger.persist_user_message()
                         turn_result = event.get("turn_result")
-                        if isinstance(turn_result, TurnResult):
-                            ledger.persist_segments(turn_result)
+                        if not isinstance(turn_result, TurnResult):
+                            # Defensive fallback: finalize so the user message
+                            # and any accumulated segments land in one batch.
+                            turn_result = ledger.finalize(turn_status="error")
+                        ledger.persist_segments(turn_result)
                         yield _sse({"type": "error", "error": event["error"]})
                         return
 
@@ -851,7 +853,16 @@ class QueryEngine:
                     )
                 raise
             except Exception as exc:
-                ledger.persist_user_message()
+                # Persistence is batched through persist_segments so the user
+                # message and any partial assistant segments land in one
+                # advisory-flock scope — never split across two writes.
+                try:
+                    ledger.persist_segments(ledger.finalize(turn_status="error"))
+                except Exception:
+                    _logger.warning(
+                        "Failed to persist partial turn state on unexpected exception",
+                        exc_info=True,
+                    )
                 error_event = {"type": "error", "error": str(exc)}
                 METRICS.observe_event(error_event)
                 yield _sse(error_event)

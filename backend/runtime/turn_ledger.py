@@ -125,37 +125,61 @@ class TurnLedger:
         )
 
     def persist_user_message(self) -> None:
-        """Write the accepted user message to the session store exactly once.
+        """Marker call — the user message is persisted by :meth:`persist_segments`.
 
-        No-op when the ledger was constructed without a session binding or when
-        the user message has already been written in this turn.
+        Kept for call-site symmetry with the done/error/cancel flows. Writing
+        the user message here (as an earlier implementation did) would split
+        a turn across two advisory-flock scopes and let cross-process readers
+        see a partially-committed state (user message on disk but no
+        assistant reply yet). All persistence goes through
+        :meth:`persist_segments`, which writes the user message and every
+        assistant segment in one batched read-modify-write.
         """
-        if self._user_message_saved:
-            return
-        if self._session_manager is None or self._session_id is None:
-            return
-        if self._user_message is None:
-            return
-        self._session_manager.save_message(
-            self._session_id,
-            "user",
-            self._user_message,
-            request_id=self._request_id,
-        )
-        self._user_message_saved = True
+        return
 
     def persist_segments(self, turn_result: TurnResult) -> None:
-        """Write the assistant segments produced by ``finalize`` to the session store."""
+        """Write the user message + assistant segments in one atomic batch.
+
+        The batch goes through ``SessionStore.save_messages_batch`` which
+        takes the per-session advisory flock exactly once, so cross-process
+        readers never observe a mid-turn state (e.g. user message written
+        but assistant reply missing, or only the first of multiple segments
+        persisted).
+        """
+        self._flush_to_session_store(turn_result=turn_result)
+
+    def _flush_to_session_store(self, *, turn_result: TurnResult | None) -> None:
         if self._session_manager is None or self._session_id is None:
             return
-        for segment in turn_result.segments:
-            self._session_manager.save_message(
-                self._session_id,
-                "assistant",
-                segment.content,
-                request_id=self._request_id,
-                blocks=segment.blocks or None,
-            )
+
+        pending: list[dict[str, Any]] = []
+
+        if self._user_message is not None and not self._user_message_saved:
+            user_record: dict[str, Any] = {
+                "role": "user",
+                "content": self._user_message,
+            }
+            if self._request_id:
+                user_record["request_id"] = self._request_id
+            pending.append(user_record)
+
+        segments = turn_result.segments if turn_result is not None else []
+        for segment in segments:
+            assistant_record: dict[str, Any] = {
+                "role": "assistant",
+                "content": segment.content,
+            }
+            if self._request_id:
+                assistant_record["request_id"] = self._request_id
+            if segment.blocks:
+                assistant_record["blocks"] = segment.blocks
+            pending.append(assistant_record)
+
+        if not pending:
+            return
+
+        self._session_manager.save_messages_batch(self._session_id, pending)
+        self._user_message_saved = True
 
     def _flush_segment(self) -> None:
         content = "".join(self._current_content)
