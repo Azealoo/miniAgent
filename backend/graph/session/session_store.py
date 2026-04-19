@@ -370,16 +370,15 @@ class SessionStore:
 
         return merged
 
-    def save_message(
-        self,
-        session_id: str,
+    @staticmethod
+    def _build_message_record(
         role: str,
         content: str,
         tool_calls: Optional[list] = None,
         retrievals: Optional[list] = None,
         request_id: str | None = None,
         blocks: Optional[list[dict[str, Any]]] = None,
-    ) -> None:
+    ) -> dict:
         msg: dict = {"role": role, "content": content}
         normalized_blocks = _normalize_blocks(blocks)
 
@@ -396,12 +395,70 @@ class SessionStore:
         if normalized_blocks:
             msg["blocks"] = normalized_blocks
 
+        return msg
+
+    def save_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        tool_calls: Optional[list] = None,
+        retrievals: Optional[list] = None,
+        request_id: str | None = None,
+        blocks: Optional[list[dict[str, Any]]] = None,
+    ) -> None:
+        msg = self._build_message_record(
+            role,
+            content,
+            tool_calls=tool_calls,
+            retrievals=retrievals,
+            request_id=request_id,
+            blocks=blocks,
+        )
+
         # Hold the inter-process lock across read-append-write so a second
         # worker racing on the same session_id cannot read a stale message
         # list and clobber our append when it writes back.
         with self._locked(session_id):
             data = self._read(session_id)
             data["messages"].append(msg)
+            self._write(session_id, data)
+
+    def save_messages_batch(
+        self,
+        session_id: str,
+        messages: list[dict[str, Any]],
+    ) -> None:
+        """Append multiple messages in one read-modify-write under one flock.
+
+        Each dict in *messages* accepts the same keys as :meth:`save_message`
+        (``role``, ``content``, plus optional ``tool_calls``/``retrievals``/
+        ``request_id``/``blocks``). Turn-scoped persistence uses this so the
+        user message and every assistant segment land in a single atomic
+        write — cross-process readers observe either the pre-turn or the
+        post-turn message list, never a partially-committed turn.
+        """
+        if not messages:
+            return
+
+        records: list[dict] = []
+        for raw in messages:
+            if not isinstance(raw, dict):
+                raise TypeError("save_messages_batch entries must be dicts")
+            records.append(
+                self._build_message_record(
+                    raw["role"],
+                    raw.get("content", ""),
+                    tool_calls=raw.get("tool_calls"),
+                    retrievals=raw.get("retrievals"),
+                    request_id=raw.get("request_id"),
+                    blocks=raw.get("blocks"),
+                )
+            )
+
+        with self._locked(session_id):
+            data = self._read(session_id)
+            data["messages"].extend(records)
             self._write(session_id, data)
 
     def rename_session(
