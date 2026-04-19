@@ -11,7 +11,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from graph.session.session_archive_index import remove_session_from_index
+from graph.session.session_archive_index import (
+    remove_session_from_index as _remove_session_from_archive_index,
+)
+from graph.session.session_index import (
+    list_index_entries as _list_session_index_entries,
+    remove_session_from_index as _remove_session_from_session_index,
+    upsert_session_entry as _upsert_session_index_entry,
+)
 from graph.session.session_normalizer import (
     _build_blocks_from_legacy_message,
     _normalize_blocks,
@@ -113,6 +120,14 @@ class SessionStore:
         self._path(session_id).write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        messages = data.get("messages", [])
+        _upsert_session_index_entry(
+            self.sessions_dir,
+            session_id,
+            title=data.get("title", session_id),
+            updated_at=data.get("updated_at", 0.0),
+            message_count=len(messages) if isinstance(messages, list) else 0,
+        )
 
     @staticmethod
     def _stamp_deterministic_mode(data: dict) -> None:
@@ -149,28 +164,10 @@ class SessionStore:
         return session_id
 
     def list_sessions(self) -> list[dict]:
-        sessions = []
-        for path in self.sessions_dir.glob("*.json"):
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(raw, list):
-                    title, updated_at, msgs = path.stem, 0.0, raw
-                else:
-                    title = raw.get("title", path.stem)
-                    updated_at = raw.get("updated_at", 0.0)
-                    msgs = raw.get("messages", [])
-                sessions.append(
-                    {
-                        "id": path.stem,
-                        "title": title,
-                        "updated_at": updated_at,
-                        "message_count": len(msgs),
-                    }
-                )
-            except Exception:
-                continue
-        sessions.sort(key=lambda x: x["updated_at"], reverse=True)
-        return sessions
+        # Reads the ``_index.json`` sidecar so we avoid an O(N) glob+open of
+        # every session file. ``_load_index`` self-heals if the sidecar is
+        # missing, malformed, or has an unknown schema version.
+        return _list_session_index_entries(self.sessions_dir)
 
     def load_session(self, session_id: str) -> list[dict]:
         """Return the raw message array (for display / history endpoint)."""
@@ -278,7 +275,8 @@ class SessionStore:
                 archive_path.unlink()
             except FileNotFoundError:
                 continue
-        remove_session_from_index(self.archive_dir, session_id)
+        _remove_session_from_archive_index(self.archive_dir, session_id)
+        _remove_session_from_session_index(self.sessions_dir, session_id)
         # Clean up the per-session locks to prevent unbounded memory growth
         _compress_locks.pop(session_id, None)
         _turn_locks.pop(session_id, None)
