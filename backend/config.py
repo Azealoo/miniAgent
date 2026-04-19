@@ -9,7 +9,7 @@ from hardening import (
     VALID_POSTURES,
     ProductionHardeningPolicy,
 )
-from runtime_config import load_runtime_config
+from runtime_config import load_runtime_config, resolve_runtime_config_paths
 from runtime_config_types import LoadedRuntimeConfig, validate_runtime_config
 
 _CONFIG_FILE = Path(__file__).parent / "config.json"
@@ -177,7 +177,44 @@ _DEFAULT: dict = {
 }
 
 
+_CACHED_LOADED_RUNTIME: LoadedRuntimeConfig | None = None
+_CACHED_LOADED_RUNTIME_SIGNATURE: tuple | None = None
+
+
+def _layer_stat_signature(layer_name: str, path: Path) -> tuple:
+    try:
+        st = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return (layer_name, str(path), None, None)
+    return (layer_name, str(path), st.st_mtime_ns, st.st_size)
+
+
+def _runtime_config_signature() -> tuple:
+    paths = resolve_runtime_config_paths(_CONFIG_FILE)
+    parts: list[tuple] = []
+    for layer_name in ("user", "project", "env", "local"):
+        path = paths[layer_name]
+        if path is None:
+            # ``env`` is the only layer that can be absent (when BIOAPEX_ENV is
+            # unset). Keep it in the signature so flipping the env profile on
+            # or off — or switching between profiles — invalidates the cache.
+            parts.append((layer_name, None, None, None))
+        else:
+            parts.append(_layer_stat_signature(layer_name, path))
+    return tuple(parts)
+
+
 def _load_loaded_runtime() -> LoadedRuntimeConfig:
+    # Cache the merged config keyed by each layer file's (path, mtime_ns,
+    # size). Writes to tracked layer files are rejected by the file API
+    # unless BIOAPEX_ALLOW_CONFIG_RELOAD=1, so the signature stays stable
+    # within a turn; when the override is set, the next accessor sees the
+    # new mtime and reparses.
+    global _CACHED_LOADED_RUNTIME, _CACHED_LOADED_RUNTIME_SIGNATURE
+    signature = _runtime_config_signature()
+    cached = _CACHED_LOADED_RUNTIME
+    if cached is not None and _CACHED_LOADED_RUNTIME_SIGNATURE == signature:
+        return cached
     loaded = load_runtime_config(
         default_config=_DEFAULT,
         project_config_path=_CONFIG_FILE,
@@ -187,6 +224,8 @@ def _load_loaded_runtime() -> LoadedRuntimeConfig:
     # the same problem later at first tool dispatch. See
     # ``runtime_config_types.RuntimeConfigModel`` for the schema.
     validate_runtime_config(loaded.data)
+    _CACHED_LOADED_RUNTIME = loaded
+    _CACHED_LOADED_RUNTIME_SIGNATURE = signature
     return loaded
 
 
