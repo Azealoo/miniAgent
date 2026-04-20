@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Iterable, Literal
 
 from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from config import get_agent_runtime_limit
-from tools.contracts import normalize_tool_output
+from tools.contracts import is_tool_result_dict, normalize_tool_output
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,33 @@ def extract_json_object(text: str) -> dict[str, Any]:
     raise ValueError("Helper agent did not return a valid JSON object.")
 
 
+def _render_raw_tool_output(raw_output: Any) -> str | None:
+    """Best-effort text rendering of a tool event payload.
+
+    Used to preserve pre-error stdout/stderr on the error envelope when the
+    normalized summary collapses to just the error message. Returns ``None``
+    when there is nothing useful to keep (e.g. the raw payload is already the
+    normalized envelope dict we are about to emit).
+    """
+
+    if raw_output is None or raw_output == "":
+        return None
+    if isinstance(raw_output, ToolMessage):
+        content = raw_output.content
+        if isinstance(content, str):
+            return content or None
+        rendered = _coerce_chunk_text(content)
+        return rendered or None
+    if isinstance(raw_output, str):
+        return raw_output
+    if is_tool_result_dict(raw_output):
+        return None
+    try:
+        return json.dumps(raw_output, ensure_ascii=False, default=str)
+    except Exception:
+        return str(raw_output) or None
+
+
 def _coerce_chunk_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -156,6 +184,10 @@ async def run_scoped_agent(
             run_id = event["run_id"]
             raw_output = event["data"].get("output", "")
             result = normalize_tool_output(event["name"], raw_output)
+            if result.status == "error" and result.partial_output is None:
+                rendered = _render_raw_tool_output(raw_output)
+                if rendered and rendered.strip() and rendered != result.summary:
+                    result.partial_output = rendered
             index = pending.pop(run_id, None)
             payload = {
                 "tool": event["name"],
