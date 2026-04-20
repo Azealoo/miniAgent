@@ -58,7 +58,9 @@ function renderAuthenticatedRawSourceView(
     })
   );
   const cleanup = () => URL.revokeObjectURL(downloadUrl);
+  // `pagehide` covers browsers that skip `beforeunload` (iOS Safari, bfcache).
   popup.addEventListener("beforeunload", cleanup, { once: true });
+  popup.addEventListener("pagehide", cleanup, { once: true });
   window.setTimeout(cleanup, 5 * 60_000);
 
   const escapedPath = escapeHtml(path);
@@ -205,13 +207,28 @@ export const openRawFileInNewTab = async (path: string): Promise<void> => {
     }
 
     const { url } = await createRawFileObjectUrl(path);
-    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    const revoke = () => URL.revokeObjectURL(url);
 
     if (popup && !popup.closed) {
       popup.location.replace(url);
+      // `popup.location.replace` navigates the blank popup to the blob URL,
+      // which would fire the popup's own `beforeunload`/`pagehide` before the
+      // blob loads and revoke the URL too early. Poll `popup.closed` instead
+      // so memory is reclaimed as soon as the user closes the popup, with
+      // the timeout kept only as a safety net.
+      const safetyTimer = window.setTimeout(revoke, 60_000);
+      const pollId = window.setInterval(() => {
+        if (popup.closed) {
+          window.clearInterval(pollId);
+          window.clearTimeout(safetyTimer);
+          revoke();
+        }
+      }, 1_000);
       return;
     }
+    // noopener fallback: no window reference, so rely on the timeout.
     window.open(url, "_blank", "noopener,noreferrer");
+    window.setTimeout(revoke, 60_000);
   } catch (error) {
     if (popup && !popup.closed) {
       writePopupMessage(
