@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import time
@@ -745,14 +746,12 @@ class QueryEngine:
             user_message=message,
         )
 
-        event_index = 0
+        event_counter = itertools.count(1)
 
         def _sse(payload: dict[str, Any]) -> str:
-            nonlocal event_index
             envelope = dict(payload)
-            event_index += 1
             envelope.setdefault("request_id", request_id)
-            envelope.setdefault("event_index", event_index)
+            envelope.setdefault("event_index", next(event_counter))
             # Validate + stamp schema_version through the transport-neutral
             # RuntimeEvent schema so SSE, WebSocket, and any future adapter share
             # one source of truth for event shapes.
