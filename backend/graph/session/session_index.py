@@ -13,6 +13,7 @@ corruption by scanning the directory once.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import uuid
@@ -23,6 +24,19 @@ from graph.session.session_schema import _SESSION_ID_RE
 
 SESSION_INDEX_FILENAME = "_index.json"
 SESSION_INDEX_SCHEMA_VERSION = "session_index.v1"
+
+
+def _compute_sessions_checksum(sessions: dict[str, Any]) -> str:
+    """Stable SHA-256 digest over the sessions payload.
+
+    ``sort_keys=True`` makes the digest insensitive to dict ordering so the
+    same logical payload always hashes to the same value — but any change to
+    entry fields (title / updated_at / message_count) flips it, which is what
+    lets ``_normalize_loaded_index`` detect semantically-corrupt but
+    syntactically-valid sidecars.
+    """
+    canonical = json.dumps(sessions, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class SessionIndexEntry(TypedDict):
@@ -104,6 +118,11 @@ def _normalize_loaded_index(raw: Any) -> dict[str, SessionIndexEntry] | None:
     sessions = raw.get("sessions")
     if not isinstance(sessions, dict):
         return None
+    checksum = raw.get("checksum")
+    if not isinstance(checksum, str):
+        return None
+    if checksum != _compute_sessions_checksum(sessions):
+        return None
     normalized: dict[str, SessionIndexEntry] = {}
     for session_id, entry in sessions.items():
         if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
@@ -126,6 +145,7 @@ def _write_index(sessions_dir: Path, index: dict[str, SessionIndexEntry]) -> Non
     path = _index_path(sessions_dir)
     payload: dict[str, Any] = {
         "schema_version": SESSION_INDEX_SCHEMA_VERSION,
+        "checksum": _compute_sessions_checksum(index),
         "sessions": index,
     }
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
