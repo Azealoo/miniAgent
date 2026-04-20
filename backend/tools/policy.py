@@ -133,6 +133,17 @@ def evaluate_pre_tool_policy(
     if skill_violation is not None:
         return skill_violation
 
+    if manifest.destructive and getattr(context, "approval_store_unavailable", False):
+        return ToolPolicyDecision(
+            status="blocked",
+            block_reason="approval_store_unavailable",
+            block_message=(
+                f"Tool '{manifest.name}' is destructive and cannot run while the "
+                "approval store is unreadable; a corrupt store could otherwise "
+                "bypass a prior deny decision."
+            ),
+        )
+
     if manifest.requires_approval:
         if _user_has_denied(manifest, context):
             return ToolPolicyDecision(
