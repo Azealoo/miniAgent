@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -387,3 +388,27 @@ def test_claim_graph_tool_returns_structured_result(tmp_path):
     assert artifact["status"] == "success"
     assert artifact["structured_payload"]["summary"]["claim_count"] == 1
     assert artifact["artifact_refs"][0]["artifact_type"] == "claim_graph"
+
+
+@pytest.mark.parametrize(
+    "field_name,secret_path",
+    [
+        ("evidence_card_paths", ".env"),
+        ("evidence_card_paths", "memory/.env.local"),
+        ("evidence_card_paths", "keys/id_rsa"),
+        ("evidence_review_paths", "secrets/server.pem"),
+        ("entity_grounding_paths", "memory/.env.production"),
+        ("workflow_run_paths", "keys/id_ed25519"),
+    ],
+)
+def test_claim_graph_tool_blocks_secret_like_paths(tmp_path, field_name, secret_path):
+    tool = ClaimGraphTool(base_dir=str(tmp_path))
+
+    summary, artifact = tool._run(**{field_name: [secret_path]})
+
+    assert "[BLOCKED]" in summary
+    assert artifact["tool_name"] == "claim_graph"
+    assert artifact["outcome"] == "blocked"
+    assert artifact["error"]["code"] == "blocked"
+    assert artifact["metadata"]["blocked_field"] == field_name
+    assert artifact["metadata"]["blocked_path"] == secret_path

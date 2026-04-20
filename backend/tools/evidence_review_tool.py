@@ -21,9 +21,11 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel
 
 from evidence.review import EvidenceReviewInput, run_evidence_review
+from hardening import is_secret_like_path
 
 from .contracts import (
     artifact_ref,
+    blocked_result,
     empty_result,
     execution_error_result,
     invalid_input_result,
@@ -57,6 +59,13 @@ class EvidenceReviewTool(BaseTool):
         max_results: int = 5,
         max_evidence_cards: int = 3,
     ) -> tuple[str, dict]:
+        for candidate in evidence_card_paths or []:
+            if is_secret_like_path(candidate):
+                return blocked_result(
+                    self.name,
+                    "Reading credential / secret files is not allowed.",
+                    metadata={"blocked_field": "evidence_card_paths", "blocked_path": candidate},
+                )
         try:
             payload = EvidenceReviewInput(
                 question=question,
