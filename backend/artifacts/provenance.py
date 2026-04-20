@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 from datetime import datetime, timezone
@@ -23,6 +25,60 @@ _RO_CRATE_CONTEXT_URL = "https://w3id.org/ro/crate/1.2/context"
 _RO_CRATE_SPEC_URL = "https://w3id.org/ro/crate/1.2"
 _PROV_SPEC_URL = "https://www.w3.org/TR/prov-overview/"
 _RO_CRATE_METADATA_FILENAME = "ro-crate-metadata.json"
+
+SIGNATURE_ALGORITHM = "HMAC-SHA256"
+_SIGNATURE_FIELD = "signature"
+_HMAC_KEY_ENV = "BIOAPEX_PROVENANCE_HMAC_KEY"
+
+
+class ProvenanceSignatureError(Exception):
+    """Raised when a provenance bundle cannot be signed or verified."""
+
+
+def _load_hmac_key() -> bytes:
+    key = os.environ.get(_HMAC_KEY_ENV)
+    if not key:
+        raise ProvenanceSignatureError(
+            f"Provenance HMAC key is not configured ({_HMAC_KEY_ENV} unset)."
+        )
+    return key.encode("utf-8")
+
+
+def _canonical_payload_bytes(payload: dict[str, Any]) -> bytes:
+    without_signature = {k: v for k, v in payload.items() if k != _SIGNATURE_FIELD}
+    return json.dumps(
+        without_signature,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def sign_provenance_payload(payload: dict[str, Any]) -> dict[str, str]:
+    """Embed an HMAC-SHA256 signature block into *payload* and return it."""
+    key = _load_hmac_key()
+    digest = hmac.new(key, _canonical_payload_bytes(payload), hashlib.sha256).hexdigest()
+    signature = {"algorithm": SIGNATURE_ALGORITHM, "digest": digest}
+    payload[_SIGNATURE_FIELD] = signature
+    return signature
+
+
+def verify_provenance_bundle(path: Path | str) -> dict[str, Any]:
+    """Load a provenance bundle from *path* and verify its HMAC signature."""
+    bundle_path = Path(path)
+    payload = json.loads(bundle_path.read_text(encoding="utf-8"))
+    signature = payload.get(_SIGNATURE_FIELD)
+    if not isinstance(signature, dict) or not isinstance(signature.get("digest"), str):
+        raise ProvenanceSignatureError(
+            f"Provenance bundle at {bundle_path} is missing a signature."
+        )
+    key = _load_hmac_key()
+    expected = hmac.new(key, _canonical_payload_bytes(payload), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature["digest"]):
+        raise ProvenanceSignatureError(
+            f"Provenance bundle at {bundle_path} has a signature mismatch."
+        )
+    return payload
 
 
 def _utcnow() -> datetime:
@@ -241,6 +297,8 @@ def materialize_provenance_bundle(
         "prov": _PROV_SPEC_URL,
     }
 
+    provenance_signature = sign_provenance_payload(provenance_payload)
+
     provenance_target = layout._track_path(resolve_artifact_path(layout.run_dir, provenance_relpath))
     provenance_target.write_text(json.dumps(provenance_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -257,6 +315,7 @@ def materialize_provenance_bundle(
         step_agent_ids=step_agent_ids,
         workflow_activity_id=workflow_activity_id,
         activities=activities,
+        provenance_signature=provenance_signature,
     )
     ro_crate_target.write_text(json.dumps(ro_crate_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     append_export_generated_event(
@@ -546,6 +605,7 @@ def _build_ro_crate_payload(
     step_agent_ids: dict[str, set[str]],
     workflow_activity_id: str,
     activities: dict[str, dict[str, Any]],
+    provenance_signature: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     ro_crate_dir = layout.run_dir / stable_artifact_name("ro_crate")
     graph: list[dict[str, Any]] = [
@@ -603,16 +663,18 @@ def _build_ro_crate_payload(
     prov_id = "../prov.json"
     prov_path = layout.run_dir / stable_artifact_name("provenance")
     if prov_path.exists() and prov_path.is_file():
-        graph.append(
-            {
-                "@id": prov_id,
-                "@type": "File",
-                "name": prov_path.name,
-                "encodingFormat": "application/json",
-                "sha256": compute_content_hash(prov_path.read_bytes()),
-                "description": "PROV-compatible lineage export for this workflow run.",
-            }
-        )
+        prov_entry: dict[str, Any] = {
+            "@id": prov_id,
+            "@type": "File",
+            "name": prov_path.name,
+            "encodingFormat": "application/json",
+            "sha256": compute_content_hash(prov_path.read_bytes()),
+            "description": "PROV-compatible lineage export for this workflow run.",
+        }
+        if provenance_signature is not None:
+            prov_entry["signatureAlgorithm"] = provenance_signature["algorithm"]
+            prov_entry["signatureDigest"] = provenance_signature["digest"]
+        graph.append(prov_entry)
         has_part.append({"@id": prov_id})
 
     workflow_activity = activities[workflow_activity_id]
