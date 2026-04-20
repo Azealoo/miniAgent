@@ -121,29 +121,37 @@ export function useSessionCatalog(
   const messagesRef = useRef<Message[]>([]);
   const sessionContinuitySummariesRef = useRef<SessionContinuitySummary[]>([]);
 
-  useEffect(() => {
-    currentSessionIdRef.current = currentSessionId;
-  }, [currentSessionId]);
+  // Update the ref before dispatching the state update so callbacks that fire
+  // between this call and the next render commit observe the latest value.
+  const commitCurrentSessionId = useCallback((value: string | null) => {
+    currentSessionIdRef.current = value;
+    setCurrentSessionId(value);
+  }, []);
 
-  useEffect(() => {
-    messagesRef.current = messages;
-  }, [messages]);
+  const commitMessages = useCallback((value: Message[]) => {
+    messagesRef.current = value;
+    setMessages(value);
+  }, []);
 
-  useEffect(() => {
-    sessionContinuitySummariesRef.current = sessionContinuitySummaries;
-  }, [sessionContinuitySummaries]);
+  const commitSessionContinuitySummaries = useCallback(
+    (value: SessionContinuitySummary[]) => {
+      sessionContinuitySummariesRef.current = value;
+      setSessionContinuitySummaries(value);
+    },
+    []
+  );
 
   // React's useState setters are stable, so this object only needs to be built
   // once — cache it so dependent useCallback deps don't thrash on every render.
   const loadSessionSetters: SessionLoadSetters = useMemo(
     () => ({
-      setMessages,
-      setCurrentSessionId,
+      setMessages: commitMessages,
+      setCurrentSessionId: commitCurrentSessionId,
       setSessionHistoryStatus,
       setSessionHistoryError,
-      setSessionContinuitySummaries,
+      setSessionContinuitySummaries: commitSessionContinuitySummaries,
     }),
-    []
+    [commitCurrentSessionId, commitMessages, commitSessionContinuitySummaries]
   );
 
   // Reset session state when inspection access is lost.
@@ -162,16 +170,22 @@ export function useSessionCatalog(
     }
 
     setSessions([]);
-    setCurrentSessionId(null);
-    setMessages([]);
+    commitCurrentSessionId(null);
+    commitMessages([]);
     setSessionListStatus("idle");
     setSessionListError(null);
     setSessionHistoryStatus("idle");
     setSessionHistoryError(null);
-    setSessionContinuitySummaries([]);
+    commitSessionContinuitySummaries([]);
     setParseErrorCount(0);
     setRequestIdMismatchCount(0);
-  }, [accessByScope.inspection.status, hasLoadedApiAuthState]);
+  }, [
+    accessByScope.inspection.status,
+    commitCurrentSessionId,
+    commitMessages,
+    commitSessionContinuitySummaries,
+    hasLoadedApiAuthState,
+  ]);
 
   // Load session list and rehydrate current session once inspection access arrives.
   useEffect(() => {
@@ -190,7 +204,7 @@ export function useSessionCatalog(
       setSessionListError(null);
       setSessionHistoryStatus("idle");
       setSessionHistoryError(null);
-      setSessionContinuitySummaries([]);
+      commitSessionContinuitySummaries([]);
       return;
     }
 
@@ -214,11 +228,11 @@ export function useSessionCatalog(
             : (sessionList[0]?.id ?? null);
 
         if (!nextSessionId) {
-          setCurrentSessionId(null);
-          setMessages([]);
+          commitCurrentSessionId(null);
+          commitMessages([]);
           setSessionHistoryStatus("idle");
           setSessionHistoryError(null);
-          setSessionContinuitySummaries([]);
+          commitSessionContinuitySummaries([]);
           return;
         }
 
@@ -248,7 +262,7 @@ export function useSessionCatalog(
           ) {
             setSessionHistoryStatus("idle");
             setSessionHistoryError(null);
-            setSessionContinuitySummaries([]);
+            commitSessionContinuitySummaries([]);
           }
           promoteInspectionScopeError(error);
         }
@@ -262,6 +276,9 @@ export function useSessionCatalog(
     };
   }, [
     accessByScope.inspection.status,
+    commitCurrentSessionId,
+    commitMessages,
+    commitSessionContinuitySummaries,
     getSessionHistoryErrorMessage,
     getSessionListErrorMessage,
     hasInspectionAccess,
@@ -324,15 +341,21 @@ export function useSessionCatalog(
     setSessions((prev) => [session, ...prev]);
     setSessionListStatus("ready");
     setSessionListError(null);
-    setCurrentSessionId(session.id);
-    setMessages([]);
+    commitCurrentSessionId(session.id);
+    commitMessages([]);
     setSessionHistoryStatus("ready");
     setSessionHistoryError(null);
-    setSessionContinuitySummaries([]);
+    commitSessionContinuitySummaries([]);
     setParseErrorCount(0);
     setRequestIdMismatchCount(0);
     resetDraftAndInspector();
-  }, [hasExecutionAccess, resetDraftAndInspector]);
+  }, [
+    commitCurrentSessionId,
+    commitMessages,
+    commitSessionContinuitySummaries,
+    hasExecutionAccess,
+    resetDraftAndInspector,
+  ]);
 
   const selectSession = useCallback(
     async (id: string) => {
@@ -372,17 +395,24 @@ export function useSessionCatalog(
       await api.deleteSession(id);
       setSessions((prev) => prev.filter((s) => s.id !== id));
       if (id === currentSessionId) {
-        setCurrentSessionId(null);
-        setMessages([]);
+        commitCurrentSessionId(null);
+        commitMessages([]);
         setSessionHistoryStatus("idle");
         setSessionHistoryError(null);
-        setSessionContinuitySummaries([]);
+        commitSessionContinuitySummaries([]);
         setParseErrorCount(0);
-    setRequestIdMismatchCount(0);
+        setRequestIdMismatchCount(0);
         resetDraftAndInspector();
       }
     },
-    [currentSessionId, hasExecutionAccess, resetDraftAndInspector]
+    [
+      commitCurrentSessionId,
+      commitMessages,
+      commitSessionContinuitySummaries,
+      currentSessionId,
+      hasExecutionAccess,
+      resetDraftAndInspector,
+    ]
   );
 
   const applySessionTitle = useCallback((id: string, title: string) => {
@@ -422,15 +452,14 @@ export function useSessionCatalog(
         }
 
         const syncedMessages = historyToMessages(history);
-        messagesRef.current = syncedMessages;
-        setMessages(syncedMessages);
+        commitMessages(syncedMessages);
         setSessionHistoryStatus("ready");
         setSessionHistoryError(null);
       } catch {
         // Keep finished local transcript visible if reconciliation fails.
       }
     },
-    [hasInspectionAccess]
+    [commitMessages, hasInspectionAccess]
   );
 
   const finalizeCompletedSession = useCallback(
@@ -468,7 +497,7 @@ export function useSessionCatalog(
         setSessions((prev) => [session, ...prev]);
         setSessionListStatus("ready");
         setSessionListError(null);
-        setCurrentSessionId(session.id);
+        commitCurrentSessionId(session.id);
         setSessionHistoryStatus("ready");
         setSessionHistoryError(null);
         sessionId = session.id;
@@ -496,7 +525,7 @@ export function useSessionCatalog(
           userStoppedStreamRef,
         },
         callbacks: {
-          setMessages,
+          setMessages: commitMessages,
           setIsStreaming,
           onTurnComplete: (messageCount) => {
             void finalizeCompletedSession(
@@ -521,6 +550,8 @@ export function useSessionCatalog(
       });
     },
     [
+      commitCurrentSessionId,
+      commitMessages,
       currentSessionId,
       finalizeCompletedSession,
       hasExecutionAccess,
