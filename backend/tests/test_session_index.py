@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from graph.session.session_index import (
     SESSION_INDEX_FILENAME,
     SESSION_INDEX_SCHEMA_VERSION,
+    _compute_sessions_checksum,
     rebuild_index,
     remove_session_from_index,
     upsert_session_entry,
@@ -54,6 +55,7 @@ def _seed_synthetic_sessions_index(sessions_dir: Path, n: int) -> list[str]:
     }
     payload = {
         "schema_version": SESSION_INDEX_SCHEMA_VERSION,
+        "checksum": _compute_sessions_checksum(entries),
         "sessions": entries,
     }
     (sessions_dir / SESSION_INDEX_FILENAME).write_text(
@@ -265,6 +267,57 @@ class TestSessionIndexSidecar:
         payload = json.loads(sidecar.read_text())
         assert sid_gone not in payload["sessions"]
         assert sid_keep in payload["sessions"]
+
+    def test_sidecar_round_trip_preserves_checksum(self, sm, tmp_path):
+        """A freshly-written sidecar carries a checksum that matches its entries."""
+        sid = sm.create_session()
+        sm.save_message(sid, "user", "hello")
+
+        sidecar = tmp_path / "sessions" / SESSION_INDEX_FILENAME
+        payload = json.loads(sidecar.read_text())
+        assert payload["checksum"] == _compute_sessions_checksum(payload["sessions"])
+
+        # Re-load via list_sessions (which exercises _normalize_loaded_index)
+        # and confirm the sidecar was not rewritten due to checksum failure.
+        before_mtime = sidecar.stat().st_mtime_ns
+        listed = sm.list_sessions()
+        assert [row["id"] for row in listed] == [sid]
+        assert sidecar.stat().st_mtime_ns == before_mtime
+
+    def test_self_heal_when_checksum_missing(self, sm, tmp_path):
+        sid = sm.create_session()
+        sm.save_message(sid, "user", "hello")
+
+        sidecar = tmp_path / "sessions" / SESSION_INDEX_FILENAME
+        payload = json.loads(sidecar.read_text())
+        payload.pop("checksum", None)
+        sidecar.write_text(json.dumps(payload), encoding="utf-8")
+
+        listed = sm.list_sessions()
+        assert [row["id"] for row in listed] == [sid]
+        rebuilt = json.loads(sidecar.read_text())
+        assert "checksum" in rebuilt
+        assert rebuilt["checksum"] == _compute_sessions_checksum(rebuilt["sessions"])
+
+    def test_self_heal_when_entries_tampered_with_valid_json(self, sm, tmp_path):
+        """Semantically-corrupt payload (valid JSON, wrong checksum) triggers rebuild."""
+        sid = sm.create_session()
+        sm.save_message(sid, "user", "hello")
+
+        sidecar = tmp_path / "sessions" / SESSION_INDEX_FILENAME
+        payload = json.loads(sidecar.read_text())
+        # Mutate an entry without refreshing the checksum — simulates bitrot
+        # or an out-of-band edit that slips past schema/JSON validation.
+        payload["sessions"][sid]["message_count"] = 999
+        sidecar.write_text(json.dumps(payload), encoding="utf-8")
+
+        listed = sm.list_sessions()
+        assert [row["id"] for row in listed] == [sid]
+        # Rebuilt from the on-disk session file, so the tampered count is gone.
+        assert listed[0]["message_count"] == 1
+        rebuilt = json.loads(sidecar.read_text())
+        assert rebuilt["sessions"][sid]["message_count"] == 1
+        assert rebuilt["checksum"] == _compute_sessions_checksum(rebuilt["sessions"])
 
     def test_concurrent_writes_do_not_race_on_tmp_path(self, tmp_path):
         """Regression test: each writer must use a unique tmp filename.
