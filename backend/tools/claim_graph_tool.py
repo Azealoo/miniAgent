@@ -21,9 +21,11 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel
 
 from evidence import ClaimGraphInput, run_claim_graph
+from hardening import is_secret_like_path
 
 from .contracts import (
     artifact_ref,
+    blocked_result,
     execution_error_result,
     invalid_input_result,
     success_result,
@@ -55,6 +57,19 @@ class ClaimGraphTool(BaseTool):
         workflow_run_paths: list[str] | None = None,
         include_related_artifacts: bool = True,
     ) -> tuple[str, dict]:
+        for field_name, candidates in (
+            ("evidence_card_paths", evidence_card_paths or []),
+            ("evidence_review_paths", evidence_review_paths or []),
+            ("entity_grounding_paths", entity_grounding_paths or []),
+            ("workflow_run_paths", workflow_run_paths or []),
+        ):
+            for candidate in candidates:
+                if is_secret_like_path(candidate):
+                    return blocked_result(
+                        self.name,
+                        "Reading credential / secret files is not allowed.",
+                        metadata={"blocked_field": field_name, "blocked_path": candidate},
+                    )
         try:
             payload = ClaimGraphInput(
                 evidence_card_paths=evidence_card_paths or [],
