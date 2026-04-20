@@ -719,24 +719,34 @@ class QueryEngine:
         base_dir = getattr(self.agent_manager, "base_dir", None)
         approved_tool_runs: frozenset[str] = frozenset()
         denied_tool_runs: frozenset[str] = frozenset()
+        approval_store_unavailable = False
         if base_dir is not None:
             try:
-                approved_tool_runs = approval_store.approved_tool_names(
-                    base_dir, session_id
+                approved_tool_runs, denied_tool_runs = (
+                    approval_store.load_decisions_strict(base_dir, session_id)
                 )
-                denied_tool_runs = frozenset(
-                    record["tool_name"]
-                    for record in approval_store.denied_records(base_dir, session_id)
+            except approval_store.ApprovalStoreLoadError:
+                # Fail closed: an unreadable store could otherwise mask a prior
+                # deny decision and let a destructive tool through. The policy
+                # layer consults ``approval_store_unavailable`` before running
+                # any ``destructive=True`` tool; read-only tools continue to
+                # run so the agent can still make progress.
+                _logger.exception(
+                    "Approval store load failed for session %s; "
+                    "destructive tools will be blocked this turn.",
+                    session_id,
                 )
-            except Exception:
+                METRICS.observe_approval_store_load_error()
                 approved_tool_runs = frozenset()
                 denied_tool_runs = frozenset()
+                approval_store_unavailable = True
         policy_context = ToolPolicyExecutionContext(
             session_id=session_id,
             request_id=request_id,
             turn_id=request_id,
             approved_tool_runs=approved_tool_runs,
             denied_tool_runs=denied_tool_runs,
+            approval_store_unavailable=approval_store_unavailable,
         )
         ledger = TurnLedger(
             session_manager=session_manager,

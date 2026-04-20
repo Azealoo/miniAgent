@@ -28,6 +28,15 @@ ApprovalDecision = Literal["approve", "deny"]
 _STORE_SUBDIR = "storage/approvals"
 
 
+class ApprovalStoreLoadError(RuntimeError):
+    """Raised when the on-disk approval store cannot be read or parsed.
+
+    Used by the strict loader so the runtime can fail closed for destructive
+    tools instead of silently degrading to "no approvals" when the JSON
+    file is corrupt or unreadable.
+    """
+
+
 class ApprovalRecord(TypedDict):
     tool_name: str
     run_id: str
@@ -41,15 +50,7 @@ def _store_path(base_dir: Path, session_id: str) -> Path:
     return Path(base_dir) / _STORE_SUBDIR / f"{session_id}.json"
 
 
-def _load(base_dir: Path, session_id: str) -> list[ApprovalRecord]:
-    path = _store_path(base_dir, session_id)
-    if not path.exists():
-        return []
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        logger.warning("Approval store for session %s is unreadable; ignoring.", session_id, exc_info=True)
-        return []
+def _parse_records(raw: object) -> list[ApprovalRecord]:
     if not isinstance(raw, list):
         return []
     records: list[ApprovalRecord] = []
@@ -76,6 +77,36 @@ def _load(base_dir: Path, session_id: str) -> list[ApprovalRecord]:
             }
         )
     return records
+
+
+def _load_strict(base_dir: Path, session_id: str) -> list[ApprovalRecord]:
+    """Load approval records, raising ``ApprovalStoreLoadError`` on failure.
+
+    A missing file is not a failure — the store is intentionally absent
+    between gated calls — but an unreadable or malformed JSON payload is.
+    """
+    path = _store_path(base_dir, session_id)
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ApprovalStoreLoadError(
+            f"Approval store for session {session_id} is unreadable."
+        ) from exc
+    return _parse_records(raw)
+
+
+def _load(base_dir: Path, session_id: str) -> list[ApprovalRecord]:
+    path = _store_path(base_dir, session_id)
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Approval store for session %s is unreadable; ignoring.", session_id, exc_info=True)
+        return []
+    return _parse_records(raw)
 
 
 def _save(base_dir: Path, session_id: str, records: list[ApprovalRecord]) -> None:
@@ -151,6 +182,26 @@ def denied_records(base_dir: Path, session_id: str) -> list[ApprovalRecord]:
     return [record for record in _load(base_dir, session_id) if record["decision"] == "deny"]
 
 
+def load_decisions_strict(
+    base_dir: Path, session_id: str
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Return ``(approved_tool_names, denied_tool_names)``, raising on failure.
+
+    Callers that need to fail closed when the on-disk store is corrupt
+    should use this helper instead of :func:`approved_tool_names` and
+    :func:`denied_records`, which swallow load errors and silently report
+    "no approvals".
+    """
+    records = _load_strict(base_dir, session_id)
+    approved = frozenset(
+        record["tool_name"] for record in records if record["decision"] == "approve"
+    )
+    denied = frozenset(
+        record["tool_name"] for record in records if record["decision"] == "deny"
+    )
+    return approved, denied
+
+
 def consume(base_dir: Path, session_id: str) -> list[ApprovalRecord]:
     """Return and clear pending decisions.
 
@@ -177,9 +228,11 @@ def consume(base_dir: Path, session_id: str) -> list[ApprovalRecord]:
 __all__ = [
     "ApprovalDecision",
     "ApprovalRecord",
+    "ApprovalStoreLoadError",
     "approved_tool_names",
     "consume",
     "denied_records",
+    "load_decisions_strict",
     "pending_records",
     "record_decision",
 ]
