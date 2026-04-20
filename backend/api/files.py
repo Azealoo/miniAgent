@@ -159,10 +159,18 @@ def _check_path(relative_path: str, *, write: bool = False) -> tuple[Path, str]:
 
 
 def _guess_media_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    # Force an explicit charset for plain-text so tool-output overflow spills
+    # (written as ``.txt`` under ``storage/tool-outputs/`` by
+    # ``tools.policy_wrappers._persist_tool_output_overflow``) cannot be
+    # MIME-sniffed into HTML if they happen to contain ``<script>``. Paired
+    # with the ``X-Content-Type-Options: nosniff`` header on the serving
+    # endpoints below.
+    if suffix == ".txt":
+        return "text/plain; charset=utf-8"
     guessed, _ = mimetypes.guess_type(path.name)
     if guessed:
         return guessed
-    suffix = path.suffix.lower()
     if suffix == ".json":
         return "application/json"
     if suffix in {".yaml", ".yml"}:
@@ -170,6 +178,11 @@ def _guess_media_type(path: Path) -> str:
     if suffix == ".md":
         return "text/markdown"
     return "text/plain; charset=utf-8"
+
+
+# Defense-in-depth: ``nosniff`` prevents browsers from overriding the
+# ``Content-Type`` we declare above when serving whitelisted files.
+_NOSNIFF_HEADER = {"X-Content-Type-Options": "nosniff"}
 
 
 def _read_raw_content(target: Path, clean_path: str) -> str:
@@ -223,9 +236,14 @@ def read_raw_file(path: str = Query(..., description="Relative file path"), requ
         return Response(
             content=_read_raw_content(target, clean).encode("utf-8"),
             media_type=media_type,
+            headers=_NOSNIFF_HEADER,
         )
 
-    return Response(content=target.read_bytes(), media_type=media_type)
+    return Response(
+        content=target.read_bytes(),
+        media_type=media_type,
+        headers=_NOSNIFF_HEADER,
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -326,6 +344,7 @@ def head_stream_file(
         "ETag": _etag_for(stat),
         "Last-Modified": formatdate(stat.st_mtime, usegmt=True),
         "Content-Length": str(stat.st_size),
+        **_NOSNIFF_HEADER,
     }
     return Response(status_code=200, media_type=_guess_media_type(target), headers=headers)
 
@@ -383,6 +402,7 @@ def stream_file(
         "ETag": etag,
         "Last-Modified": last_modified,
         "Content-Length": str(length),
+        **_NOSNIFF_HEADER,
     }
     if is_partial:
         headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
