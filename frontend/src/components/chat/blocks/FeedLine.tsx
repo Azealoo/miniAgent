@@ -8,7 +8,7 @@ export default function FeedLine({
   text,
   tone = "default",
   fullOutput,
-}: Omit<FeedLineDescriptor, "kind">) {
+}: Omit<FeedLineDescriptor, "kind" | "id">) {
   return (
     <p
       className={cn(

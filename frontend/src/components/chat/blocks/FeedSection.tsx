@@ -33,28 +33,23 @@ export default function FeedSection({
       </div>
 
       <div className="space-y-1.5">
-        {entries.map((entry, index) => {
+        {entries.map((entry) => {
           if (entry.kind === "block") {
-            return (
-              <FeedBlock
-                key={`${title}-${entry.title}-${entry.badge ?? "none"}-${index}`}
-                {...entry}
-              />
-            );
+            return <FeedBlock key={entry.id} {...entry} />;
           }
           if (entry.kind === "planning") {
-            return <FeedPlanning key={`${title}-planning-${index}`} {...entry} />;
+            return <FeedPlanning key={entry.id} {...entry} />;
           }
           if (entry.kind === "gate") {
             return (
               <ApprovalGate
-                key={`${title}-gate-${entry.block.run_id}-${index}`}
+                key={entry.id}
                 block={entry.block}
                 sessionId={sessionId}
               />
             );
           }
-          return <FeedLine key={`${title}-${entry.text}-${index}`} {...entry} />;
+          return <FeedLine key={entry.id} {...entry} />;
         })}
       </div>
     </div>

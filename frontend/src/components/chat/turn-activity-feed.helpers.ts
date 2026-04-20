@@ -131,12 +131,14 @@ function joinLabels(labels: string[], noun: string): string {
 }
 
 function summarizeRetrievalBlock(
-  results: RetrievalResult[]
+  results: RetrievalResult[],
+  blockIndex: number
 ): FeedLineDescriptor | null {
   if (results.length === 0) {
     return null;
   }
 
+  const id = `retrieval-${blockIndex}`;
   const labels = Array.from(
     new Set(
       results
@@ -148,6 +150,7 @@ function summarizeRetrievalBlock(
   if (labels.length === 0) {
     return {
       kind: "line",
+      id,
       text: "Looked at retrieved context.",
       tone: "active",
     };
@@ -156,6 +159,7 @@ function summarizeRetrievalBlock(
   if (labels.length === 1 && labels[0] === "memory") {
     return {
       kind: "line",
+      id,
       text: "Looked at memory.",
       tone: "active",
     };
@@ -163,13 +167,15 @@ function summarizeRetrievalBlock(
 
   return {
     kind: "line",
+    id,
     text: `Looked at ${joinLabels(labels, "source")}.`,
     tone: "active",
   };
 }
 
 function summarizePlanBlock(
-  block: Extract<SessionContentBlock, { type: "plan" }>
+  block: Extract<SessionContentBlock, { type: "plan" }>,
+  blockIndex: number
 ): FeedPlanningDescriptor {
   const stepCount = Array.isArray(block.plan.steps) ? block.plan.steps.length : null;
   const fallback =
@@ -184,17 +190,21 @@ function summarizePlanBlock(
 
   return {
     kind: "planning",
+    id: `plan-${block.run_id ?? blockIndex}`,
     steps: [summary, ...stepSummaries],
     tone: "active",
   };
 }
 
-function summarizeToolTraceLines(toolTrace: unknown): FeedLineDescriptor[] {
+function summarizeToolTraceLines(
+  toolTrace: unknown,
+  idPrefix: string
+): FeedLineDescriptor[] {
   if (!Array.isArray(toolTrace)) {
     return [];
   }
 
-  return toolTrace.flatMap((entry) => {
+  return toolTrace.flatMap((entry, index) => {
     if (!isObjectRecord(entry)) {
       return [];
     }
@@ -209,7 +219,10 @@ function summarizeToolTraceLines(toolTrace: unknown): FeedLineDescriptor[] {
       typeof entry.output === "string"
         ? entry.output
         : "";
-    const line = completedToolLine(tool, input, output);
+    const traceRunId =
+      typeof entry.run_id === "string" ? entry.run_id : null;
+    const id = `${idPrefix}-trace-${traceRunId ?? index}`;
+    const line = completedToolLine(tool, input, output, undefined, id);
     return line ? [line] : [];
   });
 }
@@ -353,11 +366,12 @@ function sentenceWithDetail(prefix: string, detail?: string | null): string {
 
 function summarizeVerificationChecks(
   verdict: Extract<SessionContentBlock, { type: "verification" }>["verdict"],
-  verification: Record<string, unknown> | null
+  verification: Record<string, unknown> | null,
+  idPrefix: string
 ): FeedLineDescriptor[] {
   const checks = Array.isArray(verification?.checks) ? verification.checks : [];
 
-  return checks.flatMap((check) => {
+  return checks.flatMap((check, index) => {
     if (!isObjectRecord(check)) {
       return [];
     }
@@ -366,8 +380,9 @@ function summarizeVerificationChecks(
       check.status === "pass" || check.status === "fail" || check.status === "not_run"
         ? check.status
         : null;
+    const rawName = typeof check.name === "string" ? check.name : null;
     const name = compactInline(
-      typeof check.name === "string" ? humanizeValue(check.name) : null,
+      rawName ? humanizeValue(rawName) : null,
       42
     );
     const note = compactUserFacingInline(
@@ -385,6 +400,7 @@ function summarizeVerificationChecks(
     return [
       {
         kind: "line",
+        id: `${idPrefix}-check-${rawName ?? index}`,
         text: sentenceWithDetail(prefix, note),
         tone: verificationDetailTone(verdict, status),
       },
@@ -394,7 +410,8 @@ function summarizeVerificationChecks(
 
 function summarizeVerificationActions(
   verdict: Extract<SessionContentBlock, { type: "verification" }>["verdict"],
-  verification: Record<string, unknown> | null
+  verification: Record<string, unknown> | null,
+  idPrefix: string
 ): FeedLineDescriptor[] {
   const actionValues = Array.isArray(verification?.repair_instructions)
     ? verification?.repair_instructions
@@ -403,7 +420,7 @@ function summarizeVerificationActions(
       : [];
   const seen = new Set<string>();
 
-  return actionValues.flatMap((value) => {
+  return actionValues.flatMap((value, index) => {
     if (typeof value !== "string") {
       return [];
     }
@@ -417,6 +434,7 @@ function summarizeVerificationActions(
     return [
       {
         kind: "line",
+        id: `${idPrefix}-action-${index}`,
         text,
         tone: verificationDetailTone(verdict),
       },
@@ -425,19 +443,22 @@ function summarizeVerificationActions(
 }
 
 function summarizeVerificationBlock(
-  block: Extract<SessionContentBlock, { type: "verification" }>
+  block: Extract<SessionContentBlock, { type: "verification" }>,
+  blockIndex: number
 ): FeedLineDescriptor[] {
   const tone = verificationTone(block.verdict);
   const verification = isObjectRecord(block.verification) ? block.verification : null;
+  const idPrefix = `verification-${block.run_id ?? blockIndex}`;
   const detailLines = [
-    ...summarizeToolTraceLines(block.tool_trace),
-    ...summarizeVerificationChecks(block.verdict, verification),
-    ...summarizeVerificationActions(block.verdict, verification),
+    ...summarizeToolTraceLines(block.tool_trace, idPrefix),
+    ...summarizeVerificationChecks(block.verdict, verification, idPrefix),
+    ...summarizeVerificationActions(block.verdict, verification, idPrefix),
   ];
 
   return [
     {
       kind: "line",
+      id: `${idPrefix}-outcome`,
       text: verificationOutcomeLine(block.verdict),
       tone,
     },
@@ -446,7 +467,8 @@ function summarizeVerificationBlock(
 }
 
 function summarizeWarningBlock(
-  block: Extract<SessionContentBlock, { type: "warning" }>
+  block: Extract<SessionContentBlock, { type: "warning" }>,
+  blockIndex: number
 ): FeedLineDescriptor | null {
   const message = compactInline(block.message, 160);
   if (!message) {
@@ -454,6 +476,7 @@ function summarizeWarningBlock(
   }
   return {
     kind: "line",
+    id: `warning-${blockIndex}`,
     text: message,
     tone: "warning",
   };
@@ -522,13 +545,15 @@ function outcomeTone(result?: ToolResultEnvelope): FeedTone {
 function startedToolLine(
   tool: string,
   input: string,
-  isPending: boolean
+  isPending: boolean,
+  id: string
 ): FeedLineDescriptor {
   const target = shouldShowToolTarget(tool)
     ? compactUserFacingInline(input)
     : null;
   return {
     kind: "line",
+    id,
     text: sentenceCase(
       target
         ? `${isPending ? "Running" : "Started"} ${toolPhrase(tool)} on ${target}.`
@@ -542,7 +567,8 @@ function completedToolLine(
   tool: string,
   input: string,
   output: string,
-  result?: ToolResultEnvelope
+  result: ToolResultEnvelope | undefined,
+  id: string
 ): FeedLineDescriptor | null {
   const target = shouldShowToolTarget(tool)
     ? compactUserFacingInline(input)
@@ -553,6 +579,7 @@ function completedToolLine(
   if (tool === "evidence_review") {
     return {
       kind: "line",
+      id,
       text: "Ran evidence review.",
       tone: outcomeTone(result),
       ...(fullOutput ? { fullOutput } : {}),
@@ -562,6 +589,7 @@ function completedToolLine(
   if (tool === "verification_agent") {
     return {
       kind: "line",
+      id,
       text: "Ran verification.",
       tone: outcomeTone(result),
       ...(fullOutput ? { fullOutput } : {}),
@@ -571,6 +599,7 @@ function completedToolLine(
   if (result?.status === "error") {
     return {
       kind: "line",
+      id,
       text: `${sentenceCase(toolPhrase(tool))} hit an error.`,
       tone: "error",
       ...(fullOutput ? { fullOutput } : {}),
@@ -580,6 +609,7 @@ function completedToolLine(
   if (tool.toLowerCase().includes("memory")) {
     return {
       kind: "line",
+      id,
       text: "Used memory.",
       tone: outcomeTone(result),
       ...(fullOutput ? { fullOutput } : {}),
@@ -588,6 +618,7 @@ function completedToolLine(
 
   return {
     kind: "line",
+    id,
     text: target
       ? `Ran ${toolPhrase(tool)} on ${target}.`
       : detail
@@ -642,6 +673,7 @@ function maybePushSectionPlaceholder(
   if (!hasPlanningEntry) {
     sections.planning.push({
       kind: "planning",
+      id: "planning-placeholder",
       steps: ["Planning next steps."],
       tone: "active",
     });
@@ -661,9 +693,11 @@ function summarizeWorkflowStep(step: WorkflowStepState): FeedLineDescriptor {
   const position = `${step.step_index}/${step.total_steps}`;
   const label = step.label ?? step.step_id;
   const attemptSuffix = step.attempt > 1 ? ` (attempt ${step.attempt})` : "";
+  const id = `workflow-${step.run_id}:${step.step_id}`;
   if (step.status === "running") {
     return {
       kind: "line",
+      id,
       text: `Step ${position}: ${label} — running${attemptSuffix}`,
       tone: "active",
     };
@@ -673,6 +707,7 @@ function summarizeWorkflowStep(step: WorkflowStepState): FeedLineDescriptor {
       typeof step.duration_ms === "number" ? ` in ${step.duration_ms} ms` : "";
     return {
       kind: "line",
+      id,
       text: `Step ${position}: ${label} — done${duration}${attemptSuffix}`,
       tone: "success",
     };
@@ -680,6 +715,7 @@ function summarizeWorkflowStep(step: WorkflowStepState): FeedLineDescriptor {
   const errorSuffix = step.error ? `: ${step.error}` : "";
   return {
     kind: "line",
+    id,
     text: `Step ${position}: ${label} — failed${attemptSuffix}${errorSuffix}`,
     tone: "error",
   };
@@ -689,6 +725,7 @@ function summarizeFallback(message: Message): FeedLineDescriptor {
   if (message.content.trim()) {
     return {
       kind: "line",
+      id: "fallback-drafting",
       text: "Drafting answer.",
       tone: "active",
     };
@@ -696,6 +733,7 @@ function summarizeFallback(message: Message): FeedLineDescriptor {
 
   return {
     kind: "line",
+    id: "fallback-preparing",
     text: "Preparing next step.",
     tone: "active",
   };
@@ -711,23 +749,29 @@ export function buildFeedSections(
   const pendingUses = new Map<string, Array<{ input: string; runId?: string }>>();
   let renderedPendingTool = false;
 
-  blocks.forEach((block) => {
+  blocks.forEach((block, blockIndex) => {
     switch (block.type) {
       case "text":
         break;
       case "retrieval": {
-        const line = summarizeRetrievalBlock(block.results);
+        const line = summarizeRetrievalBlock(block.results, blockIndex);
         if (line) {
           sections.thinking.push(line);
         }
         break;
       }
-      case "plan":
-        sections.thinking.push(...summarizeToolTraceLines(block.tool_trace));
-        sections.planning = [summarizePlanBlock(block)];
+      case "plan": {
+        const planPrefix = `plan-${block.run_id ?? blockIndex}`;
+        sections.thinking.push(
+          ...summarizeToolTraceLines(block.tool_trace, planPrefix)
+        );
+        sections.planning = [summarizePlanBlock(block, blockIndex)];
         break;
+      }
       case "verification":
-        sections.verification.push(...summarizeVerificationBlock(block));
+        sections.verification.push(
+          ...summarizeVerificationBlock(block, blockIndex)
+        );
         break;
       case "tool_use": {
         const key = toolBlockKey(block.tool, block.run_id);
@@ -747,7 +791,10 @@ export function buildFeedSections(
         if (shouldSuppressSectionToolLine(block.tool, hasVerificationBlock)) {
           maybePushSectionPlaceholder(sections, sectionKey, false);
         } else {
-          sections[sectionKey].push(startedToolLine(block.tool, block.input, isPending));
+          const id = `tool-start-${block.run_id ?? `idx-${blockIndex}`}`;
+          sections[sectionKey].push(
+            startedToolLine(block.tool, block.input, isPending, id)
+          );
         }
         break;
       }
@@ -761,11 +808,13 @@ export function buildFeedSections(
           pendingUses.delete(key);
         }
 
+        const id = `tool-end-${block.run_id ?? `idx-${blockIndex}`}`;
         const line = completedToolLine(
           block.tool,
           started?.input ?? "",
           block.output,
-          block.result
+          block.result,
+          id
         );
         if (line) {
           const sectionKey = sectionKeyForTool(block.tool);
@@ -781,11 +830,15 @@ export function buildFeedSections(
         break;
       }
       case "approval_gate": {
-        sections.thinking.push({ kind: "gate", block });
+        sections.thinking.push({
+          kind: "gate",
+          id: `gate-${block.run_id}`,
+          block,
+        });
         break;
       }
       case "warning": {
-        const line = summarizeWarningBlock(block);
+        const line = summarizeWarningBlock(block, blockIndex);
         if (line) {
           sections.thinking.push(line);
         }
@@ -805,7 +858,12 @@ export function buildFeedSections(
       maybePushSectionPlaceholder(sections, sectionKey, false);
     } else {
       sections[sectionKey].push(
-        startedToolLine(message.pendingTool.tool, message.pendingTool.input, true)
+        startedToolLine(
+          message.pendingTool.tool,
+          message.pendingTool.input,
+          true,
+          `tool-pending-${message.pendingTool.runId}`
+        )
       );
     }
   }
