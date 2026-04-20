@@ -214,6 +214,8 @@ async def test_token_budget_exit_stops_streaming_and_persists(tmp_path):
     # counter to return a predictable value per call so the test does not
     # depend on the optional tiktoken backend.
     events = [
+        _tool_start_event("read_file", "memory/MEMORY.md", "run-budget-1"),
+        _tool_end_event("read_file", "contents", "run-budget-1"),
         _token_event("chunk-one "),
         _token_event("chunk-two "),
         _token_event("chunk-three "),
@@ -238,6 +240,14 @@ async def test_token_budget_exit_stops_streaming_and_persists(tmp_path):
         )
 
     assert artifact.status == "token_budget_exceeded"
+    # Budget-path exit must not masquerade as an error — the exception used
+    # internally to unwind the event loop is classified separately from the
+    # generic ``except Exception`` boundary.
+    assert artifact.error is None
+    # Partial transcript is preserved: the tool call that executed before
+    # the budget tripped must still appear in the persisted trace.
+    assert artifact.tool_trace
+    assert artifact.tool_trace[0]["tool"] == "read_file"
     # With 2 tokens consumed by system+user prompt and a budget of 2,
     # the very first streamed chunk should trip the limit.
     assert artifact.tokens_used >= 2
@@ -245,6 +255,8 @@ async def test_token_budget_exit_stops_streaming_and_persists(tmp_path):
     persisted = json.loads(Path(artifact.absolute_path).read_text(encoding="utf-8"))
     assert persisted["status"] == "token_budget_exceeded"
     assert persisted["tokens_used"] == artifact.tokens_used
+    assert persisted["error"] is None
+    assert persisted["outputs"]["tool_trace"][0]["tool"] == "read_file"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

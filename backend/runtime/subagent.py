@@ -51,6 +51,16 @@ SUBAGENT_ARTIFACT_FILENAME = "subagent_run.json"
 SUBAGENT_SCHEMA_VERSION = "1.0.0"
 
 
+class _TokenBudgetExceeded(Exception):
+    """Internal signal raised from the event loop when the token budget trips.
+
+    Funneling the budget exit through the same ``except`` boundary as
+    recursion and generic errors keeps every terminal condition classified
+    in one place instead of splitting between an inline ``break`` and the
+    exception handler.
+    """
+
+
 def _tool_name(tool: Any) -> str:
     name = getattr(tool, "name", None)
     if isinstance(name, str) and name:
@@ -411,8 +421,9 @@ async def run_subagent(
                 tokens_used += _count_tokens(result.summary)
 
             if _over_budget():
-                status = "token_budget_exceeded"
-                break
+                raise _TokenBudgetExceeded()
+    except _TokenBudgetExceeded:
+        status = "token_budget_exceeded"
     except Exception as exc:  # noqa: BLE001 — classify at the boundary
         if _is_recursion_error(exc):
             status = "recursion_cap_exceeded"
