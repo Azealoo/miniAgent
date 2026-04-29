@@ -215,9 +215,36 @@ class TestCreateAndRead:
     def test_session_meta_fields(self, sm):
         sid = sm.create_session()
         meta = sm.get_session_meta(sid)
-        assert set(meta.keys()) == {"id", "title", "created_at", "updated_at", "message_count"}
+        assert set(meta.keys()) == {
+            "id",
+            "title",
+            "created_at",
+            "updated_at",
+            "message_count",
+            "access_scope",
+        }
         assert meta["id"] == sid
         assert meta["message_count"] == 0
+        assert meta["access_scope"] == "execution"
+
+    def test_create_session_persists_access_scope(self, sm, tmp_path):
+        sid = sm.create_session(access_scope="admin")
+        raw = json.loads((tmp_path / "sessions" / f"{sid}.json").read_text())
+        assert raw["access_scope"] == "admin"
+        assert sm.get_session_access_scope(sid) == "admin"
+
+    def test_create_session_rejects_unknown_scope(self, sm):
+        with pytest.raises(ValueError):
+            sm.create_session(access_scope="superuser")
+
+    def test_legacy_session_without_scope_defaults_to_execution(self, sm, tmp_path):
+        sid = sm.create_session()
+        path = tmp_path / "sessions" / f"{sid}.json"
+        raw = json.loads(path.read_text())
+        raw.pop("access_scope", None)
+        path.write_text(json.dumps(raw))
+        assert sm.get_session_access_scope(sid) == "execution"
+        assert sm.get_session_meta(sid)["access_scope"] == "execution"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

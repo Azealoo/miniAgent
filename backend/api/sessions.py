@@ -92,7 +92,10 @@ def list_session_files_workspace_summary(session_id: str, request: Request = Non
 @router.post("/sessions", status_code=201)
 def create_session(request: Request = None):
     require_execution_access(request)
-    session_id = _sm().create_session()
+    # The route requires execution access, so the session is bound to the
+    # ``execution`` tier. Recording it on the session JSON lets ``/api/chat``
+    # cross-check session scope against per-turn requirements (issue #240).
+    session_id = _sm().create_session(access_scope="execution")
     return _sm().get_session_meta(session_id)
 
 

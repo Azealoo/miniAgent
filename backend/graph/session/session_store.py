@@ -293,12 +293,36 @@ class SessionStore:
     # Public API                                                           #
     # ------------------------------------------------------------------ #
 
-    def create_session(self) -> str:
+    # Default access scope for new sessions and for sessions written before
+    # ``access_scope`` was persisted on the JSON record. Sessions could only
+    # be created via execution-scope routes prior to this change, so legacy
+    # records are treated as execution-bound rather than rejected.
+    _DEFAULT_ACCESS_SCOPE = "execution"
+    _VALID_ACCESS_SCOPES = ("inspection", "execution", "admin")
+
+    def create_session(self, *, access_scope: str = _DEFAULT_ACCESS_SCOPE) -> str:
+        if access_scope not in self._VALID_ACCESS_SCOPES:
+            raise ValueError(f"Invalid access_scope: {access_scope!r}")
         session_id = str(uuid.uuid4())
         data = self._empty(session_id)
+        data["access_scope"] = access_scope
         with self._locked(session_id):
             self._write(session_id, data)
         return session_id
+
+    def get_session_access_scope(self, session_id: str) -> str:
+        """Return the access scope bound to *session_id*.
+
+        Sessions written before ``access_scope`` was tracked silently default
+        to ``execution`` — they could only have been created through
+        execution-scope routes, so promoting them to that tier preserves the
+        prior contract without rejecting in-flight clients on upgrade.
+        """
+        data = self._read(session_id)
+        scope = data.get("access_scope")
+        if scope in self._VALID_ACCESS_SCOPES:
+            return scope
+        return self._DEFAULT_ACCESS_SCOPE
 
     def list_sessions(self) -> list[dict]:
         # Reads the ``_index.json`` sidecar so we avoid an O(N) glob+open of
@@ -578,12 +602,16 @@ class SessionStore:
 
     def get_session_meta(self, session_id: str) -> dict:
         data = self._read(session_id)
+        scope = data.get("access_scope")
+        if scope not in self._VALID_ACCESS_SCOPES:
+            scope = self._DEFAULT_ACCESS_SCOPE
         meta = {
             "id": session_id,
             "title": data.get("title", ""),
             "created_at": data.get("created_at", 0.0),
             "updated_at": data.get("updated_at", 0.0),
             "message_count": len(data.get("messages", [])),
+            "access_scope": scope,
         }
         runtime_config = data.get("runtime_config")
         if isinstance(runtime_config, dict):
