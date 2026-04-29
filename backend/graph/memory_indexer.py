@@ -150,7 +150,15 @@ class MemoryIndexer:
         self._probe_cache: dict[tuple[str, str], list[str]] = {}
         # Background rebuild coordination. `_schedule_lock` guards the
         # `_rebuild_in_flight` flag so concurrent `_maybe_rebuild` callers
-        # coalesce to a single worker rather than queueing duplicates.
+        # coalesce to a single worker rather than queueing duplicates. The
+        # check-and-set in `_maybe_rebuild` and the clear in
+        # `_run_background_rebuild`'s `finally` both run under this lock, so
+        # the flag transition is atomic across all callers.
+        # NOTE: this is `threading.Lock`, not `asyncio.Lock`, because the
+        # rebuild worker is a `threading.Thread` daemon and `_maybe_rebuild`
+        # is a sync method invoked from both sync and async call sites. An
+        # `asyncio.Lock` would not serialize the thread worker against sync
+        # callers and would also be bound to a single event loop.
         # `_rebuild_thread` is retained so callers (tests, shutdown paths) can
         # join the worker when they need deterministic completion.
         self._schedule_lock = threading.Lock()
