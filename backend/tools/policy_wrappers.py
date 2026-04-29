@@ -39,6 +39,7 @@ from .policy import (
     scoped_environment,
 )
 from .registry import ToolManifestEntry, ToolRegistry
+from .speculation import get_current_speculation, speculation_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -647,6 +648,97 @@ class PolicyWrappedTool(BaseTool):
             request_id=policy_context.request_id if policy_context else None,
         )
 
+    def _is_speculatable(self) -> bool:
+        """True when speculative pre-execution is safe for this tool.
+
+        Restricted to read-only, concurrency-safe, non-destructive tools.
+        A tool that flips any of those flags is never speculated even if a
+        speculation is somehow scheduled for it.
+        """
+
+        manifest = self.manifest
+        return bool(
+            manifest.read_only
+            and manifest.concurrency_safe
+            and not manifest.destructive
+        )
+
+    async def _run_speculative(self, kwargs: dict[str, Any]) -> Any:
+        """Dispatch the wrapped tool without pre/post hooks or annotation.
+
+        The consumer path re-runs pre-dispatch decisions and post-tool
+        hooks before serving the cached result, so the speculative runner
+        only needs to produce a raw-tool-output shaped value. Sandbox
+        timeouts and exceptions are converted into ``ToolResultEnvelope``
+        tuples exactly as the real dispatch would.
+        """
+
+        try:
+            with scoped_environment(self._sandbox_env_allowlist()):
+                return await self._dispatch_async_with_wall_clock(
+                    (), kwargs, self._sandbox_wall_clock()
+                )
+        except _SandboxWallClockExceeded as exc:
+            return self._handle_wall_clock_exceeded(exc)
+        except Exception as exc:
+            return self._handle_tool_exception(exc, (), kwargs)
+
+    def schedule_speculation(self, args: dict[str, Any]) -> bool:
+        """Queue a speculative dispatch of this tool against ``args``.
+
+        Called by the agent streaming loop as soon as a fully parsed
+        tool_use block is observed on the model stream. No-op (and returns
+        ``False``) when speculation is disabled, when the tool is not
+        speculatable, or when there is no active ``SpeculationSession`` on
+        the caller's context.
+        """
+
+        if not speculation_enabled():
+            return False
+        if not self._is_speculatable():
+            return False
+        session = get_current_speculation()
+        if session is None:
+            return False
+        kwargs = dict(args) if isinstance(args, dict) else {}
+
+        async def _runner() -> Any:
+            return await self._run_speculative(kwargs)
+
+        return session.speculate(self.name, (), kwargs, _runner)
+
+    async def _try_consume_speculation(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any]] | None:
+        """Serve a cached speculative result if one matches this dispatch.
+
+        Returns the raw tool output plus a metadata block describing the
+        hit, or ``None`` when no speculation was scheduled, it was already
+        consumed, or the canonical args digest didn't match.
+        """
+
+        if not speculation_enabled():
+            return None
+        if not self._is_speculatable():
+            return None
+        session = get_current_speculation()
+        if session is None:
+            return None
+        consumed = await session.consume(self.name, args, kwargs)
+        if consumed is None:
+            return None
+        raw_output, speculation_duration_ms = consumed
+        metadata = {
+            "was_speculative": True,
+            "speculation_duration_ms": round(speculation_duration_ms, 3),
+            "consumed_at": datetime.now(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+        return raw_output, metadata
+
     def _run(self, *args, **kwargs):  # type: ignore[override]
         started_at = datetime.now(timezone.utc)
         t0 = time.perf_counter()
@@ -690,6 +782,7 @@ class PolicyWrappedTool(BaseTool):
         t0 = time.perf_counter()
         decision = self._resolve_pre_dispatch_decision(args, kwargs)
         raw_output = self._short_circuit_raw_output(decision)
+        speculation_metadata: dict[str, Any] | None = None
         if raw_output is None:
             with runtime_hooks.hook_invocation_context(
                 self._build_invocation_context(started_at=started_at, duration_ms=None)
@@ -697,6 +790,10 @@ class PolicyWrappedTool(BaseTool):
                 args, kwargs, hook_raw = self._apply_pre_tool_hooks(args, kwargs)
             if hook_raw is not None:
                 raw_output = hook_raw
+        if raw_output is None:
+            consumed = await self._try_consume_speculation(args, kwargs)
+            if consumed is not None:
+                raw_output, speculation_metadata = consumed
         if raw_output is None:
             try:
                 with scoped_environment(self._sandbox_env_allowlist()):
@@ -723,6 +820,10 @@ class PolicyWrappedTool(BaseTool):
             get_tool_policy_context(),
             decision,
         )
+        if speculation_metadata is not None:
+            merged_metadata = dict(annotated.metadata)
+            merged_metadata["speculation"] = speculation_metadata
+            annotated.metadata = merged_metadata
         duration_ms = (time.perf_counter() - t0) * 1000.0
         with runtime_hooks.hook_invocation_context(
             self._build_invocation_context(started_at=started_at, duration_ms=duration_ms)

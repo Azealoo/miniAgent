@@ -6,6 +6,7 @@ so that live workspace edits are always reflected in the system prompt.
 import asyncio
 import hashlib
 import logging
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
@@ -26,6 +27,12 @@ from .prompt_builder import build_retrieved_memory_block, build_system_prompt_bl
 from .session_manager import SessionManager
 from .skill_router import select_skill_entries_for_query
 from tools.contracts import normalize_tool_output
+from tools.policy import get_tool_policy_context
+from tools.speculation import (
+    SpeculationSession,
+    speculation_enabled,
+    speculation_session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -425,157 +432,209 @@ class AgentManager:
                 1000,
             )
         }
-        # Outer primary->fallback loop: if the primary executor model raises
-        # an overload/timeout error before any event has been yielded, swap
-        # in the role's configured fallback_model once per turn. The inner
-        # stream is unchanged; verification/repair retries remain in
-        # ``runtime/query_engine.py`` and are intentionally not merged here.
-        while True:
-            try:
-                async for event in agent.astream_events(
-                    {"messages": lc_messages},
-                    version="v2",
-                    config=run_config,
-                ):
-                    kind = event["event"]
+        # Speculative read-only tool execution: as soon as the model emits
+        # a fully parsed tool_use block, wrapped PolicyWrappedTools that
+        # are read_only + concurrency_safe can begin executing in the
+        # background. The formal dispatch inside `_arun` consumes the
+        # cached result if the args digest matches, otherwise discards it.
+        if speculation_enabled():
+            policy_context = get_tool_policy_context()
+            spec_session: SpeculationSession | None = SpeculationSession(
+                session_id=policy_context.session_id if policy_context else None,
+                turn_id=policy_context.turn_id if policy_context else None,
+            )
+            tool_lookup = {
+                getattr(tool, "name", ""): tool for tool in self.tools
+            }
+        else:
+            spec_session = None
+            tool_lookup = {}
 
-                    if kind == "on_chat_model_stream":
-                        chunk = event["data"]["chunk"]
-                        if chunk.content:
-                            if after_tool:
-                                yield {"type": "new_response"}
-                                after_tool = False
-                            if isinstance(chunk.content, str):
-                                answer_segments.append(chunk.content)
-                            streamed_any_event = True
-                            yield {"type": "token", "content": chunk.content}
-
-                    elif kind == "on_chat_model_end":
-                        usage_event = _extract_llm_usage_event(event)
-                        if usage_event is not None:
-                            streamed_any_event = True
-                            yield usage_event
-
-                    elif kind == "on_tool_start":
-                        run_id = event["run_id"]
-                        tool_name = event["name"]
-                        raw_input = event["data"].get("input", {})
-
-                        # Flatten single-key dict inputs for readability
-                        if isinstance(raw_input, dict) and len(raw_input) == 1:
-                            tool_input_str = str(next(iter(raw_input.values())))
-                        else:
-                            tool_input_str = str(raw_input)
-
-                        streamed_any_event = True
-                        yield {
-                            "type": "tool_start",
-                            "tool": tool_name,
-                            "input": tool_input_str,
-                            "run_id": run_id,
-                        }
-
-                    elif kind == "on_tool_end":
-                        run_id = event["run_id"]
-                        raw_output = event["data"].get("output", "")
-                        result = normalize_tool_output(event["name"], raw_output)
-                        raw_input = event["data"].get("input", {})
-                        if isinstance(raw_input, dict) and len(raw_input) == 1:
-                            tool_input_str = str(next(iter(raw_input.values())))
-                        else:
-                            tool_input_str = str(raw_input)
-
-                        result_dict = result.model_dump(mode="json")
-                        policy = result.metadata.get("policy")
-                        policy_dict = policy if isinstance(policy, dict) else None
-
-                        if result.outcome == "needs_approval":
-                            approval_message = (
-                                result.error.message
-                                if result.error is not None
-                                else result.summary
-                            )
-                            approval_reason = (
-                                policy_dict.get("approval_reason")
-                                if isinstance(policy_dict, dict)
-                                else None
-                            ) or "requires_approval"
-                            payload = {
-                                "type": "tool_awaiting_approval",
-                                "tool": event["name"],
-                                "input": tool_input_str,
-                                "run_id": run_id,
-                                "reason": approval_reason,
-                                "message": approval_message,
-                                "result": result_dict,
-                            }
-                            if policy_dict is not None:
-                                payload["policy"] = policy_dict
-                            yield payload
-                            # Hard-stop the turn: the agent must not keep reasoning over a
-                            # gated ToolMessage, since that would either loop on the same
-                            # gate or paper over the human decision. The reviewer resumes
-                            # the turn via POST /api/chat/approval + a follow-up /api/chat.
-                            yield {"type": "done", "turn_status": "awaiting_approval"}
-                            return
-
-                        payload = {
-                            "type": "tool_end",
-                            "tool": event["name"],
-                            "output": result.summary,
-                            "result": result_dict,
-                            "run_id": run_id,
-                        }
-                        if policy_dict is not None:
-                            payload["policy"] = policy_dict
-                        streamed_any_event = True
-                        yield payload
-                        after_tool = True
-                break
-
-            except asyncio.CancelledError:
-                # Cancellation must propagate verbatim so it reaches in-flight
-                # async tools as a CancelledError at their next await point.
-                # Catching and converting it to an "error" event would silently
-                # turn a client disconnect into a normal turn failure and would
-                # leave the cancelled tool task uncancelled.
-                raise
-            except Exception as exc:
-                if (
-                    not used_fallback
-                    and not streamed_any_event
-                    and is_overload_or_timeout(exc)
-                ):
-                    fallback_llm = build_fallback_chat_model(
-                        "executor", streaming=True
-                    )
-                    if fallback_llm is not None:
-                        self._record_model_fallback(
-                            role="executor",
-                            exc=exc,
-                        )
-                        agent = await self._build_agent(
-                            rag_mode,
-                            skill_entries=selected_skill_entries,
-                            llm=fallback_llm,
-                            session_id=session_id,
-                            use_cache=False,
-                        )
-                        used_fallback = True
-                        after_tool = False
-                        answer_segments = []
-                        continue
-                yield {"type": "error", "error": str(exc)}
+        def _schedule_speculations(event: dict) -> None:
+            if not tool_lookup:
                 return
+            output = event.get("data", {}).get("output")
+            tool_calls = getattr(output, "tool_calls", None) or []
+            for call in tool_calls:
+                call_name = call.get("name") if isinstance(call, dict) else None
+                call_args = call.get("args") if isinstance(call, dict) else None
+                wrapped = tool_lookup.get(call_name) if call_name else None
+                scheduler = getattr(wrapped, "schedule_speculation", None) if wrapped else None
+                if scheduler is None:
+                    continue
+                try:
+                    scheduler(call_args if isinstance(call_args, dict) else {})
+                except Exception:  # pragma: no cover - scheduling must never break the turn
+                    pass
 
-        warning_event = self._maybe_build_citation_warning(
-            "".join(answer_segments),
-            turn_started_at=turn_started_at,
+        spec_cm = (
+            speculation_session(spec_session)
+            if spec_session is not None
+            else nullcontext()
         )
-        if warning_event is not None:
-            yield warning_event
+        try:
+            with spec_cm:
+                # Outer primary->fallback loop: if the primary executor model
+                # raises an overload/timeout error before any event has been
+                # yielded, swap in the role's configured fallback_model once
+                # per turn. The inner stream is unchanged; verification/repair
+                # retries remain in ``runtime/query_engine.py`` and are
+                # intentionally not merged here.
+                while True:
+                    try:
+                        async for event in agent.astream_events(
+                            {"messages": lc_messages},
+                            version="v2",
+                            config=run_config,
+                        ):
+                            kind = event["event"]
 
-        yield {"type": "done"}
+                            if kind == "on_chat_model_stream":
+                                chunk = event["data"]["chunk"]
+                                if chunk.content:
+                                    if after_tool:
+                                        yield {"type": "new_response"}
+                                        after_tool = False
+                                    if isinstance(chunk.content, str):
+                                        answer_segments.append(chunk.content)
+                                    streamed_any_event = True
+                                    yield {"type": "token", "content": chunk.content}
+
+                            elif kind == "on_chat_model_end":
+                                # Schedule speculative execution for any
+                                # read-only, concurrency-safe tool calls the
+                                # model just emitted, then emit any provider
+                                # cache-usage telemetry attached to the
+                                # AIMessage.
+                                _schedule_speculations(event)
+                                usage_event = _extract_llm_usage_event(event)
+                                if usage_event is not None:
+                                    streamed_any_event = True
+                                    yield usage_event
+
+                            elif kind == "on_tool_start":
+                                run_id = event["run_id"]
+                                tool_name = event["name"]
+                                raw_input = event["data"].get("input", {})
+
+                                # Flatten single-key dict inputs for readability
+                                if isinstance(raw_input, dict) and len(raw_input) == 1:
+                                    tool_input_str = str(next(iter(raw_input.values())))
+                                else:
+                                    tool_input_str = str(raw_input)
+
+                                streamed_any_event = True
+                                yield {
+                                    "type": "tool_start",
+                                    "tool": tool_name,
+                                    "input": tool_input_str,
+                                    "run_id": run_id,
+                                }
+
+                            elif kind == "on_tool_end":
+                                run_id = event["run_id"]
+                                raw_output = event["data"].get("output", "")
+                                result = normalize_tool_output(event["name"], raw_output)
+                                raw_input = event["data"].get("input", {})
+                                if isinstance(raw_input, dict) and len(raw_input) == 1:
+                                    tool_input_str = str(next(iter(raw_input.values())))
+                                else:
+                                    tool_input_str = str(raw_input)
+
+                                result_dict = result.model_dump(mode="json")
+                                policy = result.metadata.get("policy")
+                                policy_dict = policy if isinstance(policy, dict) else None
+
+                                if result.outcome == "needs_approval":
+                                    approval_message = (
+                                        result.error.message
+                                        if result.error is not None
+                                        else result.summary
+                                    )
+                                    approval_reason = (
+                                        policy_dict.get("approval_reason")
+                                        if isinstance(policy_dict, dict)
+                                        else None
+                                    ) or "requires_approval"
+                                    payload = {
+                                        "type": "tool_awaiting_approval",
+                                        "tool": event["name"],
+                                        "input": tool_input_str,
+                                        "run_id": run_id,
+                                        "reason": approval_reason,
+                                        "message": approval_message,
+                                        "result": result_dict,
+                                    }
+                                    if policy_dict is not None:
+                                        payload["policy"] = policy_dict
+                                    yield payload
+                                    # Hard-stop the turn: the agent must not keep reasoning over a
+                                    # gated ToolMessage, since that would either loop on the same
+                                    # gate or paper over the human decision. The reviewer resumes
+                                    # the turn via POST /api/chat/approval + a follow-up /api/chat.
+                                    yield {"type": "done", "turn_status": "awaiting_approval"}
+                                    return
+
+                                payload = {
+                                    "type": "tool_end",
+                                    "tool": event["name"],
+                                    "output": result.summary,
+                                    "result": result_dict,
+                                    "run_id": run_id,
+                                }
+                                if policy_dict is not None:
+                                    payload["policy"] = policy_dict
+                                streamed_any_event = True
+                                yield payload
+                                after_tool = True
+                        break
+
+                    except asyncio.CancelledError:
+                        # Cancellation must propagate verbatim so it reaches in-flight
+                        # async tools as a CancelledError at their next await point.
+                        # Catching and converting it to an "error" event would silently
+                        # turn a client disconnect into a normal turn failure and would
+                        # leave the cancelled tool task uncancelled.
+                        raise
+                    except Exception as exc:
+                        if (
+                            not used_fallback
+                            and not streamed_any_event
+                            and is_overload_or_timeout(exc)
+                        ):
+                            fallback_llm = build_fallback_chat_model(
+                                "executor", streaming=True
+                            )
+                            if fallback_llm is not None:
+                                self._record_model_fallback(
+                                    role="executor",
+                                    exc=exc,
+                                )
+                                agent = await self._build_agent(
+                                    rag_mode,
+                                    skill_entries=selected_skill_entries,
+                                    llm=fallback_llm,
+                                    session_id=session_id,
+                                    use_cache=False,
+                                )
+                                used_fallback = True
+                                after_tool = False
+                                answer_segments = []
+                                continue
+                        yield {"type": "error", "error": str(exc)}
+                        return
+
+                warning_event = self._maybe_build_citation_warning(
+                    "".join(answer_segments),
+                    turn_started_at=turn_started_at,
+                )
+                if warning_event is not None:
+                    yield warning_event
+
+                yield {"type": "done"}
+        finally:
+            if spec_session is not None:
+                await spec_session.discard_pending("stream_ended")
 
     def _record_model_fallback(self, *, role: str, exc: BaseException) -> None:
         """Emit an audit line when a primary model is swapped for its fallback."""
