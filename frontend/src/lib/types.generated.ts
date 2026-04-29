@@ -170,6 +170,17 @@ export interface ChatStreamPlanUpdatedEvent {
   tool_trace?: JsonObject[];
   type: "plan_updated";
 }
+/** Frozen prompt-cache prefix was replaced mid-session. */
+export interface ChatStreamPrefixInvalidatedEvent {
+  current_fingerprint?: string;
+  event_index?: number;
+  previous_fingerprint?: string;
+  reason?: string;
+  request_id?: string;
+  schema_version?: number;
+  session_id?: string;
+  type: "prefix_invalidated";
+}
 /** Non-fatal signal that a RAG retrieval attempt raised. */
 export interface ChatStreamRetrievalErrorEvent {
   error_type: string;
@@ -326,6 +337,7 @@ export type ChatStreamEventDTO =
   | ChatStreamPlanUpdatedEvent
   | ChatStreamVerificationResultEvent
   | ChatStreamNewResponseEvent
+  | ChatStreamPrefixInvalidatedEvent
   | ChatStreamCompactionEvent
   | WarningRuntimeEvent
   | ChatStreamDoneEvent

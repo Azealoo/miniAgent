@@ -8,6 +8,7 @@ migration completes — plan to remove it after one release cycle.
 """
 
 from graph.session import (
+    FrozenPrefixRegistration,
     FrozenSessionPrefix,
     SESSION_SCHEMA_VERSION,
     SessionCorruptError,
@@ -16,6 +17,7 @@ from graph.session import (
 )
 
 __all__ = [
+    "FrozenPrefixRegistration",
     "FrozenSessionPrefix",
     "SessionManager",
     "SESSION_SCHEMA_VERSION",

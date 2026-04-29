@@ -31,6 +31,7 @@ export type {
   ChatStreamPlanUpdatedEvent,
   ChatStreamVerificationResultEvent,
   ChatStreamNewResponseEvent,
+  ChatStreamPrefixInvalidatedEvent,
   ChatStreamCompactionEvent,
   ChatStreamDoneEvent,
   ChatStreamErrorEvent,
@@ -58,6 +59,7 @@ import type {
   ChatStreamPlanUpdatedEvent,
   ChatStreamVerificationResultEvent,
   ChatStreamNewResponseEvent,
+  ChatStreamPrefixInvalidatedEvent,
   ChatStreamCompactionEvent,
   ChatStreamDoneEvent,
   ChatStreamErrorEvent,
@@ -207,6 +209,20 @@ export interface SessionWarningBlock {
   review_path?: string;
 }
 
+/**
+ * Transport-only block surfaced when the backend replaces a session's frozen
+ * prompt-cache prefix mid-session. Not persisted in session JSON — it only
+ * lives on the streaming assistant message so the UI can render a pill
+ * explaining that provider prompt caching was dropped for this turn.
+ */
+export interface SessionPrefixInvalidatedBlock {
+  type: "prefix_invalidated";
+  session_id?: string;
+  previous_fingerprint?: string;
+  current_fingerprint?: string;
+  reason?: string;
+}
+
 export type SessionContentBlock =
   | SessionTextBlock
   | SessionToolUseBlock
@@ -216,7 +232,8 @@ export type SessionContentBlock =
   | SessionPlanBlock
   | SessionVerificationBlock
   | SessionApprovalGateBlock
-  | SessionWarningBlock;
+  | SessionWarningBlock
+  | SessionPrefixInvalidatedBlock;
 
 export interface ToolCall {
   tool: string;
@@ -280,6 +297,7 @@ export type ChatStreamEvent =
   | ChatStreamPlanUpdatedEvent
   | ChatStreamVerificationResultEvent
   | ChatStreamNewResponseEvent
+  | ChatStreamPrefixInvalidatedEvent
   | ChatStreamCompactionEvent
   | ChatStreamWarningEvent
   | ChatStreamDoneEvent

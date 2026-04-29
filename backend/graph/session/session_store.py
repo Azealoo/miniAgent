@@ -97,8 +97,24 @@ class FrozenSessionPrefix:
 # Per-session frozen prefix cache. Sub-agent contracts read this to reuse the
 # byte-identical leading prompt and maximise prompt-cache hits.
 _frozen_prefixes: dict[str, FrozenSessionPrefix] = {}
-_frozen_prefix_drift_logged: set[str] = set()
 _frozen_prefix_lock = threading.Lock()
+
+
+@dataclass(frozen=True)
+class FrozenPrefixRegistration:
+    """Result of :meth:`SessionStore.freeze_session_prefix`.
+
+    ``frozen`` is the currently-installed prefix snapshot. ``invalidated`` is
+    ``True`` on the turn a drifted fingerprint replaced a prior snapshot —
+    callers surface that as an SSE signal so the UI can show that the
+    provider prompt cache was dropped. ``previous_fingerprint`` carries the
+    fingerprint of the snapshot we replaced (``None`` on the first call for
+    the session).
+    """
+
+    frozen: FrozenSessionPrefix
+    invalidated: bool
+    previous_fingerprint: str | None
 
 
 def _get_or_create_lock(
@@ -531,37 +547,54 @@ class SessionStore:
         *,
         stable_prefix: str,
         tool_names: tuple[str, ...],
-    ) -> FrozenSessionPrefix:
-        """Record (on first call) or return the session's frozen prompt prefix.
+    ) -> FrozenPrefixRegistration:
+        """Record — or replace on drift — the session's frozen prompt prefix.
 
         The prefix + tool list are the leading bytes of the system prompt that
         must stay byte-identical across the parent turn and every sub-agent
-        run for DeepSeek / OpenAI / Anthropic prompt-cache hits. We freeze on
-        the first turn and never replace the snapshot — subsequent turns with
-        a different prefix log a drift warning (workspace edits, skills added
-        mid-session) so the loss of cache-eligibility is visible.
+        run for DeepSeek / OpenAI / Anthropic prompt-cache hits. On the first
+        call for a session we install the snapshot; on subsequent calls with
+        the same fingerprint we return it verbatim. A mid-session workspace
+        edit, skill change, or tool registry update produces a different
+        fingerprint — when that happens we replace the snapshot so sub-agents
+        spawned from the new parent prompt do not reuse stale cached bytes,
+        and return ``invalidated=True`` so the caller can emit an SSE event
+        for the UI.
         """
         _validate_session_id(session_id)
         fingerprint = _fingerprint_prefix(stable_prefix, tool_names)
         with _frozen_prefix_lock:
             existing = _frozen_prefixes.get(session_id)
-            if existing is not None:
-                if existing.prefix_fingerprint != fingerprint and session_id not in _frozen_prefix_drift_logged:
-                    _frozen_prefix_drift_logged.add(session_id)
-                    logger.warning(
-                        "session_prefix_drift session_id=%s — frozen prefix no "
-                        "longer matches current prompt assembly; sub-agent "
-                        "prompt-cache hits will degrade for this session.",
-                        session_id,
-                    )
-                return existing
+            if existing is not None and existing.prefix_fingerprint == fingerprint:
+                return FrozenPrefixRegistration(
+                    frozen=existing,
+                    invalidated=False,
+                    previous_fingerprint=None,
+                )
             frozen = FrozenSessionPrefix(
                 stable_prefix=stable_prefix,
                 tool_names=tool_names,
                 prefix_fingerprint=fingerprint,
             )
             _frozen_prefixes[session_id] = frozen
-            return frozen
+            if existing is None:
+                return FrozenPrefixRegistration(
+                    frozen=frozen,
+                    invalidated=False,
+                    previous_fingerprint=None,
+                )
+            logger.info(
+                "session_prefix_invalidated session_id=%s previous=%s current=%s "
+                "— workspace/skills edit detected; frozen prefix replaced.",
+                session_id,
+                existing.prefix_fingerprint,
+                fingerprint,
+            )
+            return FrozenPrefixRegistration(
+                frozen=frozen,
+                invalidated=True,
+                previous_fingerprint=existing.prefix_fingerprint,
+            )
 
     def get_frozen_session_prefix(self, session_id: str) -> FrozenSessionPrefix | None:
         """Return the frozen prefix for *session_id*, or ``None`` if unset."""
@@ -574,7 +607,6 @@ class SessionStore:
         """Drop the frozen prefix (used when the session is deleted)."""
         with _frozen_prefix_lock:
             _frozen_prefixes.pop(session_id, None)
-            _frozen_prefix_drift_logged.discard(session_id)
 
     def get_session_meta(self, session_id: str) -> dict:
         data = self._read(session_id)

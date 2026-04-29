@@ -150,6 +150,15 @@ export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent {
       };
     case "new_response":
       return { type: "new_response", ...base };
+    case "prefix_invalidated":
+      return {
+        type: "prefix_invalidated",
+        session_id: event.session_id ?? undefined,
+        previous_fingerprint: event.previous_fingerprint ?? undefined,
+        current_fingerprint: event.current_fingerprint ?? undefined,
+        reason: event.reason ?? undefined,
+        ...base,
+      };
     case "compaction_event":
       return {
         type: "compaction_event",

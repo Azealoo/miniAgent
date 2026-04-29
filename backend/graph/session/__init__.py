@@ -12,9 +12,10 @@ from graph.session.session_schema import (
     SessionCorruptError,
     _validate_session_id,
 )
-from graph.session.session_store import FrozenSessionPrefix
+from graph.session.session_store import FrozenPrefixRegistration, FrozenSessionPrefix
 
 __all__ = [
+    "FrozenPrefixRegistration",
     "FrozenSessionPrefix",
     "SessionManager",
     "SESSION_SCHEMA_VERSION",

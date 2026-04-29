@@ -35,53 +35,69 @@ def _valid_session_id(n: int) -> str:
 
 
 class TestFrozenSessionPrefix:
-    def test_freeze_returns_same_snapshot_on_repeat_calls(self, tmp_path):
+    def test_freeze_returns_same_snapshot_for_matching_fingerprint(self, tmp_path):
         from graph.session_manager import SessionManager
 
         session_id = _valid_session_id(1)
         sm = SessionManager(base_dir=tmp_path)
-        sm.create_session()  # Seed a session file so delete works later.
-        frozen_a = sm.freeze_session_prefix(
+        registration_a = sm.freeze_session_prefix(
             session_id,
             stable_prefix="<!-- Skills Snapshot -->\nx",
             tool_names=("read_file", "run_bash"),
         )
-        frozen_b = sm.freeze_session_prefix(
+        registration_b = sm.freeze_session_prefix(
             session_id,
-            stable_prefix="<!-- different -->\nz",
-            tool_names=("read_file",),
+            stable_prefix="<!-- Skills Snapshot -->\nx",
+            tool_names=("read_file", "run_bash"),
         )
-        assert frozen_a is frozen_b, (
-            "The first snapshot must be sticky — subsequent calls return it verbatim"
+        assert registration_a.frozen is registration_b.frozen, (
+            "A matching fingerprint must return the already-installed snapshot"
         )
-        assert sm.get_frozen_session_prefix(session_id) is frozen_a
+        assert registration_a.invalidated is False
+        assert registration_b.invalidated is False
+        assert sm.get_frozen_session_prefix(session_id) is registration_a.frozen
 
-    def test_drift_logs_warning_once(self, tmp_path, caplog):
+    def test_drift_invalidates_and_replaces_frozen_prefix(self, tmp_path, caplog):
         from graph.session_manager import SessionManager
 
         session_id = _valid_session_id(2)
         sm = SessionManager(base_dir=tmp_path)
 
-        sm.freeze_session_prefix(
+        first = sm.freeze_session_prefix(
             session_id,
             stable_prefix="stable",
             tool_names=("a",),
         )
+        assert first.invalidated is False
+        assert first.previous_fingerprint is None
 
-        with caplog.at_level("WARNING", logger="graph.session.session_store"):
-            sm.freeze_session_prefix(
+        with caplog.at_level("INFO", logger="graph.session.session_store"):
+            second = sm.freeze_session_prefix(
                 session_id,
                 stable_prefix="stable-edited",
                 tool_names=("a",),
             )
-            sm.freeze_session_prefix(
+            assert second.invalidated is True
+            assert second.previous_fingerprint == first.frozen.prefix_fingerprint
+            assert second.frozen.stable_prefix == "stable-edited"
+            assert sm.get_frozen_session_prefix(session_id) is second.frozen
+
+            third = sm.freeze_session_prefix(
                 session_id,
                 stable_prefix="stable-edited-again",
                 tool_names=("a",),
             )
+            assert third.invalidated is True
+            assert third.previous_fingerprint == second.frozen.prefix_fingerprint
+            assert third.frozen.stable_prefix == "stable-edited-again"
+            assert sm.get_frozen_session_prefix(session_id) is third.frozen
 
-        drift_logs = [r for r in caplog.records if "session_prefix_drift" in r.message]
-        assert len(drift_logs) == 1, "Drift warning must log only once per session"
+        invalidation_logs = [
+            r for r in caplog.records if "session_prefix_invalidated" in r.message
+        ]
+        assert len(invalidation_logs) == 2, (
+            "Every drifted fingerprint must log an invalidation, not be swallowed"
+        )
 
     def test_delete_session_clears_frozen_prefix(self, tmp_path):
         from graph.session_manager import SessionManager

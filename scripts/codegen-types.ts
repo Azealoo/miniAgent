@@ -105,6 +105,7 @@ const EVENT_NAME_MAP: Record<string, string> = {
   PlanUpdatedRuntimeEvent: "ChatStreamPlanUpdatedEvent",
   VerificationResultRuntimeEvent: "ChatStreamVerificationResultEvent",
   NewResponseRuntimeEvent: "ChatStreamNewResponseEvent",
+  PrefixInvalidatedRuntimeEvent: "ChatStreamPrefixInvalidatedEvent",
   CompactionRuntimeEvent: "ChatStreamCompactionEvent",
   DoneRuntimeEvent: "ChatStreamDoneEvent",
   ErrorRuntimeEvent: "ChatStreamErrorEvent",

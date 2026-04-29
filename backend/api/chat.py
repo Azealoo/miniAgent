@@ -15,6 +15,7 @@ SSE event types emitted:
   plan_updated {type, summary, plan, tool_trace?, run_id?}
   verification_result {type, summary, verdict, verification, tool_trace?, run_id?}
   new_response {type}
+  prefix_invalidated {type, session_id?, previous_fingerprint?, current_fingerprint?, reason?}
   done         {type, content, session_id, turn_status?, exit}
   error        {type, error}
   warning      {type, kind, message, ...}
