@@ -37,6 +37,15 @@ _STORE_SUBDIR = "storage/approvals"
 APPROVAL_TTL_SECONDS = 300
 
 
+class ApprovalStoreLoadError(RuntimeError):
+    """Raised when the on-disk approval store cannot be read or parsed.
+
+    Used by the strict loader so the runtime can fail closed for destructive
+    tools instead of silently degrading to "no approvals" when the JSON
+    file is corrupt or unreadable.
+    """
+
+
 class ApprovalRecord(TypedDict):
     tool_name: str
     run_id: str
@@ -92,15 +101,7 @@ def _is_expired(record: ApprovalRecord, *, now: datetime | None = None) -> bool:
     return (reference - recorded_at) > timedelta(seconds=APPROVAL_TTL_SECONDS)
 
 
-def _load(base_dir: Path, session_id: str) -> list[ApprovalRecord]:
-    path = _store_path(base_dir, session_id)
-    if not path.exists():
-        return []
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        logger.warning("Approval store for session %s is unreadable; ignoring.", session_id, exc_info=True)
-        return []
+def _parse_records(raw: object) -> list[ApprovalRecord]:
     if not isinstance(raw, list):
         return []
     now = datetime.now(timezone.utc)
@@ -133,6 +134,36 @@ def _load(base_dir: Path, session_id: str) -> list[ApprovalRecord]:
             continue
         records.append(record)
     return records
+
+
+def _load_strict(base_dir: Path, session_id: str) -> list[ApprovalRecord]:
+    """Load approval records, raising ``ApprovalStoreLoadError`` on failure.
+
+    A missing file is not a failure — the store is intentionally absent
+    between gated calls — but an unreadable or malformed JSON payload is.
+    """
+    path = _store_path(base_dir, session_id)
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ApprovalStoreLoadError(
+            f"Approval store for session {session_id} is unreadable."
+        ) from exc
+    return _parse_records(raw)
+
+
+def _load(base_dir: Path, session_id: str) -> list[ApprovalRecord]:
+    path = _store_path(base_dir, session_id)
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Approval store for session %s is unreadable; ignoring.", session_id, exc_info=True)
+        return []
+    return _parse_records(raw)
 
 
 def _save(base_dir: Path, session_id: str, records: list[ApprovalRecord]) -> None:
@@ -227,6 +258,31 @@ def denied_records(base_dir: Path, session_id: str) -> list[ApprovalRecord]:
     return [record for record in _load(base_dir, session_id) if record["decision"] == "deny"]
 
 
+def load_tool_runs_strict(
+    base_dir: Path, session_id: str
+) -> tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]]]:
+    """Return ``(approved, denied)`` ``(tool_name, args_hash)`` sets, raising on failure.
+
+    Callers that need to fail closed when the on-disk store is corrupt
+    should use this helper instead of :func:`approved_tool_runs` and
+    :func:`denied_tool_runs`, which swallow load errors and silently report
+    "no approvals" — that fallback could let a destructive tool through
+    after the reviewer recorded a deny.
+    """
+    records = _load_strict(base_dir, session_id)
+    approved = frozenset(
+        (record["tool_name"], record.get("args_hash", ""))
+        for record in records
+        if record["decision"] == "approve"
+    )
+    denied = frozenset(
+        (record["tool_name"], record.get("args_hash", ""))
+        for record in records
+        if record["decision"] == "deny"
+    )
+    return approved, denied
+
+
 def consume(base_dir: Path, session_id: str) -> list[ApprovalRecord]:
     """Return and clear pending decisions.
 
@@ -254,11 +310,13 @@ __all__ = [
     "APPROVAL_TTL_SECONDS",
     "ApprovalDecision",
     "ApprovalRecord",
+    "ApprovalStoreLoadError",
     "approved_tool_runs",
     "compute_args_hash",
     "consume",
     "denied_records",
     "denied_tool_runs",
+    "load_tool_runs_strict",
     "pending_records",
     "record_decision",
 ]

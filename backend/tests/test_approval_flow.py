@@ -13,6 +13,7 @@ Exercises three guarantees from the issue:
    as a ``denied_tool_runs`` entry on the policy context.
 """
 import json
+import logging
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -416,3 +417,92 @@ async def test_destructive_tool_always_reprompts_even_when_approved(isolated_app
     assert artifact["outcome"] == "needs_approval"
     assert artifact["metadata"]["policy"]["status"] == "needs_approval"
     assert summary.startswith("[NEEDS_APPROVAL]")
+
+
+@pytest.mark.asyncio
+async def test_corrupt_approval_store_fails_closed_for_destructive_tools(
+    isolated_approval_state, caplog
+):
+    """A corrupt approvals file must not silently degrade to "no approvals".
+
+    When the on-disk store is unreadable the runtime must:
+    * log the load failure with a traceback,
+    * increment ``bioapex_approval_store_load_errors_total``,
+    * flip the policy context's ``approval_store_unavailable`` flag so the
+      policy layer blocks destructive tools (fail closed), while still
+      allowing read-only tools to run so the agent can make progress.
+    """
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+    from runtime.metrics_collector import METRICS
+    from tools import get_runtime_tools
+    from tools.policy import get_tool_policy_context, tool_policy_context
+
+    session_id = agent_manager.session_manager.create_session()
+
+    approvals_dir = agent_manager.base_dir / "storage" / "approvals"
+    approvals_dir.mkdir(parents=True, exist_ok=True)
+    corrupt_path = approvals_dir / f"{session_id}.json"
+    corrupt_path.write_text("{not valid json", encoding="utf-8")
+
+    before_counter = METRICS._counters.get(
+        "bioapex_approval_store_load_errors_total", {}
+    ).get((), 0.0)
+
+    captured: dict[str, object] = {}
+
+    async def fake_astream(_message, _history):
+        captured["policy_context"] = get_tool_policy_context()
+        yield {"type": "token", "content": "load error handled"}
+        yield {"type": "done"}
+
+    with caplog.at_level(logging.ERROR, logger="runtime.query_engine"):
+        with patch.object(agent_manager, "astream", fake_astream):
+            response = await chat(
+                ChatRequest(message="retry", session_id=session_id)
+            )
+            await _collect_sse_payloads(response)
+
+    policy_context = captured["policy_context"]
+    assert policy_context is not None
+    assert policy_context.approval_store_unavailable is True
+    assert policy_context.approved_tool_runs == frozenset()
+    assert policy_context.denied_tool_runs == frozenset()
+
+    after_counter = METRICS._counters.get(
+        "bioapex_approval_store_load_errors_total", {}
+    ).get((), 0.0)
+    assert after_counter == before_counter + 1.0
+
+    load_failure_logs = [
+        record
+        for record in caplog.records
+        if record.name == "runtime.query_engine"
+        and "Approval store load failed" in record.getMessage()
+    ]
+    assert load_failure_logs, "expected an error log with exc_info for the load failure"
+    assert load_failure_logs[0].exc_info is not None
+
+    runtime_tools = get_runtime_tools(agent_manager.base_dir)
+    write_file = next(tool for tool in runtime_tools if tool.name == "write_file")
+    read_file = next(tool for tool in runtime_tools if tool.name == "read_file")
+
+    (agent_manager.base_dir / "memory").mkdir(parents=True, exist_ok=True)
+    readable = agent_manager.base_dir / "memory" / "note.md"
+    readable.write_text("hi", encoding="utf-8")
+
+    with tool_policy_context(policy_context):
+        write_summary, write_artifact = write_file._run(
+            path="memory/note.md", content="hi"
+        )
+        read_summary, read_artifact = read_file._run(path="memory/note.md")
+
+    assert write_artifact["outcome"] == "blocked"
+    assert (
+        write_artifact["metadata"]["policy"]["block_reason"]
+        == "approval_store_unavailable"
+    )
+    assert "approval store" in write_summary.lower() or "destructive" in write_summary.lower()
+
+    assert read_artifact["outcome"] != "blocked"
+    assert read_summary

@@ -90,6 +90,11 @@ class ToolPolicyExecutionContext:
     # envelope and routes around the capability instead of spinning on the
     # same gate.
     denied_tool_runs: frozenset[tuple[str, str]] = frozenset()
+    # True when the on-disk approval store could not be loaded for this
+    # turn. Destructive tools must fail closed in that case — a silent
+    # fallback to empty approved/denied sets could otherwise let a denied
+    # gated tool through.
+    approval_store_unavailable: bool = False
 
 
 @dataclass(frozen=True)

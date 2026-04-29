@@ -188,6 +188,11 @@ class MetricsCollector:
             "gauge",
             "Rolling ratio cache_read_tokens / total_input_tokens across LLM calls.",
         )
+        self._register(
+            "bioapex_approval_store_load_errors_total",
+            "counter",
+            "Turns where the on-disk approval store failed to load and destructive tools were forced closed.",
+        )
 
     # ------------------------------------------------------------------ #
     # Mutation helpers                                                     #
@@ -268,6 +273,10 @@ class MetricsCollector:
         else:
             self._inc_counter("bioapex_retrieval_cache_misses_total")
         self._recompute_hit_ratio()
+
+    def observe_approval_store_load_error(self) -> None:
+        """Record a turn where the on-disk approval store could not be loaded."""
+        self._inc_counter("bioapex_approval_store_load_errors_total")
 
     def observe_retrieval_error(self, *, error_type: str) -> None:
         """Record a retrieval attempt that raised.
