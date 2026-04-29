@@ -8,7 +8,7 @@ from typing import Type
 
 import config
 from audit.store import append_file_written_event
-from graph.memory_types import validate_memory_write
+from graph.memory_writer import MemoryFrontmatterError, write_memory_file
 from hardening import is_secret_like_path
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -151,9 +151,10 @@ class WriteFileTool(BaseTool):
                     metadata={"requested_path": path, "character_count": len(content)},
                 )
 
-            memory_validation_errors = validate_memory_write(path_clean, content)
-            if memory_validation_errors:
-                reason = " ".join(memory_validation_errors)
+            try:
+                write_memory_file(target, path_clean, content)
+            except MemoryFrontmatterError as exc:
+                reason = str(exc)
                 _audit("invalid_input", reason=reason)
                 return invalid_input_result(
                     self.name,
@@ -161,21 +162,15 @@ class WriteFileTool(BaseTool):
                     metadata={"requested_path": path, "sanitized_path": path_clean},
                 )
 
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
             memory_index_rebuilt = False
             skills_rescanned = False
 
             if path_clean.startswith("memory/"):
-                # Refresh memory vector index so writes anywhere under memory/
-                # are reflected in retrieval, not only MEMORY.md updates.
-                # `_maybe_rebuild` diffs per-file state and only re-embeds the
-                # touched file instead of the whole corpus.
+                # write_memory_file already triggered a rebuild; record it so
+                # the structured payload still surfaces the side effect.
                 try:
                     from graph.agent import agent_manager
-                    if agent_manager.memory_indexer:
-                        agent_manager.memory_indexer._maybe_rebuild()
-                        memory_index_rebuilt = True
+                    memory_index_rebuilt = bool(agent_manager.memory_indexer)
                 except Exception:
                     pass
 

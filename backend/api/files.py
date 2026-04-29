@@ -29,7 +29,7 @@ from audit.store import append_file_written_event
 from artifacts.public_urls import public_raw_file_url
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
-from graph.memory_types import validate_memory_write
+from graph.memory_writer import MemoryFrontmatterError, write_memory_file
 from hardening import is_secret_like_path
 from pydantic import BaseModel
 from rate_limit import check_rate_limit
@@ -449,9 +449,10 @@ def save_file(body: SaveRequest, request: Request = None):
         )
         raise
 
-    memory_validation_errors = validate_memory_write(clean, body.content)
-    if memory_validation_errors:
-        reason = " ".join(memory_validation_errors)
+    try:
+        write_memory_file(target, clean, body.content)
+    except MemoryFrontmatterError as exc:
+        reason = str(exc)
         append_file_written_event(
             base_dir,
             path=clean,
@@ -461,10 +462,6 @@ def save_file(body: SaveRequest, request: Request = None):
             reason=reason,
         )
         raise HTTPException(400, reason)
-
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(body.content, encoding="utf-8")
     except Exception as exc:
         append_file_written_event(
             base_dir,
@@ -475,17 +472,6 @@ def save_file(body: SaveRequest, request: Request = None):
             reason=str(exc),
         )
         raise
-
-    # Refresh memory index after any memory/ write so multi-file memory stays fresh.
-    # `_maybe_rebuild` only re-embeds the changed file instead of the full corpus.
-    if clean.startswith("memory/"):
-        try:
-            from graph.agent import agent_manager
-
-            if agent_manager.memory_indexer:
-                agent_manager.memory_indexer._maybe_rebuild()
-        except Exception:
-            pass
 
     append_file_written_event(
         base_dir,
