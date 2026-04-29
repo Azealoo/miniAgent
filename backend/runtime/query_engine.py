@@ -296,7 +296,7 @@ class QueryEngine:
             else {}
         )
         repair_lines = [
-            "This is the single runtime-managed repair retry for the same user task.",
+            "This is a runtime-managed repair retry pass for the same user task.",
             "Return a corrected answer for the user. Keep any valid material, fix the verifier findings, "
             "and do not mention the repair pass unless it helps the user.",
             "Clearly separate what you confirmed by inspecting files or tool outputs in this turn from "
@@ -378,11 +378,14 @@ class QueryEngine:
         turn: QueryTurnInput,
     ) -> AsyncGenerator[dict, None]:
         saw_plan = False
-        repair_attempted = False
+        repair_attempts = 0
         current_turn = turn
 
         budget = get_max_tokens_per_turn()
         verification_settings = get_verification_settings()
+        max_repair_attempts = _coerce_nonnegative_int(
+            verification_settings.get("max_repair_attempts"), 1
+        )
         verifier_max_wall_s = _coerce_nonnegative_float(
             verification_settings.get("verifier_max_wall_s"), 0.0
         )
@@ -396,7 +399,7 @@ class QueryEngine:
         output_tokens = 0
         # Populated the first time a ``verification_result`` helper event is
         # observed; the wallclock + token caps only apply from that point on,
-        # and cover the single repair retry that may follow.
+        # and cover any repair retries that may follow.
         verifier_started_monotonic: float | None = None
         verifier_start_output_tokens = 0
         METRICS.record_input_tokens(input_tokens)
@@ -579,7 +582,7 @@ class QueryEngine:
                 return
 
             should_retry = (
-                not repair_attempted
+                repair_attempts < max_repair_attempts
                 and turn_status == "ok"
                 and self._verification_requires_repair(latest_verification_event)
                 and latest_verification_event is not None
@@ -596,7 +599,7 @@ class QueryEngine:
                 yield done_event
                 return
 
-            repair_attempted = True
+            repair_attempts += 1
             yield {"type": "new_response"}
             current_turn = replace(
                 turn,

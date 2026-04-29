@@ -92,14 +92,19 @@ _DEFAULT: dict = {
     },
     "verification": {
         "retry_on_repair_required": True,
-        # Wallclock seconds allowed for the verifier + single repair retry,
+        # Maximum number of runtime-managed repair retry passes per turn when
+        # the verifier returns ``repair_required``/``fail``. 0 disables
+        # repairs; sensible operator range is 1-2 (the original behavior was
+        # a hardcoded single retry).
+        "max_repair_attempts": 1,
+        # Wallclock seconds allowed for the verifier + repair retries,
         # measured from the first ``verification_result`` helper event. 0
         # disables the cap. Breach emits a ``verifier_cap_exceeded`` error
         # through the same path as the per-turn token budget breach.
         "verifier_max_wall_s": 0,
-        # Output-token ceiling for the verifier + single repair retry,
-        # measured as the delta from the first ``verification_result`` helper
-        # event. 0 disables the cap.
+        # Output-token ceiling for the verifier + repair retries, measured
+        # as the delta from the first ``verification_result`` helper event.
+        # 0 disables the cap.
         "verifier_max_tokens": 0,
     },
     "llm_output_token_cap": {
