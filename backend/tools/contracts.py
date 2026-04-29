@@ -91,6 +91,11 @@ class ToolResultEnvelope(BaseModel):
     error: ToolResultError | None = None
     metadata: dict[str, JsonLike] = Field(default_factory=dict)
     source_payload: JsonLike = None
+    # Pre-error stdout/stderr captured alongside an error envelope. Populated
+    # by trace consumers (see runtime.helper_agent_runner) so the full raw
+    # tool output survives even when the summary collapses to just the error
+    # message.
+    partial_output: str | None = None
 
 
 def artifact_ref(
