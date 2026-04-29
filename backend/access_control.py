@@ -15,6 +15,22 @@ _FORWARDED_CLIENT_HEADERS = ("forwarded", "x-forwarded-for", "x-real-ip")
 AccessScope = Literal["inspection", "execution", "admin"]
 AccessGrantMode = Literal["loopback", "bearer"]
 
+# Tier ordering for access scopes. ``inspection`` is the lowest (read-only),
+# ``execution`` permits running tools and authoring, ``admin`` is the highest
+# (destructive / privileged ops). A session bound to scope ``X`` may only run
+# turns whose required scope is ``<= X``.
+_SCOPE_ORDER: dict[str, int] = {"inspection": 0, "execution": 1, "admin": 2}
+
+
+def scope_satisfies(actual: str | None, required: AccessScope) -> bool:
+    """Return True if *actual* meets or exceeds *required* in the scope tier.
+
+    An unknown or missing *actual* returns False so callers fail closed.
+    """
+    if actual not in _SCOPE_ORDER:
+        return False
+    return _SCOPE_ORDER[actual] >= _SCOPE_ORDER[required]
+
 
 def is_loopback_client(request: Request | None) -> bool:
     client = request.client if request is not None else None
@@ -113,4 +129,5 @@ __all__ = [
     "require_execution_access",
     "require_inspection_access",
     "require_route_access",
+    "scope_satisfies",
 ]

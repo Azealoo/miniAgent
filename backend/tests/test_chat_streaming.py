@@ -1027,6 +1027,25 @@ async def test_chat_blocks_non_local_clients_without_bearer_token(isolated_chat_
 
 
 @pytest.mark.asyncio
+async def test_chat_rejects_session_bound_below_execution_scope(isolated_chat_state):
+    """A session created at ``inspection`` scope must not run chat turns even
+    if the calling request itself meets the execution route check (issue #240)."""
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session(access_scope="inspection")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await chat(
+            ChatRequest(message="Read memory", session_id=session_id),
+            _request("/api/chat"),
+        )
+
+    assert exc_info.value.status_code == 403
+    assert "scope" in str(exc_info.value.detail).lower()
+
+
+@pytest.mark.asyncio
 async def test_chat_allows_non_local_clients_with_execution_bearer_token(isolated_chat_state):
     from api.chat import ChatRequest, chat
     from graph.agent import agent_manager

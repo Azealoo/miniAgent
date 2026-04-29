@@ -44,7 +44,7 @@ proceed (on approve) or route around the tool (on deny).
 """
 from typing import Literal
 
-from access_control import require_execution_access
+from access_control import require_execution_access, scope_satisfies
 from audit.store import append_tool_approval_decision_event
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -133,6 +133,18 @@ async def chat(request: ChatRequest, http_request: Request = None):
     session_manager = agent_manager.session_manager
     if session_manager is None:
         raise HTTPException(status_code=503, detail="Agent runtime is not initialized.")
+
+    # Defence-in-depth: ``require_execution_access`` above proves the *current*
+    # request is execution-eligible. This second check proves the *session*
+    # itself was bound to a scope that permits execution — preventing scope
+    # confusion when a session is created in a lower tier (e.g. inspection)
+    # but a later request happens to present an execution-tier credential.
+    session_scope = session_manager.get_session_access_scope(request.session_id)
+    if not scope_satisfies(session_scope, "execution"):
+        raise HTTPException(
+            status_code=403,
+            detail="Session scope is insufficient to start a chat turn.",
+        )
 
     turn_lock = session_manager.get_or_create_turn_lock(request.session_id)
     # Non-blocking check-then-acquire. ``asyncio.Lock.acquire()`` completes
