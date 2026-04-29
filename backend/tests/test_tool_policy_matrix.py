@@ -48,6 +48,11 @@ from tools.registry import (  # noqa: E402
     validate_tool_classifications,
 )
 
+# ``evaluate_pre_tool_policy`` defaults the args_hash to ``""`` when no kwargs
+# flow through a wrapper. This matrix test is a synthetic policy-only probe,
+# so pre-approvals use the same sentinel to pair with that default.
+_NO_ARGS_HASH = ""
+
 
 # Maps posture's ``tools.*_enabled`` field to the registered tool names it
 # gates. Flags that do not correspond to a registered runtime tool (``slurm``,
@@ -78,28 +83,33 @@ def _disabled_tool_names(policy: ProductionHardeningPolicy) -> frozenset[str]:
     return frozenset(disabled)
 
 
-def _approved_tool_names(
+def _approved_tool_runs(
     policy: ProductionHardeningPolicy,
     manifests: tuple[ToolManifestEntry, ...],
     disabled: frozenset[str],
-) -> frozenset[str]:
+) -> frozenset[tuple[str, str]]:
     """Pre-approvals implied by the posture's approval threshold.
 
     A disabled tool is never pre-approved; the denial takes precedence so the
-    policy produces ``blocked`` rather than ``allow``.
+    policy produces ``blocked`` rather than ``allow``. Destructive manifests
+    are intentionally never pre-approved — the policy layer always re-prompts
+    for them regardless of what the posture says.
     """
     threshold = policy.approval_threshold
-    approved: set[str] = set()
+    approved: set[tuple[str, str]] = set()
     for manifest in manifests:
         if manifest.name in disabled:
             continue
         if not manifest.requires_approval:
             continue
+        if manifest.destructive:
+            # Destructive tools always re-prompt; an approval recorded here
+            # would be ignored by ``_user_has_approved`` anyway.
+            continue
         if threshold == "none":
-            approved.add(manifest.name)
+            approved.add((manifest.name, _NO_ARGS_HASH))
         elif threshold == "destructive_only":
-            if not manifest.destructive:
-                approved.add(manifest.name)
+            approved.add((manifest.name, _NO_ARGS_HASH))
         elif threshold == "all_risky":
             # Every requires-approval tool still needs explicit approval.
             continue
@@ -109,13 +119,14 @@ def _approved_tool_names(
 def _build_context(posture: HardeningPosture) -> ToolPolicyExecutionContext:
     policy = ProductionHardeningPolicy.from_posture(posture)
     disabled = _disabled_tool_names(policy)
-    approved = _approved_tool_names(policy, _MANIFESTS, disabled)
+    approved = _approved_tool_runs(policy, _MANIFESTS, disabled)
+    denied = frozenset((name, _NO_ARGS_HASH) for name in disabled)
     return ToolPolicyExecutionContext(
         session_id=f"session-{posture}",
         request_id=f"request-{posture}",
         allowed_access_scope="execution",
         approved_tool_runs=approved,
-        denied_tool_runs=disabled,
+        denied_tool_runs=denied,
     )
 
 
@@ -129,10 +140,15 @@ def _expected_status(
         return "blocked"
     if not manifest.requires_approval:
         return "allow"
+    # Destructive tools always re-prompt regardless of the posture's
+    # pre-approval semantics — ``_user_has_approved`` ignores stored
+    # approvals for them.
+    if manifest.destructive:
+        return "needs_approval"
     if policy.approval_threshold == "none":
         return "allow"
     if policy.approval_threshold == "destructive_only":
-        return "needs_approval" if manifest.destructive else "allow"
+        return "allow"
     # approval_threshold == "all_risky"
     return "needs_approval"
 
@@ -155,7 +171,7 @@ EXPECTED_MATRIX: dict[tuple[str, str], ToolPolicyStatus] = {
     ("uniprot_api", "dev"): "allow",
     ("ensembl_api", "dev"): "allow",
     ("read_file", "dev"): "allow",
-    ("write_file", "dev"): "allow",
+    ("write_file", "dev"): "needs_approval",
     ("search_knowledge_base", "dev"): "allow",
     # trusted-lab — python_repl disabled; destructive-only approval gates
     # write_file; other requires-approval tools pre-approved.

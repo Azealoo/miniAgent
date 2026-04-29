@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from graph.approval_store import compute_args_hash
 from tools import get_runtime_tools
 from tools.policy import (
     evaluate_sandbox_arguments,
@@ -34,13 +35,17 @@ from tools.policy_wrappers import PolicyWrappedTool
 from tools.registry import ToolManifestEntry
 
 
-def _approved_context(*approved: str) -> ToolPolicyExecutionContext:
+def _approved_context(*approved: tuple[str, str]) -> ToolPolicyExecutionContext:
     return ToolPolicyExecutionContext(
         session_id="session-1",
         request_id="request-1",
         allowed_access_scope="execution",
         approved_tool_runs=frozenset(approved),
     )
+
+
+def _approved_for(tool_name: str, kwargs: dict | None = None) -> ToolPolicyExecutionContext:
+    return _approved_context((tool_name, compute_args_hash(kwargs or {})))
 
 
 def _find_tool(tools, name: str) -> PolicyWrappedTool:
@@ -87,11 +92,9 @@ def test_write_file_sandbox_blocks_path_outside_allowed_roots(tmp_path):
     write_file = _find_tool(runtime_tools, "write_file")
     assert write_file.manifest.sandbox is not None
 
-    with tool_policy_context(_approved_context("write_file")):
-        summary, artifact = write_file._run(
-            path="artifacts/out.txt",
-            content="hello",
-        )
+    call_kwargs = {"path": "artifacts/out.txt", "content": "hello"}
+    with tool_policy_context(_approved_for("write_file", call_kwargs)):
+        summary, artifact = write_file._run(**call_kwargs)
 
     assert summary.startswith("[BLOCKED]")
     assert artifact["outcome"] == "blocked"
@@ -110,7 +113,7 @@ def test_fetch_url_sandbox_blocks_loopback_url_before_dispatch(tmp_path):
     runtime_tools = get_runtime_tools(tmp_path)
     fetch_url = _find_tool(runtime_tools, "fetch_url")
 
-    with tool_policy_context(_approved_context("fetch_url")):
+    with tool_policy_context(_approved_for("fetch_url", {"url": "http://127.0.0.1:8080/admin"})):
         summary, artifact = fetch_url._run(url="http://127.0.0.1:8080/admin")
 
     assert summary.startswith("[BLOCKED]")
@@ -125,11 +128,9 @@ def test_http_json_sandbox_blocks_private_ip_url_before_dispatch(tmp_path):
     runtime_tools = get_runtime_tools(tmp_path)
     http_json = _find_tool(runtime_tools, "http_json")
 
-    with tool_policy_context(_approved_context("http_json")):
-        summary, artifact = http_json._run(
-            method="GET",
-            url="http://10.0.0.5/api",
-        )
+    http_kwargs = {"method": "GET", "url": "http://10.0.0.5/api"}
+    with tool_policy_context(_approved_for("http_json", http_kwargs)):
+        summary, artifact = http_json._run(**http_kwargs)
 
     assert summary.startswith("[BLOCKED]")
     assert artifact["outcome"] == "blocked"
@@ -355,11 +356,9 @@ def test_sandbox_violation_surfaces_as_typed_blocked_envelope(tmp_path):
     runtime_tools = get_runtime_tools(tmp_path)
     write_file = _find_tool(runtime_tools, "write_file")
 
-    with tool_policy_context(_approved_context("write_file")):
-        summary, artifact = write_file._run(
-            path="../etc/passwd",
-            content="x",
-        )
+    call_kwargs = {"path": "../etc/passwd", "content": "x"}
+    with tool_policy_context(_approved_for("write_file", call_kwargs)):
+        summary, artifact = write_file._run(**call_kwargs)
 
     assert artifact["contract_version"] == "tool_result.v1"
     assert artifact["tool_name"] == "write_file"

@@ -83,6 +83,11 @@ class ApprovalDecisionRequest(BaseModel):
     decision: Literal["approve", "deny"]
     actor: str = Field(default="ui-user")
     rationale: str | None = None
+    # Stable SHA-256 digest of the tool's canonical-JSON kwargs computed by
+    # the frontend (or the policy wrapper, surfaced on the gate event). An
+    # approval is bound to this exact args_hash; the next call to the same
+    # tool with different arguments re-prompts the reviewer.
+    args_hash: str = Field(default="")
 
     @field_validator("actor")
     @classmethod
@@ -205,6 +210,7 @@ async def submit_approval_decision(
         decision=request.decision,
         actor=request.actor,
         rationale=request.rationale,
+        args_hash=request.args_hash,
     )
 
     append_tool_approval_decision_event(

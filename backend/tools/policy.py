@@ -96,6 +96,8 @@ def set_active_skills_on_current_context(
 def evaluate_pre_tool_policy(
     manifest: ToolManifestEntry,
     context: ToolPolicyExecutionContext | None,
+    *,
+    args_hash: str = "",
 ) -> ToolPolicyDecision:
     settings = config.get_tool_policy_settings()
     if not bool(settings.get("enabled", True)):
@@ -134,7 +136,7 @@ def evaluate_pre_tool_policy(
         return skill_violation
 
     if manifest.requires_approval:
-        if _user_has_denied(manifest, context):
+        if _user_has_denied(manifest, context, args_hash):
             return ToolPolicyDecision(
                 status="blocked",
                 block_reason="reviewer_denied_approval",
@@ -142,7 +144,7 @@ def evaluate_pre_tool_policy(
                     f"Tool '{manifest.name}' was denied by the reviewer; proceed without it."
                 ),
             )
-        if not _user_has_approved(manifest, context):
+        if not _user_has_approved(manifest, context, args_hash):
             return ToolPolicyDecision(
                 status="needs_approval",
                 approval_reason="requires_approval",
@@ -330,23 +332,29 @@ def scoped_environment(allowed_env_vars: tuple[str, ...] | None) -> Iterator[Non
 def _user_has_approved(
     manifest: ToolManifestEntry,
     context: ToolPolicyExecutionContext,
+    args_hash: str,
 ) -> bool:
+    # Destructive tools always re-prompt regardless of any prior approval —
+    # the reviewer must confirm each destructive call in the moment. This is
+    # defense in depth on top of turn-end consume() so a stuck or late-arriving
+    # approval cannot silently authorize a second destructive dispatch.
+    if manifest.destructive:
+        return False
     approved = context.approved_tool_runs
     if not approved:
         return False
-    if manifest.name in approved:
-        return True
-    return False
+    return (manifest.name, args_hash) in approved
 
 
 def _user_has_denied(
     manifest: ToolManifestEntry,
     context: ToolPolicyExecutionContext,
+    args_hash: str,
 ) -> bool:
     denied = getattr(context, "denied_tool_runs", None)
     if not denied:
         return False
-    return manifest.name in denied
+    return (manifest.name, args_hash) in denied
 
 
 def annotate_tool_result(
