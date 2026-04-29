@@ -28,6 +28,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -57,6 +58,17 @@ from graph.session.session_schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Quarantined corrupt session files are named ``{int(time.time())}_{session_id}.json``
+# (see ``SessionStore._quarantine_corrupt_file``). Files older than this default
+# are pruned by ``SessionStore.prune_quarantine`` — bad bytes have already been
+# preserved long enough for forensic review by the time the cleanup runs.
+QUARANTINE_RETENTION_SECONDS = 7 * 86400
+_QUARANTINE_FILENAME_RE = re.compile(
+    r"^(?P<ts>\d+)_"
+    r"(?P<sid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    r"\.json$"
+)
 
 # Per-session locks prevent two concurrent requests from compressing the same
 # session simultaneously (which would double-archive messages). Entries are
@@ -142,6 +154,16 @@ class SessionStore:
         self.quarantine_dir = self.sessions_dir / "_quarantine"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
+        # Opportunistic cleanup so deployments without a cron still drop
+        # quarantined files past the retention window. Failures must never
+        # block startup — the admin script (``prune_quarantine.py``) is the
+        # authoritative path.
+        try:
+            self.prune_quarantine()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "session_quarantine_prune_init_failed error=%s", exc
+            )
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
@@ -202,6 +224,50 @@ class SessionStore:
             quarantined,
         )
         return quarantined
+
+    def prune_quarantine(
+        self, max_age_seconds: int = QUARANTINE_RETENTION_SECONDS
+    ) -> int:
+        """Delete quarantined files whose filename timestamp is older than
+        *max_age_seconds*. Returns the number of files removed.
+
+        Files are named ``{int(time.time())}_{session_id}.json`` by
+        :meth:`_quarantine_corrupt_file`; entries that do not match that
+        pattern are skipped rather than guessed-at, so unrelated artifacts
+        (e.g. an operator's notes) are never deleted.
+        """
+        if not self.quarantine_dir.is_dir():
+            return 0
+
+        cutoff = time.time() - max_age_seconds
+        removed = 0
+        for entry in self.quarantine_dir.iterdir():
+            if not entry.is_file():
+                continue
+            match = _QUARANTINE_FILENAME_RE.match(entry.name)
+            if match is None:
+                continue
+            ts = int(match.group("ts"))
+            if ts >= cutoff:
+                continue
+            try:
+                entry.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                logger.warning(
+                    "session_quarantine_prune_failed path=%s error=%s",
+                    entry,
+                    exc,
+                )
+                continue
+            logger.info(
+                "session_quarantine_pruned path=%s age_seconds=%d",
+                entry,
+                int(time.time() - ts),
+            )
+            removed += 1
+        return removed
 
     def _read(self, session_id: str, *, raise_on_corrupt: bool = False) -> dict:
         path = self._path(session_id)

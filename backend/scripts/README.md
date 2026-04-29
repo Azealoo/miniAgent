@@ -96,3 +96,22 @@ Reports are written under
   event.
 - Repair retries work when the recorded session contains both segments
   (the second astream call consumes the second recorded segment).
+
+## `prune_quarantine.py`
+
+Deletes corrupt-session JSONs under `backend/sessions/_quarantine/` once
+they are older than the retention window (default 7 days). The runtime
+quarantines bad bytes but never prunes them, so this command (or a cron
+that wraps it) is what keeps the directory bounded. `SessionStore.__init__`
+also calls `prune_quarantine()` opportunistically so deployments without
+cron still get cleanup on the next process start.
+
+```
+python -m backend.scripts.prune_quarantine
+python -m backend.scripts.prune_quarantine --max-age-days 30
+python -m backend.scripts.prune_quarantine --base-dir /srv/bioapex/backend
+```
+
+Files whose names do not match the `{ts}_{session_id}.json` pattern
+emitted by quarantine are skipped — operator-authored notes alongside
+quarantined files are never deleted.
