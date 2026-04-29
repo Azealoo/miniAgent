@@ -46,6 +46,7 @@ class TurnLedger:
         self._request_id = request_id
         self._user_message = user_message
         self._user_message_saved = False
+        self._persisted_segment_count = 0
 
     def consume(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         event_type = event.get("type")
@@ -145,6 +146,12 @@ class TurnLedger:
         readers never observe a mid-turn state (e.g. user message written
         but assistant reply missing, or only the first of multiple segments
         persisted).
+
+        The call is fully idempotent: the user message is written at most
+        once (``_user_message_saved``), and only segments past
+        ``_persisted_segment_count`` are written, so a defensive ``finally``
+        re-invocation after a successful done/error path cannot duplicate
+        any record.
         """
         self._flush_to_session_store(turn_result=turn_result)
 
@@ -163,8 +170,9 @@ class TurnLedger:
                 user_record["request_id"] = self._request_id
             pending.append(user_record)
 
-        segments = turn_result.segments if turn_result is not None else []
-        for segment in segments:
+        all_segments = turn_result.segments if turn_result is not None else []
+        new_segments = all_segments[self._persisted_segment_count:]
+        for segment in new_segments:
             assistant_record: dict[str, Any] = {
                 "role": "assistant",
                 "content": segment.content,
@@ -180,6 +188,7 @@ class TurnLedger:
 
         self._session_manager.save_messages_batch(self._session_id, pending)
         self._user_message_saved = True
+        self._persisted_segment_count = len(all_segments)
 
     def _flush_segment(self) -> None:
         content = "".join(self._current_content)

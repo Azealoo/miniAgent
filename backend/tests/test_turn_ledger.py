@@ -142,6 +142,63 @@ class TestTurnLedgerBatchPersistence:
             TurnResult(segments=[], turn_status="ok", final_content="")
         )
 
+    def test_persist_segments_does_not_duplicate_assistant_segments(self, sm):
+        """Calling persist_segments twice with the same finalized result must
+        not duplicate assistant records. This guards the ``finally``-based
+        defensive finalization in stream_chat: if a generic exception fires
+        after the done path already persisted, the redundant flush should be
+        a no-op rather than appending the segments again.
+        """
+        sid = sm.create_session()
+        ledger = TurnLedger(
+            session_manager=sm,
+            session_id=sid,
+            request_id="turn-dup",
+            user_message="ask",
+        )
+        ledger.consume({"type": "token", "content": "first"})
+        ledger.consume({"type": "new_response"})
+        ledger.consume({"type": "token", "content": "second"})
+        first = ledger.finalize(turn_status="ok")
+        ledger.persist_segments(first)
+
+        # ``finalize`` does not clear ``_segments``; a second call returns the
+        # same accumulated segments. Without idempotency this would duplicate.
+        second = ledger.finalize(turn_status="error")
+        ledger.persist_segments(second)
+
+        msgs = sm.load_session(sid)
+        roles = [m["role"] for m in msgs]
+        assert roles == ["user", "assistant", "assistant"]
+        assert [m["content"] for m in msgs] == ["ask", "first", "second"]
+
+    def test_persist_segments_appends_only_new_segments(self, sm):
+        """A streaming turn that calls persist_segments mid-flight (via the
+        ``finally`` guard after partial output) and again on the terminal
+        ``done`` event must persist each segment exactly once.
+        """
+        sid = sm.create_session()
+        ledger = TurnLedger(
+            session_manager=sm,
+            session_id=sid,
+            request_id="turn-incremental",
+            user_message="streaming ask",
+        )
+        ledger.consume({"type": "token", "content": "partial"})
+        partial = ledger.finalize(turn_status="error")
+        ledger.persist_segments(partial)
+
+        # Streaming continues after the defensive flush — a new segment is
+        # appended and the terminal persist must only write the new one.
+        ledger.consume({"type": "new_response"})
+        ledger.consume({"type": "token", "content": "rest"})
+        final = ledger.finalize(turn_status="ok")
+        ledger.persist_segments(final)
+
+        msgs = sm.load_session(sid)
+        assert [m["role"] for m in msgs] == ["user", "assistant", "assistant"]
+        assert [m["content"] for m in msgs] == ["streaming ask", "partial", "rest"]
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # Cross-process atomicity: a reader polling the session JSON while a turn

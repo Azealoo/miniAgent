@@ -765,6 +765,7 @@ class QueryEngine:
             policy_context=policy_context,
         )
 
+        terminal_turn_status: str | None = None
         with tool_policy_context(policy_context):
             try:
                 if (
@@ -800,6 +801,9 @@ class QueryEngine:
                         ledger.persist_user_message()
                         ledger.persist_segments(turn_result)
                         turn_status = getattr(turn_result, "turn_status", None)
+                        terminal_turn_status = (
+                            turn_status if isinstance(turn_status, str) else "ok"
+                        )
                         done_payload: dict[str, Any] = {
                             "type": "done",
                             "content": turn_result.final_content,
@@ -828,6 +832,7 @@ class QueryEngine:
                             # and any accumulated segments land in one batch.
                             turn_result = ledger.finalize(turn_status="error")
                         ledger.persist_segments(turn_result)
+                        terminal_turn_status = "error"
                         yield _sse({"type": "error", "error": event["error"]})
                         return
 
@@ -836,33 +841,35 @@ class QueryEngine:
                 # Client disconnect (or any upstream cancel) reaches us as a
                 # CancelledError thrown into the awaiting `async for`, or as
                 # GeneratorExit when the consumer drops the generator entirely.
-                # Persist whatever the agent has already produced so the next
-                # turn picks up from a consistent on-disk state, then re-raise
-                # so cancellation continues propagating to in-flight tools.
+                # The `finally` below persists whatever the agent has already
+                # produced so the next turn picks up from a consistent
+                # on-disk state, then we re-raise so cancellation continues
+                # propagating to in-flight tools.
                 # Pending approvals are deliberately NOT consumed here: the
                 # turn never reached its terminal state, so they remain valid
                 # for the next /api/chat retry.
-                try:
-                    ledger.persist_user_message()
-                    cancelled_result = ledger.finalize(turn_status="cancelled")
-                    ledger.persist_segments(cancelled_result)
-                except Exception:
-                    _logger.warning(
-                        "Failed to persist partial turn state on cancellation",
-                        exc_info=True,
-                    )
+                terminal_turn_status = "cancelled"
                 raise
             except Exception as exc:
-                # Persistence is batched through persist_segments so the user
-                # message and any partial assistant segments land in one
-                # advisory-flock scope — never split across two writes.
-                try:
-                    ledger.persist_segments(ledger.finalize(turn_status="error"))
-                except Exception:
-                    _logger.warning(
-                        "Failed to persist partial turn state on unexpected exception",
-                        exc_info=True,
-                    )
+                terminal_turn_status = "error"
                 error_event = {"type": "error", "error": str(exc)}
                 METRICS.observe_event(error_event)
                 yield _sse(error_event)
+            finally:
+                # Defensive finalization: regardless of which path exits the
+                # try (normal return, generic exception, cancellation, or an
+                # error raised by `_sse`/`yield` itself after a partial
+                # persist), make sure the user message and any flushed
+                # assistant segments are on disk. Both `persist_user_message`
+                # and `persist_segments` are idempotent — the user message is
+                # guarded by `_user_message_saved` and segments by
+                # `_persisted_segment_count` — so a redundant call after a
+                # successful done/error path is a no-op.
+                try:
+                    final_status = terminal_turn_status or "error"
+                    ledger.persist_segments(ledger.finalize(turn_status=final_status))
+                except Exception:
+                    _logger.warning(
+                        "Failed to persist partial turn state on stream exit",
+                        exc_info=True,
+                    )
