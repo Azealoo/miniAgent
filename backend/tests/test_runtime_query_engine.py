@@ -873,6 +873,46 @@ async def test_query_engine_run_turn_attaches_turn_result_to_budget_error():
 
 
 @pytest.mark.asyncio
+async def test_query_engine_does_not_yield_token_that_crosses_budget():
+    class _OverflowingTokenAgentManager(_FakeAgentManager):
+        async def astream(self, message: str, history: list[dict]) -> AsyncGenerator[dict, None]:
+            yield {"type": "token", "content": "warm up "}
+            yield {"type": "token", "content": "x" * 20000}
+            yield {"type": "token", "content": "unreachable tail"}
+            yield {"type": "done"}
+
+    engine = QueryEngine(_OverflowingTokenAgentManager())
+    turn = QueryTurnInput(message="hi", history=[])
+
+    with patch(
+        "runtime.query_engine.get_max_tokens_per_turn",
+        return_value=200,
+    ):
+        events = [event async for event in engine.run_harness_turn(turn)]
+
+    token_contents = [
+        event.get("content") for event in events if event.get("type") == "token"
+    ]
+    assert token_contents == ["warm up "], (
+        "token that crosses the budget must not be emitted to the client"
+    )
+    assert not any(
+        "unreachable tail" == event.get("content")
+        for event in events
+        if event.get("type") == "token"
+    )
+
+    error_events = [event for event in events if event.get("type") == "error"]
+    assert len(error_events) == 1
+    error = error_events[0]
+    assert error["turn_status"] == "budget_exceeded"
+    assert error["error"].startswith("turn budget exceeded at ")
+    assert events[-1] is error, (
+        "budget_error must be the final event; no tokens may follow it"
+    )
+
+
+@pytest.mark.asyncio
 async def test_query_engine_run_harness_turn_uses_agent_path_when_not_protocol_or_workflow():
     engine = QueryEngine(_FakeAgentManager())
     turn = QueryTurnInput(
