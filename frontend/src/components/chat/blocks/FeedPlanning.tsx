@@ -6,7 +6,7 @@ import type { FeedPlanningDescriptor } from "./types";
 export default function FeedPlanning({
   steps,
   tone = "active",
-}: FeedPlanningDescriptor) {
+}: Omit<FeedPlanningDescriptor, "kind" | "id">) {
   return (
     <div className="space-y-1">
       {steps.map((step) => (

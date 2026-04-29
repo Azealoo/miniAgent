@@ -9,7 +9,7 @@ export default function FeedBlock({
   detail,
   badge,
   tone = "default",
-}: FeedBlockDescriptor) {
+}: Omit<FeedBlockDescriptor, "kind" | "id">) {
   return (
     <div
       className={cn(

@@ -6,7 +6,6 @@ describe("FeedBlock", () => {
   it("renders the title and detail text", () => {
     render(
       <FeedBlock
-        kind="block"
         title="Evidence Review"
         detail="Reviewed two supporting papers."
       />
@@ -18,7 +17,7 @@ describe("FeedBlock", () => {
 
   it("omits the badge element when no badge is provided", () => {
     render(
-      <FeedBlock kind="block" title="Readiness Check" detail="All good." />
+      <FeedBlock title="Readiness Check" detail="All good." />
     );
 
     expect(screen.queryByText("supported")).toBeNull();
@@ -27,7 +26,6 @@ describe("FeedBlock", () => {
   it("renders the badge with matching tone classes when provided", () => {
     render(
       <FeedBlock
-        kind="block"
         title="Evidence Review"
         detail="Claims look supported."
         badge="supported"
@@ -44,7 +42,6 @@ describe("FeedBlock", () => {
   it("applies the warning tone to the outer container for warning states", () => {
     render(
       <FeedBlock
-        kind="block"
         title="Readiness"
         detail="Some checks still pending."
         tone="warning"
