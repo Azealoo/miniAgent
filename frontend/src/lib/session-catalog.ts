@@ -488,6 +488,15 @@ export function useSessionCatalog(
   const sendMessage = useCallback(
     async (content: string, options?: SendMessageOptions) => {
       if (isStreaming || !hasExecutionAccess) return;
+      // `isStreaming` state can trail the refs under rapid send/stop/send,
+      // so assert the prior turn has fully released its refs before we
+      // overwrite the AbortController on a new turn.
+      if (
+        streamingIdRef.current !== null ||
+        streamAbortControllerRef.current !== null
+      ) {
+        return;
+      }
 
       let sessionId = currentSessionId;
       const hadNoMessages = messagesRef.current.length === 0;
