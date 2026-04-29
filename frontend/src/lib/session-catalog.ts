@@ -350,7 +350,7 @@ export function useSessionCatalog(
           getSessionHistoryErrorMessage
         );
         setParseErrorCount(0);
-    setRequestIdMismatchCount(0);
+        setRequestIdMismatchCount(0);
         resetDraftAndInspector();
       } catch (error) {
         promoteInspectionScopeError(error);
@@ -378,7 +378,7 @@ export function useSessionCatalog(
         setSessionHistoryError(null);
         setSessionContinuitySummaries([]);
         setParseErrorCount(0);
-    setRequestIdMismatchCount(0);
+        setRequestIdMismatchCount(0);
         resetDraftAndInspector();
       }
     },
