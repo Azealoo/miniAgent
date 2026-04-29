@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from artifacts import EvidenceReviewArtifact, load_artifact_document, lookup_artifact_registry
@@ -92,3 +94,29 @@ def test_evidence_review_tool_returns_structured_review_contract(tmp_path):
     assert artifact["structured_payload"]["review_status"] == "supported"
     assert artifact["structured_payload"]["source_facts"]
     assert artifact["artifact_refs"][0]["artifact_type"] == "evidence_review"
+
+
+@pytest.mark.parametrize(
+    "secret_path",
+    [
+        ".env",
+        "memory/.env",
+        "memory/.env.local",
+        "secrets/credentials.pem",
+        "keys/id_rsa",
+    ],
+)
+def test_evidence_review_tool_blocks_secret_like_paths(tmp_path, secret_path):
+    tool = EvidenceReviewTool(base_dir=str(tmp_path))
+
+    summary, artifact = tool._run(
+        question="What evidence supports anything?",
+        evidence_card_paths=[secret_path],
+    )
+
+    assert "[BLOCKED]" in summary
+    assert artifact["tool_name"] == "evidence_review"
+    assert artifact["outcome"] == "blocked"
+    assert artifact["error"]["code"] == "blocked"
+    assert artifact["metadata"]["blocked_field"] == "evidence_card_paths"
+    assert artifact["metadata"]["blocked_path"] == secret_path
