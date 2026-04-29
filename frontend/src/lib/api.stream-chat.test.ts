@@ -446,6 +446,75 @@ describe("streamChat", () => {
     expect(surfacedErrors).toEqual([]);
   });
 
+  it("swallows reader.releaseLock() failures so overflow teardown cannot throw", async () => {
+    const cap = 256;
+    const oversizedLine = "data: " + "x".repeat(cap + 64);
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(oversizedLine));
+        controller.close();
+      },
+    });
+
+    // Wrap getReader so releaseLock() throws (simulating an already-released
+    // reader after cancel()), while read()/cancel() still behave normally.
+    const originalGetReader = stream.getReader.bind(stream);
+    Object.defineProperty(stream, "getReader", {
+      configurable: true,
+      value: (...args: unknown[]) => {
+        const reader = (originalGetReader as (...a: unknown[]) => ReadableStreamDefaultReader<Uint8Array>)(...args);
+        return new Proxy(reader, {
+          get(target, prop, receiver) {
+            if (prop === "releaseLock") {
+              return () => {
+                throw new DOMException(
+                  "The reader is not attached to any stream.",
+                  "InvalidStateError"
+                );
+              };
+            }
+            const value = Reflect.get(target, prop, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      },
+    });
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(stream, {
+        headers: { "Content-Type": "text/event-stream" },
+        status: 200,
+      })
+    );
+
+    const overflows: Array<{ bufferedBytes: number; maxBufferBytes: number }> = [];
+    const surfacedErrors: string[] = [];
+
+    await expect(
+      streamChat(
+        "Send a giant payload.",
+        "session-overflow-release",
+        {
+          onStreamOverflow: (event) => {
+            overflows.push({
+              bufferedBytes: event.bufferedBytes,
+              maxBufferBytes: event.maxBufferBytes,
+            });
+          },
+          onError: (error) => {
+            surfacedErrors.push(error);
+          },
+        },
+        { maxBufferBytes: cap }
+      )
+    ).resolves.toBeUndefined();
+
+    expect(overflows).toHaveLength(1);
+    expect(overflows[0].maxBufferBytes).toBe(cap);
+    expect(surfacedErrors).toEqual([]);
+  });
+
   it("drops events whose request_id does not match the latched in-flight id", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       sseResponse(
