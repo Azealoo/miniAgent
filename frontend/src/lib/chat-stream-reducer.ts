@@ -473,6 +473,30 @@ function workflowStepKey(runId: string, stepId: string): string {
   return `${runId}:${stepId}`;
 }
 
+function findWorkflowStep(
+  steps: WorkflowStepState[] | undefined,
+  runId: string,
+  stepId: string
+): WorkflowStepState | undefined {
+  const key = workflowStepKey(runId, stepId);
+  return (steps ?? []).find(
+    (entry) => workflowStepKey(entry.run_id, entry.step_id) === key
+  );
+}
+
+// Legal transitions: undefined → running/ok/failed, running → running/ok/failed.
+// Terminal states (ok/failed) are sticky so that a late or duplicate event cannot
+// regress an already-finished step. A new attempt number (retry) is the only way
+// to move out of a terminal state.
+function isValidWorkflowStepTransition(
+  existing: WorkflowStepState | undefined,
+  incomingAttempt: number
+): boolean {
+  if (!existing) return true;
+  if (incomingAttempt > existing.attempt) return true;
+  return existing.status === "running";
+}
+
 function upsertWorkflowStep(
   steps: WorkflowStepState[] | undefined,
   next: WorkflowStepState
@@ -494,6 +518,11 @@ function applyWorkflowStepStarted(
   steps: WorkflowStepState[] | undefined,
   event: ChatStreamWorkflowStepStartedEvent
 ): WorkflowStepState[] {
+  const existing = findWorkflowStep(steps, event.run_id, event.step_id);
+  const attempt = event.attempt ?? 1;
+  if (!isValidWorkflowStepTransition(existing, attempt)) {
+    return steps ?? [];
+  }
   return upsertWorkflowStep(steps, {
     workflow_id: event.workflow_id,
     run_id: event.run_id,
@@ -502,7 +531,7 @@ function applyWorkflowStepStarted(
     total_steps: event.total_steps,
     status: "running",
     label: event.label ?? undefined,
-    attempt: event.attempt ?? 1,
+    attempt,
   });
 }
 
@@ -510,11 +539,12 @@ function applyWorkflowStepEnded(
   steps: WorkflowStepState[] | undefined,
   event: ChatStreamWorkflowStepEndedEvent
 ): WorkflowStepState[] {
-  const existing = (steps ?? []).find(
-    (entry) =>
-      workflowStepKey(entry.run_id, entry.step_id) ===
-      workflowStepKey(event.run_id, event.step_id)
-  );
+  const existing = findWorkflowStep(steps, event.run_id, event.step_id);
+  // `workflow_step_ended` carries no attempt field, so a duplicate/late `ended`
+  // against a terminal step is always treated as a regression and rejected.
+  if (existing && existing.status !== "running") {
+    return steps ?? [];
+  }
   return upsertWorkflowStep(steps, {
     workflow_id: event.workflow_id,
     run_id: event.run_id,
@@ -532,11 +562,11 @@ function applyWorkflowStepFailed(
   steps: WorkflowStepState[] | undefined,
   event: ChatStreamWorkflowStepFailedEvent
 ): WorkflowStepState[] {
-  const existing = (steps ?? []).find(
-    (entry) =>
-      workflowStepKey(entry.run_id, entry.step_id) ===
-      workflowStepKey(event.run_id, event.step_id)
-  );
+  const existing = findWorkflowStep(steps, event.run_id, event.step_id);
+  const attempt = event.attempt ?? existing?.attempt ?? 1;
+  if (!isValidWorkflowStepTransition(existing, attempt)) {
+    return steps ?? [];
+  }
   return upsertWorkflowStep(steps, {
     workflow_id: event.workflow_id,
     run_id: event.run_id,
@@ -545,7 +575,7 @@ function applyWorkflowStepFailed(
     total_steps: event.total_steps,
     status: "failed",
     label: existing?.label,
-    attempt: event.attempt ?? existing?.attempt ?? 1,
+    attempt,
     duration_ms: event.duration_ms,
     error: event.error,
     failure_policy: event.failure_policy,

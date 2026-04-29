@@ -833,6 +833,209 @@ describe("applyStreamEvent per-event coverage", () => {
     expect(statuses).toEqual(["ok", "running"]);
   });
 
+  it("rejects a late workflow_step_started after ok and preserves terminal fields", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_started",
+        workflow_id: "demo_flow",
+        run_id: "wf-3",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 1,
+        label: "First step",
+        attempt: 1,
+      },
+      100
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_ended",
+        workflow_id: "demo_flow",
+        run_id: "wf-3",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 1,
+        duration_ms: 42,
+      },
+      110
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_started",
+        workflow_id: "demo_flow",
+        run_id: "wf-3",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 1,
+        label: "regressed label",
+        attempt: 1,
+      },
+      120
+    );
+    const step = state.messages[0].workflowSteps?.[0];
+    expect(step?.status).toBe("ok");
+    expect(step?.duration_ms).toBe(42);
+    expect(step?.label).toBe("First step");
+    expect(step?.attempt).toBe(1);
+  });
+
+  it("rejects a duplicate workflow_step_failed and preserves error + policy", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_started",
+        workflow_id: "demo_flow",
+        run_id: "wf-4",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 1,
+        attempt: 1,
+      },
+      100
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_failed",
+        workflow_id: "demo_flow",
+        run_id: "wf-4",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 1,
+        duration_ms: 7,
+        error: "original failure",
+        failure_policy: "fail_workflow",
+        attempt: 1,
+      },
+      110
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_failed",
+        workflow_id: "demo_flow",
+        run_id: "wf-4",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 1,
+        duration_ms: 999,
+        error: "replayed failure",
+        failure_policy: "continue_with_warning",
+        attempt: 1,
+      },
+      120
+    );
+    const step = state.messages[0].workflowSteps?.[0];
+    expect(step?.status).toBe("failed");
+    expect(step?.error).toBe("original failure");
+    expect(step?.failure_policy).toBe("fail_workflow");
+    expect(step?.duration_ms).toBe(7);
+  });
+
+  it("rejects a late workflow_step_ended after failed", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_started",
+        workflow_id: "demo_flow",
+        run_id: "wf-5",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 1,
+        attempt: 1,
+      },
+      100
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_failed",
+        workflow_id: "demo_flow",
+        run_id: "wf-5",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 1,
+        duration_ms: 7,
+        error: "boom",
+        failure_policy: "fail_workflow",
+        attempt: 1,
+      },
+      110
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_ended",
+        workflow_id: "demo_flow",
+        run_id: "wf-5",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 1,
+        duration_ms: 999,
+      },
+      120
+    );
+    const step = state.messages[0].workflowSteps?.[0];
+    expect(step?.status).toBe("failed");
+    expect(step?.error).toBe("boom");
+    expect(step?.duration_ms).toBe(7);
+  });
+
+  it("allows a retry (ok → running) when the attempt number increases", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_started",
+        workflow_id: "demo_flow",
+        run_id: "wf-6",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 1,
+        attempt: 1,
+      },
+      100
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_failed",
+        workflow_id: "demo_flow",
+        run_id: "wf-6",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 1,
+        duration_ms: 5,
+        error: "transient",
+        failure_policy: "fail_workflow",
+        attempt: 1,
+      },
+      110
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_started",
+        workflow_id: "demo_flow",
+        run_id: "wf-6",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 1,
+        attempt: 2,
+      },
+      120
+    );
+    const step = state.messages[0].workflowSteps?.[0];
+    expect(step?.status).toBe("running");
+    expect(step?.attempt).toBe(2);
+  });
+
   it("returns state unchanged when no streaming message is active", () => {
     const state: StreamReducerState = {
       messages: [
