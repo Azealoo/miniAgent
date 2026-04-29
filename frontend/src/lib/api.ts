@@ -449,7 +449,9 @@ export async function streamChat(
     },
   });
 
-  const dispatcher = createChatStreamDispatcher(callbacks);
+  const dispatcher = createChatStreamDispatcher(callbacks, {
+    expectedRequestId: options.requestId,
+  });
 
   if (!response.ok || !response.body) {
     const text = await response.text().catch(() => response.statusText);

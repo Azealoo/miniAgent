@@ -185,6 +185,34 @@ describe("createChatStreamDispatcher request-id correlation", () => {
     expect(onRequestIdMismatch).toHaveBeenCalledTimes(1);
     expect(dispatcher.expectedRequestId()).toBe("req-seeded");
   });
+
+  it("rejects a late prior-turn event even when it arrives before any current-turn event", () => {
+    const onEvent = vi.fn();
+    const onToken = vi.fn();
+    const onRequestIdMismatch = vi.fn();
+    const dispatcher = createChatStreamDispatcher(
+      { onEvent, onToken, onRequestIdMismatch },
+      { expectedRequestId: "req-current" }
+    );
+
+    dispatcher.dispatch({
+      type: "token",
+      content: "stale-from-prior-turn",
+      request_id: "req-previous",
+    });
+    dispatcher.dispatch({
+      type: "token",
+      content: "current",
+      request_id: "req-current",
+    });
+
+    expect(onRequestIdMismatch).toHaveBeenCalledTimes(1);
+    const [droppedEvent] = onRequestIdMismatch.mock.calls[0];
+    expect(droppedEvent.request_id).toBe("req-previous");
+    expect(onToken).toHaveBeenCalledTimes(1);
+    expect(onToken).toHaveBeenCalledWith("current");
+    expect(dispatcher.expectedRequestId()).toBe("req-current");
+  });
 });
 
 describe("parseChatStreamDataPayload", () => {
