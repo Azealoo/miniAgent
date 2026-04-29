@@ -10,6 +10,7 @@ from typing import Any
 
 from audit.store import append_file_written_event
 from graph.memory_types import parse_memory_document
+from graph.memory_writer import MemoryFrontmatterError, write_memory_file
 from graph.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -106,9 +107,32 @@ def distill_request_memory(
     if new_content is None:
         return MemoryDistillationResult("skipped", "request_already_distilled", path=relative_target)
 
+    scoped_indexer = (
+        memory_indexer
+        if memory_indexer is not None
+        and getattr(memory_indexer, "base_dir", None) == base_dir
+        else None
+    )
+
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(new_content, encoding="utf-8")
+        write_memory_file(
+            target,
+            relative_target,
+            new_content,
+            memory_indexer=scoped_indexer,
+        )
+    except MemoryFrontmatterError as exc:
+        # Programmer error: distillation templates produced invalid frontmatter.
+        # Surface it through the audit log instead of silently writing junk.
+        append_file_written_event(
+            base_dir,
+            path=relative_target,
+            source="memory_distillation",
+            outcome="invalid_input",
+            session_id=session_id,
+            reason=str(exc),
+        )
+        return MemoryDistillationResult("failed", "invalid_frontmatter", path=relative_target)
     except OSError:
         append_file_written_event(
             base_dir,
@@ -129,13 +153,6 @@ def distill_request_memory(
         session_id=session_id,
         reason=f"distilled request {request_id}",
     )
-
-    if memory_indexer is not None and getattr(memory_indexer, "base_dir", None) == base_dir:
-        try:
-            # Incremental: only re-embeds the distilled file, not the whole corpus.
-            memory_indexer._maybe_rebuild()
-        except Exception:
-            pass
 
     return MemoryDistillationResult("written", "distilled_verified_turn", path=relative_target)
 
@@ -437,8 +454,20 @@ async def distill_session(
     )
 
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(new_content, encoding="utf-8")
+        write_memory_file(target, relative_target, new_content)
+    except MemoryFrontmatterError as exc:
+        try:
+            append_file_written_event(
+                base_dir,
+                path=relative_target,
+                source="session_distillation",
+                outcome="invalid_input",
+                session_id=session_id,
+                reason=str(exc),
+            )
+        except Exception:
+            pass
+        return MemoryDistillationResult("failed", "invalid_frontmatter", path=relative_target)
     except OSError:
         try:
             append_file_written_event(
