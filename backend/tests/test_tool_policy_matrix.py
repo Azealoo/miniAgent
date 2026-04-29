@@ -258,7 +258,7 @@ def _fake_manifest(
         read_only=read_only,
         destructive=destructive,
         concurrency_safe=concurrency_safe,
-        planner_exposed=read_only,
+        planner_exposed=False,
         verifier_exposed=read_only,
         interrupt_behavior="restartable" if read_only else "avoid_interrupting",
         tool_validates_input=False,
