@@ -220,6 +220,28 @@ class TestValidateDirectly:
                 {"memory_indexer": {"max_sections_per_file": "sixty-four"}}
             )
 
+    def test_verification_max_repair_attempts_defaults_to_one(self):
+        model = RuntimeConfigModel.model_validate({})
+        assert model.verification.max_repair_attempts == 1
+
+    def test_verification_max_repair_attempts_override_accepts_two(self):
+        model = RuntimeConfigModel.model_validate(
+            {"verification": {"max_repair_attempts": 2}}
+        )
+        assert model.verification.max_repair_attempts == 2
+
+    def test_verification_max_repair_attempts_zero_disables_repairs(self):
+        model = RuntimeConfigModel.model_validate(
+            {"verification": {"max_repair_attempts": 0}}
+        )
+        assert model.verification.max_repair_attempts == 0
+
+    def test_verification_max_repair_attempts_negative_raises(self):
+        with pytest.raises(pydantic.ValidationError):
+            RuntimeConfigModel.model_validate(
+                {"verification": {"max_repair_attempts": -1}}
+            )
+
 
 class TestLoadIntegration:
     """Validation must fire through ``_load_loaded_runtime`` /
@@ -314,3 +336,28 @@ class TestLoadIntegration:
                 config.snapshot_runtime_config()
 
         assert "bogus_section" in str(exc_info.value)
+
+    def test_get_verification_settings_default_max_repair_attempts(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text("{}", encoding="utf-8")
+
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+
+            settings = config.get_verification_settings()
+
+        assert settings["max_repair_attempts"] == 1
+
+    def test_get_verification_settings_override_max_repair_attempts(self, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        cfg_file.write_text(
+            json.dumps({"verification": {"max_repair_attempts": 2}}),
+            encoding="utf-8",
+        )
+
+        with patch("config._CONFIG_FILE", cfg_file):
+            import config
+
+            settings = config.get_verification_settings()
+
+        assert settings["max_repair_attempts"] == 2

@@ -512,6 +512,137 @@ async def test_query_engine_run_harness_turn_stops_after_one_repair_retry():
     }
 
 
+def _make_failing_verification_manager_class():
+    """Build an agent manager that always returns a ``fail`` verifier verdict.
+
+    Each turn yields a token + a verification_agent tool_end with verdict
+    ``fail`` so the runtime keeps requesting repair retries until the
+    configured ``max_repair_attempts`` cap is hit.
+    """
+
+    class _AlwaysFailingAgentManager(_FakeAgentManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def astream(
+            self, message: str, history: list[dict]
+        ) -> AsyncGenerator[dict, None]:
+            self.calls += 1
+            run_id = f"verify-run-{self.calls}"
+            yield {"type": "token", "content": f"draft {self.calls}"}
+            yield {
+                "type": "tool_end",
+                "tool": "verification_agent",
+                "output": "verifier summary",
+                "run_id": run_id,
+                "result": {
+                    "status": "success",
+                    "summary": "Verifier verdict: fail. Still missing details.",
+                    "structured_payload": {
+                        "agent_type": "verification",
+                        "verification": {
+                            "verdict": "fail",
+                            "summary": "Still missing details.",
+                            "checks": [
+                                {
+                                    "name": "coverage",
+                                    "status": "fail",
+                                    "note": "missing",
+                                }
+                            ],
+                            "issues": ["gap"],
+                            "repair_instructions": ["fix it"],
+                        },
+                        "tool_trace": [],
+                    },
+                },
+            }
+            yield {"type": "done"}
+
+    return _AlwaysFailingAgentManager
+
+
+@pytest.mark.asyncio
+async def test_query_engine_run_harness_turn_allows_two_repair_retries_when_cap_is_two():
+    manager = _make_failing_verification_manager_class()()
+    engine = QueryEngine(manager)
+    turn = QueryTurnInput(
+        message="hello",
+        history=[{"role": "system", "content": "ctx"}],
+    )
+
+    with patch(
+        "runtime.query_engine.get_verification_settings",
+        return_value={
+            "retry_on_repair_required": True,
+            "max_repair_attempts": 2,
+        },
+    ):
+        events = [event async for event in engine.run_harness_turn(turn)]
+
+    # 1 initial draft + 2 repair retries = 3 astream invocations.
+    assert manager.calls == 3
+    assert [event["type"] for event in events].count("new_response") == 2
+    assert [event["type"] for event in events].count("verification_result") == 3
+    assert events[-1] == {
+        "type": "done",
+        "turn_status": "ok",
+        "exit": {"reason": "success", "exit_code": 0},
+    }
+
+
+@pytest.mark.asyncio
+async def test_query_engine_run_harness_turn_disables_repairs_when_cap_is_zero():
+    manager = _make_failing_verification_manager_class()()
+    engine = QueryEngine(manager)
+    turn = QueryTurnInput(
+        message="hello",
+        history=[{"role": "system", "content": "ctx"}],
+    )
+
+    with patch(
+        "runtime.query_engine.get_verification_settings",
+        return_value={
+            "retry_on_repair_required": True,
+            "max_repair_attempts": 0,
+        },
+    ):
+        events = [event async for event in engine.run_harness_turn(turn)]
+
+    # Cap of 0 means no repair retries — only the initial draft runs.
+    assert manager.calls == 1
+    assert [event["type"] for event in events].count("new_response") == 0
+    assert [event["type"] for event in events].count("verification_result") == 1
+    assert events[-1] == {
+        "type": "done",
+        "turn_status": "ok",
+        "exit": {"reason": "success", "exit_code": 0},
+    }
+
+
+@pytest.mark.asyncio
+async def test_query_engine_run_harness_turn_default_cap_allows_one_repair_retry():
+    manager = _make_failing_verification_manager_class()()
+    engine = QueryEngine(manager)
+    turn = QueryTurnInput(
+        message="hello",
+        history=[{"role": "system", "content": "ctx"}],
+    )
+
+    # Omitting ``max_repair_attempts`` from the settings dict must fall back
+    # to the documented default of 1 retry — preserving the prior behavior.
+    with patch(
+        "runtime.query_engine.get_verification_settings",
+        return_value={"retry_on_repair_required": True},
+    ):
+        events = [event async for event in engine.run_harness_turn(turn)]
+
+    assert manager.calls == 2
+    assert [event["type"] for event in events].count("new_response") == 1
+    assert [event["type"] for event in events].count("verification_result") == 2
+
+
 @pytest.mark.asyncio
 async def test_query_engine_can_treat_repair_required_as_advisory():
     class _RepairSuggestedAgentManager(_FakeAgentManager):
