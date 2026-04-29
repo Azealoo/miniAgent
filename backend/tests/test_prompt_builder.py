@@ -15,11 +15,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from graph.prompt_builder import (
     EVICTION_ORDER,
+    KNOWN_SECTION_IDS,
     MAX_COMPONENT_CHARS,
     MAX_MEMORY_INDEX_CHARS,
     MAX_RETRIEVED_MEMORY_BLOCK_CHARS,
     SECTIONS_IN_STABLE_PREFIX,
+    STATIC_GUIDANCE_SECTION_IDS,
     _apply_eviction,
+    _assemble_sections,
     build_anthropic_system_blocks,
     build_retrieved_memory_block,
     build_system_prompt,
@@ -1212,6 +1215,40 @@ class TestPromptCachePrefix:
             "_tool_selection_guidance",
             "_rag_memory_guidance",
         })
+
+    def test_known_section_ids_covers_stable_prefix_membership(self):
+        # Every id in SECTIONS_IN_STABLE_PREFIX must be a known section.
+        # A mismatch would silently drop a "stable" section from the cache
+        # prefix because the split uses set membership, not ordered tuples.
+        assert SECTIONS_IN_STABLE_PREFIX <= KNOWN_SECTION_IDS, (
+            "unknown ids in SECTIONS_IN_STABLE_PREFIX: "
+            f"{sorted(SECTIONS_IN_STABLE_PREFIX - KNOWN_SECTION_IDS)}"
+        )
+        # EVICTION_ORDER and STATIC_GUIDANCE_SECTION_IDS together define the
+        # closed set — with no overlap, since static guidance is never evicted.
+        assert set(EVICTION_ORDER).isdisjoint(STATIC_GUIDANCE_SECTION_IDS)
+        assert KNOWN_SECTION_IDS == frozenset(EVICTION_ORDER) | STATIC_GUIDANCE_SECTION_IDS
+
+    def test_assemble_sections_emits_no_orphan_ids(self, workspace):
+        # Every id emitted in either mode must be classified — otherwise the
+        # stable/volatile partition would silently treat a new section as
+        # volatile and drop it from the cache prefix.
+        for rag_mode in (False, True):
+            sections = _assemble_sections(
+                workspace, rag_mode, skill_entries=None
+            )
+            emitted_ids = {sid for sid, _ in sections}
+            orphans = emitted_ids - KNOWN_SECTION_IDS
+            assert not orphans, (
+                f"_assemble_sections emitted orphan ids (rag_mode={rag_mode}): "
+                f"{sorted(orphans)}"
+            )
+            # And each emitted id must be partitioned into exactly one of
+            # stable / volatile via SECTIONS_IN_STABLE_PREFIX.
+            for sid in emitted_ids:
+                assert (sid in SECTIONS_IN_STABLE_PREFIX) or (
+                    sid in KNOWN_SECTION_IDS - SECTIONS_IN_STABLE_PREFIX
+                ), f"section id {sid!r} is not classified as stable or volatile"
 
 
 class TestAnthropicSystemBlocks:

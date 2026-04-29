@@ -114,6 +114,66 @@ class TestFrozenSessionPrefix:
         sm.delete_session(session_id)
         assert sm.get_frozen_session_prefix(session_id) is None
 
+    def test_mid_session_skill_addition_triggers_prefix_drift(self, tmp_path, caplog):
+        """A new skill registered mid-session must change the assembled
+        stable prefix so ``freeze_session_prefix`` detects drift and logs
+        ``session_prefix_drift`` — otherwise the cache silently misses."""
+        from graph.prompt_builder import build_system_prompt_blocks
+        from graph.session_manager import SessionManager
+
+        # Minimal workspace so build_system_prompt_blocks has something to
+        # assemble. We only need the skills tree to be writable.
+        (tmp_path / "workspace").mkdir()
+        (tmp_path / "workspace" / "SOUL.md").write_text("soul", encoding="utf-8")
+        (tmp_path / "skills").mkdir()
+
+        session_id = _valid_session_id(42)
+        sm = SessionManager(base_dir=tmp_path)
+        sm.create_session()
+
+        turn1_stable, _ = build_system_prompt_blocks(tmp_path, rag_mode=False)
+        sm.freeze_session_prefix(
+            session_id,
+            stable_prefix=turn1_stable,
+            tool_names=("read_file",),
+        )
+
+        # Mid-session: register a new skill. This is the exact mutation the
+        # issue flags — the stable prefix changes shape but nothing else in
+        # the runtime notices.
+        skill_dir = tmp_path / "skills" / "new_skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            (
+                "---\nname: new_skill\ndescription: A new skill added mid-session.\n"
+                "category: bio/literature\n"
+                "requires_tools: [read_file]\nrequires_network: false\n"
+                "user_invocable: true\nspecies: any\nmodality: literature\n"
+                "stage: analysis\nstability: experimental\nsafety_level: low\n"
+                "---\n# Body\n"
+            ),
+            encoding="utf-8",
+        )
+
+        turn2_stable, _ = build_system_prompt_blocks(tmp_path, rag_mode=False)
+        assert turn1_stable != turn2_stable, (
+            "adding a skill mid-session must change the assembled stable "
+            "prefix — otherwise the drift hook has nothing to detect"
+        )
+
+        with caplog.at_level("WARNING", logger="graph.session.session_store"):
+            sm.freeze_session_prefix(
+                session_id,
+                stable_prefix=turn2_stable,
+                tool_names=("read_file",),
+            )
+
+        drift_logs = [r for r in caplog.records if "session_prefix_drift" in r.message]
+        assert len(drift_logs) == 1, (
+            "freeze_session_prefix must log session_prefix_drift when the "
+            "re-assembled prefix no longer matches the first-turn fingerprint"
+        )
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SubAgentContract: compose stable prefix into the final system prompt
