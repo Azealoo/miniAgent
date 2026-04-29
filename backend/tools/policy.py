@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import socket
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -292,14 +293,32 @@ def _public_network_violation_reason(
     host = (parsed.hostname or "").lower()
     if not host:
         return "URL has no host"
+
+    # Reject reserved/private/loopback addresses BEFORE consulting allowed_hosts
+    # so an entry like '127.0.0.1' or 'localhost' cannot short-circuit the
+    # public-scope guarantee by being added to the allowlist.
+    resolved: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    try:
+        resolved.append(ipaddress.ip_address(host))
+    except ValueError:
+        try:
+            for info in socket.getaddrinfo(host, None):
+                addr_str = info[4][0].split("%", 1)[0]
+                try:
+                    resolved.append(ipaddress.ip_address(addr_str))
+                except ValueError:
+                    continue
+        except OSError:
+            return f"host '{host}' could not be resolved"
+        if not resolved:
+            return f"host '{host}' could not be resolved"
+
+    for addr in resolved:
+        if addr.is_loopback or addr.is_link_local or addr.is_private:
+            return f"host '{host}' resolves to a private/reserved IP range"
+
     if allowed_hosts and host not in {h.lower() for h in allowed_hosts}:
         return f"host '{host}' is not in the sandbox allowed_hosts list"
-    try:
-        addr = ipaddress.ip_address(host)
-    except ValueError:
-        return None
-    if addr.is_loopback or addr.is_link_local or addr.is_private:
-        return f"host '{host}' resolves to a private/reserved IP range"
     return None
 
 
