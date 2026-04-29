@@ -879,6 +879,76 @@ class TestAutoCompress:
         assert result is False
         assert len(sm.load_session(sid)) == 40  # untouched
 
+    @pytest.mark.asyncio
+    async def test_compress_lock_released_when_inner_raises(self, sm, monkeypatch):
+        """Regression for #258: a failed compression must release the asyncio.Lock
+        so the next call can acquire it. ``async with`` in
+        ``auto_compress_if_needed`` is the contract — this test pins it down so a
+        future refactor cannot drop the context manager and silently leak the
+        held state.
+
+        We bypass the inner ``_do_compress_if_needed`` (which is non-fatal by
+        design and swallows LLM errors) and force the *body* of the lock to
+        raise, mirroring the only way an unhandled exception could escape the
+        critical section in production.
+        """
+        sid = sm.create_session()
+        for i in range(40):
+            sm.save_message(sid, "user", f"m{i}")
+
+        async def _boom(self, session_id, llm, threshold):
+            raise RuntimeError("simulated unexpected failure inside lock")
+
+        monkeypatch.setattr(
+            type(sm), "_do_compress_if_needed", _boom, raising=True
+        )
+
+        with pytest.raises(RuntimeError, match="simulated unexpected failure"):
+            await sm.auto_compress_if_needed(sid, llm=None, threshold=40)
+
+        lock = sm.get_or_create_compress_lock(sid)
+        assert not lock.locked(), (
+            "Compression lock is still held after the critical section raised "
+            "— async with did not release it (issue #258)."
+        )
+
+        # Subsequent acquisition must not deadlock. Use wait_for so a
+        # regression surfaces as a timeout instead of hanging the suite.
+        import asyncio
+
+        await asyncio.wait_for(lock.acquire(), timeout=1.0)
+        lock.release()
+
+    @pytest.mark.asyncio
+    async def test_compress_lock_entry_persists_after_failure(self, sm, monkeypatch):
+        """Companion guard for #222 vs #258: the registry entry stays put after
+        a failure. Evicting on failure (the naive ‘fix’ proposed by #258) would
+        re-introduce the GC race the strong-ref dict was built to prevent.
+        """
+        from graph.session import session_store
+
+        sid = sm.create_session()
+        for i in range(40):
+            sm.save_message(sid, "user", f"m{i}")
+
+        original = sm.get_or_create_compress_lock(sid)
+        assert session_store._compress_locks.get(sid) is original
+
+        async def _boom(self, session_id, llm, threshold):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(
+            type(sm), "_do_compress_if_needed", _boom, raising=True
+        )
+
+        with pytest.raises(RuntimeError):
+            await sm.auto_compress_if_needed(sid, llm=None, threshold=40)
+
+        assert session_store._compress_locks.get(sid) is original, (
+            "Lock entry was evicted after a failed compression — that "
+            "re-introduces the GC race fixed by #222."
+        )
+
 
 # --------------------------------------------------------------------- #
 # delete_session post-session distillation hook                         #
