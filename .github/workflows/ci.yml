@@ -56,6 +56,12 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      # Lockfile audit guards against silent drift / known-vulnerable
+      # transitive deps slipping in once direct ranges are pinned (issue #264).
+      - name: Audit lockfile (high+ severity)
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
       - name: Run JSON -> TS drift guard
         working-directory: frontend
         run: npm run codegen:check
@@ -75,6 +81,12 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
+
+      # Lockfile audit guards against silent drift / known-vulnerable
+      # transitive deps slipping in once direct ranges are pinned (issue #264).
+      - name: Audit lockfile (high+ severity)
+        working-directory: frontend
+        run: npm audit --audit-level=high
 
       # Typecheck gates the build — fail fast on type errors before the
       # slower `next build` step, and before lint runs against potentially
