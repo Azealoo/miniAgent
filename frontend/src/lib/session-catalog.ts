@@ -20,6 +20,12 @@ const DEFAULT_SESSION_TITLE = "New Chat";
 
 export type SessionListStatus = "idle" | "loading" | "ready" | "error";
 
+export type ContinuitySummariesLoadingStatus =
+  | "idle"
+  | "loading"
+  | "ready"
+  | "error";
+
 export interface UseSessionCatalogParams {
   hasLoadedApiAuthState: boolean;
   accessByScope: Record<AccessScope, AccessScopeState>;
@@ -55,6 +61,12 @@ export interface UseSessionCatalogResult {
   sessionHistoryStatus: SessionHistoryStatus;
   sessionHistoryError: string | null;
   sessionContinuitySummaries: SessionContinuitySummary[];
+  /**
+   * Lifecycle of the most recent `getSessionContinuity` fetch for the active
+   * session. Lets the UI distinguish "no archived summaries yet" from "still
+   * fetching" so the empty-state branch can render a loading affordance.
+   */
+  continuitySummariesLoadingStatus: ContinuitySummariesLoadingStatus;
   lastFailedTurn: FailedTurnState | null;
   /**
    * Number of malformed SSE payloads the parser has surfaced for the active
@@ -108,6 +120,10 @@ export function useSessionCatalog(
   const [sessionContinuitySummaries, setSessionContinuitySummaries] = useState<
     SessionContinuitySummary[]
   >([]);
+  const [
+    continuitySummariesLoadingStatus,
+    setContinuitySummariesLoadingStatus,
+  ] = useState<ContinuitySummariesLoadingStatus>("idle");
   const [lastFailedTurn, setLastFailedTurn] = useState<FailedTurnState | null>(
     null
   );
@@ -142,6 +158,8 @@ export function useSessionCatalog(
       setSessionHistoryStatus,
       setSessionHistoryError,
       setSessionContinuitySummaries,
+      setSessionContinuitySummariesLoadingStatus:
+        setContinuitySummariesLoadingStatus,
     }),
     []
   );
@@ -169,6 +187,7 @@ export function useSessionCatalog(
     setSessionHistoryStatus("idle");
     setSessionHistoryError(null);
     setSessionContinuitySummaries([]);
+    setContinuitySummariesLoadingStatus("idle");
     setParseErrorCount(0);
     setRequestIdMismatchCount(0);
   }, [accessByScope.inspection.status, hasLoadedApiAuthState]);
@@ -191,6 +210,7 @@ export function useSessionCatalog(
       setSessionHistoryStatus("idle");
       setSessionHistoryError(null);
       setSessionContinuitySummaries([]);
+      setContinuitySummariesLoadingStatus("idle");
       return;
     }
 
@@ -219,6 +239,7 @@ export function useSessionCatalog(
           setSessionHistoryStatus("idle");
           setSessionHistoryError(null);
           setSessionContinuitySummaries([]);
+          setContinuitySummariesLoadingStatus("idle");
           return;
         }
 
@@ -249,6 +270,7 @@ export function useSessionCatalog(
             setSessionHistoryStatus("idle");
             setSessionHistoryError(null);
             setSessionContinuitySummaries([]);
+            setContinuitySummariesLoadingStatus("idle");
           }
           promoteInspectionScopeError(error);
         }
@@ -329,6 +351,7 @@ export function useSessionCatalog(
     setSessionHistoryStatus("ready");
     setSessionHistoryError(null);
     setSessionContinuitySummaries([]);
+    setContinuitySummariesLoadingStatus("idle");
     setParseErrorCount(0);
     setRequestIdMismatchCount(0);
     resetDraftAndInspector();
@@ -377,6 +400,7 @@ export function useSessionCatalog(
         setSessionHistoryStatus("idle");
         setSessionHistoryError(null);
         setSessionContinuitySummaries([]);
+        setContinuitySummariesLoadingStatus("idle");
         setParseErrorCount(0);
         setRequestIdMismatchCount(0);
         resetDraftAndInspector();
@@ -553,6 +577,7 @@ export function useSessionCatalog(
     sessionHistoryStatus,
     sessionHistoryError,
     sessionContinuitySummaries,
+    continuitySummariesLoadingStatus,
     lastFailedTurn,
     parseErrorCount,
     requestIdMismatchCount,

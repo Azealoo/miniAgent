@@ -32,6 +32,7 @@ export function makeMockAppValue(
     sessionHistoryStatus: "ready",
     sessionHistoryError: null,
     sessionContinuitySummaries: [],
+    continuitySummariesLoadingStatus: "ready",
     lastFailedTurn: null,
     parseErrorCount: 0,
     requestIdMismatchCount: 0,

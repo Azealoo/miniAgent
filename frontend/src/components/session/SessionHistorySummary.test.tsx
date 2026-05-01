@@ -167,6 +167,7 @@ describe("SessionHistorySummary", () => {
         currentSessionId="session-alpha"
         messages={messages}
         continuitySummaries={[]}
+        continuitySummariesLoadingStatus="ready"
       />
     );
 
@@ -262,6 +263,7 @@ describe("SessionHistorySummary", () => {
         currentSessionId="session-history"
         messages={messages}
         continuitySummaries={[]}
+        continuitySummariesLoadingStatus="ready"
       />
     );
 
@@ -336,6 +338,7 @@ describe("SessionHistorySummary", () => {
         currentSessionId="session-expanded-history"
         messages={messages}
         continuitySummaries={[]}
+        continuitySummariesLoadingStatus="ready"
       />
     );
 
@@ -393,6 +396,7 @@ describe("SessionHistorySummary", () => {
         currentSessionId="session-recent-history"
         messages={messages}
         continuitySummaries={[]}
+        continuitySummariesLoadingStatus="ready"
       />
     );
 
@@ -447,6 +451,7 @@ describe("SessionHistorySummary", () => {
         currentSessionId="session-verify-retry"
         messages={messages}
         continuitySummaries={[]}
+        continuitySummariesLoadingStatus="ready"
       />
     );
 
@@ -511,6 +516,7 @@ describe("SessionHistorySummary", () => {
           }),
         ]}
         continuitySummaries={[makeSessionContinuitySummary()]}
+        continuitySummariesLoadingStatus="ready"
       />
     );
 
@@ -525,5 +531,59 @@ describe("SessionHistorySummary", () => {
     expect(await screen.findByText("Looked at archive-history.md.")).toBeTruthy();
 
     fetchMock.restore();
+  });
+
+  it("shows a loading affordance while continuity summaries are still fetching", () => {
+    render(
+      <SessionHistorySummary
+        currentSessionId="session-loading"
+        messages={[
+          makeMessage({
+            id: "user-loading",
+            role: "user",
+            content: "Loading state question.",
+            request_id: "request-loading",
+          }),
+          makeMessage({
+            id: "assistant-loading",
+            role: "assistant",
+            content: "Loading state answer.",
+            request_id: "request-loading",
+          }),
+        ]}
+        continuitySummaries={[]}
+        continuitySummariesLoadingStatus="loading"
+      />
+    );
+
+    expect(screen.getByText("Archived Work")).toBeTruthy();
+    expect(screen.getByText("Loading archived summaries…")).toBeTruthy();
+  });
+
+  it("hides the archived-work section when continuity summaries are absent and not loading", () => {
+    render(
+      <SessionHistorySummary
+        currentSessionId="session-empty"
+        messages={[
+          makeMessage({
+            id: "user-empty",
+            role: "user",
+            content: "Empty state question.",
+            request_id: "request-empty",
+          }),
+          makeMessage({
+            id: "assistant-empty",
+            role: "assistant",
+            content: "Empty state answer.",
+            request_id: "request-empty",
+          }),
+        ]}
+        continuitySummaries={[]}
+        continuitySummariesLoadingStatus="ready"
+      />
+    );
+
+    expect(screen.queryByText("Archived Work")).toBeNull();
+    expect(screen.queryByText("Loading archived summaries…")).toBeNull();
   });
 });

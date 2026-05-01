@@ -23,6 +23,7 @@ import {
 import { useAccessScopeState } from "./access-scope-state";
 import {
   useSessionCatalog,
+  type ContinuitySummariesLoadingStatus,
   type FailedTurnState,
   type SendMessageOptions,
 } from "./session-catalog";
@@ -62,6 +63,13 @@ interface AppContextValue {
   sessionHistoryStatus: SessionHistoryStatus;
   sessionHistoryError: string | null;
   sessionContinuitySummaries: SessionContinuitySummary[];
+  /**
+   * Lifecycle of the most recent session-continuity fetch. `"loading"` while
+   * the parallel `getSessionContinuity` request is in flight, `"ready"` once
+   * it lands, `"error"` if the surrounding `loadSession` failed. Drives the
+   * loading affordance in the SessionHistorySummary empty-state branch.
+   */
+  continuitySummariesLoadingStatus: ContinuitySummariesLoadingStatus;
   lastFailedTurn: FailedTurnState | null;
   /**
    * Count of malformed SSE payloads the parser has surfaced for the active
@@ -280,6 +288,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       sessionHistoryStatus: catalog.sessionHistoryStatus,
       sessionHistoryError: catalog.sessionHistoryError,
       sessionContinuitySummaries: catalog.sessionContinuitySummaries,
+      continuitySummariesLoadingStatus:
+        catalog.continuitySummariesLoadingStatus,
       lastFailedTurn: catalog.lastFailedTurn,
       parseErrorCount: catalog.parseErrorCount,
       requestIdMismatchCount: catalog.requestIdMismatchCount,
@@ -322,6 +332,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       catalog.sessionHistoryStatus,
       catalog.sessionHistoryError,
       catalog.sessionContinuitySummaries,
+      catalog.continuitySummariesLoadingStatus,
       catalog.lastFailedTurn,
       catalog.parseErrorCount,
       catalog.requestIdMismatchCount,

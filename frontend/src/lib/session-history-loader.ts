@@ -14,6 +14,12 @@ import type {
 
 export type SessionHistoryStatus = "idle" | "loading" | "ready" | "error";
 
+export type ContinuitySummariesLoadingStatus =
+  | "idle"
+  | "loading"
+  | "ready"
+  | "error";
+
 export interface SessionLoadSnapshot {
   currentSessionId: string | null;
   messages: Message[];
@@ -26,6 +32,9 @@ export interface SessionLoadSetters {
   setSessionHistoryStatus: (status: SessionHistoryStatus) => void;
   setSessionHistoryError: (error: string | null) => void;
   setSessionContinuitySummaries: (summaries: SessionContinuitySummary[]) => void;
+  setSessionContinuitySummariesLoadingStatus: (
+    status: ContinuitySummariesLoadingStatus
+  ) => void;
 }
 
 function groupHistoryMessagesIntoTurns<T extends { role: string }>(
@@ -109,6 +118,7 @@ export async function loadSession(
   setters.setSessionHistoryStatus("loading");
   setters.setSessionHistoryError(null);
   setters.setSessionContinuitySummaries([]);
+  setters.setSessionContinuitySummariesLoadingStatus("loading");
   try {
     const [history, continuity] = await Promise.all([
       api.getHistory(id),
@@ -118,6 +128,7 @@ export async function loadSession(
     setters.setCurrentSessionId(id);
     setters.setMessages(messages);
     setters.setSessionContinuitySummaries(continuity.summaries);
+    setters.setSessionContinuitySummariesLoadingStatus("ready");
     setters.setSessionHistoryStatus("ready");
     setters.setSessionHistoryError(null);
   } catch (error) {
@@ -139,6 +150,7 @@ export async function loadSession(
       setters.setMessages([]);
       setters.setSessionContinuitySummaries([]);
     }
+    setters.setSessionContinuitySummariesLoadingStatus("error");
     setters.setSessionHistoryStatus("error");
     setters.setSessionHistoryError(nextErrorMessage);
     throw error;
