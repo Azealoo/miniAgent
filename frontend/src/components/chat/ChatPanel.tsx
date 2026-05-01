@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef } from "react";
-import { ArrowRight, MessageSquarePlus, RefreshCw, ShieldAlert } from "lucide-react";
+import { ArrowRight, MessageSquarePlus, RefreshCw, ShieldAlert, Sparkles } from "lucide-react";
 import SurfaceState from "@/components/layout/SurfaceState";
 import { useApp } from "@/lib/store";
 import ChatInput from "./ChatInput";
@@ -177,6 +177,7 @@ export default function ChatPanel() {
                 sessionHistoryError={sessionHistoryError}
                 showWorkspaceSetupState={showWorkspaceSetupState}
                 onRetryHistory={() => void reloadCurrentSession()}
+                onSelectSuggestion={primeDraftMessage}
               />
             ) : (
               <SessionHistorySummary
@@ -256,6 +257,29 @@ function InlineActionButton({
   );
 }
 
+const QUICK_START_SUGGESTIONS: ReadonlyArray<{ label: string; prompt: string }> = [
+  {
+    label: "Plan an RNA-seq QC run",
+    prompt:
+      "Plan an RNA-seq QC run for a small bulk dataset. Walk me through the inputs you need and which workflow you would use.",
+  },
+  {
+    label: "Summarize a gene",
+    prompt:
+      "Summarize what is currently known about the gene TP53 — function, key pathways, and recent evidence — and cite the sources you used.",
+  },
+  {
+    label: "Inspect memory",
+    prompt:
+      "Show me what you remember about this project from memory and tell me which files you would read first to get oriented.",
+  },
+  {
+    label: "Compare two datasets",
+    prompt:
+      "I want to compare two single-cell datasets. Outline the steps and the evidence you would gather before running anything.",
+  },
+];
+
 function EmptyState({
   currentSessionId,
   hasExecutionAccess,
@@ -270,6 +294,7 @@ function EmptyState({
   sessionHistoryError,
   showWorkspaceSetupState,
   onRetryHistory,
+  onSelectSuggestion,
 }: {
   currentSessionId: string | null;
   hasExecutionAccess: boolean;
@@ -284,6 +309,7 @@ function EmptyState({
   sessionHistoryError: string | null;
   showWorkspaceSetupState: boolean;
   onRetryHistory: () => void;
+  onSelectSuggestion?: (text: string) => void;
 }) {
   if (inspectionStatus === "checking" || executionStatus === "checking" || isSessionLoading) {
     return (
@@ -378,6 +404,8 @@ function EmptyState({
     );
   }
 
+  const showQuickStart = hasExecutionAccess && Boolean(onSelectSuggestion);
+
   return (
     <div className="flex flex-1 flex-col items-center justify-center px-8 py-16 text-center">
       <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-[16px] bg-[var(--apex-accent-soft)]">
@@ -398,6 +426,42 @@ function EmptyState({
           ? "Ask a biology question, inspect a dataset, review evidence, or start a structured analysis when you need one. New requests in this session will appear here as the conversation grows."
           : "Ask a biology question, inspect a dataset, review evidence, or start a structured analysis when you need one. The center workspace is ready for the active conversation."}
       </p>
+      {showQuickStart ? (
+        <div className="mt-6 w-full max-w-lg">
+          <p className="flex items-center justify-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-400">
+            <Sparkles size={12} className="text-[var(--apex-accent)]" />
+            Try one of these
+          </p>
+          <div
+            role="list"
+            aria-label="Quick-start suggestions"
+            className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2"
+          >
+            {QUICK_START_SUGGESTIONS.map((suggestion) => (
+              <button
+                key={suggestion.label}
+                type="button"
+                role="listitem"
+                onClick={() => onSelectSuggestion?.(suggestion.prompt)}
+                className="group flex items-start gap-2 rounded-[12px] border border-[var(--shell-border)] bg-white/92 px-3 py-2 text-left text-[12px] leading-5 text-slate-600 transition-colors hover:border-[var(--apex-accent)] hover:bg-[var(--apex-accent-soft)] hover:text-slate-800"
+              >
+                <ArrowRight
+                  size={12}
+                  className="mt-1 shrink-0 text-slate-400 transition-colors group-hover:text-[var(--apex-accent)]"
+                />
+                <span className="flex flex-col">
+                  <span className="font-medium text-slate-700 group-hover:text-slate-900">
+                    {suggestion.label}
+                  </span>
+                  <span className="text-[11px] text-slate-500 group-hover:text-slate-600">
+                    {suggestion.prompt}
+                  </span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
