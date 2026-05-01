@@ -49,6 +49,43 @@ describe("ChatInput", () => {
     expect(screen.getByDisplayValue("/papers")).toBeTruthy();
   });
 
+  it("lets Shift+Tab fall through for reverse focus navigation while the slash dropdown is visible", async () => {
+    const user = userEvent.setup();
+    renderChatInput();
+
+    const textbox = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await user.type(textbox, "/pap");
+
+    expect(screen.getByText("Matching Commands")).toBeTruthy();
+    expect(textbox.value).toBe("/pap");
+
+    const notDefaultPrevented = fireEvent.keyDown(textbox, {
+      key: "Tab",
+      shiftKey: true,
+    });
+
+    expect(notDefaultPrevented).toBe(true);
+    expect(textbox.value).toBe("/pap");
+  });
+
+  it("does not consume Tab when Ctrl/Meta/Alt modifiers are held", async () => {
+    const user = userEvent.setup();
+    renderChatInput();
+
+    const textbox = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await user.type(textbox, "/pap");
+
+    for (const modifier of ["ctrlKey", "metaKey", "altKey"] as const) {
+      const notDefaultPrevented = fireEvent.keyDown(textbox, {
+        key: "Tab",
+        [modifier]: true,
+      });
+
+      expect(notDefaultPrevented).toBe(true);
+      expect(textbox.value).toBe("/pap");
+    }
+  });
+
   it("executes exact slash commands that prime structured analysis prompts", async () => {
     const user = userEvent.setup();
     const props = renderChatInput();
