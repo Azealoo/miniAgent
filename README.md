@@ -112,6 +112,27 @@ Where `<ROLE>` is one of `EXECUTOR`, `PLANNER`, `VERIFIER`, or `TITLE`.
 - per-role execution backend settings
 - production hardening and access defaults
 
+#### Layered config precedence
+
+The runtime config loader (`backend/runtime_config.py`) merges layers in this
+order — later layers override earlier ones, and the final value for each field
+wins:
+
+1. built-in defaults in `backend/config.py`
+2. user config (`~/.codex/bioapex/config.json`, or `BIOAPEX_USER_CONFIG`)
+3. project config (`backend/config.json`, or `BIOAPEX_PROJECT_CONFIG`)
+4. environment profile (`config.<env>.json` next to the project config, when
+   `BIOAPEX_ENV` is set — e.g. `BIOAPEX_ENV=staging` picks
+   `backend/config.staging.json`). Unset/blank `BIOAPEX_ENV` skips this layer
+   entirely; a missing `config.<env>.json` file is a no-op.
+5. local config (`backend/config.local.json`, or `BIOAPEX_LOCAL_CONFIG`)
+6. process environment variables (e.g. `BIOAPEX_PROMPT_MEMORY_STALE_DAYS`)
+7. role-specific model overrides (`BIOAPEX_<ROLE>_*`)
+
+This lets dev/staging/prod share `backend/config.json` and diverge only in a
+small `config.<env>.json` overlay, while still allowing per-machine `local`
+tweaks and per-process env-var overrides on top.
+
 ## Path Conventions
 
 Important: the running backend treats `backend/` as its project root.
@@ -239,6 +260,51 @@ Important limits and behavior:
 - prompt components are truncated to bounded sizes
 - project instruction context is additive and discovered from ancestor instruction files
 - retrieved memory is injected as background context rather than as verified current state
+
+#### Prompt-cache stable prefix and sub-agent reuse
+
+The assembled prompt is split into a *stable prefix* (workspace files, skills
+snapshot, harness guidance, tool-result contract) and a *volatile suffix*
+(memory index, scoped-memory listing, git status). The split lives in
+`backend/graph/prompt_builder.py::build_system_prompt_blocks` and matches the
+`SECTIONS_IN_STABLE_PREFIX` set.
+
+The stable prefix is captured per session on the first turn via
+`SessionManager.freeze_session_prefix`. Helper sub-agents (`plan_agent`,
+`verification_agent`) read it back through `resolve_session_stable_prefix` and
+prepend it verbatim to their own helper-specific system prompt, so the
+provider's prefix cache matches the parent agent's leading bytes:
+
+- DeepSeek and OpenAI hit prefix caching automatically when the leading
+  tokens are byte-identical to a recent request from the same key.
+- Anthropic clients can feed the split through
+  `build_anthropic_system_blocks` to attach a `cache_control: ephemeral`
+  breakpoint at the end of the stable prefix.
+
+Per-call cache hit / miss / creation token counts come from LangChain's
+normalized `AIMessage.usage_metadata` (`input_token_details.cache_read` and
+`cache_creation`) and are surfaced two ways:
+
+- Process-wide: the Prometheus gauges
+  `bioapex_prompt_cache_read_tokens_total`,
+  `bioapex_prompt_cache_creation_tokens_total`,
+  `bioapex_prompt_cache_uncached_tokens_total`, and the rolling
+  `bioapex_prompt_cache_hit_rate` ratio (see
+  `backend/runtime/metrics_collector.py`).
+- Per sub-agent run: the artifact at
+  `artifacts/subagent/<date>/<run_id>/subagent_run.json` includes a
+  `cache_stats` block with `llm_calls`, `input_tokens`,
+  `cache_read_tokens`, `cache_creation_tokens`, `uncached_tokens`, and the
+  per-run `cache_hit_rate`.
+
+**Adding a tool, skill, or workspace edit mid-session breaks the cache.**
+The frozen prefix is sticky for the lifetime of the session; if the prompt
+assembly changes after the first turn (a skill is enabled, a workspace file
+is edited, the runtime is reconfigured) the new prefix no longer matches the
+frozen one and provider prefix caching falls through. The runtime logs a
+single `session_prefix_drift` warning the first time it sees a divergent
+prefix for a given session id so the loss of cache eligibility is visible.
+To recover the cache hit rate, start a new chat session.
 
 ### Tools
 
@@ -518,7 +584,7 @@ Two repo areas matter for feature work and documentation:
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/api/chat` | SSE chat endpoint with typed events and per-turn `request_id` / `event_index` |
+| `POST` | `/api/chat` | SSE chat endpoint with typed events and per-turn `request_id` / `event_index`. Turns for the same `session_id` are serialized — a second request that arrives while one is still streaming fails fast with HTTP 409 rather than interleaving writes. |
 
 Current emitted SSE event types:
 

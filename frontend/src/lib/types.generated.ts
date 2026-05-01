@@ -119,6 +119,7 @@ export type SessionContentBlock =
 export interface ChatStreamCompactionEvent {
   event_index?: number;
   from_turn: number;
+  phase?: "snip" | "microcompact" | "collapse" | "autocompact";
   request_id?: string;
   saved_tokens: number;
   schema_version?: number;
@@ -129,10 +130,11 @@ export interface ChatStreamCompactionEvent {
 export interface ChatStreamDoneEvent {
   content: string;
   event_index?: number;
+  exit?: TurnExit;
   request_id?: string;
   schema_version?: number;
   session_id?: string;
-  turn_status?: "ok" | "awaiting_approval" | "budget_exceeded" | "error";
+  turn_status?: "ok" | "awaiting_approval" | "budget_exceeded" | "error" | "cancelled";
   type: "done";
 }
 export interface ChatStreamErrorEvent {
@@ -167,6 +169,16 @@ export interface ChatStreamPlanUpdatedEvent {
   summary: string;
   tool_trace?: JsonObject[];
   type: "plan_updated";
+}
+/** Non-fatal signal that a RAG retrieval attempt raised. */
+export interface ChatStreamRetrievalErrorEvent {
+  error_type: string;
+  event_index?: number;
+  message: string;
+  query: string;
+  request_id?: string;
+  schema_version?: number;
+  type: "retrieval_error";
 }
 export interface ChatStreamRetrievalEvent {
   event_index?: number;
@@ -229,6 +241,12 @@ export interface ChatStreamToolStartEvent {
   tool: string;
   type: "tool_start";
 }
+/** Structured terminal-state payload carried on every ``done`` event. */
+export interface TurnExit {
+  exit_code: number;
+  reason: "success" | "tool_error" | "user_abort" | "context_limit" | "token_budget" | "approval_denied" | "awaiting_approval";
+  summary?: string;
+}
 export interface ChatStreamVerificationResultEvent {
   event_index?: number;
   request_id?: string;
@@ -240,9 +258,65 @@ export interface ChatStreamVerificationResultEvent {
   verdict: "pass" | "repair_required" | "fail";
   verification: JsonObject;
 }
+/** Non-fatal diagnostic surfaced to the user during a turn. */
+export interface WarningRuntimeEvent {
+  cited?: string[];
+  event_index?: number;
+  included?: string[];
+  kind: string;
+  message: string;
+  missing?: string[];
+  request_id?: string;
+  review_path?: string;
+  schema_version?: number;
+  type: "warning";
+}
+export interface ChatStreamWorkflowStepEndedEvent {
+  duration_ms: number;
+  event_index?: number;
+  outputs?: JsonObject;
+  request_id?: string;
+  run_id: string;
+  schema_version?: number;
+  step_id: string;
+  step_index: number;
+  total_steps: number;
+  type: "workflow_step_ended";
+  workflow_id: string;
+}
+export interface ChatStreamWorkflowStepFailedEvent {
+  attempt?: number;
+  duration_ms: number;
+  error: string;
+  event_index?: number;
+  failure_policy: "fail_workflow" | "block_workflow" | "continue_with_warning";
+  request_id?: string;
+  run_id: string;
+  schema_version?: number;
+  step_id: string;
+  step_index: number;
+  total_steps: number;
+  type: "workflow_step_failed";
+  workflow_id: string;
+}
+/** Emitted by the workflow runner before it invokes a step's executor. */
+export interface ChatStreamWorkflowStepStartedEvent {
+  attempt?: number;
+  event_index?: number;
+  label?: string;
+  request_id?: string;
+  run_id: string;
+  schema_version?: number;
+  step_id: string;
+  step_index: number;
+  total_steps: number;
+  type: "workflow_step_started";
+  workflow_id: string;
+}
 /** Discriminated union of every backend-emitted streaming event. */
 export type ChatStreamEventDTO =
   | ChatStreamRetrievalEvent
+  | ChatStreamRetrievalErrorEvent
   | ChatStreamTokenEvent
   | ChatStreamToolStartEvent
   | ChatStreamToolEndEvent
@@ -253,5 +327,9 @@ export type ChatStreamEventDTO =
   | ChatStreamVerificationResultEvent
   | ChatStreamNewResponseEvent
   | ChatStreamCompactionEvent
+  | WarningRuntimeEvent
   | ChatStreamDoneEvent
-  | ChatStreamErrorEvent;
+  | ChatStreamErrorEvent
+  | ChatStreamWorkflowStepStartedEvent
+  | ChatStreamWorkflowStepEndedEvent
+  | ChatStreamWorkflowStepFailedEvent;

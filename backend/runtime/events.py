@@ -13,9 +13,72 @@ from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-RUNTIME_EVENT_SCHEMA_VERSION: int = 1
+RUNTIME_EVENT_SCHEMA_VERSION: int = 2
 
 SCHEMA_SNAPSHOT_PATH = Path(__file__).with_name("events.schema.json")
+
+# Canonical reason taxonomy for the terminal ``DoneRuntimeEvent.exit`` payload.
+# ``turn_status`` is retained alongside ``exit`` for v1 clients; new consumers
+# should branch on ``exit.reason``.
+TurnExitReason = Literal[
+    "success",
+    "tool_error",
+    "user_abort",
+    "context_limit",
+    "token_budget",
+    "approval_denied",
+    "awaiting_approval",
+]
+
+_TURN_STATUS_TO_EXIT: dict[str, tuple[str, int]] = {
+    "ok": ("success", 0),
+    "awaiting_approval": ("awaiting_approval", 4),
+    "budget_exceeded": ("token_budget", 3),
+    # ``verifier_cap_exceeded`` is only carried on ``error`` events emitted
+    # by ``run_harness_turn``; the SSE adapter strips turn_status off error
+    # payloads before they leave the server, so this does not need a slot
+    # in ``DoneRuntimeEvent.turn_status``.
+    "verifier_cap_exceeded": ("token_budget", 3),
+    "error": ("tool_error", 1),
+    "cancelled": ("user_abort", 2),
+}
+
+
+class TurnExit(BaseModel):
+    """Structured terminal-state payload carried on every ``done`` event.
+
+    Replaces the v1 convention of inferring exit state from ``turn_status``
+    alone: callers should branch on ``reason`` and treat ``exit_code`` as the
+    shell-style result (0 = success, non-zero = failure class).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: TurnExitReason = Field(
+        description="Canonical exit reason for the turn.",
+    )
+    exit_code: int = Field(
+        description="Shell-style exit code — 0 for success, non-zero per reason.",
+    )
+    summary: Optional[str] = Field(
+        default=None,
+        description="Optional human-readable one-liner describing the exit.",
+    )
+
+
+def turn_status_to_exit(
+    turn_status: Optional[str],
+    *,
+    summary: Optional[str] = None,
+) -> TurnExit:
+    """Map a legacy ``turn_status`` string onto a structured ``TurnExit``.
+
+    Unknown statuses fall back to ``tool_error`` so v2 consumers always see a
+    populated ``exit`` payload.
+    """
+    status = turn_status if isinstance(turn_status, str) and turn_status else "ok"
+    reason, code = _TURN_STATUS_TO_EXIT.get(status, ("tool_error", 1))
+    return TurnExit(reason=reason, exit_code=code, summary=summary)  # type: ignore[arg-type]
 
 
 class _RuntimeEventBase(BaseModel):
@@ -42,6 +105,21 @@ class RetrievalRuntimeEvent(_RuntimeEventBase):
     type: Literal["retrieval"] = "retrieval"
     query: str
     results: list[dict[str, Any]]
+
+
+class RetrievalErrorRuntimeEvent(_RuntimeEventBase):
+    """Non-fatal signal that a RAG retrieval attempt raised.
+
+    Emitted when ``MemoryIndexer.retrieve`` (or the LLM-probe fallback) throws
+    during the pre-turn retrieval phase. The turn itself continues — callers
+    still record a retrieval miss via the metrics collector — but the reviewer
+    sees the failure in the UI instead of the old silent swallow.
+    """
+
+    type: Literal["retrieval_error"] = "retrieval_error"
+    query: str
+    error_type: str
+    message: str
 
 
 class TokenRuntimeEvent(_RuntimeEventBase):
@@ -134,18 +212,57 @@ class CompactionRuntimeEvent(_RuntimeEventBase):
     to_turn: int
     summary: str
     saved_tokens: int
+    phase: Optional[Literal["snip", "microcompact", "collapse", "autocompact"]] = Field(
+        default=None,
+        description=(
+            "Which rung of the progressive compaction ladder produced this "
+            "event. Absent for legacy payloads predating the four-phase "
+            "ladder (issue #82)."
+        ),
+    )
+
+
+class WarningRuntimeEvent(_RuntimeEventBase):
+    """Non-fatal diagnostic surfaced to the user during a turn.
+
+    Emitted just before ``done`` when a runtime check finds a condition the
+    reviewer should see but that does not interrupt response delivery. The
+    canonical use case is ``kind == "citation_mismatch"``: the final answer
+    cited PMIDs that are not present on any evidence card included in this
+    turn's ``evidence_review`` artifact.
+    """
+
+    type: Literal["warning"] = "warning"
+    kind: str
+    message: str
+    missing: list[str] = Field(default_factory=list)
+    cited: list[str] = Field(default_factory=list)
+    included: list[str] = Field(default_factory=list)
+    review_path: Optional[str] = None
 
 
 class DoneRuntimeEvent(_RuntimeEventBase):
     type: Literal["done"] = "done"
     content: str
     session_id: Optional[str] = None
-    turn_status: Optional[Literal["ok", "awaiting_approval", "budget_exceeded", "error"]] = Field(
+    turn_status: Optional[
+        Literal["ok", "awaiting_approval", "budget_exceeded", "error", "cancelled"]
+    ] = Field(
         default=None,
         description=(
-            "Terminal state of the turn. Absent or 'ok' means the turn completed "
-            "normally; 'awaiting_approval' means the runtime paused on a gated tool "
-            "and the client must call /api/chat/approval before the next turn."
+            "Legacy v1 terminal state indicator, retained for clients that have "
+            "not migrated to the ``exit`` payload. New consumers must branch on "
+            "``exit.reason`` instead — the canonical taxonomy is defined there."
+        ),
+    )
+    exit: Optional[TurnExit] = Field(
+        default=None,
+        description=(
+            "Structured terminal-state payload introduced in schema_version=2. "
+            "``reason`` covers success|tool_error|user_abort|context_limit|"
+            "token_budget|approval_denied|awaiting_approval and ``exit_code`` is "
+            "shell-style (0 for success, non-zero per reason). Absent on v1 "
+            "payloads during rollout but stamped on every producer path here."
         ),
     )
 
@@ -155,9 +272,52 @@ class ErrorRuntimeEvent(_RuntimeEventBase):
     error: str
 
 
+class WorkflowStepStartedRuntimeEvent(_RuntimeEventBase):
+    """Emitted by the workflow runner before it invokes a step's executor.
+
+    ``run_id`` identifies the workflow run (stable across all three step events
+    for the same invocation); ``step_id`` identifies the step within the spec.
+    Transport-only — not persisted in session JSON.
+    """
+
+    type: Literal["workflow_step_started"] = "workflow_step_started"
+    workflow_id: str
+    run_id: str
+    step_id: str
+    step_index: int = Field(ge=1)
+    total_steps: int = Field(ge=1)
+    label: Optional[str] = None
+    attempt: int = Field(default=1, ge=1)
+
+
+class WorkflowStepEndedRuntimeEvent(_RuntimeEventBase):
+    type: Literal["workflow_step_ended"] = "workflow_step_ended"
+    workflow_id: str
+    run_id: str
+    step_id: str
+    step_index: int = Field(ge=1)
+    total_steps: int = Field(ge=1)
+    duration_ms: int = Field(ge=0)
+    outputs: Optional[dict[str, Any]] = None
+
+
+class WorkflowStepFailedRuntimeEvent(_RuntimeEventBase):
+    type: Literal["workflow_step_failed"] = "workflow_step_failed"
+    workflow_id: str
+    run_id: str
+    step_id: str
+    step_index: int = Field(ge=1)
+    total_steps: int = Field(ge=1)
+    duration_ms: int = Field(ge=0)
+    error: str
+    failure_policy: Literal["fail_workflow", "block_workflow", "continue_with_warning"]
+    attempt: int = Field(default=1, ge=1)
+
+
 RuntimeEvent = Annotated[
     Union[
         RetrievalRuntimeEvent,
+        RetrievalErrorRuntimeEvent,
         TokenRuntimeEvent,
         ToolStartRuntimeEvent,
         ToolEndRuntimeEvent,
@@ -168,14 +328,19 @@ RuntimeEvent = Annotated[
         VerificationResultRuntimeEvent,
         NewResponseRuntimeEvent,
         CompactionRuntimeEvent,
+        WarningRuntimeEvent,
         DoneRuntimeEvent,
         ErrorRuntimeEvent,
+        WorkflowStepStartedRuntimeEvent,
+        WorkflowStepEndedRuntimeEvent,
+        WorkflowStepFailedRuntimeEvent,
     ],
     Field(discriminator="type"),
 ]
 
 RUNTIME_EVENT_TYPES: tuple[str, ...] = (
     "retrieval",
+    "retrieval_error",
     "token",
     "tool_start",
     "tool_end",
@@ -186,8 +351,12 @@ RUNTIME_EVENT_TYPES: tuple[str, ...] = (
     "verification_result",
     "new_response",
     "compaction_event",
+    "warning",
     "done",
     "error",
+    "workflow_step_started",
+    "workflow_step_ended",
+    "workflow_step_failed",
 )
 
 _RUNTIME_EVENT_ADAPTER: TypeAdapter[RuntimeEvent] = TypeAdapter(RuntimeEvent)

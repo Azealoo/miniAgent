@@ -95,6 +95,33 @@ settings anonymously.
 - HPC deployments should sit behind cluster or campus authentication and should separate analyst access from operator/admin access.
 - Hosted deployments should require authenticated identity, TLS, request logging, rate limiting, and role separation for read-only inspection, execution, and admin/configuration work.
 
+### File-API rate limiting
+
+The ``/api/files*`` router ships with a per-caller token-bucket limiter
+(see ``backend/rate_limit.py``). Callers are keyed by bearer-token
+identity when ``access_control`` validated one, else by client host.
+Buckets are process-local, which is sufficient for single-worker uvicorn
+deployments; multi-worker or multi-host deployments should front
+BioAPEX with a reverse proxy that enforces global rate limiting.
+
+Defaults — overridable in ``backend/config.json`` under
+``api_rate_limits``:
+
+```json
+{
+  "api_rate_limits": {
+    "files_read":  {"rate": 30, "period_seconds": 60, "enabled": true},
+    "files_write": {"rate": 10, "period_seconds": 60, "enabled": true}
+  }
+}
+```
+
+When a caller exceeds a bucket, the router responds with HTTP ``429``
+and a ``Retry-After`` header (seconds) describing when the next token
+will be available. Setting ``BIOAPEX_RATE_LIMIT_DISABLED=1`` in the
+backend process environment disables the limiter; keep this reserved
+for local development or load testing against a single workstation.
+
 ## Secrets handling
 
 - Keep secrets in environment variables or an external secret manager. Do not store raw credentials in `backend/config.json`.
@@ -105,6 +132,40 @@ settings anonymously.
 - These terminal guardrails are defense-in-depth, not a full shell sandbox. Shared or hosted deployments should still disable the terminal tool instead of relying on exhaustive shell-language coverage.
 - Rotate credentials if a secret-like file appears in a writable BioAPEX path or if an audit review finds unsafe secret exposure.
 - Review audit and session retention before production use so secret values are not persisted in logs or chat history.
+
+## Client-side telemetry
+
+- Unhandled frontend errors and SSE transport failures are reported to
+  the backend audit log through `POST /api/audit/client`, which writes
+  an event of type `client_error` via the same
+  `audit_redaction.v1` policy the backend uses for every other audit
+  event. Source: `frontend/src/lib/telemetry.ts` → `backend/api/audit_client.py`.
+- The route is guarded by an in-process per-client token bucket (burst
+  of 20 events, one token every 2 seconds). Repeated 429s cause the
+  frontend logger to disable itself for the rest of the session so a
+  stuck browser tab cannot DoS the audit log.
+- **PII scrub policy** — enforced in the browser before the request is
+  sent; the backend then re-applies its own size caps as defence in
+  depth:
+  - URLs in `message` and string-valued `meta` entries have their query
+    string and fragment removed; bearer tokens, identifiers, and search
+    params never leave the browser.
+  - `message` is trimmed and truncated to 500 characters so a hostile
+    error cannot be used as a silent exfil channel.
+  - `stack` is filtered frame-by-frame. Frames that reference an
+    absolute filesystem path (`/home/...`, `C:\\...`, `file://...`) are
+    dropped so browsers that include the OS username in stacks do not
+    leak it. Webpack / Next.js chunk paths and workspace-relative paths
+    are kept.
+  - `meta` keys matching `/token|password|auth|cookie|secret|api[_-]?key/i`
+    are replaced with `"[redacted]"`; the key count is capped at 24 and
+    each string value at 1,000 characters.
+  - The logger never reads `document.cookie`, `window.location.search`,
+    or request bodies. Callers must not pass those values as `meta`.
+- When reviewing audit logs for secret exposure (see *Secrets handling*
+  above), treat `event_type: client_error` entries the same way as every
+  other audit record — the scrub is best-effort, not a replacement for
+  rotation if a secret still slips through.
 
 ## Backup and restore expectations
 

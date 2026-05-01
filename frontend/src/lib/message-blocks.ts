@@ -23,6 +23,14 @@ type TurnCompatibleMessage = BlockCompatibleMessage & {
   role: string;
 };
 
+type AssistantMessageMetadata = {
+  id?: string;
+  startedAtMs?: number;
+  endedAtMs?: number;
+  isStreaming?: boolean;
+  pendingTool?: { tool: string; input: string; runId: string };
+};
+
 export interface NormalizedMessageContent {
   blocks: SessionContentBlock[];
   content: string;
@@ -40,11 +48,25 @@ function toolBlockKey(tool: string, runId?: string): string {
   return runId ?? tool;
 }
 
-function asObjectRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// Inputs reaching this guard are sourced from `JsonValue`-typed payloads, so any
+// non-array object on the wire is a `JsonObject` by construction.
+function isJsonObject(value: unknown): value is JsonObject {
+  return isRecord(value);
+}
+
+function getPlanStepIntent(step: unknown): string | null {
+  if (!isRecord(step)) {
     return null;
   }
-  return value as Record<string, unknown>;
+  const intent = step.intent;
+  if (typeof intent !== "string" || !intent.trim()) {
+    return null;
+  }
+  return intent;
 }
 
 function asJsonObjectArray(value: unknown): JsonObject[] | undefined {
@@ -52,12 +74,77 @@ function asJsonObjectArray(value: unknown): JsonObject[] | undefined {
     return undefined;
   }
 
-  return value
-    .filter(
-      (item): item is Record<string, unknown> =>
-        Boolean(item) && typeof item === "object" && !Array.isArray(item)
-    )
-    .map((item) => ({ ...item }) as JsonObject);
+  return value.filter(isJsonObject).map((item) => ({ ...item }));
+}
+
+// `TurnCompatibleMessage` doesn't declare these optional fields, so the helper
+// reads them off an `unknown` view that the `isRecord` guard narrows.
+function readAssistantMessageMetadata(
+  message: unknown
+): AssistantMessageMetadata {
+  if (!isRecord(message)) {
+    return {};
+  }
+  const result: AssistantMessageMetadata = {};
+  if (typeof message.id === "string") {
+    result.id = message.id;
+  }
+  if (typeof message.startedAtMs === "number") {
+    result.startedAtMs = message.startedAtMs;
+  }
+  if (typeof message.endedAtMs === "number") {
+    result.endedAtMs = message.endedAtMs;
+  }
+  if (typeof message.isStreaming === "boolean") {
+    result.isStreaming = message.isStreaming;
+  }
+  const pendingTool = message.pendingTool;
+  if (
+    isRecord(pendingTool) &&
+    typeof pendingTool.tool === "string" &&
+    typeof pendingTool.input === "string" &&
+    typeof pendingTool.runId === "string"
+  ) {
+    result.pendingTool = {
+      tool: pendingTool.tool,
+      input: pendingTool.input,
+      runId: pendingTool.runId,
+    };
+  }
+  return result;
+}
+
+// The next two helpers encapsulate an identity cast that lets TypeScript
+// preserve the caller's generic `T` through an object spread that overrides
+// fields TS treats as widened. The runtime objects still satisfy `T` because
+// every overridden field is declared on `TurnCompatibleMessage` itself.
+function withNormalizedAssistantContent<T extends TurnCompatibleMessage>(
+  message: T,
+  content: string,
+  blocks: SessionContentBlock[]
+): T {
+  return { ...message, content, blocks } as T;
+}
+
+function buildCollapsedAssistantMessage<T extends TurnCompatibleMessage>(
+  first: T,
+  last: T,
+  mergedBlocks: SessionContentBlock[]
+): T {
+  const firstMeta = readAssistantMessageMetadata(first);
+  const lastMeta = readAssistantMessageMetadata(last);
+  return {
+    ...first,
+    ...last,
+    id: firstMeta.id ?? lastMeta.id,
+    request_id: last.request_id ?? first.request_id,
+    content: last.content ?? "",
+    blocks: mergedBlocks,
+    startedAtMs: firstMeta.startedAtMs ?? lastMeta.startedAtMs,
+    endedAtMs: lastMeta.endedAtMs ?? firstMeta.endedAtMs,
+    isStreaming: lastMeta.isStreaming ?? false,
+    pendingTool: lastMeta.pendingTool,
+  } as T;
 }
 
 function helperResultSummary(
@@ -87,13 +174,13 @@ function extractPlanBlockFromToolResult(
     return null;
   }
 
-  const payload = asObjectRecord(block.result?.structured_payload);
-  if (payload?.agent_type !== "plan") {
+  const payload = block.result?.structured_payload;
+  if (!isJsonObject(payload) || payload.agent_type !== "plan") {
     return null;
   }
 
-  const plan = asObjectRecord(payload.plan);
-  if (!plan) {
+  const plan = payload.plan;
+  if (!isJsonObject(plan)) {
     return null;
   }
 
@@ -109,7 +196,7 @@ function extractPlanBlockFromToolResult(
     event: inferPlanEvent(summary),
     summary,
     run_id: block.run_id,
-    plan: { ...plan } as JsonObject,
+    plan: { ...plan },
     ...(toolTrace ? { tool_trace: toolTrace } : {}),
   };
 }
@@ -121,13 +208,13 @@ function extractVerificationBlockFromToolResult(
     return null;
   }
 
-  const payload = asObjectRecord(block.result?.structured_payload);
-  if (payload?.agent_type !== "verification") {
+  const payload = block.result?.structured_payload;
+  if (!isJsonObject(payload) || payload.agent_type !== "verification") {
     return null;
   }
 
-  const verification = asObjectRecord(payload.verification);
-  if (!verification) {
+  const verification = payload.verification;
+  if (!isJsonObject(verification)) {
     return null;
   }
 
@@ -147,7 +234,7 @@ function extractVerificationBlockFromToolResult(
     ),
     verdict: normalizedVerdict,
     run_id: block.run_id,
-    verification: { ...verification } as JsonObject,
+    verification: { ...verification },
     ...(toolTrace ? { tool_trace: toolTrace } : {}),
   };
 }
@@ -379,12 +466,8 @@ function consumeLeadingMatchedPlanSteps(
   let matchedCount = 0;
 
   for (let index = 0; index < steps.length; index += 1) {
-    const step = steps[index];
-    if (!step || typeof step !== "object") {
-      break;
-    }
-    const intent = (step as { intent?: unknown }).intent;
-    if (typeof intent !== "string" || !intent.trim()) {
+    const intent = getPlanStepIntent(steps[index]);
+    if (!intent) {
       break;
     }
 
@@ -735,7 +818,7 @@ export function normalizeTurnMessages<T extends TurnCompatibleMessage>(
     forceHasVerification ||
     assistantBlocks.some((block) => block.type !== "text" && block.type !== "usage");
 
-  return collapsedMessages.map((message) => {
+  return collapsedMessages.map((message): T => {
     if (message.role !== "assistant") {
       return message;
     }
@@ -755,12 +838,12 @@ export function normalizeTurnMessages<T extends TurnCompatibleMessage>(
       });
     }
 
-    return {
-      ...message,
-      content: normalized.content,
-      blocks: sanitizedBlocks,
-    };
-  }) as T[];
+    return withNormalizedAssistantContent(
+      message,
+      normalized.content,
+      sanitizedBlocks
+    );
+  });
 }
 
 function messageHasVerificationContext(message: BlockCompatibleMessage): boolean {
@@ -814,20 +897,8 @@ function collapseVerificationRetryMessages<T extends TurnCompatibleMessage>(
       continue;
     }
 
-    const first = cluster[0] as T & {
-      id?: string;
-      startedAtMs?: number;
-      endedAtMs?: number;
-      isStreaming?: boolean;
-      pendingTool?: { tool: string; input: string; runId: string };
-    };
-    const last = cluster[cluster.length - 1] as T & {
-      id?: string;
-      startedAtMs?: number;
-      endedAtMs?: number;
-      isStreaming?: boolean;
-      pendingTool?: { tool: string; input: string; runId: string };
-    };
+    const first = cluster[0];
+    const last = cluster[cluster.length - 1];
     const mergedBlocks: SessionContentBlock[] = [
       ...cluster.slice(0, -1).flatMap((entry) =>
         deriveMessageBlocks(entry).filter((block) => block.type !== "text")
@@ -835,18 +906,7 @@ function collapseVerificationRetryMessages<T extends TurnCompatibleMessage>(
       ...deriveMessageBlocks(last),
     ];
 
-    collapsed.push({
-      ...first,
-      ...last,
-      id: first.id ?? last.id,
-      request_id: last.request_id ?? first.request_id,
-      content: last.content ?? "",
-      blocks: mergedBlocks,
-      startedAtMs: first.startedAtMs ?? last.startedAtMs,
-      endedAtMs: last.endedAtMs ?? first.endedAtMs,
-      isStreaming: last.isStreaming ?? false,
-      pendingTool: last.pendingTool,
-    } as T);
+    collapsed.push(buildCollapsedAssistantMessage(first, last, mergedBlocks));
     index = endIndex;
   }
 
@@ -896,10 +956,26 @@ export function deriveMessageBlocks(
   return message.role === "assistant" ? augmentHelperBlocks(blocks) : blocks;
 }
 
+// Per-message cache for the zero-option fast path. ChatMessage calls this on
+// every render during token streaming; the store keeps a stable reference for
+// non-streaming messages, so looking up the previous result avoids re-running
+// the full block derivation and sanitizer pipeline for every untouched row.
+const normalizedContentCache = new WeakMap<object, NormalizedMessageContent>();
+
 export function normalizeMessageContent(
   message: BlockCompatibleMessage,
   options: NormalizeMessageContentOptions = {}
 ): NormalizedMessageContent {
+  const hasOptions =
+    options.forceHasPlan !== undefined ||
+    options.forceHasVerification !== undefined ||
+    options.forceHasProcessActivity !== undefined;
+  if (!hasOptions && typeof message === "object" && message !== null) {
+    const cached = normalizedContentCache.get(message as object);
+    if (cached) {
+      return cached;
+    }
+  }
   const blocks = deriveMessageBlocks(message);
   const hasTextBlock = blocks.some((block) => block.type === "text");
   const hasPlan = hasBlockType(blocks, "plan");
@@ -974,11 +1050,12 @@ export function normalizeMessageContent(
       case "plan":
       case "verification":
       case "approval_gate":
+      case "warning":
         break;
     }
   });
 
-  return {
+  const result: NormalizedMessageContent = {
     blocks,
     content: hasTextBlock ? textParts.join("") : (message.content ?? ""),
     toolCalls:
@@ -986,6 +1063,10 @@ export function normalizeMessageContent(
     retrievals:
       retrievals.length > 0 ? retrievals : [...(message.retrievals ?? [])],
   };
+  if (!hasOptions && typeof message === "object" && message !== null) {
+    normalizedContentCache.set(message as object, result);
+  }
+  return result;
 }
 
 export function messageHasProcessTrail(

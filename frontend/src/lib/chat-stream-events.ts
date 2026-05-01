@@ -1,7 +1,8 @@
 import { parseRuntimeEvent } from "./runtime-events";
-import { parseSseChunk } from "./sse-parser";
+import { parseSseChunk, type SseOverflowSignal } from "./sse-parser";
 import type {
   ChatStreamEvent,
+  ChatStreamOverflowEvent,
   ChatStreamParseErrorEvent,
   ChatStreamPlanCreatedEvent,
   ChatStreamPlanUpdatedEvent,
@@ -9,15 +10,18 @@ import type {
   JsonObject,
   RetrievalResult,
   ToolResultEnvelope,
+  TurnExit,
 } from "./types";
 
 interface ParsedChatStreamChunk {
   bufferedRemainder: string;
   events: ChatStreamEvent[];
+  overflow?: SseOverflowSignal;
 }
 
 interface ParseChatStreamChunkOptions {
   flush?: boolean;
+  maxBufferBytes?: number;
 }
 
 function readOptionalString(value: unknown): string | undefined {
@@ -59,6 +63,15 @@ export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent {
         type: "retrieval",
         query: event.query,
         results: event.results as unknown as RetrievalResult[],
+        ...base,
+      };
+    case "retrieval_error":
+      return {
+        type: "retrieval_error",
+        query: event.query,
+        error_type: event.error_type,
+        message: event.message,
+        schema_version: event.schema_version,
         ...base,
       };
     case "token":
@@ -144,6 +157,18 @@ export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent {
         to_turn: event.to_turn,
         summary: event.summary,
         saved_tokens: event.saved_tokens,
+        phase: event.phase ?? undefined,
+        ...base,
+      };
+    case "warning":
+      return {
+        type: "warning",
+        kind: event.kind,
+        message: event.message,
+        missing: event.missing,
+        cited: event.cited,
+        included: event.included,
+        review_path: event.review_path ?? null,
         ...base,
       };
     case "done":
@@ -151,12 +176,52 @@ export function parseChatStreamEventPayload(payload: unknown): ChatStreamEvent {
         type: "done",
         content: event.content,
         session_id: event.session_id ?? undefined,
+        turn_status: event.turn_status ?? undefined,
+        exit: (event.exit ?? undefined) as TurnExit | undefined,
         ...base,
       };
     case "error":
       return {
         type: "error",
         error: event.error,
+        ...base,
+      };
+    case "workflow_step_started":
+      return {
+        type: "workflow_step_started",
+        workflow_id: event.workflow_id,
+        run_id: event.run_id,
+        step_id: event.step_id,
+        step_index: event.step_index,
+        total_steps: event.total_steps,
+        label: event.label ?? undefined,
+        attempt: event.attempt,
+        ...base,
+      };
+    case "workflow_step_ended":
+      return {
+        type: "workflow_step_ended",
+        workflow_id: event.workflow_id,
+        run_id: event.run_id,
+        step_id: event.step_id,
+        step_index: event.step_index,
+        total_steps: event.total_steps,
+        duration_ms: event.duration_ms,
+        outputs: (event.outputs ?? undefined) as JsonObject | undefined,
+        ...base,
+      };
+    case "workflow_step_failed":
+      return {
+        type: "workflow_step_failed",
+        workflow_id: event.workflow_id,
+        run_id: event.run_id,
+        step_id: event.step_id,
+        step_index: event.step_index,
+        total_steps: event.total_steps,
+        duration_ms: event.duration_ms,
+        error: event.error,
+        failure_policy: event.failure_policy,
+        attempt: event.attempt,
         ...base,
       };
   }
@@ -211,7 +276,7 @@ export function parseChatStreamChunk(
   decodedChunk: string,
   options: ParseChatStreamChunkOptions = {}
 ): ParsedChatStreamChunk {
-  const { bufferedRemainder, payloads } = parseSseChunk(
+  const { bufferedRemainder, payloads, overflow } = parseSseChunk(
     previousBuffer,
     decodedChunk,
     options
@@ -219,6 +284,7 @@ export function parseChatStreamChunk(
   return {
     bufferedRemainder,
     events: payloads.map(parseChatStreamDataPayload),
+    overflow,
   };
 }
 
@@ -251,12 +317,36 @@ export interface StreamCallbacks {
    * stream keeps running — malformed events are surfaced, not terminal.
    */
   onParseError?: (event: ChatStreamParseErrorEvent) => void;
+  /**
+   * Called when the SSE buffer cap is exceeded. Terminal: the transport will
+   * cancel the reader after dispatching this event.
+   */
+  onStreamOverflow?: (event: ChatStreamOverflowEvent) => void;
+  /**
+   * Called when an incoming event carries a `request_id` that doesn't match
+   * the one the dispatcher latched on to for this stream. The event is
+   * dropped before any other callback runs so stale-response payloads never
+   * reach the reducer.
+   */
+  onRequestIdMismatch?: (event: ChatStreamEvent) => void;
 }
 
 export interface ChatStreamDispatcher {
   dispatch: (event: ChatStreamEvent) => void;
   sawTerminalEvent: () => boolean;
   lastRequestId: () => string | undefined;
+  expectedRequestId: () => string | undefined;
+}
+
+export interface CreateChatStreamDispatcherOptions {
+  /**
+   * Pre-seed the expected request id. When set, any event whose
+   * `request_id` is present and differs is dropped as a stale response
+   * before callbacks run. When omitted, the dispatcher latches on to the
+   * first backend-emitted `request_id` it sees and compares subsequent
+   * events against it.
+   */
+  expectedRequestId?: string;
 }
 
 /**
@@ -266,16 +356,28 @@ export interface ChatStreamDispatcher {
  * + reader loop.
  */
 export function createChatStreamDispatcher(
-  callbacks: StreamCallbacks
+  callbacks: StreamCallbacks,
+  options: CreateChatStreamDispatcherOptions = {}
 ): ChatStreamDispatcher {
   let sawTerminalEvent = false;
   let lastRequestId: string | undefined;
+  let expectedRequestId: string | undefined = options.expectedRequestId;
 
   const dispatch = (event: ChatStreamEvent) => {
     if (event.request_id) {
+      if (expectedRequestId === undefined) {
+        expectedRequestId = event.request_id;
+      } else if (event.request_id !== expectedRequestId) {
+        callbacks.onRequestIdMismatch?.(event);
+        return;
+      }
       lastRequestId = event.request_id;
     }
-    if (event.type === "done" || event.type === "error") {
+    if (
+      event.type === "done" ||
+      event.type === "error" ||
+      event.type === "stream_overflow"
+    ) {
       sawTerminalEvent = true;
     }
 
@@ -325,6 +427,9 @@ export function createChatStreamDispatcher(
       case "parse_error":
         callbacks.onParseError?.(event);
         break;
+      case "stream_overflow":
+        callbacks.onStreamOverflow?.(event);
+        break;
     }
   };
 
@@ -332,5 +437,6 @@ export function createChatStreamDispatcher(
     dispatch,
     sawTerminalEvent: () => sawTerminalEvent,
     lastRequestId: () => lastRequestId,
+    expectedRequestId: () => expectedRequestId,
   };
 }

@@ -160,3 +160,27 @@ def test_trusted_lab_posture_rejects_unauthenticated_loopback_request(tmp_path):
         response = client.get("/api/access/probe", params={"scope": "execution"})
 
     assert response.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "actual,required,expected",
+    [
+        ("inspection", "inspection", True),
+        ("execution", "inspection", True),
+        ("admin", "inspection", True),
+        ("inspection", "execution", False),
+        ("execution", "execution", True),
+        ("admin", "execution", True),
+        ("inspection", "admin", False),
+        ("execution", "admin", False),
+        ("admin", "admin", True),
+        (None, "execution", False),
+        ("garbage", "execution", False),
+    ],
+)
+def test_scope_satisfies_orders_inspection_below_execution_below_admin(
+    actual, required, expected
+):
+    from access_control import scope_satisfies
+
+    assert scope_satisfies(actual, required) is expected

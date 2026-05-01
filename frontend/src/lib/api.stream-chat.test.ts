@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { streamChat } from "./api";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "./runtime-events";
 import { makeGenericToolResultEnvelope } from "@/test/fixtures";
 import { sseResponse } from "@/test/mock-fetch";
 
@@ -171,6 +172,54 @@ describe("streamChat", () => {
       message: "Review the RNA-seq dataset.",
       session_id: "session-1",
     });
+    const headers = new Headers(init?.headers as HeadersInit);
+    expect(headers.get("X-Runtime-Event-Schema-Version")).toBe(
+      String(RUNTIME_EVENT_SCHEMA_VERSION)
+    );
+  });
+
+  it("surfaces the structured exit payload on done events to the reducer", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      sseResponse(
+        [
+          {
+            type: "done",
+            content: "final",
+            session_id: "session-exit",
+            turn_status: "budget_exceeded",
+            exit: {
+              reason: "token_budget",
+              exit_code: 3,
+              summary: "turn budget exceeded at 9001 tokens",
+            },
+            event_index: 1,
+          },
+        ],
+        { chunkSize: 32 }
+      )
+    );
+
+    const capturedEvents: Array<{ type: string; exit?: unknown }> = [];
+    await streamChat("Test exit.", "session-exit", {
+      onEvent: (event) => {
+        if (event.type === "done") {
+          capturedEvents.push({ type: event.type, exit: event.exit });
+        } else {
+          capturedEvents.push({ type: event.type });
+        }
+      },
+    });
+
+    expect(capturedEvents).toEqual([
+      {
+        type: "done",
+        exit: {
+          reason: "token_budget",
+          exit_code: 3,
+          summary: "turn budget exceeded at 9001 tokens",
+        },
+      },
+    ]);
   });
 
   it("surfaces typed error events without crashing on malformed SSE chunks", async () => {
@@ -337,6 +386,191 @@ describe("streamChat", () => {
       "The response stream closed before completion.",
     ]);
     expect(surfacedRequestIds).toEqual(["request-truncated-1"]);
+  });
+
+  it("dispatches stream_overflow and cancels the reader when the buffered remainder exceeds the cap", async () => {
+    const cap = 256;
+    // A `data:` line with no terminator longer than the cap, followed by a
+    // legitimate `done` event. The cancel() should fire before `done` is
+    // surfaced to the dispatcher, so onDone must not be called.
+    const oversizedLine = "data: " + "x".repeat(cap + 64);
+    const trailingDone = `data: ${JSON.stringify({
+      type: "done",
+      content: "should not be reached",
+      request_id: "request-overflow-trailing",
+      event_index: 99,
+    })}\n\n`;
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      sseResponse([oversizedLine, trailingDone], { chunkSize: 64 })
+    );
+
+    const eventTypes: string[] = [];
+    const overflows: Array<{
+      bufferedBytes: number;
+      maxBufferBytes: number;
+    }> = [];
+    let sawDone = false;
+    const surfacedErrors: string[] = [];
+
+    await streamChat(
+      "Send a giant payload.",
+      "session-overflow",
+      {
+        onEvent: (event) => {
+          eventTypes.push(event.type);
+        },
+        onStreamOverflow: (event) => {
+          overflows.push({
+            bufferedBytes: event.bufferedBytes,
+            maxBufferBytes: event.maxBufferBytes,
+          });
+        },
+        onDone: () => {
+          sawDone = true;
+        },
+        onError: (error) => {
+          surfacedErrors.push(error);
+        },
+      },
+      { maxBufferBytes: cap }
+    );
+
+    expect(overflows).toHaveLength(1);
+    expect(overflows[0].maxBufferBytes).toBe(cap);
+    expect(overflows[0].bufferedBytes).toBeGreaterThan(cap);
+    expect(eventTypes).toContain("stream_overflow");
+    // Overflow is terminal — no synthetic "stream closed before completion"
+    // error and no surfaced trailing `done` event.
+    expect(sawDone).toBe(false);
+    expect(surfacedErrors).toEqual([]);
+  });
+
+  it("swallows reader.releaseLock() failures so overflow teardown cannot throw", async () => {
+    const cap = 256;
+    const oversizedLine = "data: " + "x".repeat(cap + 64);
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(oversizedLine));
+        controller.close();
+      },
+    });
+
+    // Wrap getReader so releaseLock() throws (simulating an already-released
+    // reader after cancel()), while read()/cancel() still behave normally.
+    const originalGetReader = stream.getReader.bind(stream);
+    Object.defineProperty(stream, "getReader", {
+      configurable: true,
+      value: (...args: unknown[]) => {
+        const reader = (originalGetReader as (...a: unknown[]) => ReadableStreamDefaultReader<Uint8Array>)(...args);
+        return new Proxy(reader, {
+          get(target, prop, receiver) {
+            if (prop === "releaseLock") {
+              return () => {
+                throw new DOMException(
+                  "The reader is not attached to any stream.",
+                  "InvalidStateError"
+                );
+              };
+            }
+            const value = Reflect.get(target, prop, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      },
+    });
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(stream, {
+        headers: { "Content-Type": "text/event-stream" },
+        status: 200,
+      })
+    );
+
+    const overflows: Array<{ bufferedBytes: number; maxBufferBytes: number }> = [];
+    const surfacedErrors: string[] = [];
+
+    await expect(
+      streamChat(
+        "Send a giant payload.",
+        "session-overflow-release",
+        {
+          onStreamOverflow: (event) => {
+            overflows.push({
+              bufferedBytes: event.bufferedBytes,
+              maxBufferBytes: event.maxBufferBytes,
+            });
+          },
+          onError: (error) => {
+            surfacedErrors.push(error);
+          },
+        },
+        { maxBufferBytes: cap }
+      )
+    ).resolves.toBeUndefined();
+
+    expect(overflows).toHaveLength(1);
+    expect(overflows[0].maxBufferBytes).toBe(cap);
+    expect(surfacedErrors).toEqual([]);
+  });
+
+  it("drops events whose request_id does not match the latched in-flight id", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      sseResponse(
+        [
+          {
+            type: "token",
+            content: "first ",
+            request_id: "request-live",
+            event_index: 1,
+          },
+          {
+            type: "token",
+            content: "stale-echo",
+            request_id: "request-stale",
+            event_index: 2,
+          },
+          { type: "token", content: "untagged ", event_index: 3 },
+          {
+            type: "done",
+            content: "first untagged done.",
+            request_id: "request-live",
+            event_index: 4,
+          },
+        ],
+        { chunkSize: 29 }
+      )
+    );
+
+    const tokens: string[] = [];
+    const mismatchRequestIds: string[] = [];
+    let finalContent = "";
+    let finalRequestId = "";
+
+    await streamChat(
+      "Ignore the stale echo.",
+      "session-stale",
+      {
+        onToken: (content) => {
+          tokens.push(content);
+        },
+        onDone: (content, requestId) => {
+          finalContent = content;
+          finalRequestId = requestId ?? "";
+        },
+        onRequestIdMismatch: (event) => {
+          if (event.request_id) {
+            mismatchRequestIds.push(event.request_id);
+          }
+        },
+      }
+    );
+
+    expect(tokens).toEqual(["first ", "untagged "]);
+    expect(mismatchRequestIds).toEqual(["request-stale"]);
+    expect(finalContent).toBe("first untagged done.");
+    expect(finalRequestId).toBe("request-live");
   });
 
   it("cancels the in-flight fetch when the AbortController is aborted", async () => {

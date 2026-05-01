@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -13,9 +15,15 @@ from typing import Any
 from langchain_core.tools import BaseTool
 from pydantic import ConfigDict, Field
 
+from config import (
+    get_tool_wallclock_default_s,
+    get_tool_wallclock_override_s,
+)
 from runtime import hooks as runtime_hooks
 
 from .contracts import (
+    MAX_STRUCTURED_PAYLOAD_JSON_CHARS,
+    ToolArtifactRef,
     ToolResultEnvelope,
     blocked_result,
     execution_error_result,
@@ -37,8 +45,18 @@ logger = logging.getLogger(__name__)
 
 _MAX_LOGGED_ARG_CHARS = 500
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_TRACE_DIR = Path(__file__).resolve().parents[1] / "storage" / "tool-traces"
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+_DEFAULT_TRACE_DIR = _BACKEND_ROOT / "storage" / "tool-traces"
 _TRACE_DIR_ENV = "BIOAPEX_TOOL_TRACE_DIR"
+_DEFAULT_TOOL_OUTPUT_DIR = _BACKEND_ROOT / "storage" / "tool-outputs"
+_TOOL_OUTPUT_DIR_ENV = "BIOAPEX_TOOL_OUTPUT_DIR"
+# Summaries over this byte budget are spilled to disk as a
+# ``tool_output_overflow`` artifact and replaced in the transcript with a
+# truncated preview. Matches the char cap the contract layer uses for
+# structured payloads so the preview in the transcript never grows past what
+# the prompt layer can consume in a single tool turn.
+_DEFAULT_SUMMARY_OVERFLOW_BYTES = MAX_STRUCTURED_PAYLOAD_JSON_CHARS
+_PATH_FRAGMENT_SAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _SENSITIVE_KW_KEYS = frozenset({"token", "api_key", "password", "authorization"})
 _REDACTED_PATH_MARKER = "<redacted-path>"
 _REDACTED_VALUE_MARKER = "<redacted>"
@@ -82,6 +100,68 @@ def _resolve_trace_dir() -> Path:
     if override:
         return Path(override)
     return _DEFAULT_TRACE_DIR
+
+
+def _resolve_tool_output_dir() -> Path:
+    override = os.environ.get(_TOOL_OUTPUT_DIR_ENV)
+    if override:
+        return Path(override)
+    return _DEFAULT_TOOL_OUTPUT_DIR
+
+
+def _sanitize_path_fragment(value: str | None, *, default: str) -> str:
+    if not value:
+        return default
+    cleaned = _PATH_FRAGMENT_SAFE_RE.sub("_", str(value)).strip("._")
+    if not cleaned:
+        return default
+    return cleaned[:64]
+
+
+def _persist_tool_output_overflow(
+    *,
+    tool_name: str,
+    session_id: str | None,
+    turn_id: str | None,
+    full_text: str,
+) -> ToolArtifactRef | None:
+    """Write the oversized summary to disk and return a typed artifact ref.
+
+    Returns ``None`` on filesystem failure so the truncation path still
+    completes; the truncation marker in the transcript tells the caller the
+    full output is unavailable.
+    """
+
+    try:
+        encoded = full_text.encode("utf-8", errors="replace")
+        digest = hashlib.sha256(encoded).hexdigest()[:12]
+        target_root = _resolve_tool_output_dir()
+        session_segment = _sanitize_path_fragment(session_id, default="_no_session")
+        target_dir = target_root / session_segment
+        target_dir.mkdir(parents=True, exist_ok=True)
+        turn_segment = _sanitize_path_fragment(turn_id, default="_no_turn")
+        tool_segment = _sanitize_path_fragment(tool_name, default="tool")
+        filename = f"{turn_segment}-{tool_segment}-{digest}.txt"
+        path = target_dir / filename
+        path.write_bytes(encoded)
+        try:
+            stored = str(path.resolve().relative_to(_BACKEND_ROOT))
+        except ValueError:
+            stored = str(path)
+        return ToolArtifactRef(
+            path=stored,
+            label=f"{tool_name} full output",
+            artifact_type="tool_output_overflow",
+            identifier=f"{tool_segment}-{digest}",
+        )
+    except Exception:  # pragma: no cover - defensive
+        logger.warning(
+            "Failed to persist oversized tool output for %s (session=%s)",
+            tool_name,
+            session_id,
+            exc_info=True,
+        )
+        return None
 
 
 def _redact_path_if_external(value: str) -> str:
@@ -287,32 +367,97 @@ class PolicyWrappedTool(BaseTool):
             raise _SandboxWallClockExceeded(max_wall_clock) from exc
 
     def _apply_output_byte_cap(self, envelope: ToolResultEnvelope) -> ToolResultEnvelope:
-        sandbox = self.manifest.sandbox
-        if sandbox is None or sandbox.max_output_bytes is None:
-            return envelope
-        max_bytes = sandbox.max_output_bytes
-        if max_bytes <= 0:
-            return envelope
+        """Cap the envelope summary and spill the full text to an artifact.
+
+        The wrapper enforces two separate thresholds:
+
+        * ``sandbox.max_output_bytes`` — the per-tool policy cap. When this
+          fires we keep the legacy ``sandbox_output_truncated`` warning,
+          marker, and metadata so existing policy/observability assertions
+          stay green.
+        * ``_DEFAULT_SUMMARY_OVERFLOW_BYTES`` — a default overflow budget
+          applied to every tool, mirroring the contract-layer payload cap.
+          Preserves the transcript from ballooning when a tool happens to
+          not declare a sandbox.
+
+        Whichever threshold fires, the *original* summary is spilled to
+        ``backend/storage/tool-outputs/<session>/<turn>-<tool>-<hash>.txt``
+        and a ``tool_output_overflow`` ``ToolArtifactRef`` is appended so
+        the UI can surface a "full output →" link against the truncated
+        preview in the transcript.
+        """
+
         summary = envelope.summary or ""
-        encoded = summary.encode("utf-8")
-        if len(encoded) <= max_bytes:
+        if not summary:
             return envelope
-        truncated = encoded[:max_bytes].decode("utf-8", errors="ignore")
-        marker = "\n...[sandbox output truncated]"
+
+        encoded = summary.encode("utf-8")
+        sandbox = self.manifest.sandbox
+        sandbox_cap = (
+            sandbox.max_output_bytes
+            if sandbox is not None
+            and sandbox.max_output_bytes is not None
+            and sandbox.max_output_bytes > 0
+            else None
+        )
+        default_cap = _DEFAULT_SUMMARY_OVERFLOW_BYTES
+        candidate_caps = [cap for cap in (sandbox_cap, default_cap) if cap and cap > 0]
+        if not candidate_caps:
+            return envelope
+        effective_cap = min(candidate_caps)
+        if len(encoded) <= effective_cap:
+            return envelope
+
+        sandbox_triggered = sandbox_cap is not None and len(encoded) > sandbox_cap
+
+        policy_context = get_tool_policy_context()
+        artifact = _persist_tool_output_overflow(
+            tool_name=self.name,
+            session_id=policy_context.session_id if policy_context else None,
+            turn_id=policy_context.turn_id if policy_context else None,
+            full_text=summary,
+        )
+
+        truncated = encoded[:effective_cap].decode("utf-8", errors="ignore")
+        if sandbox_triggered:
+            marker = "\n...[sandbox output truncated]"
+        elif artifact is not None:
+            marker = "\n...[output truncated — full output saved as artifact]"
+        else:
+            marker = "\n...[output truncated]"
         envelope.summary = truncated + marker
-        if "sandbox_output_truncated" not in envelope.warnings:
+
+        if sandbox_triggered and "sandbox_output_truncated" not in envelope.warnings:
             envelope.warnings.append("sandbox_output_truncated")
+        if not sandbox_triggered and "output_truncated" not in envelope.warnings:
+            envelope.warnings.append("output_truncated")
+
         metadata = dict(envelope.metadata)
-        metadata.setdefault("sandbox", {})
-        if isinstance(metadata["sandbox"], dict):
-            metadata["sandbox"].update(
+        if sandbox_triggered:
+            sandbox_meta = metadata.get("sandbox")
+            if not isinstance(sandbox_meta, dict):
+                sandbox_meta = {}
+            sandbox_meta.update(
                 {
                     "output_truncated": True,
-                    "max_output_bytes": max_bytes,
+                    "max_output_bytes": sandbox_cap,
                     "summary_bytes_before_cap": len(encoded),
                 }
             )
+            metadata["sandbox"] = sandbox_meta
+        overflow_meta: dict[str, Any] = {
+            "triggered": True,
+            "threshold_bytes": effective_cap,
+            "summary_bytes_before_cap": len(encoded),
+            "sandbox_triggered": sandbox_triggered,
+        }
+        if artifact is not None and artifact.path:
+            overflow_meta["artifact_path"] = artifact.path
+        metadata["tool_output_overflow"] = overflow_meta
         envelope.metadata = metadata
+
+        if artifact is not None:
+            envelope.artifact_refs = [*envelope.artifact_refs, artifact]
         return envelope
 
     def _handle_tool_exception(
@@ -379,10 +524,24 @@ class PolicyWrappedTool(BaseTool):
         return None
 
     def _sandbox_wall_clock(self) -> float | None:
+        """Resolve the per-tool wall-clock budget actually enforced at dispatch.
+
+        Resolution order (first hit wins, ``None`` means "no cap"):
+          1. ``tool_wallclock.overrides[<tool_name>]`` from runtime config.
+             A configured value of ``0`` disables the cap explicitly.
+          2. ``SandboxSpec.max_wall_clock_seconds`` declared on the tool
+             manifest (today set in ``tools/registry.py`` for high-risk tools).
+          3. ``tool_wallclock.default_seconds`` from runtime config as the
+             project-wide floor for tools without a sandbox declaration.
+        """
+        override = get_tool_wallclock_override_s(self.name)
+        if override is not None:
+            return override if override > 0 else None
         sandbox = self.manifest.sandbox
-        if sandbox is None:
-            return None
-        return sandbox.max_wall_clock_seconds
+        if sandbox is not None and sandbox.max_wall_clock_seconds is not None:
+            return sandbox.max_wall_clock_seconds
+        default = get_tool_wallclock_default_s()
+        return default if default > 0 else None
 
     def _sandbox_env_allowlist(self) -> tuple[str, ...] | None:
         sandbox = self.manifest.sandbox
@@ -643,6 +802,13 @@ class PolicyWrappedTool(BaseTool):
                     )
             except _SandboxWallClockExceeded as exc:
                 raw_output = self._handle_wall_clock_exceeded(exc)
+            except asyncio.CancelledError:
+                # Client-disconnect cancellation must reach in-flight async
+                # tools at their next await point and bubble back up so the
+                # whole turn unwinds. Converting it to an error envelope
+                # would let the agent loop keep running on a half-cancelled
+                # task tree.
+                raise
             except Exception as exc:
                 raw_output = self._handle_tool_exception(exc, args, kwargs)
 

@@ -34,8 +34,13 @@ export type {
   ChatStreamCompactionEvent,
   ChatStreamDoneEvent,
   ChatStreamErrorEvent,
+  ChatStreamRetrievalErrorEvent,
   ChatStreamToolStartEvent,
   ChatStreamToolChunkEvent,
+  ChatStreamWorkflowStepStartedEvent,
+  ChatStreamWorkflowStepEndedEvent,
+  ChatStreamWorkflowStepFailedEvent,
+  TurnExit,
 } from "./types.generated";
 
 import type {
@@ -56,6 +61,11 @@ import type {
   ChatStreamCompactionEvent,
   ChatStreamDoneEvent,
   ChatStreamErrorEvent,
+  ChatStreamRetrievalErrorEvent,
+  TurnExit,
+  ChatStreamWorkflowStepStartedEvent,
+  ChatStreamWorkflowStepEndedEvent,
+  ChatStreamWorkflowStepFailedEvent,
   SessionTextBlock,
   SessionUsageBlock,
   SessionPlanBlock as GeneratedSessionPlanBlock,
@@ -187,6 +197,16 @@ export type SessionApprovalGateBlock = Omit<
   result?: ToolResultEnvelope;
 };
 
+export interface SessionWarningBlock {
+  type: "warning";
+  kind: string;
+  message: string;
+  missing?: string[];
+  cited?: string[];
+  included?: string[];
+  review_path?: string;
+}
+
 export type SessionContentBlock =
   | SessionTextBlock
   | SessionToolUseBlock
@@ -195,7 +215,8 @@ export type SessionContentBlock =
   | SessionUsageBlock
   | SessionPlanBlock
   | SessionVerificationBlock
-  | SessionApprovalGateBlock;
+  | SessionApprovalGateBlock
+  | SessionWarningBlock;
 
 export interface ToolCall {
   tool: string;
@@ -221,8 +242,35 @@ export interface ChatStreamParseErrorEvent {
   raw?: string;
 }
 
+/**
+ * Client-side synthetic event emitted when the SSE parser's buffered remainder
+ * grows past the configured cap (default 4 MB) without a record terminator.
+ * The transport treats this as terminal and cancels the reader to defend
+ * against a memory-exhaustion DoS.
+ */
+export interface ChatStreamOverflowEvent {
+  request_id?: string;
+  event_index?: number;
+  type: "stream_overflow";
+  bufferedBytes: number;
+  maxBufferBytes: number;
+}
+
+export interface ChatStreamWarningEvent {
+  request_id?: string;
+  event_index?: number;
+  type: "warning";
+  kind: string;
+  message: string;
+  missing: string[];
+  cited: string[];
+  included: string[];
+  review_path?: string | null;
+}
+
 export type ChatStreamEvent =
   | ChatStreamRetrievalEvent
+  | ChatStreamRetrievalErrorEvent
   | ChatStreamTokenEvent
   | ChatStreamToolStartEvent
   | ChatStreamToolEndEvent
@@ -233,15 +281,39 @@ export type ChatStreamEvent =
   | ChatStreamVerificationResultEvent
   | ChatStreamNewResponseEvent
   | ChatStreamCompactionEvent
+  | ChatStreamWarningEvent
   | ChatStreamDoneEvent
   | ChatStreamErrorEvent
-  | ChatStreamParseErrorEvent;
+  | ChatStreamWorkflowStepStartedEvent
+  | ChatStreamWorkflowStepEndedEvent
+  | ChatStreamWorkflowStepFailedEvent
+  | ChatStreamParseErrorEvent
+  | ChatStreamOverflowEvent;
 
 export type ChatStreamEventType = ChatStreamEvent["type"];
 
 // ────────────────────────────────────────────────────────────────────────
 // Hybrid chat Message — backend shape + client-side streaming fields
 // ────────────────────────────────────────────────────────────────────────
+
+export type WorkflowStepStatus = "running" | "ok" | "failed";
+
+export interface WorkflowStepState {
+  workflow_id: string;
+  run_id: string;
+  step_id: string;
+  step_index: number;
+  total_steps: number;
+  status: WorkflowStepStatus;
+  label?: string;
+  attempt: number;
+  duration_ms?: number;
+  error?: string;
+  failure_policy?:
+    | "fail_workflow"
+    | "block_workflow"
+    | "continue_with_warning";
+}
 
 export interface Message {
   id: string;
@@ -259,6 +331,19 @@ export interface Message {
    * `tool_end` arrives and the buffer is flushed into the persisted block.
    */
   toolChunkBuffers?: Record<string, { chunks: { index: number; text: string }[] }>;
+  /**
+   * Live workflow step list, ordered by first-seen ``started`` event. Keyed by
+   * ``${run_id}:${step_id}`` so repeated attempts collapse into a single row.
+   * Transport-only state — not persisted in session JSON.
+   */
+  workflowSteps?: WorkflowStepState[];
+  /**
+   * Terminal exit payload from the last ``done`` event of this turn. Drives the
+   * reason-specific pill/banner the UI renders under the assistant message.
+   * Absent until the stream terminates; preserved across re-renders so the
+   * outcome stays visible after streaming completes.
+   */
+  exit?: TurnExit;
 }
 
 export interface SessionHistoryMessage {

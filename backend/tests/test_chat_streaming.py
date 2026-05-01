@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import sys
@@ -372,6 +373,119 @@ async def test_chat_stream_runs_bounded_repair_pass_as_second_segment(isolated_c
     assert assistant_messages[0]["content"] == "Draft answer without citation."
     assert assistant_messages[1]["content"] == "Repaired answer with citation."
 
+
+@pytest.mark.asyncio
+async def test_bounded_async_stream_force_cancels_aclose_when_inner_swallows_cancel(
+    monkeypatch,
+):
+    """Issue #227: if the inner agent's aclose() blocks (e.g. a SLURM-wait
+    tool swallowing CancelledError), the bounded stream's finally: block must
+    not hang indefinitely. It should give up after ``_ACLOSE_TIMEOUT_S``,
+    emit a warning, and force-cancel the pending aclose task so the turn can
+    return.
+    """
+    import asyncio
+    import logging
+    import time
+
+    from runtime import query_engine
+    from runtime.query_engine import _bounded_async_stream
+
+    class BlockingAgen:
+        """Stand-in for the executor's async generator.
+
+        ``aclose`` blocks until it's explicitly cancelled — modeling a tool
+        (e.g. SLURM wait) whose cleanup will hang forever unless the
+        bounded-stream wrapper escalates with its own ``task.cancel()``.
+        """
+
+        def __init__(self) -> None:
+            self.cancel_count = 0
+            self._yielded = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self._yielded:
+                self._yielded = True
+                return {"type": "token", "content": "start"}
+            await asyncio.sleep(60)
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                self.cancel_count += 1
+                # Honor the escalated cancel so the task actually completes
+                # — this is what distinguishes a forced teardown from the
+                # hang we're fixing.
+                raise
+
+    # Keep the test fast — we don't need the production 5s wait.
+    monkeypatch.setattr(query_engine, "_ACLOSE_TIMEOUT_S", 0.2)
+
+    inner = BlockingAgen()
+    # Wallclock deadline far in the future so teardown is triggered by
+    # ``aclose()`` (the caller exiting the ``async for``), not by the
+    # wallclock branch.
+    bounded = _bounded_async_stream(inner, time.monotonic() + 60.0)
+
+    observed: list[dict] = []
+    async for event in bounded:
+        observed.append(event)
+        break
+    assert observed == [{"type": "token", "content": "start"}]
+
+    start = time.monotonic()
+    with caplog_collect_warnings("runtime.query_engine") as records:
+        await bounded.aclose()
+    elapsed = time.monotonic() - start
+
+    # Teardown completes within a bounded window (first wait_for plus the
+    # force-cancel wait_for, each capped by the monkeypatched timeout).
+    assert elapsed < 2.0, f"aclose teardown took {elapsed:.2f}s"
+
+    # The inner generator's aclose received at least one cancellation —
+    # cancel was escalated rather than silently swallowed into a hang.
+    assert inner.cancel_count >= 1
+
+    # The warning log path fired, pointing operators at the stuck tool.
+    assert any(
+        "aclose exceeded" in record.getMessage() and record.levelno == logging.WARNING
+        for record in records
+    ), [r.getMessage() for r in records]
+
+
+@contextlib.contextmanager
+def caplog_collect_warnings(logger_name: str):
+    """Minimal stand-in for pytest's ``caplog`` fixture scoped to one logger.
+
+    Used by the bounded-stream teardown test so we can assert the warning
+    emitted when ``aclose()`` exceeds its budget without pulling in the
+    broader caplog fixture machinery.
+    """
+    import logging
+
+    records: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _ListHandler(level=logging.WARNING)
+    target = logging.getLogger(logger_name)
+    previous_level = target.level
+    target.addHandler(handler)
+    target.setLevel(logging.WARNING)
+    try:
+        yield records
+    finally:
+        target.removeHandler(handler)
+        target.setLevel(previous_level)
+
+
 @pytest.mark.asyncio
 async def test_agent_astream_injects_compact_source_aware_retrieved_memory(isolated_chat_state):
     from graph.agent import agent_manager
@@ -433,6 +547,288 @@ async def test_agent_astream_injects_compact_source_aware_retrieved_memory(isola
     assert "BRCA1 follow-up note" in system_message.content
     assert "memory/project/brca1.md#follow-up" in system_message.content
     assert len(system_message.content) < 1800
+
+
+@pytest.mark.asyncio
+async def test_agent_astream_llm_probe_picks_files_and_falls_back(isolated_chat_state):
+    """rag_mode=llm_probe asks the executor LLM to pick files, with keyword RAG fallback."""
+    from graph.agent import agent_manager
+
+    original_tools = agent_manager.tools
+    original_memory_indexer = agent_manager.memory_indexer
+    original_llm = agent_manager.llm
+
+    class FakeAgent:
+        async def astream_events(self, payload, version="v2", config=None):
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": type("Chunk", (), {"content": "ok"})()},
+            }
+
+    class FakeLLM:
+        def __init__(self, response_text: str):
+            self.response_text = response_text
+            self.calls = 0
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            return type("Resp", (), {"content": self.response_text})()
+
+    fake_indexer = MagicMock()
+    fake_indexer.memory_file_count.return_value = 12  # above threshold
+    fake_indexer.memory_corpus_digest.return_value = "digest-abc"
+    fake_indexer.get_cached_probe_selection.return_value = None
+    fake_indexer.build_probe_index.return_value = (
+        "- memory/project/a.md — Alpha: A desc.\n- memory/user/b.md — Beta: B desc.",
+        ["memory/project/a.md", "memory/user/b.md"],
+    )
+    fake_indexer.parse_probe_selection.return_value = ["memory/project/a.md"]
+    fake_indexer.build_probe_results.return_value = [
+        {
+            "text": "alpha body",
+            "score": 1.0,
+            "source": "memory/project/a.md",
+            "memory_name": "Alpha",
+            "memory_description": "A desc.",
+            "memory_type": "project_fact",
+            "memory_type_label": "project fact",
+        }
+    ]
+
+    agent_manager.tools = []
+    agent_manager.memory_indexer = fake_indexer
+    fake_llm = FakeLLM('["memory/project/a.md"]')
+    agent_manager.llm = fake_llm
+
+    try:
+        with patch("config.get_rag_mode", return_value=True), patch(
+            "config.get_rag_mode_name", return_value="llm_probe"
+        ), patch("config.get_llm_probe_min_files", return_value=10), patch(
+            "graph.agent.create_agent", return_value=FakeAgent()
+        ):
+            events = [
+                event
+                async for event in agent_manager.astream(
+                    "Where are the alpha notes?", []
+                )
+            ]
+    finally:
+        agent_manager.tools = original_tools
+        agent_manager.memory_indexer = original_memory_indexer
+        agent_manager.llm = original_llm
+
+    assert fake_llm.calls == 1
+    retrieval = next(event for event in events if event["type"] == "retrieval")
+    assert retrieval["mode"] == "llm_probe"
+    assert retrieval["results"][0]["source"] == "memory/project/a.md"
+    fake_indexer.parse_probe_selection.assert_called_once()
+    # Keyword RAG must not be invoked when the probe produces a hit.
+    fake_indexer.retrieve.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_astream_llm_probe_falls_back_to_keyword_on_failure(
+    isolated_chat_state,
+):
+    """When the probe LLM raises, retrieval falls back to keyword RAG transparently."""
+    from graph.agent import agent_manager
+
+    original_tools = agent_manager.tools
+    original_memory_indexer = agent_manager.memory_indexer
+    original_llm = agent_manager.llm
+
+    class FakeAgent:
+        async def astream_events(self, payload, version="v2", config=None):
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": type("Chunk", (), {"content": "ok"})()},
+            }
+
+    class ExplodingLLM:
+        async def ainvoke(self, messages):
+            raise RuntimeError("probe model unreachable")
+
+    fake_indexer = MagicMock()
+    fake_indexer.memory_file_count.return_value = 20
+    fake_indexer.memory_corpus_digest.return_value = "digest-xyz"
+    fake_indexer.get_cached_probe_selection.return_value = None
+    fake_indexer.build_probe_index.return_value = (
+        "- memory/project/a.md — Alpha: A desc.",
+        ["memory/project/a.md"],
+    )
+    fake_indexer.retrieve.return_value = [
+        {
+            "text": "keyword fallback hit",
+            "score": 0.5,
+            "source": "memory/project/a.md",
+            "memory_type": "project_fact",
+            "memory_type_label": "project fact",
+            "memory_name": "Alpha",
+            "memory_description": "A desc.",
+        }
+    ]
+
+    agent_manager.tools = []
+    agent_manager.memory_indexer = fake_indexer
+    agent_manager.llm = ExplodingLLM()
+
+    try:
+        with patch("config.get_rag_mode", return_value=True), patch(
+            "config.get_rag_mode_name", return_value="llm_probe"
+        ), patch("config.get_llm_probe_min_files", return_value=10), patch(
+            "graph.agent.create_agent", return_value=FakeAgent()
+        ):
+            events = [
+                event
+                async for event in agent_manager.astream(
+                    "Where are the alpha notes?", []
+                )
+            ]
+    finally:
+        agent_manager.tools = original_tools
+        agent_manager.memory_indexer = original_memory_indexer
+        agent_manager.llm = original_llm
+
+    retrieval = next(event for event in events if event["type"] == "retrieval")
+    assert retrieval["mode"] == "llm_probe_fallback_keyword"
+    assert retrieval["results"][0]["text"] == "keyword fallback hit"
+    fake_indexer.retrieve.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_agent_astream_llm_probe_below_threshold_uses_keyword_rag(
+    isolated_chat_state,
+):
+    """Too few memory files skips the probe and goes straight to keyword RAG."""
+    from graph.agent import agent_manager
+
+    original_tools = agent_manager.tools
+    original_memory_indexer = agent_manager.memory_indexer
+    original_llm = agent_manager.llm
+
+    class FakeAgent:
+        async def astream_events(self, payload, version="v2", config=None):
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": type("Chunk", (), {"content": "ok"})()},
+            }
+
+    fake_indexer = MagicMock()
+    fake_indexer.memory_file_count.return_value = 3  # below threshold
+    fake_indexer.retrieve.return_value = [
+        {
+            "text": "keyword hit",
+            "score": 0.5,
+            "source": "memory/project/a.md",
+            "memory_type": "project_fact",
+            "memory_type_label": "project fact",
+            "memory_name": "Alpha",
+            "memory_description": "A desc.",
+        }
+    ]
+
+    agent_manager.tools = []
+    agent_manager.memory_indexer = fake_indexer
+
+    try:
+        with patch("config.get_rag_mode", return_value=True), patch(
+            "config.get_rag_mode_name", return_value="llm_probe"
+        ), patch("config.get_llm_probe_min_files", return_value=10), patch(
+            "graph.agent.create_agent", return_value=FakeAgent()
+        ):
+            events = [
+                event
+                async for event in agent_manager.astream("query", [])
+            ]
+    finally:
+        agent_manager.tools = original_tools
+        agent_manager.memory_indexer = original_memory_indexer
+        agent_manager.llm = original_llm
+
+    # No probe was invoked (build_probe_index is the probe entry point).
+    fake_indexer.build_probe_index.assert_not_called()
+    retrieval = next(event for event in events if event["type"] == "retrieval")
+    assert retrieval["mode"] == "keyword"
+
+
+@pytest.mark.asyncio
+async def test_agent_astream_emits_retrieval_error_when_indexer_raises(
+    isolated_chat_state, caplog
+):
+    """A broken MemoryIndexer must produce a log line, counter bump, and event.
+
+    Regression test for issue #115: ``memory_indexer.retrieve`` failures used
+    to be silently swallowed. The turn still continues (the ``retrieval_error``
+    event is non-fatal) and ``METRICS.observe_retrieval(hit=False)`` keeps
+    firing so the miss ratio stays comparable.
+    """
+    import logging
+
+    from graph.agent import agent_manager
+    from runtime.metrics_collector import METRICS
+
+    original_tools = agent_manager.tools
+    original_memory_indexer = agent_manager.memory_indexer
+
+    class FakeAgent:
+        async def astream_events(self, payload, version="v2", config=None):
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": type("Chunk", (), {"content": "ok"})()},
+            }
+
+    class BrokenIndexer:
+        def retrieve(self, *_args, **_kwargs):
+            raise RuntimeError("index corrupt")
+
+        def memory_file_count(self) -> int:
+            return 0
+
+    agent_manager.tools = []
+    agent_manager.memory_indexer = BrokenIndexer()
+
+    METRICS.reset()
+    try:
+        with caplog.at_level(logging.ERROR, logger="graph.agent"), patch(
+            "config.get_rag_mode", return_value=True
+        ), patch(
+            "graph.agent.create_agent", return_value=FakeAgent()
+        ):
+            events = [
+                event
+                async for event in agent_manager.astream(
+                    "Where are the BRCA1 notes?", []
+                )
+            ]
+    finally:
+        agent_manager.tools = original_tools
+        agent_manager.memory_indexer = original_memory_indexer
+
+    retrieval_error = next(
+        event for event in events if event["type"] == "retrieval_error"
+    )
+    assert retrieval_error["query"] == "Where are the BRCA1 notes?"
+    assert retrieval_error["error_type"] == "RuntimeError"
+    assert "index corrupt" in retrieval_error["message"]
+
+    assert any(
+        record.name == "graph.agent"
+        and record.levelno == logging.ERROR
+        and "retrieval_error" in record.getMessage()
+        for record in caplog.records
+    )
+
+    exposition = METRICS.render_exposition()
+    assert (
+        'bioapex_retrieval_errors_total{error_type="RuntimeError"} 1'
+        in exposition
+    )
+    # Non-fatal semantics: the miss counter still ticks so the hit-ratio
+    # gauge keeps its historical meaning.
+    assert "bioapex_retrieval_cache_misses_total 1" in exposition
+
+    # The turn kept running and produced the downstream token event.
+    assert any(event["type"] == "token" for event in events)
 
 
 @pytest.mark.asyncio
@@ -745,6 +1141,25 @@ async def test_chat_blocks_non_local_clients_without_bearer_token(isolated_chat_
 
 
 @pytest.mark.asyncio
+async def test_chat_rejects_session_bound_below_execution_scope(isolated_chat_state):
+    """A session created at ``inspection`` scope must not run chat turns even
+    if the calling request itself meets the execution route check (issue #240)."""
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session(access_scope="inspection")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await chat(
+            ChatRequest(message="Read memory", session_id=session_id),
+            _request("/api/chat"),
+        )
+
+    assert exc_info.value.status_code == 403
+    assert "scope" in str(exc_info.value.detail).lower()
+
+
+@pytest.mark.asyncio
 async def test_chat_allows_non_local_clients_with_execution_bearer_token(isolated_chat_state):
     from api.chat import ChatRequest, chat
     from graph.agent import agent_manager
@@ -807,6 +1222,71 @@ async def test_chat_stream_emits_monotonic_event_index_and_terminal_done(
         range(1, len(payloads) + 1)
     )
     assert len({item["request_id"] for item in payloads}) == 1
+    assert payloads[-1]["exit"] == {"reason": "success", "exit_code": 0}
+    assert payloads[-1]["schema_version"] == 2
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_schema_version_deprecation_warning_for_v1_clients(
+    isolated_chat_state,
+):
+    """Issue #90: v1 clients should receive a one-shot ``warning`` with
+    ``kind="schema_version_deprecated"`` before the stream body so callers
+    know to migrate to reading ``done.exit``.
+    """
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    async def fake_astream(_message, _history):
+        yield {"type": "token", "content": "ok"}
+        yield {"type": "done"}
+
+    http_request = _request(
+        "/api/chat",
+        headers=[(b"x-runtime-event-schema-version", b"1")],
+    )
+    with patch.object(agent_manager, "astream", fake_astream):
+        response = await chat(
+            ChatRequest(message="anything", session_id=session_id),
+            http_request=http_request,
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    warnings = [item for item in payloads if item["type"] == "warning"]
+    assert len(warnings) == 1
+    assert warnings[0]["kind"] == "schema_version_deprecated"
+    assert "done.exit" in warnings[0]["message"]
+    assert payloads[-1]["type"] == "done"
+    assert payloads[-1]["exit"]["reason"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_omits_deprecation_warning_when_header_matches_current(
+    isolated_chat_state,
+):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    async def fake_astream(_message, _history):
+        yield {"type": "token", "content": "ok"}
+        yield {"type": "done"}
+
+    http_request = _request(
+        "/api/chat",
+        headers=[(b"x-runtime-event-schema-version", b"2")],
+    )
+    with patch.object(agent_manager, "astream", fake_astream):
+        response = await chat(
+            ChatRequest(message="anything", session_id=session_id),
+            http_request=http_request,
+        )
+        payloads = await _collect_sse_payloads(response)
+
+    assert not any(item["type"] == "warning" for item in payloads)
 
 
 @pytest.mark.asyncio
@@ -960,6 +1440,117 @@ async def test_chat_stream_does_not_buffer_answer_tokens_for_biology_questions(
     assert assistant_messages
     assert assistant_messages[0]["content"] == "TP53 definitely controls stress response."
     assert assistant_messages[0].get("tool_calls", []) == []
+
+
+@pytest.mark.asyncio
+async def test_chat_rejects_overlapping_turn_for_same_session_with_409(
+    isolated_chat_state,
+):
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    async def fake_astream(_message, _history):
+        yield {"type": "token", "content": "first turn"}
+        yield {"type": "done"}
+
+    with patch.object(agent_manager, "astream", fake_astream):
+        # First call acquires the per-session turn lock synchronously before
+        # returning the StreamingResponse; the lock stays held until the
+        # response body is iterated to completion.
+        response_first = await chat(
+            ChatRequest(message="first", session_id=session_id)
+        )
+
+        # Second call for the same session_id must fail fast with 409 while the
+        # first turn's stream has not yet been drained.
+        with pytest.raises(HTTPException) as exc_info:
+            await chat(ChatRequest(message="second", session_id=session_id))
+        assert exc_info.value.status_code == 409
+
+        # A different session_id is unaffected by the lock on ``session_id``.
+        other_session_id = agent_manager.session_manager.create_session()
+        response_other = await chat(
+            ChatRequest(message="sibling", session_id=other_session_id)
+        )
+        payloads_other = await _collect_sse_payloads(response_other)
+        assert any(item["type"] == "done" for item in payloads_other)
+
+        # Drain the first stream — this releases the per-session lock.
+        payloads_first = await _collect_sse_payloads(response_first)
+        assert any(item["type"] == "done" for item in payloads_first)
+
+        # After release, a follow-up turn on the original session succeeds.
+        response_third = await chat(
+            ChatRequest(message="third", session_id=session_id)
+        )
+        payloads_third = await _collect_sse_payloads(response_third)
+        assert any(item["type"] == "done" for item in payloads_third)
+
+
+@pytest.mark.asyncio
+async def test_chat_serializes_concurrent_turns_for_same_session(isolated_chat_state):
+    """When two turns race for the same session, the second must not execute
+    concurrently with the first. With the 409 fast-fail contract, the second
+    call raises HTTPException(409) rather than interleaving writes."""
+    import asyncio
+
+    from api.chat import ChatRequest, chat
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def paused_astream(message, _history):
+        if message == "first":
+            first_started.set()
+            await release_first.wait()
+        yield {"type": "token", "content": f"turn:{message}"}
+        yield {"type": "done"}
+
+    with patch.object(agent_manager, "astream", paused_astream):
+        response_first = await chat(
+            ChatRequest(message="first", session_id=session_id)
+        )
+
+        async def drain(response):
+            return await _collect_sse_payloads(response)
+
+        drain_first = asyncio.create_task(drain(response_first))
+
+        # Wait until the first turn has actually entered the executor. At this
+        # point the per-session lock is held by the in-flight generator.
+        await first_started.wait()
+
+        second_error: HTTPException | None = None
+        try:
+            await chat(ChatRequest(message="second", session_id=session_id))
+        except HTTPException as exc:
+            second_error = exc
+
+        assert second_error is not None
+        assert second_error.status_code == 409
+
+        release_first.set()
+        first_payloads = await drain_first
+        # After the first turn drained and released the lock, a fresh attempt
+        # must succeed — demonstrating the lock's bounded lifetime.
+        response_follow = await chat(
+            ChatRequest(message="follow", session_id=session_id)
+        )
+        follow_payloads = await _collect_sse_payloads(response_follow)
+
+    tokens_first = [
+        item["content"] for item in first_payloads if item["type"] == "token"
+    ]
+    tokens_follow = [
+        item["content"] for item in follow_payloads if item["type"] == "token"
+    ]
+    assert tokens_first == ["turn:first"]
+    assert tokens_follow == ["turn:follow"]
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,8 @@ import {
   parseChatStreamChunk,
   type StreamCallbacks,
 } from "./chat-stream-events";
+import { RUNTIME_EVENT_SCHEMA_VERSION } from "./runtime-events";
+import { log } from "./telemetry";
 
 export { ApiPayloadError, isApiPayloadError };
 export type { StreamCallbacks };
@@ -71,6 +73,50 @@ export class ApiError extends Error {
     this.scope = options.scope;
     this.status = options.status;
   }
+}
+
+export interface SessionCorruptDetail {
+  sessionId: string;
+  quarantinePath: string;
+  message: string;
+}
+
+/**
+ * Returns the structured "session_corrupt" payload when *error* is a 422
+ * response from a session endpoint, otherwise null. Drives the user-visible
+ * "session corrupt" notice in the UI.
+ */
+export function getSessionCorruptDetail(
+  error: unknown
+): SessionCorruptDetail | null {
+  if (!(error instanceof ApiError) || error.status !== 422) return null;
+  const text = error.bodyText.trim();
+  if (!text) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const detail =
+    parsed && typeof parsed === "object" && "detail" in parsed
+      ? (parsed as { detail?: unknown }).detail
+      : parsed;
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) return null;
+  const record = detail as Record<string, unknown>;
+  if (record.error !== "session_corrupt") return null;
+  const sessionId = typeof record.session_id === "string" ? record.session_id : "";
+  const quarantinePath =
+    typeof record.quarantine_path === "string" ? record.quarantine_path : "";
+  const message =
+    typeof record.message === "string" && record.message.trim()
+      ? record.message
+      : "The saved session file was corrupt and has been quarantined.";
+  return { sessionId, quarantinePath, message };
+}
+
+export function isSessionCorruptError(error: unknown): boolean {
+  return getSessionCorruptDetail(error) !== null;
 }
 
 let apiAuthProvider: ApiAuthProvider | null = null;
@@ -380,6 +426,12 @@ export interface StreamChatOptions {
    * per-turn request_id; this override is not forwarded in the request body.
    */
   requestId?: string;
+  /**
+   * Cap on the SSE parser's unterminated buffered remainder. Defaults to the
+   * parser's own default (4 MB). When exceeded, a synthetic
+   * `stream_overflow` event is dispatched and the reader is cancelled.
+   */
+  maxBufferBytes?: number;
 }
 
 export async function streamChat(
@@ -392,15 +444,28 @@ export async function streamChat(
     jsonBody: { message, session_id: sessionId },
     method: "POST",
     signal: callbacks.signal,
+    headers: {
+      "X-Runtime-Event-Schema-Version": String(RUNTIME_EVENT_SCHEMA_VERSION),
+    },
   });
 
-  const dispatcher = createChatStreamDispatcher(callbacks);
+  const dispatcher = createChatStreamDispatcher(callbacks, {
+    expectedRequestId: options.requestId,
+  });
 
   if (!response.ok || !response.body) {
     const text = await response.text().catch(() => response.statusText);
+    const errorMessage = extractApiErrorMessage(text, response.status, response.statusText);
+    log.error({
+      event: "sse_stream_open_failed",
+      message: errorMessage,
+      requestId: options.requestId,
+      sessionId,
+      meta: { status: response.status },
+    });
     const errorEvent: ChatStreamErrorEvent = {
       type: "error",
-      error: extractApiErrorMessage(text, response.status, response.statusText),
+      error: errorMessage,
       request_id: options.requestId,
     };
     dispatcher.dispatch(errorEvent);
@@ -409,29 +474,74 @@ export async function streamChat(
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
+  const parseOptions = { maxBufferBytes: options.maxBufferBytes };
   let buffer = "";
+  let aborted = false;
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const parsed = parseChatStreamChunk(buffer, decoder.decode(value, { stream: true }));
+      const parsed = parseChatStreamChunk(
+        buffer,
+        decoder.decode(value, { stream: true }),
+        parseOptions
+      );
       buffer = parsed.bufferedRemainder;
       for (const event of parsed.events) dispatcher.dispatch(event);
+      if (parsed.overflow) {
+        log.error({
+          event: "sse_stream_overflow",
+          message: "SSE buffered remainder exceeded the cap; stream cancelled.",
+          requestId: dispatcher.lastRequestId() ?? options.requestId,
+          sessionId,
+          meta: {
+            buffered_bytes: parsed.overflow.bufferedBytes,
+            max_buffer_bytes: parsed.overflow.maxBufferBytes,
+          },
+        });
+        dispatcher.dispatch({
+          type: "stream_overflow",
+          bufferedBytes: parsed.overflow.bufferedBytes,
+          maxBufferBytes: parsed.overflow.maxBufferBytes,
+          request_id: dispatcher.lastRequestId() ?? options.requestId,
+        });
+        buffer = "";
+        aborted = true;
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
     }
 
-    const finalParsed = parseChatStreamChunk(buffer, decoder.decode(), { flush: true });
-    buffer = finalParsed.bufferedRemainder;
-    for (const event of finalParsed.events) dispatcher.dispatch(event);
-
-    if (!dispatcher.sawTerminalEvent()) {
-      dispatcher.dispatch({
-        type: "error",
-        error: "The response stream closed before completion.",
-        request_id: dispatcher.lastRequestId() ?? options.requestId,
+    if (!aborted) {
+      const finalParsed = parseChatStreamChunk(buffer, decoder.decode(), {
+        ...parseOptions,
+        flush: true,
       });
+      buffer = finalParsed.bufferedRemainder;
+      for (const event of finalParsed.events) dispatcher.dispatch(event);
+
+      if (!dispatcher.sawTerminalEvent()) {
+        const truncationMessage = "The response stream closed before completion.";
+        log.error({
+          event: "sse_stream_truncated",
+          message: truncationMessage,
+          requestId: dispatcher.lastRequestId() ?? options.requestId,
+          sessionId,
+        });
+        dispatcher.dispatch({
+          type: "error",
+          error: truncationMessage,
+          request_id: dispatcher.lastRequestId() ?? options.requestId,
+        });
+      }
     }
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // The reader may already be released (e.g. after an overflow-driven
+      // cancel() resolves). Swallow so teardown cannot mask the primary flow.
+    }
   }
 }

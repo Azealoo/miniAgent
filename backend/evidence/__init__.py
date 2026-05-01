@@ -7,6 +7,12 @@ from .claim_graph import (
     PersistedClaimGraph,
     run_claim_graph,
 )
+from .integrity import (
+    CitationIntegrityResult,
+    build_citation_mismatch_event,
+    check_citation_integrity,
+    extract_pmids_from_text,
+)
 from .retrieval import (
     EVIDENCE_RETRIEVAL_WORKFLOW_NAME,
     EvidenceRetrievalFailure,
@@ -25,6 +31,7 @@ from .review import (
 __all__ = [
     "CLAIM_GRAPH_CONTRADICTION_RULE_SET",
     "CLAIM_GRAPH_WORKFLOW_NAME",
+    "CitationIntegrityResult",
     "EVIDENCE_RETRIEVAL_WORKFLOW_NAME",
     "EVIDENCE_REVIEW_WORKFLOW_NAME",
     "ClaimGraphInput",
@@ -35,6 +42,9 @@ __all__ = [
     "EvidenceReviewResult",
     "PersistedClaimGraph",
     "RetrievedEvidenceCard",
+    "build_citation_mismatch_event",
+    "check_citation_integrity",
+    "extract_pmids_from_text",
     "run_claim_graph",
     "run_evidence_review",
     "run_evidence_retrieval",

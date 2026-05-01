@@ -23,6 +23,9 @@ When working in this repo:
 - ground important claims in evidence when possible
 - enforce safety and compliance checks before risky execution
 - keep the system transparent and inspectable
+- avoid the rejected approaches listed in [`docs/anti-patterns.md`](docs/anti-patterns.md)
+  (regex-only permissions, single-phase compaction, `bash`/`python_repl`
+  as default execution)
 
 ## Commands
 

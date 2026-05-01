@@ -610,6 +610,41 @@ describe("applyStreamEvent per-event coverage", () => {
     expect(assistant.content).toBe("streamed");
   });
 
+  it("done stores the structured exit payload on the finalized message", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      {
+        type: "done",
+        content: "done",
+        exit: {
+          reason: "token_budget",
+          exit_code: 3,
+          summary: "turn budget exceeded",
+        },
+      },
+      200
+    );
+    const assistant = state.messages[0];
+    expect(assistant.exit).toEqual({
+      reason: "token_budget",
+      exit_code: 3,
+      summary: "turn budget exceeded",
+    });
+  });
+
+  it("done preserves message.exit when a later done has no exit field", () => {
+    let state = freshState();
+    const priorExit = { reason: "tool_error", exit_code: 1 } as const;
+    state = {
+      ...state,
+      messages: state.messages.map((m) => ({ ...m, exit: priorExit })),
+    };
+    state = reduceEvent(state, { type: "done", content: "ok" }, 210);
+    const assistant = state.messages[0];
+    expect(assistant.exit).toEqual(priorExit);
+  });
+
   it("error appends an error block and ends the turn", () => {
     let state = freshState();
     state = reduceEvent(
@@ -643,6 +678,159 @@ describe("applyStreamEvent per-event coverage", () => {
     expect(result.finished).toBe(false);
     expect(result.messages).toBe(state.messages);
     expect(result.streamingMessageId).toBe(state.streamingMessageId);
+  });
+
+  it("workflow_step_started seeds a running step in workflowSteps", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_started",
+        workflow_id: "demo_flow",
+        run_id: "wf-1",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 2,
+        label: "First step",
+        attempt: 1,
+        request_id: "request-w",
+      },
+      110
+    );
+    const assistant = state.messages[0];
+    expect(assistant.request_id).toBe("request-w");
+    expect(assistant.workflowSteps).toHaveLength(1);
+    expect(assistant.workflowSteps?.[0]).toMatchObject({
+      workflow_id: "demo_flow",
+      run_id: "wf-1",
+      step_id: "step_a",
+      step_index: 1,
+      total_steps: 2,
+      status: "running",
+      label: "First step",
+      attempt: 1,
+    });
+  });
+
+  it("workflow_step_ended flips a running step to ok and records duration", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_started",
+        workflow_id: "demo_flow",
+        run_id: "wf-1",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 2,
+        label: "First step",
+        attempt: 1,
+      },
+      110
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_ended",
+        workflow_id: "demo_flow",
+        run_id: "wf-1",
+        step_id: "step_a",
+        step_index: 1,
+        total_steps: 2,
+        duration_ms: 42,
+      },
+      120
+    );
+    const step = state.messages[0].workflowSteps?.[0];
+    expect(step?.status).toBe("ok");
+    expect(step?.duration_ms).toBe(42);
+    expect(step?.label).toBe("First step");
+  });
+
+  it("workflow_step_failed flips a running step to failed and carries error + policy", () => {
+    let state = freshState();
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_started",
+        workflow_id: "demo_flow",
+        run_id: "wf-1",
+        step_id: "step_b",
+        step_index: 2,
+        total_steps: 2,
+        attempt: 1,
+      },
+      130
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_failed",
+        workflow_id: "demo_flow",
+        run_id: "wf-1",
+        step_id: "step_b",
+        step_index: 2,
+        total_steps: 2,
+        duration_ms: 5,
+        error: "RuntimeError: kaboom",
+        failure_policy: "fail_workflow",
+        attempt: 1,
+      },
+      140
+    );
+    const steps = state.messages[0].workflowSteps;
+    expect(steps).toHaveLength(1);
+    expect(steps?.[0]).toMatchObject({
+      status: "failed",
+      error: "RuntimeError: kaboom",
+      failure_policy: "fail_workflow",
+      duration_ms: 5,
+    });
+  });
+
+  it("workflow step events for multiple steps preserve insertion order", () => {
+    let state = freshState();
+    const base = {
+      workflow_id: "demo_flow" as const,
+      run_id: "wf-2" as const,
+      total_steps: 2,
+      attempt: 1,
+    };
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_started",
+        ...base,
+        step_id: "step_a",
+        step_index: 1,
+      },
+      110
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_ended",
+        ...base,
+        step_id: "step_a",
+        step_index: 1,
+        duration_ms: 10,
+      },
+      115
+    );
+    state = reduceEvent(
+      state,
+      {
+        type: "workflow_step_started",
+        ...base,
+        step_id: "step_b",
+        step_index: 2,
+      },
+      120
+    );
+    const ids = state.messages[0].workflowSteps?.map((step) => step.step_id);
+    expect(ids).toEqual(["step_a", "step_b"]);
+    const statuses = state.messages[0].workflowSteps?.map((step) => step.status);
+    expect(statuses).toEqual(["ok", "running"]);
   });
 
   it("returns state unchanged when no streaming message is active", () => {

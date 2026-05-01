@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from pydantic import BaseModel
 
@@ -20,13 +20,26 @@ __all__ = [
     "EvidenceRequirement",
     "SandboxSpec",
     "ToolAccessScope",
+    "ToolClassificationError",
     "ToolInterruptBehavior",
     "ToolManifestEntry",
     "ToolPolicyMetadata",
     "ToolRegistry",
     "build_tool_manifest_entry",
     "build_tool_registry",
+    "is_concurrency_safe_tier",
+    "partition_manifests_by_risk",
+    "validate_tool_classifications",
 ]
+
+
+class ToolClassificationError(ValueError):
+    """Raised when a tool manifest combines flags that contradict each other.
+
+    Surfaced at boot so a misclassified tool never reaches the runtime
+    dispatch path, where the read-only/destructive partition would silently
+    do the wrong thing.
+    """
 
 
 @dataclass(frozen=True)
@@ -125,15 +138,17 @@ _POLICY_OVERRIDES: dict[str, ToolPolicyMetadata] = {
         activity_summary_hint="State the code goal and the data or files it will touch before executing it.",
         result_summary_hint="Summarize the computed result, warnings, and any files or variables materially changed.",
     ),
-    "fetch_url": ToolPolicyMetadata(access_scope="inspection"),
-    "http_json": ToolPolicyMetadata(access_scope="inspection"),
+    "fetch_url": ToolPolicyMetadata(access_scope="inspection", verifier_exposed=True),
+    "http_json": ToolPolicyMetadata(access_scope="inspection", verifier_exposed=True),
     "ncbi_eutils": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
+        verifier_exposed=True,
     ),
     "evidence_retrieval": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
+        verifier_exposed=True,
     ),
     "evidence_review": ToolPolicyMetadata(
         access_scope="execution",
@@ -147,12 +162,14 @@ _POLICY_OVERRIDES: dict[str, ToolPolicyMetadata] = {
     "uniprot_api": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
+        verifier_exposed=True,
     ),
     "ensembl_api": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
+        verifier_exposed=True,
     ),
-    "read_file": ToolPolicyMetadata(access_scope="inspection"),
+    "read_file": ToolPolicyMetadata(access_scope="inspection", verifier_exposed=True),
     "write_file": ToolPolicyMetadata(
         access_scope="execution",
         destructive=True,
@@ -164,9 +181,21 @@ _POLICY_OVERRIDES: dict[str, ToolPolicyMetadata] = {
     "search_knowledge_base": ToolPolicyMetadata(
         access_scope="inspection",
         evidence_requirement="recommended",
+        verifier_exposed=True,
     ),
     "plan_agent": ToolPolicyMetadata(access_scope="inspection"),
     "verification_agent": ToolPolicyMetadata(access_scope="inspection"),
+}
+
+# Tools that are read-only (so would normally be planner-exposed) but whose
+# planner visibility is intentionally suppressed to nudge the planner toward a
+# richer sibling tool. See issue #126 — the raw ``ncbi_eutils`` wrapper is
+# redundant with ``evidence_retrieval`` for planner-level literature work
+# because the latter also persists durable BioAPEX evidence cards. The main
+# agent and skills still see ``ncbi_eutils``; only the planner helper agent
+# has it hidden.
+_PLANNER_HIDDEN_TOOL_NAMES = {
+    "ncbi_eutils",
 }
 
 _READ_ONLY_TOOL_NAMES = {
@@ -242,8 +271,8 @@ def build_tool_manifest_entry(tool: Any) -> ToolManifestEntry:
     read_only = policy.read_only or tool.name in _READ_ONLY_TOOL_NAMES
     destructive = policy.destructive
     concurrency_safe = policy.concurrency_safe or tool.name in _CONCURRENCY_SAFE_TOOL_NAMES
-    planner_exposed = policy.planner_exposed or read_only
-    verifier_exposed = policy.verifier_exposed or read_only
+    planner_exposed = (policy.planner_exposed or read_only) and tool.name not in _PLANNER_HIDDEN_TOOL_NAMES
+    verifier_exposed = policy.verifier_exposed and not policy.destructive
     interrupt_behavior = policy.interrupt_behavior or _default_interrupt_behavior(
         read_only=read_only,
         destructive=destructive,
@@ -284,3 +313,74 @@ def build_tool_manifest_entry(tool: Any) -> ToolManifestEntry:
 def build_tool_registry(base_dir: Path, tools: list[Any]) -> ToolRegistry:
     manifests = tuple(build_tool_manifest_entry(tool) for tool in tools)
     return ToolRegistry(tools=tuple(tools), manifests=manifests)
+
+
+def is_concurrency_safe_tier(manifest: ToolManifestEntry) -> bool:
+    """True when the manifest is safe to dispatch alongside others via gather.
+
+    The risk-tier rule is: read-only, concurrency-safe, and not destructive.
+    Any tool that fails this check runs in the serial (destructive) tier.
+    """
+    return (
+        manifest.read_only
+        and manifest.concurrency_safe
+        and not manifest.destructive
+    )
+
+
+def partition_manifests_by_risk(
+    manifests: Iterable[ToolManifestEntry],
+) -> tuple[tuple[ToolManifestEntry, ...], tuple[ToolManifestEntry, ...]]:
+    """Split manifests into (concurrency_safe_tier, destructive_tier).
+
+    Preserves input order within each tier so downstream dispatchers can
+    line results up against the original call list.
+    """
+    parallel: list[ToolManifestEntry] = []
+    serial: list[ToolManifestEntry] = []
+    for manifest in manifests:
+        if is_concurrency_safe_tier(manifest):
+            parallel.append(manifest)
+        else:
+            serial.append(manifest)
+    return tuple(parallel), tuple(serial)
+
+
+def validate_tool_classifications(
+    manifests: Iterable[ToolManifestEntry],
+) -> None:
+    """Refuse to accept a manifest set with contradictory risk flags.
+
+    Enforced invariants:
+
+    * ``destructive`` and ``read_only`` cannot both be true — a read-only
+      tool by definition has no side effects to roll back.
+    * ``destructive`` and ``concurrency_safe`` cannot both be true — the
+      parallel tier must never contain a tool that mutates shared state.
+    * ``concurrency_safe`` requires ``read_only`` — the batch dispatcher
+      only gathers reads; a concurrency-safe-but-not-read-only manifest
+      would be routed to parallel when it must not be.
+
+    Called at app startup (``backend/app.py`` lifespan) so a miscategorised
+    tool aborts boot rather than corrupting a live turn.
+    """
+    errors: list[str] = []
+    for manifest in manifests:
+        name = manifest.name
+        if manifest.destructive and manifest.read_only:
+            errors.append(
+                f"{name!r}: cannot be both destructive and read_only"
+            )
+        if manifest.destructive and manifest.concurrency_safe:
+            errors.append(
+                f"{name!r}: cannot be both destructive and concurrency_safe"
+            )
+        if manifest.concurrency_safe and not manifest.read_only:
+            errors.append(
+                f"{name!r}: concurrency_safe requires read_only=True"
+            )
+    if errors:
+        raise ToolClassificationError(
+            "Misclassified tool manifests detected:\n  - "
+            + "\n  - ".join(errors)
+        )

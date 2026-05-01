@@ -24,6 +24,8 @@ export default function UsagePanel() {
     currentSessionId,
     messages,
     isStreaming,
+    parseErrorCount,
+    requestIdMismatchCount,
   } = useApp();
 
   const [tokens, setTokens] = useState<TokenStats | null>(null);
@@ -172,6 +174,18 @@ export default function UsagePanel() {
                 label="Tools"
                 value={sessionUsage.tool_tokens.toLocaleString()}
               />
+              {parseErrorCount > 0 ? (
+                <UsageMetricRow
+                  label="Parse errors"
+                  value={parseErrorCount.toLocaleString()}
+                />
+              ) : null}
+              {requestIdMismatchCount > 0 ? (
+                <UsageMetricRow
+                  label="Request-id drops"
+                  value={requestIdMismatchCount.toLocaleString()}
+                />
+              ) : null}
             </div>
 
             <div className="space-y-1.5 pt-0.5">

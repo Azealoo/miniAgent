@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal, Sequence
 
 import config
+from langchain_core.messages import BaseMessage
 from langchain_deepseek import ChatDeepSeek
 from langchain_openai import ChatOpenAI
+
+_logger = logging.getLogger(__name__)
 
 ModelRole = Literal["executor", "planner", "verifier", "title"]
 ModelProvider = Literal["deepseek", "openai"]
@@ -22,6 +27,9 @@ class RoleModelConfig:
     temperature: float
     streaming: bool
     seed: int | None = None
+    fallback_model: str | None = None
+    max_tokens: int = 0
+    escalated_max_tokens: int = 0
 
 
 _ROLE_DEFAULTS: dict[ModelRole, dict[str, object]] = {
@@ -31,6 +39,7 @@ _ROLE_DEFAULTS: dict[ModelRole, dict[str, object]] = {
         "base_url": "https://api.deepseek.com",
         "temperature": 0.3,
         "streaming": True,
+        "fallback_model": None,
     },
     "planner": {
         "provider": "openai",
@@ -38,6 +47,7 @@ _ROLE_DEFAULTS: dict[ModelRole, dict[str, object]] = {
         "base_url": "https://api.openai.com/v1",
         "temperature": 0.2,
         "streaming": True,
+        "fallback_model": None,
     },
     "verifier": {
         "provider": "openai",
@@ -45,6 +55,7 @@ _ROLE_DEFAULTS: dict[ModelRole, dict[str, object]] = {
         "base_url": "https://api.openai.com/v1",
         "temperature": 0.2,
         "streaming": True,
+        "fallback_model": None,
     },
     "title": {
         "provider": "openai",
@@ -52,6 +63,7 @@ _ROLE_DEFAULTS: dict[ModelRole, dict[str, object]] = {
         "base_url": "https://api.openai.com/v1",
         "temperature": 0.2,
         "streaming": False,
+        "fallback_model": None,
     },
 }
 
@@ -173,6 +185,19 @@ def get_role_model_config(role: ModelRole, *, streaming: bool | None = None) -> 
         # Deterministic mode pins temperature to 0 regardless of per-role setting.
         temperature = 0.0
 
+    fallback_model_setting = (
+        os.getenv(f"{_role_env_prefix(role)}_FALLBACK_MODEL")
+        or role_settings.get("fallback_model")
+        or llm_settings.get("fallback_model")
+        or defaults.get("fallback_model")
+    )
+    if isinstance(fallback_model_setting, str):
+        fallback_model_setting = fallback_model_setting.strip() or None
+    elif fallback_model_setting is not None:
+        fallback_model_setting = None
+
+    default_cap, escalated_cap = config.get_llm_output_token_caps()
+
     return RoleModelConfig(
         role=role,
         provider=provider,
@@ -182,6 +207,9 @@ def get_role_model_config(role: ModelRole, *, streaming: bool | None = None) -> 
         temperature=temperature,
         streaming=resolved_streaming,
         seed=seed,
+        fallback_model=fallback_model_setting,
+        max_tokens=default_cap,
+        escalated_max_tokens=escalated_cap,
     )
 
 
@@ -189,10 +217,14 @@ def role_model_is_configured(role: ModelRole) -> bool:
     return bool(get_role_model_config(role).api_key.strip())
 
 
-def build_chat_model(role: ModelRole, *, streaming: bool | None = None):
-    settings = get_role_model_config(role, streaming=streaming)
+def _instantiate_chat_model(
+    settings: RoleModelConfig,
+    *,
+    model_override: str | None = None,
+    max_tokens_override: int | None = None,
+):
     kwargs: dict[str, object] = {
-        "model": settings.model,
+        "model": model_override or settings.model,
         "api_key": settings.api_key,
         "base_url": settings.base_url,
         "temperature": settings.temperature,
@@ -200,8 +232,159 @@ def build_chat_model(role: ModelRole, *, streaming: bool | None = None):
     }
     if settings.seed is not None:
         kwargs["seed"] = settings.seed
+    resolved_cap = (
+        max_tokens_override
+        if max_tokens_override is not None
+        else settings.max_tokens
+    )
+    if resolved_cap and resolved_cap > 0:
+        kwargs["max_tokens"] = int(resolved_cap)
     if settings.provider == "deepseek":
         return ChatDeepSeek(**kwargs)
     if settings.provider == "openai":
         return ChatOpenAI(**kwargs)
-    raise ValueError(f"Unsupported provider for role {role!r}: {settings.provider!r}")
+    raise ValueError(
+        f"Unsupported provider for role {settings.role!r}: {settings.provider!r}"
+    )
+
+
+def build_chat_model(
+    role: ModelRole,
+    *,
+    streaming: bool | None = None,
+    max_tokens_override: int | None = None,
+):
+    settings = get_role_model_config(role, streaming=streaming)
+    return _instantiate_chat_model(
+        settings, max_tokens_override=max_tokens_override
+    )
+
+
+def build_fallback_chat_model(role: ModelRole, *, streaming: bool | None = None):
+    """Return a chat model client built with the role's ``fallback_model``.
+
+    Returns ``None`` when the role has no ``fallback_model`` configured —
+    callers should treat this as "no fallback available" and re-raise the
+    original overload/timeout exception.
+    """
+    settings = get_role_model_config(role, streaming=streaming)
+    if not settings.fallback_model:
+        return None
+    return _instantiate_chat_model(settings, model_override=settings.fallback_model)
+
+
+_CAP_STOP_REASONS: frozenset[str] = frozenset({"length", "max_tokens"})
+
+
+def _extract_stop_reason(response: Any) -> str | None:
+    """Pull the normalized cap signal out of a LangChain chat-model response.
+
+    LangChain stores provider-specific finish reasons under
+    ``response_metadata['finish_reason']`` for OpenAI/DeepSeek and
+    ``response_metadata['stop_reason']`` for Anthropic. We inspect both so
+    the escalation logic works uniformly if the provider ever changes.
+    """
+    metadata = getattr(response, "response_metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    for key in ("finish_reason", "stop_reason"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _response_hit_cap(response: Any) -> bool:
+    return _extract_stop_reason(response) in _CAP_STOP_REASONS
+
+
+async def invoke_with_escalation(
+    role: ModelRole,
+    messages: Sequence[BaseMessage],
+    *,
+    model: Any | None = None,
+    base_dir: Path | str | None = None,
+    session_id: str | None = None,
+    run_id: str | None = None,
+    streaming: bool | None = False,
+) -> Any:
+    """Invoke a role's chat model with the default output-token cap and
+    escalate once to the larger cap when the provider reports the response
+    was truncated at the cap.
+
+    Each escalation (successful retry, retry failure, or still-capped result)
+    is recorded to the audit log via ``append_llm_escalation_event`` when
+    ``base_dir`` is provided. Non-streaming ``ainvoke`` is used so the caller
+    receives a single materialised ``AIMessage`` whose ``response_metadata``
+    can be inspected — streaming callsites need a different strategy.
+
+    ``model`` may be a pre-built chat model (e.g. the instance the
+    ``AgentManager`` already holds). The retry always rebuilds through
+    ``build_chat_model`` so the escalated cap reaches the provider kwargs.
+    """
+    settings = get_role_model_config(role, streaming=streaming)
+    default_cap = settings.max_tokens
+    escalated_cap = settings.escalated_max_tokens
+
+    if model is None:
+        model = build_chat_model(role, streaming=streaming)
+    response = await model.ainvoke(list(messages))
+
+    if (
+        default_cap <= 0
+        or escalated_cap <= default_cap
+        or not _response_hit_cap(response)
+    ):
+        return response
+
+    stop_reason = _extract_stop_reason(response)
+    _logger.info(
+        "llm output-token cap hit for role=%s model=%s (stop_reason=%s); "
+        "escalating %d -> %d",
+        role,
+        settings.model,
+        stop_reason,
+        default_cap,
+        escalated_cap,
+    )
+
+    escalated_model = build_chat_model(
+        role,
+        streaming=streaming,
+        max_tokens_override=escalated_cap,
+    )
+
+    retry_error: str | None = None
+    retry_response: Any = None
+    try:
+        retry_response = await escalated_model.ainvoke(list(messages))
+    except Exception as exc:  # noqa: BLE001 — classify at the boundary
+        retry_error = str(exc)
+
+    if retry_error is not None:
+        outcome = "retry_failed"
+    elif _response_hit_cap(retry_response):
+        outcome = "still_capped"
+    else:
+        outcome = "retried"
+
+    if base_dir is not None:
+        from audit.store import append_llm_escalation_event
+
+        append_llm_escalation_event(
+            base_dir,
+            role=role,
+            provider=settings.provider,
+            model=settings.model,
+            default_max_tokens=default_cap,
+            escalated_max_tokens=escalated_cap,
+            outcome=outcome,
+            session_id=session_id,
+            run_id=run_id,
+            stop_reason=stop_reason,
+            error=retry_error,
+        )
+
+    if retry_error is not None:
+        return response
+    return retry_response

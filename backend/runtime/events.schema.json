@@ -21,6 +21,25 @@
           "title": "From Turn",
           "type": "integer"
         },
+        "phase": {
+          "anyOf": [
+            {
+              "enum": [
+                "snip",
+                "microcompact",
+                "collapse",
+                "autocompact"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Which rung of the progressive compaction ladder produced this event. Absent for legacy payloads predating the four-phase ladder (issue #82).",
+          "title": "Phase"
+        },
         "request_id": {
           "anyOf": [
             {
@@ -39,7 +58,7 @@
           "type": "integer"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -89,6 +108,18 @@
           "description": "Monotonic 1-based sequence number within a single turn.",
           "title": "Event Index"
         },
+        "exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnExit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Structured terminal-state payload introduced in schema_version=2. ``reason`` covers success|tool_error|user_abort|context_limit|token_budget|approval_denied|awaiting_approval and ``exit_code`` is shell-style (0 for success, non-zero per reason). Absent on v1 payloads during rollout but stamped on every producer path here."
+        },
         "request_id": {
           "anyOf": [
             {
@@ -103,7 +134,7 @@
           "title": "Request Id"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -127,7 +158,8 @@
                 "ok",
                 "awaiting_approval",
                 "budget_exceeded",
-                "error"
+                "error",
+                "cancelled"
               ],
               "type": "string"
             },
@@ -136,7 +168,7 @@
             }
           ],
           "default": null,
-          "description": "Terminal state of the turn. Absent or 'ok' means the turn completed normally; 'awaiting_approval' means the runtime paused on a gated tool and the client must call /api/chat/approval before the next turn.",
+          "description": "Legacy v1 terminal state indicator, retained for clients that have not migrated to the ``exit`` payload. New consumers must branch on ``exit.reason`` instead \u2014 the canonical taxonomy is defined there.",
           "title": "Turn Status"
         },
         "type": {
@@ -187,7 +219,7 @@
           "title": "Request Id"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -236,7 +268,7 @@
           "title": "Request Id"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -299,7 +331,7 @@
           "title": "Run Id"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -386,7 +418,7 @@
           "title": "Run Id"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -423,6 +455,70 @@
         "plan"
       ],
       "title": "PlanUpdatedRuntimeEvent",
+      "type": "object"
+    },
+    "RetrievalErrorRuntimeEvent": {
+      "additionalProperties": false,
+      "description": "Non-fatal signal that a RAG retrieval attempt raised.\n\nEmitted when ``MemoryIndexer.retrieve`` (or the LLM-probe fallback) throws\nduring the pre-turn retrieval phase. The turn itself continues \u2014 callers\nstill record a retrieval miss via the metrics collector \u2014 but the reviewer\nsees the failure in the UI instead of the old silent swallow.",
+      "properties": {
+        "error_type": {
+          "title": "Error Type",
+          "type": "string"
+        },
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
+        },
+        "schema_version": {
+          "default": 2,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "type": {
+          "const": "retrieval_error",
+          "default": "retrieval_error",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query",
+        "error_type",
+        "message"
+      ],
+      "title": "RetrievalErrorRuntimeEvent",
       "type": "object"
     },
     "RetrievalRuntimeEvent": {
@@ -468,7 +564,7 @@
           "type": "array"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -522,7 +618,7 @@
           "title": "Request Id"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -614,7 +710,7 @@
           "type": "string"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -685,7 +781,7 @@
           "type": "string"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -780,7 +876,7 @@
           "type": "string"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -843,7 +939,7 @@
           "type": "string"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -865,6 +961,50 @@
         "run_id"
       ],
       "title": "ToolStartRuntimeEvent",
+      "type": "object"
+    },
+    "TurnExit": {
+      "additionalProperties": false,
+      "description": "Structured terminal-state payload carried on every ``done`` event.\n\nReplaces the v1 convention of inferring exit state from ``turn_status``\nalone: callers should branch on ``reason`` and treat ``exit_code`` as the\nshell-style result (0 = success, non-zero = failure class).",
+      "properties": {
+        "exit_code": {
+          "description": "Shell-style exit code \u2014 0 for success, non-zero per reason.",
+          "title": "Exit Code",
+          "type": "integer"
+        },
+        "reason": {
+          "description": "Canonical exit reason for the turn.",
+          "enum": [
+            "success",
+            "tool_error",
+            "user_abort",
+            "context_limit",
+            "token_budget",
+            "approval_denied",
+            "awaiting_approval"
+          ],
+          "title": "Reason",
+          "type": "string"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional human-readable one-liner describing the exit.",
+          "title": "Summary"
+        }
+      },
+      "required": [
+        "reason",
+        "exit_code"
+      ],
+      "title": "TurnExit",
       "type": "object"
     },
     "VerificationResultRuntimeEvent": {
@@ -910,7 +1050,7 @@
           "title": "Run Id"
         },
         "schema_version": {
-          "default": 1,
+          "default": 2,
           "description": "Version of the RuntimeEvent schema this event conforms to.",
           "title": "Schema Version",
           "type": "integer"
@@ -963,6 +1103,388 @@
       ],
       "title": "VerificationResultRuntimeEvent",
       "type": "object"
+    },
+    "WarningRuntimeEvent": {
+      "additionalProperties": false,
+      "description": "Non-fatal diagnostic surfaced to the user during a turn.\n\nEmitted just before ``done`` when a runtime check finds a condition the\nreviewer should see but that does not interrupt response delivery. The\ncanonical use case is ``kind == \"citation_mismatch\"``: the final answer\ncited PMIDs that are not present on any evidence card included in this\nturn's ``evidence_review`` artifact.",
+      "properties": {
+        "cited": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Cited",
+          "type": "array"
+        },
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
+        },
+        "included": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Included",
+          "type": "array"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "missing": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing",
+          "type": "array"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
+        },
+        "review_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review Path"
+        },
+        "schema_version": {
+          "default": 2,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "type": {
+          "const": "warning",
+          "default": "warning",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "title": "WarningRuntimeEvent",
+      "type": "object"
+    },
+    "WorkflowStepEndedRuntimeEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_ms": {
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
+        },
+        "outputs": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Outputs"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": 2,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "step_id": {
+          "title": "Step Id",
+          "type": "string"
+        },
+        "step_index": {
+          "minimum": 1,
+          "title": "Step Index",
+          "type": "integer"
+        },
+        "total_steps": {
+          "minimum": 1,
+          "title": "Total Steps",
+          "type": "integer"
+        },
+        "type": {
+          "const": "workflow_step_ended",
+          "default": "workflow_step_ended",
+          "title": "Type",
+          "type": "string"
+        },
+        "workflow_id": {
+          "title": "Workflow Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workflow_id",
+        "run_id",
+        "step_id",
+        "step_index",
+        "total_steps",
+        "duration_ms"
+      ],
+      "title": "WorkflowStepEndedRuntimeEvent",
+      "type": "object"
+    },
+    "WorkflowStepFailedRuntimeEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "error": {
+          "title": "Error",
+          "type": "string"
+        },
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
+        },
+        "failure_policy": {
+          "enum": [
+            "fail_workflow",
+            "block_workflow",
+            "continue_with_warning"
+          ],
+          "title": "Failure Policy",
+          "type": "string"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": 2,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "step_id": {
+          "title": "Step Id",
+          "type": "string"
+        },
+        "step_index": {
+          "minimum": 1,
+          "title": "Step Index",
+          "type": "integer"
+        },
+        "total_steps": {
+          "minimum": 1,
+          "title": "Total Steps",
+          "type": "integer"
+        },
+        "type": {
+          "const": "workflow_step_failed",
+          "default": "workflow_step_failed",
+          "title": "Type",
+          "type": "string"
+        },
+        "workflow_id": {
+          "title": "Workflow Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workflow_id",
+        "run_id",
+        "step_id",
+        "step_index",
+        "total_steps",
+        "duration_ms",
+        "error",
+        "failure_policy"
+      ],
+      "title": "WorkflowStepFailedRuntimeEvent",
+      "type": "object"
+    },
+    "WorkflowStepStartedRuntimeEvent": {
+      "additionalProperties": false,
+      "description": "Emitted by the workflow runner before it invokes a step's executor.\n\n``run_id`` identifies the workflow run (stable across all three step events\nfor the same invocation); ``step_id`` identifies the step within the spec.\nTransport-only \u2014 not persisted in session JSON.",
+      "properties": {
+        "attempt": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "event_index": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Monotonic 1-based sequence number within a single turn.",
+          "title": "Event Index"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable per-turn identifier stamped by the transport adapter.",
+          "title": "Request Id"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": 2,
+          "description": "Version of the RuntimeEvent schema this event conforms to.",
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "step_id": {
+          "title": "Step Id",
+          "type": "string"
+        },
+        "step_index": {
+          "minimum": 1,
+          "title": "Step Index",
+          "type": "integer"
+        },
+        "total_steps": {
+          "minimum": 1,
+          "title": "Total Steps",
+          "type": "integer"
+        },
+        "type": {
+          "const": "workflow_step_started",
+          "default": "workflow_step_started",
+          "title": "Type",
+          "type": "string"
+        },
+        "workflow_id": {
+          "title": "Workflow Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workflow_id",
+        "run_id",
+        "step_id",
+        "step_index",
+        "total_steps"
+      ],
+      "title": "WorkflowStepStartedRuntimeEvent",
+      "type": "object"
     }
   },
   "discriminator": {
@@ -974,18 +1496,26 @@
       "plan_created": "#/$defs/PlanCreatedRuntimeEvent",
       "plan_updated": "#/$defs/PlanUpdatedRuntimeEvent",
       "retrieval": "#/$defs/RetrievalRuntimeEvent",
+      "retrieval_error": "#/$defs/RetrievalErrorRuntimeEvent",
       "token": "#/$defs/TokenRuntimeEvent",
       "tool_awaiting_approval": "#/$defs/ToolAwaitingApprovalRuntimeEvent",
       "tool_chunk": "#/$defs/ToolChunkRuntimeEvent",
       "tool_end": "#/$defs/ToolEndRuntimeEvent",
       "tool_start": "#/$defs/ToolStartRuntimeEvent",
-      "verification_result": "#/$defs/VerificationResultRuntimeEvent"
+      "verification_result": "#/$defs/VerificationResultRuntimeEvent",
+      "warning": "#/$defs/WarningRuntimeEvent",
+      "workflow_step_ended": "#/$defs/WorkflowStepEndedRuntimeEvent",
+      "workflow_step_failed": "#/$defs/WorkflowStepFailedRuntimeEvent",
+      "workflow_step_started": "#/$defs/WorkflowStepStartedRuntimeEvent"
     },
     "propertyName": "type"
   },
   "oneOf": [
     {
       "$ref": "#/$defs/RetrievalRuntimeEvent"
+    },
+    {
+      "$ref": "#/$defs/RetrievalErrorRuntimeEvent"
     },
     {
       "$ref": "#/$defs/TokenRuntimeEvent"
@@ -1018,10 +1548,22 @@
       "$ref": "#/$defs/CompactionRuntimeEvent"
     },
     {
+      "$ref": "#/$defs/WarningRuntimeEvent"
+    },
+    {
       "$ref": "#/$defs/DoneRuntimeEvent"
     },
     {
       "$ref": "#/$defs/ErrorRuntimeEvent"
+    },
+    {
+      "$ref": "#/$defs/WorkflowStepStartedRuntimeEvent"
+    },
+    {
+      "$ref": "#/$defs/WorkflowStepEndedRuntimeEvent"
+    },
+    {
+      "$ref": "#/$defs/WorkflowStepFailedRuntimeEvent"
     }
   ]
 }

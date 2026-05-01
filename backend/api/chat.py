@@ -15,11 +15,26 @@ SSE event types emitted:
   plan_updated {type, summary, plan, tool_trace?, run_id?}
   verification_result {type, summary, verdict, verification, tool_trace?, run_id?}
   new_response {type}
-  done         {type, content, session_id, turn_status?}
+  done         {type, content, session_id, turn_status?, exit}
   error        {type, error}
+  warning      {type, kind, message, ...}
+
+The terminal ``done`` event carries a structured ``exit`` object
+(``reason``/``exit_code``/``summary?``) on schema_version=2. Legacy v1 clients
+can send ``X-Runtime-Event-Schema-Version: 1`` to receive a one-shot
+``warning`` with ``kind="schema_version_deprecated"`` before the stream body;
+``turn_status`` remains populated for back-compat.
 
 Event shaping and persistence live in ``runtime.query_engine.QueryEngine``;
 this route is intentionally limited to request plumbing.
+
+Concurrency: turns for the same ``session_id`` are serialized via a
+per-session ``asyncio.Lock`` obtained from ``SessionManager.get_or_create_turn_lock``.
+If a request arrives while another turn for that session is still streaming,
+this endpoint responds with HTTP 409 ``session busy`` rather than queueing —
+double-clicks and client retries fail fast instead of silently interleaving
+writes to session JSON, memory, or the turn ledger. The lock is released when
+the stream finishes (including on exceptions and client disconnects).
 
 POST /api/chat/approval records a reviewer's approve/deny decision for a gated
 tool call. A turn that hit ``tool_awaiting_approval`` ends with
@@ -29,7 +44,7 @@ proceed (on approve) or route around the tool (on deny).
 """
 from typing import Literal
 
-from access_control import require_execution_access
+from access_control import require_execution_access, scope_satisfies
 from audit.store import append_tool_approval_decision_event
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -115,13 +130,59 @@ async def chat(request: ChatRequest, http_request: Request = None):
 
     from graph.agent import agent_manager
 
+    session_manager = agent_manager.session_manager
+    if session_manager is None:
+        raise HTTPException(status_code=503, detail="Agent runtime is not initialized.")
+
+    # Defence-in-depth: ``require_execution_access`` above proves the *current*
+    # request is execution-eligible. This second check proves the *session*
+    # itself was bound to a scope that permits execution — preventing scope
+    # confusion when a session is created in a lower tier (e.g. inspection)
+    # but a later request happens to present an execution-tier credential.
+    session_scope = session_manager.get_session_access_scope(request.session_id)
+    if not scope_satisfies(session_scope, "execution"):
+        raise HTTPException(
+            status_code=403,
+            detail="Session scope is insufficient to start a chat turn.",
+        )
+
+    turn_lock = session_manager.get_or_create_turn_lock(request.session_id)
+    # Non-blocking check-then-acquire. ``asyncio.Lock.acquire()`` completes
+    # synchronously when the lock is free, so there is no yield point between
+    # the ``locked()`` check and ``acquire()`` — another coroutine cannot slip
+    # in between them.
+    if turn_lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="Another turn is already streaming for this session_id.",
+        )
+    await turn_lock.acquire()
+
+    client_schema_version: int | None = None
+    if http_request is not None:
+        raw_version = http_request.headers.get("x-runtime-event-schema-version")
+        if raw_version is not None:
+            try:
+                client_schema_version = int(raw_version.strip())
+            except ValueError:
+                client_schema_version = None
+
     engine = QueryEngine(agent_manager)
-    stream = engine.stream_turn_sse(
+    inner_stream = engine.stream_turn_sse(
         message=request.message,
         session_id=request.session_id,
+        client_schema_version=client_schema_version,
     )
+
+    async def _locked_stream():
+        try:
+            async for chunk in inner_stream:
+                yield chunk
+        finally:
+            turn_lock.release()
+
     return StreamingResponse(
-        stream,
+        _locked_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -15,12 +15,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from graph.prompt_builder import (
     EVICTION_ORDER,
+    KNOWN_SECTION_IDS,
     MAX_COMPONENT_CHARS,
     MAX_MEMORY_INDEX_CHARS,
     MAX_RETRIEVED_MEMORY_BLOCK_CHARS,
+    SECTIONS_IN_STABLE_PREFIX,
+    STATIC_GUIDANCE_SECTION_IDS,
     _apply_eviction,
+    _assemble_sections,
+    build_anthropic_system_blocks,
     build_retrieved_memory_block,
     build_system_prompt,
+    build_system_prompt_blocks,
 )
 from graph.skill_router import select_skill_entries_for_query
 
@@ -881,11 +887,14 @@ def test_property_total_prompt_under_sum_of_section_budgets(tmp_path, seed):
         + budget["memory_index_max_chars"]
         + budget["scoped_memory_block_max_chars"]
     )
-    # The static Tool Result Error Contract guidance is always present and
-    # never evicted; account for it explicitly so the bound is meaningful.
-    static_guidance_len = len(
-        "<!-- Tool Result Error Contract -->\n"
-    ) + 4_000  # generous upper bound for the guidance text.
+    # Static pinned guidance blocks (Tool Result Error Contract + Tool
+    # Selection Guidance) are always present and never evicted; account for
+    # them explicitly so the bound is meaningful.
+    static_guidance_len = (
+        len("<!-- Tool Result Error Contract -->\n")
+        + len("<!-- Tool Selection Guidance -->\n")
+        + 6_000  # generous upper bound covering both guidance bodies.
+    )
     truncation_slack = 200  # accommodates per-section truncate markers.
 
     assert len(prompt) <= sum_caps + static_guidance_len + truncation_slack
@@ -1010,3 +1019,257 @@ def test_apply_eviction_disabled_when_total_zero():
     ]
     survived = _apply_eviction(sections, total_max_chars=0)
     assert survived == sections
+
+
+# ── Prompt-cache prefix stability tests (issue #66) ─────────────────────
+# The stable prefix (SKILLS_SNAPSHOT, workspace/*.md, ancestor AGENTS.md /
+# CLAW.md, pinned tool-result contract, RAG memory guidance) must stay
+# byte-identical across turns with varying per-turn state (git status,
+# memory index, scoped-memory listing). Otherwise provider-side prompt
+# caching (DeepSeek / OpenAI automatic prefix caching, Anthropic cache_control)
+# cannot reuse the KV cache across consecutive turns.
+
+
+def _init_git_repo(workspace: Path) -> None:
+    subprocess.run(["git", "init", "--quiet"], cwd=workspace, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "tests@example.com"],
+        cwd=workspace,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Prompt Builder Tests"],
+        cwd=workspace,
+        check=True,
+    )
+    # Disable commit signing for the test repo — some sandboxed environments
+    # configure a global signing hook that fails on throwaway repos.
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"],
+        cwd=workspace,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "tag.gpgsign", "false"],
+        cwd=workspace,
+        check=True,
+    )
+    (workspace / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=workspace, check=True)
+    result = subprocess.run(
+        ["git", "commit", "-m", "init", "--quiet"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(
+            "git commit unavailable in this environment (possibly signing-gated); "
+            f"stderr={result.stderr.strip()!r}"
+        )
+
+
+class TestPromptCachePrefix:
+    def test_stable_prefix_contains_all_cache_eligible_sections(self, workspace):
+        stable, volatile = build_system_prompt_blocks(workspace, rag_mode=False)
+        # The cache-eligible tags land in the stable prefix.
+        for tag in [
+            "<!-- Skills Snapshot -->",
+            "<!-- Soul -->",
+            "<!-- Identity -->",
+            "<!-- User Profile -->",
+            "<!-- Agents Guide -->",
+            "<!-- Tool Result Error Contract -->",
+        ]:
+            assert tag in stable, f"{tag} missing from stable prefix"
+            assert tag not in volatile, f"{tag} leaked into volatile suffix"
+        # And the volatile per-turn sections land in the suffix (not the prefix).
+        assert "<!-- Long-term Memory -->" in volatile
+        assert "<!-- Long-term Memory -->" not in stable
+
+    def test_rag_mode_keeps_memory_guidance_in_stable_prefix(self, workspace):
+        stable, volatile = build_system_prompt_blocks(workspace, rag_mode=True)
+        # The RAG memory guidance is a static string — it belongs in the prefix.
+        assert "Long-term Memory" in stable
+        assert "RAG" in stable or "Retrieval" in stable
+        # No volatile memory index in RAG mode (it's substituted by guidance).
+        assert volatile == ""
+
+    def test_stable_prefix_comes_before_volatile_suffix_in_concat(self, workspace):
+        prompt = build_system_prompt(workspace, rag_mode=False)
+        # Every stable-prefix marker appears before the first volatile marker.
+        memory_pos = prompt.find("<!-- Long-term Memory -->")
+        assert memory_pos > 0
+        for tag in [
+            "<!-- Skills Snapshot -->",
+            "<!-- Soul -->",
+            "<!-- Identity -->",
+            "<!-- User Profile -->",
+            "<!-- Agents Guide -->",
+            "<!-- Tool Result Error Contract -->",
+        ]:
+            assert 0 <= prompt.find(tag) < memory_pos, (
+                f"stable section {tag!r} must precede volatile memory section"
+            )
+
+    def test_stable_prefix_is_byte_identical_across_10_turns_with_volatile_churn(
+        self,
+        workspace,
+        monkeypatch,
+    ):
+        """Simulate 10 turns with per-turn volatile state (git status + memory
+        index + scoped memory churn) and assert the stable prefix is
+        byte-identical every turn."""
+        _init_git_repo(workspace)
+        monkeypatch.setenv("BIOAPEX_PROMPT_INCLUDE_GIT_CONTEXT", "1")
+
+        # Pre-create scoped memory dirs so stale entries can be swapped in.
+        (workspace / "memory" / "project").mkdir(parents=True, exist_ok=True)
+
+        stable_prefixes: list[str] = []
+        for turn in range(10):
+            # Mutate per-turn volatile state only: git working tree, memory
+            # index content, and a scoped-memory entry.
+            (workspace / "tracked.txt").write_text(
+                f"turn-{turn} dirty state\n",
+                encoding="utf-8",
+            )
+            (workspace / "memory" / "MEMORY.md").write_text(
+                f"# Memory Index\n- turn {turn} pointer line\n",
+                encoding="utf-8",
+            )
+            (workspace / "memory" / "project" / "note.md").write_text(
+                (
+                    "---\n"
+                    "type: project_fact\n"
+                    f"name: Turn {turn} note\n"
+                    "description: Scoped note that changes per-turn.\n"
+                    "pinned: true\n"
+                    "updated_at: 2099-01-01T00:00:00Z\n"
+                    "---\nbody\n"
+                ),
+                encoding="utf-8",
+            )
+
+            stable, volatile = build_system_prompt_blocks(workspace, rag_mode=False)
+            stable_prefixes.append(stable)
+            # Volatile churn must actually reach the volatile suffix on every
+            # turn so we know we're testing the right thing.
+            assert f"turn {turn} pointer line" in volatile
+            assert f"Turn {turn} note" in volatile
+
+        # All 10 stable prefixes are byte-identical → provider-side prefix
+        # caching can reuse the attention KV for every turn after the first.
+        unique_prefixes = set(stable_prefixes)
+        assert len(unique_prefixes) == 1, (
+            "stable prefix drifted across turns: "
+            f"{len(unique_prefixes)} distinct variants observed"
+        )
+
+    def test_stable_prefix_captures_at_least_80_percent_of_prompt_mass(
+        self,
+        workspace,
+        monkeypatch,
+    ):
+        """Across a 10-turn fixture, the stable prefix must carry ≥ 80 % of
+        the average total prompt length. This is the hit-rate demonstration
+        asked for in issue #66: once the first turn has warmed the cache,
+        every subsequent turn's input gets ≥ 80 % cache-read tokens.
+        """
+        _init_git_repo(workspace)
+        monkeypatch.setenv("BIOAPEX_PROMPT_INCLUDE_GIT_CONTEXT", "1")
+        (workspace / "memory" / "project").mkdir(parents=True, exist_ok=True)
+
+        ratios: list[float] = []
+        for turn in range(10):
+            (workspace / "tracked.txt").write_text(
+                f"turn-{turn} dirty\n", encoding="utf-8"
+            )
+            (workspace / "memory" / "MEMORY.md").write_text(
+                f"# Memory Index\n- turn {turn} pointer\n",
+                encoding="utf-8",
+            )
+            stable, volatile = build_system_prompt_blocks(workspace, rag_mode=False)
+            total = len(stable) + len(volatile)
+            assert total > 0
+            ratios.append(len(stable) / total)
+
+        avg_ratio = sum(ratios) / len(ratios)
+        assert avg_ratio >= 0.80, (
+            f"stable prefix covers {avg_ratio:.1%} of prompt mass; "
+            "cache hit-rate target is ≥ 80%"
+        )
+
+    def test_sections_in_stable_prefix_matches_documented_membership(self):
+        # The cache-prefix membership set is the contract the runtime relies
+        # on to attach Anthropic ``cache_control`` breakpoints. Guard it so
+        # reshuffling sections requires an intentional update here.
+        assert SECTIONS_IN_STABLE_PREFIX == frozenset({
+            "skills_snapshot",
+            "soul",
+            "identity",
+            "user_profile",
+            "agents_guide",
+            "project_instructions",
+            "_tool_result_error_contract",
+            "_tool_selection_guidance",
+            "_rag_memory_guidance",
+        })
+
+    def test_known_section_ids_covers_stable_prefix_membership(self):
+        # Every id in SECTIONS_IN_STABLE_PREFIX must be a known section.
+        # A mismatch would silently drop a "stable" section from the cache
+        # prefix because the split uses set membership, not ordered tuples.
+        assert SECTIONS_IN_STABLE_PREFIX <= KNOWN_SECTION_IDS, (
+            "unknown ids in SECTIONS_IN_STABLE_PREFIX: "
+            f"{sorted(SECTIONS_IN_STABLE_PREFIX - KNOWN_SECTION_IDS)}"
+        )
+        # EVICTION_ORDER and STATIC_GUIDANCE_SECTION_IDS together define the
+        # closed set — with no overlap, since static guidance is never evicted.
+        assert set(EVICTION_ORDER).isdisjoint(STATIC_GUIDANCE_SECTION_IDS)
+        assert KNOWN_SECTION_IDS == frozenset(EVICTION_ORDER) | STATIC_GUIDANCE_SECTION_IDS
+
+    def test_assemble_sections_emits_no_orphan_ids(self, workspace):
+        # Every id emitted in either mode must be classified — otherwise the
+        # stable/volatile partition would silently treat a new section as
+        # volatile and drop it from the cache prefix.
+        for rag_mode in (False, True):
+            sections = _assemble_sections(
+                workspace, rag_mode, skill_entries=None
+            )
+            emitted_ids = {sid for sid, _ in sections}
+            orphans = emitted_ids - KNOWN_SECTION_IDS
+            assert not orphans, (
+                f"_assemble_sections emitted orphan ids (rag_mode={rag_mode}): "
+                f"{sorted(orphans)}"
+            )
+            # And each emitted id must be partitioned into exactly one of
+            # stable / volatile via SECTIONS_IN_STABLE_PREFIX.
+            for sid in emitted_ids:
+                assert (sid in SECTIONS_IN_STABLE_PREFIX) or (
+                    sid in KNOWN_SECTION_IDS - SECTIONS_IN_STABLE_PREFIX
+                ), f"section id {sid!r} is not classified as stable or volatile"
+
+
+class TestAnthropicSystemBlocks:
+    def test_emits_cache_control_breakpoint_on_stable_prefix_only(self):
+        blocks = build_anthropic_system_blocks("STABLE", "VOLATILE")
+        assert blocks == [
+            {"type": "text", "text": "STABLE", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "VOLATILE"},
+        ]
+
+    def test_skips_volatile_block_when_empty(self):
+        blocks = build_anthropic_system_blocks("STABLE", "")
+        assert blocks == [
+            {"type": "text", "text": "STABLE", "cache_control": {"type": "ephemeral"}},
+        ]
+
+    def test_skips_stable_block_when_empty(self):
+        # A degenerate prompt with no stable prefix should not emit a
+        # cache_control breakpoint — Anthropic would reject an empty block.
+        blocks = build_anthropic_system_blocks("", "VOLATILE")
+        assert blocks == [{"type": "text", "text": "VOLATILE"}]
+
+    def test_returns_empty_list_when_both_parts_empty(self):
+        assert build_anthropic_system_blocks("", "") == []

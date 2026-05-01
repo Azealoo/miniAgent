@@ -5,6 +5,7 @@ import React, {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -14,6 +15,11 @@ import {
   withScopeBearerToken,
 } from "./access-control";
 import * as api from "./api";
+import {
+  clearApiAuthState,
+  loadApiAuthState,
+  saveApiAuthState,
+} from "./auth-storage";
 import { useAccessScopeState } from "./access-scope-state";
 import {
   useSessionCatalog,
@@ -57,6 +63,18 @@ interface AppContextValue {
   sessionHistoryError: string | null;
   sessionContinuitySummaries: SessionContinuitySummary[];
   lastFailedTurn: FailedTurnState | null;
+  /**
+   * Count of malformed SSE payloads the parser has surfaced for the active
+   * session. Drives the parse-error row in UsagePanel so dropped events are
+   * observable instead of silently swallowed.
+   */
+  parseErrorCount: number;
+  /**
+   * Count of events the dispatcher dropped because their `request_id`
+   * didn't match the in-flight turn. Surfaced beside `parseErrorCount` in
+   * UsagePanel so stale-response drops are observable.
+   */
+  requestIdMismatchCount: number;
   draftMessage: string;
   draftRevision: number;
   inspectorTab: InspectorTab;
@@ -114,6 +132,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const apiAuthStateRef = useRef(apiAuthState);
 
   useEffect(() => {
+    // Hydrate persisted bearer tokens keyed by backend base URL so reloads
+    // don't force the user back through sign-in. Runs once on mount (client
+    // only) — the server-render pass leaves the empty initial state intact.
+    setApiAuthState(loadApiAuthState());
     setHasLoadedApiAuthState(true);
   }, []);
 
@@ -185,10 +207,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const setAccessToken = useCallback((scope: AccessScope, token: string) => {
-    setApiAuthState((current) => withScopeBearerToken(current, scope, token));
+    setApiAuthState((current) => {
+      const next = withScopeBearerToken(current, scope, token);
+      saveApiAuthState(next);
+      return next;
+    });
   }, []);
 
   const clearAccessTokens = useCallback(() => {
+    clearApiAuthState();
     setApiAuthState(clearAllBearerTokens());
   }, []);
 
@@ -232,50 +259,96 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [access.hasExecutionAccess, catalog]
   );
 
-  return (
-    <AppContext.Provider
-      value={{
-        apiAuthState,
-        accessByScope: access.accessByScope,
-        hasInspectionAccess: access.hasInspectionAccess,
-        hasExecutionAccess: access.hasExecutionAccess,
-        hasAdminAccess: access.hasAdminAccess,
-        sessions: catalog.sessions,
-        currentSessionId: catalog.currentSessionId,
-        messages: catalog.messages,
-        isStreaming: catalog.isStreaming,
-        isSessionLoading,
-        sessionListStatus: catalog.sessionListStatus,
-        sessionListError: catalog.sessionListError,
-        sessionHistoryStatus: catalog.sessionHistoryStatus,
-        sessionHistoryError: catalog.sessionHistoryError,
-        sessionContinuitySummaries: catalog.sessionContinuitySummaries,
-        lastFailedTurn: catalog.lastFailedTurn,
-        draftMessage,
-        draftRevision,
-        inspectorTab,
-        inspectorPreviewPath,
-        refreshSessions: catalog.refreshSessions,
-        reloadCurrentSession: catalog.reloadCurrentSession,
-        refreshAccessState: access.refreshAccessState,
-        createSession: catalog.createSession,
-        selectSession: catalog.selectSession,
-        deleteSession: catalog.deleteSession,
-        renameSession: catalog.renameSession,
-        sendMessage: catalog.sendMessage,
-        stopStreaming: catalog.stopStreaming,
-        clearLastFailedTurn: catalog.clearLastFailedTurn,
-        primeDraftMessage,
-        clearDraftMessage,
-        submitApprovalDecision,
-        setAccessToken,
-        clearAccessTokens,
-        setInspectorTab,
-        openInspectorPath,
-        clearInspectorPath,
-      }}
-    >
-      {children}
-    </AppContext.Provider>
+  // Memoize the context value so consumers that depend on `useApp()` don't
+  // re-render on every AppProvider render. Without this, the object literal
+  // rebuilds each render and defeats the child-level useCallback/React.memo
+  // guards downstream.
+  const contextValue = useMemo<AppContextValue>(
+    () => ({
+      apiAuthState,
+      accessByScope: access.accessByScope,
+      hasInspectionAccess: access.hasInspectionAccess,
+      hasExecutionAccess: access.hasExecutionAccess,
+      hasAdminAccess: access.hasAdminAccess,
+      sessions: catalog.sessions,
+      currentSessionId: catalog.currentSessionId,
+      messages: catalog.messages,
+      isStreaming: catalog.isStreaming,
+      isSessionLoading,
+      sessionListStatus: catalog.sessionListStatus,
+      sessionListError: catalog.sessionListError,
+      sessionHistoryStatus: catalog.sessionHistoryStatus,
+      sessionHistoryError: catalog.sessionHistoryError,
+      sessionContinuitySummaries: catalog.sessionContinuitySummaries,
+      lastFailedTurn: catalog.lastFailedTurn,
+      parseErrorCount: catalog.parseErrorCount,
+      requestIdMismatchCount: catalog.requestIdMismatchCount,
+      draftMessage,
+      draftRevision,
+      inspectorTab,
+      inspectorPreviewPath,
+      refreshSessions: catalog.refreshSessions,
+      reloadCurrentSession: catalog.reloadCurrentSession,
+      refreshAccessState: access.refreshAccessState,
+      createSession: catalog.createSession,
+      selectSession: catalog.selectSession,
+      deleteSession: catalog.deleteSession,
+      renameSession: catalog.renameSession,
+      sendMessage: catalog.sendMessage,
+      stopStreaming: catalog.stopStreaming,
+      clearLastFailedTurn: catalog.clearLastFailedTurn,
+      primeDraftMessage,
+      clearDraftMessage,
+      submitApprovalDecision,
+      setAccessToken,
+      clearAccessTokens,
+      setInspectorTab,
+      openInspectorPath,
+      clearInspectorPath,
+    }),
+    [
+      apiAuthState,
+      access.accessByScope,
+      access.hasInspectionAccess,
+      access.hasExecutionAccess,
+      access.hasAdminAccess,
+      access.refreshAccessState,
+      catalog.sessions,
+      catalog.currentSessionId,
+      catalog.messages,
+      catalog.isStreaming,
+      catalog.sessionListStatus,
+      catalog.sessionListError,
+      catalog.sessionHistoryStatus,
+      catalog.sessionHistoryError,
+      catalog.sessionContinuitySummaries,
+      catalog.lastFailedTurn,
+      catalog.parseErrorCount,
+      catalog.requestIdMismatchCount,
+      catalog.refreshSessions,
+      catalog.reloadCurrentSession,
+      catalog.createSession,
+      catalog.selectSession,
+      catalog.deleteSession,
+      catalog.renameSession,
+      catalog.sendMessage,
+      catalog.stopStreaming,
+      catalog.clearLastFailedTurn,
+      isSessionLoading,
+      draftMessage,
+      draftRevision,
+      inspectorTab,
+      inspectorPreviewPath,
+      primeDraftMessage,
+      clearDraftMessage,
+      submitApprovalDecision,
+      setAccessToken,
+      clearAccessTokens,
+      setInspectorTab,
+      openInspectorPath,
+      clearInspectorPath,
+    ]
   );
+
+  return <AppContext.Provider value={contextValue}>{children}</AppContext.Provider>;
 }

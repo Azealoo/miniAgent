@@ -7,6 +7,8 @@ import {
   RUNTIME_EVENT_SCHEMAS,
   RUNTIME_EVENT_TYPES,
   RUNTIME_EVENT_SCHEMA_VERSION,
+  TURN_EXIT_REASONS,
+  TurnExitSchema,
 } from "./runtime-events";
 
 interface BackendPropertySchema {
@@ -104,10 +106,48 @@ function minimalPayloadFor(eventType: string): Record<string, unknown> {
         summary: "Compacted early turns.",
         saved_tokens: 1200,
       };
+    case "warning":
+      return {
+        type: "warning",
+        kind: "citation_mismatch",
+        message: "Answer cites PMID 12345 but it is not in the evidence review.",
+      };
     case "done":
       return { type: "done", content: "final answer" };
     case "error":
       return { type: "error", error: "boom" };
+    case "workflow_step_started":
+      return {
+        type: "workflow_step_started",
+        workflow_id: "rna-seq-qc",
+        run_id: "wf-run-1",
+        step_id: "preflight_check",
+        step_index: 1,
+        total_steps: 2,
+        label: "Validate dataset manifest",
+      };
+    case "workflow_step_ended":
+      return {
+        type: "workflow_step_ended",
+        workflow_id: "rna-seq-qc",
+        run_id: "wf-run-1",
+        step_id: "preflight_check",
+        step_index: 1,
+        total_steps: 2,
+        duration_ms: 42,
+      };
+    case "workflow_step_failed":
+      return {
+        type: "workflow_step_failed",
+        workflow_id: "rna-seq-qc",
+        run_id: "wf-run-1",
+        step_id: "summarize_qc",
+        step_index: 2,
+        total_steps: 2,
+        duration_ms: 128,
+        error: "KeyError: min_genes",
+        failure_policy: "fail_workflow",
+      };
     default:
       throw new Error(`No minimal payload defined for ${eventType}`);
   }
@@ -201,6 +241,67 @@ describe("runtime-events zod schemas", () => {
       expect(schema, `${eventType} has a zod schema`).toBeDefined();
       const parsed = schema.safeParse(minimalPayloadFor(eventType));
       expect(parsed.success).toBe(true);
+    }
+  });
+
+  it("schema_version mirrors the backend contract at 2 (issue #90)", () => {
+    expect(RUNTIME_EVENT_SCHEMA_VERSION).toBe(2);
+  });
+
+  it("TurnExit zod schema accepts each taxonomy reason", () => {
+    for (const reason of TURN_EXIT_REASONS) {
+      const result = TurnExitSchema.safeParse({ reason, exit_code: 0 });
+      expect(result.success, `${reason} should parse`).toBe(true);
+    }
+  });
+
+  it("TurnExit zod schema rejects unknown reasons", () => {
+    const result = TurnExitSchema.safeParse({
+      reason: "definitely_not_real",
+      exit_code: 9,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("done accepts a structured exit payload", () => {
+    const parsed = parseRuntimeEvent({
+      type: "done",
+      content: "final",
+      exit: {
+        reason: "token_budget",
+        exit_code: 3,
+        summary: "turn budget exceeded",
+      },
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok && parsed.event.type === "done") {
+      expect(parsed.event.exit).toEqual({
+        reason: "token_budget",
+        exit_code: 3,
+        summary: "turn budget exceeded",
+      });
+    }
+  });
+
+  it("done rejects exit payloads with an unknown reason", () => {
+    const parsed = parseRuntimeEvent({
+      type: "done",
+      content: "final",
+      exit: { reason: "totally_invented", exit_code: 9 },
+    });
+    expect(parsed.ok).toBe(false);
+  });
+
+  it("warning accepts the schema_version_deprecated kind", () => {
+    const parsed = parseRuntimeEvent({
+      type: "warning",
+      kind: "schema_version_deprecated",
+      message:
+        "client requested RuntimeEvent schema_version=1; server is on 2.",
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok && parsed.event.type === "warning") {
+      expect(parsed.event.kind).toBe("schema_version_deprecated");
     }
   });
 });

@@ -13,6 +13,10 @@ import {
   getScopedSurfaceErrorMessage,
   shouldPromoteScopeError,
 } from "./surface-errors";
+import {
+  DEFAULT_ACCESS_PROBE_POLL_INTERVAL_MS,
+  useAccessProbe,
+} from "../hooks/useAccessProbe";
 import type { AccessScope, AccessScopeState } from "./types";
 
 export function buildCheckingAccessStates(
@@ -56,7 +60,8 @@ export interface UseAccessScopeStateResult {
 export function useAccessScopeState(
   apiAuthState: api.ApiAuthState,
   apiAuthStateRef: React.MutableRefObject<api.ApiAuthState>,
-  hasLoadedApiAuthState: boolean
+  hasLoadedApiAuthState: boolean,
+  pollIntervalMs: number = DEFAULT_ACCESS_PROBE_POLL_INTERVAL_MS
 ): UseAccessScopeStateResult {
   const [accessByScope, setAccessByScope] = useState<
     Record<AccessScope, AccessScopeState>
@@ -122,35 +127,20 @@ export function useAccessScopeState(
     );
   });
 
-  useEffect(() => {
-    if (!hasLoadedApiAuthState || typeof window === "undefined") {
-      return;
-    }
+  // Re-probe access after outages or server restarts without flashing the UI
+  // back into a blocking "checking" state. `runAccessProbe` is stable (auth
+  // state reads go through a ref), so the listener wiring is not reinstalled
+  // on every render.
+  const backgroundProbe = useCallback(() => {
+    void runAccessProbe(false);
+  }, [runAccessProbe]);
 
-    // Re-probe access after outages or server restarts without flashing the UI
-    // back into a blocking "checking" state.
-    const handleBackgroundProbe = () => {
-      if (!window.navigator.onLine) {
-        return;
-      }
-      void runAccessProbe(false);
-    };
-
-    window.addEventListener("focus", handleBackgroundProbe);
-    window.addEventListener("online", handleBackgroundProbe);
-
-    const intervalId = shouldPollAccessRecovery
-      ? window.setInterval(handleBackgroundProbe, 30_000)
-      : null;
-
-    return () => {
-      window.removeEventListener("focus", handleBackgroundProbe);
-      window.removeEventListener("online", handleBackgroundProbe);
-      if (intervalId !== null) {
-        window.clearInterval(intervalId);
-      }
-    };
-  }, [hasLoadedApiAuthState, runAccessProbe, shouldPollAccessRecovery]);
+  useAccessProbe({
+    probe: backgroundProbe,
+    enabled: hasLoadedApiAuthState,
+    shouldPoll: shouldPollAccessRecovery,
+    pollIntervalMs,
+  });
 
   const promoteInspectionScopeError = useCallback(
     (error: unknown) => {

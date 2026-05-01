@@ -1,7 +1,13 @@
 """Typed session content blocks, schema version, and id validators."""
 
 import re
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal
+
+# Pydantic >=2.12 requires ``typing_extensions.TypedDict`` on Python < 3.12 so
+# that TypeAdapter can build a core schema (see https://errors.pydantic.dev/
+# 2.13/u/typed-dict-version). Using the backport unconditionally keeps the
+# schema drift guard working on the CI image (Python 3.11).
+from typing_extensions import TypedDict
 
 # Only allow standard UUID v4 strings produced by uuid.uuid4().
 # This blocks path traversal payloads like "../config" or "../../etc/passwd".
@@ -11,6 +17,29 @@ _SESSION_ID_RE = re.compile(
 _ARCHIVE_ID_RE = re.compile(r"^\d+$")
 
 SESSION_SCHEMA_VERSION = "session.v3"
+
+
+class SessionCorruptError(Exception):
+    """Raised when a session JSON file cannot be decoded.
+
+    The corrupted file has been moved aside (see ``quarantine_path``) so the
+    next read returns an empty session — callers can surface a typed error
+    to the UI instead of silently overwriting the user's history.
+    """
+
+    def __init__(
+        self,
+        session_id: str,
+        quarantine_path: str,
+        *,
+        original_error: Exception | None = None,
+    ) -> None:
+        self.session_id = session_id
+        self.quarantine_path = quarantine_path
+        self.original_error = original_error
+        super().__init__(
+            f"Session {session_id!r} JSON was corrupt; quarantined at {quarantine_path}"
+        )
 
 
 class SessionTextBlock(TypedDict):
@@ -73,6 +102,16 @@ class SessionApprovalGateBlock(TypedDict, total=False):
     policy: dict[str, Any]
 
 
+class SessionWarningBlock(TypedDict, total=False):
+    type: Literal["warning"]
+    kind: str
+    message: str
+    missing: list[str]
+    cited: list[str]
+    included: list[str]
+    review_path: str
+
+
 class SessionArchiveIndexEntry(TypedDict):
     archive_id: str | None
     message_count: int
@@ -87,6 +126,7 @@ SessionContentBlock = (
     | SessionPlanBlock
     | SessionVerificationBlock
     | SessionApprovalGateBlock
+    | SessionWarningBlock
 )
 
 

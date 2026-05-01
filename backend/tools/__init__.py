@@ -6,7 +6,10 @@ from pathlib import Path
 import config
 
 from .policy_wrappers import build_policy_wrapped_tools
+from .prose_policy import register_prose_permission_hook
 from .registry import ToolManifestEntry, ToolRegistry, build_tool_registry
+
+register_prose_permission_hook()
 from .ensembl_api_tool import EnsemblApiTool
 from .fetch_url_tool import FetchURLTool
 from .http_json_tool import HttpJsonTool

@@ -6,7 +6,7 @@ from graph.session.session_schema import (
     SessionApprovalGateBlock, SessionContentBlock, SessionPlanBlock,
     SessionRetrievalBlock, SessionTextBlock, SessionToolResultBlock,
     SessionToolUseBlock, SessionUsageBlock, SessionVerificationBlock,
-    _tool_block_key,
+    SessionWarningBlock, _tool_block_key,
 )
 
 
@@ -169,6 +169,27 @@ def _normalize_blocks(value: Any) -> list[SessionContentBlock]:
                 block["tool_trace"] = [
                     dict(entry) for entry in tool_trace if isinstance(entry, dict)
                 ]
+            blocks.append(block)
+        elif block_type == "warning":
+            message = item.get("message")
+            if not isinstance(message, str):
+                continue
+            block: SessionWarningBlock = {
+                "type": "warning",
+                "kind": (
+                    item.get("kind")
+                    if isinstance(item.get("kind"), str) and item.get("kind")
+                    else "warning"
+                ),
+                "message": message,
+            }
+            for field in ("missing", "cited", "included"):
+                value = item.get(field)
+                if isinstance(value, list):
+                    block[field] = [entry for entry in value if isinstance(entry, str)]
+            review_path = item.get("review_path")
+            if isinstance(review_path, str) and review_path:
+                block["review_path"] = review_path
             blocks.append(block)
         elif block_type == "approval_gate":
             tool_name = item.get("tool")

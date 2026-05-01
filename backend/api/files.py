@@ -29,15 +29,25 @@ from audit.store import append_file_written_event
 from artifacts.public_urls import public_raw_file_url
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
-from graph.memory_types import validate_memory_write
+from graph.memory_writer import MemoryFrontmatterError, write_memory_file
 from hardening import is_secret_like_path
 from pydantic import BaseModel
+from rate_limit import check_rate_limit
 from starlette.requests import ClientDisconnect
 
 router = APIRouter()
 
-# Paths the API is allowed to serve (relative to base_dir)
-_READ_ALLOWED_PREFIXES = ("workspace/", "memory/", "skills/", "knowledge/", "artifacts/")
+# Paths the API is allowed to serve (relative to base_dir).
+# ``storage/tool-outputs/`` is included so the chat UI can fetch the full-text
+# spill file linked from a ``tool_output_overflow`` ToolArtifactRef (issue #129).
+_READ_ALLOWED_PREFIXES = (
+    "workspace/",
+    "memory/",
+    "skills/",
+    "knowledge/",
+    "artifacts/",
+    "storage/tool-outputs/",
+)
 _WRITE_ALLOWED_PREFIXES = ("workspace/", "memory/", "skills/", "knowledge/")
 # Streamed writes are gated strictly to artifacts/ so the editor POST whitelist
 # is not widened for large, tool-produced payloads.
@@ -46,6 +56,35 @@ _ALLOWED_ROOT_FILES = {"SKILLS_SNAPSHOT.md"}
 _MAX_SAVE_BYTES = 500_000  # 500 KB limit for writes via the editor API
 _STREAM_CHUNK_BYTES = 1 << 20  # 1 MiB per disk read/write, bounds peak memory
 _REFERENCE_SCHEMA_PREFIX = "artifacts/reference_schemas/"
+
+# Runtime config surfaces that are frozen once a turn starts. Live edits via
+# the file API would otherwise let an in-flight turn pick up a different tool
+# policy, hardening posture, or hook configuration than the one captured at
+# turn entry. ``.env`` files are additionally covered by ``is_secret_like_path``
+# but are listed here so the rejection message is explicit.
+_FROZEN_CONFIG_FILES = frozenset(
+    {
+        "config.json",
+        "config.local.json",
+        "runtime/hooks.py",
+    }
+)
+_FROZEN_CONFIG_SUFFIXES = (".env",)
+_FROZEN_CONFIG_MESSAGE = (
+    "Runtime config files are frozen once a turn starts and cannot be "
+    "rewritten through the file API. Set BIOAPEX_ALLOW_CONFIG_RELOAD=1 in "
+    "the backend environment to opt back into live edits during development."
+)
+
+
+def _is_frozen_config_path(clean: str) -> bool:
+    """Return True for paths that should be treated as frozen runtime config."""
+    if clean in _FROZEN_CONFIG_FILES:
+        return True
+    name = clean.rsplit("/", 1)[-1]
+    if name.startswith(".env") or any(name.endswith(s) for s in _FROZEN_CONFIG_SUFFIXES):
+        return True
+    return False
 
 
 def _base_dir() -> Path:
@@ -60,29 +99,48 @@ def _check_path(relative_path: str, *, write: bool = False) -> tuple[Path, str]:
 
     Returns (resolved_absolute_path, normalized_relative_path).
     Raises HTTPException on any violation.
+
+    Ordering contract: strip -> reject '..' -> resolve -> confirm under base
+    via relative_to() -> derive the normalized relative path from the resolved
+    target -> run frozen-config / whitelist / secret checks against that
+    derived path. Applying the whitelist to raw input is fragile (prefix-name
+    tricks, symlink traversal); deriving from the resolved target fixes that.
     """
     # Strip leading slash or ./
     clean = relative_path.strip().lstrip("/").removeprefix("./")
 
-    # Traversal guard (before whitelist check)
+    # Traversal guard — reject '..' before any disk access.
     if ".." in clean.split("/"):
         raise HTTPException(403, "Path traversal is not allowed.")
 
-    base = _base_dir()
+    base = _base_dir().resolve()
     target = (base / clean).resolve()
 
-    # Use relative_to() instead of startswith() to prevent prefix-name attacks:
-    # e.g. /project/backend_evil would falsely pass startswith(/project/backend)
+    # Confirm target lives under base. This is what defeats prefix-name and
+    # symlink escapes; the whitelist below is then applied to the *resolved*
+    # relative path rather than the raw user input.
     try:
-        target.relative_to(base.resolve())
+        resolved_relative = target.relative_to(base)
     except ValueError:
         raise HTTPException(403, "Path is outside the project directory.")
 
-    # Whitelist check
+    # Platform-independent relative path for whitelist / audit comparisons.
+    clean = resolved_relative.as_posix()
+
+    # Runtime config files are frozen during a turn. Reject writes with a
+    # clear, specific message (instead of the generic whitelist error) unless
+    # the dev override env var is set. Read is unaffected.
+    if write and _is_frozen_config_path(clean) and not cfg.config_reload_allowed():
+        raise HTTPException(403, _FROZEN_CONFIG_MESSAGE)
+
+    # Whitelist check — against the resolved relative path.
     allowed_prefixes = _WRITE_ALLOWED_PREFIXES if write else _READ_ALLOWED_PREFIXES
     allowed = any(clean.startswith(p) for p in allowed_prefixes) or (
         clean in _ALLOWED_ROOT_FILES
     )
+    if write and cfg.config_reload_allowed() and _is_frozen_config_path(clean):
+        allowed = True
+
     if not allowed:
         mode = "write" if write else "read"
         raise HTTPException(
@@ -90,8 +148,12 @@ def _check_path(relative_path: str, *, write: bool = False) -> tuple[Path, str]:
             f"Access denied for {mode}. Allowed: {list(allowed_prefixes)} + {list(_ALLOWED_ROOT_FILES)}",
         )
 
+    # The secret-like check still applies to read paths and to non-frozen
+    # writes. When the dev override explicitly permits a config/.env rewrite
+    # we let it through so the reload gate actually works.
     if is_secret_like_path(clean):
-        raise HTTPException(403, "Credential / secret files are not accessible via this API.")
+        if not (write and cfg.config_reload_allowed() and _is_frozen_config_path(clean)):
+            raise HTTPException(403, "Credential / secret files are not accessible via this API.")
 
     return target, clean
 
@@ -134,6 +196,7 @@ def _read_raw_content(target: Path, clean_path: str) -> str:
 @router.get("/files")
 def read_file(path: str = Query(..., description="Relative file path"), request: Request = None):
     require_inspection_access(request)
+    check_rate_limit(request, "files_read")
     target, _ = _check_path(path, write=False)
     if not target.exists():
         raise HTTPException(404, f"File not found: {path}")
@@ -147,6 +210,7 @@ def read_file(path: str = Query(..., description="Relative file path"), request:
 @router.get("/files/raw")
 def read_raw_file(path: str = Query(..., description="Relative file path"), request: Request = None):
     require_inspection_access(request)
+    check_rate_limit(request, "files_read")
     target, clean = _check_path(path, write=False)
     if not target.exists():
         raise HTTPException(404, f"File not found: {path}")
@@ -237,6 +301,35 @@ def _iter_file_range(target: Path, start: int, length: int, chunk_size: int):
             yield chunk
 
 
+@router.head("/files/stream")
+def head_stream_file(
+    path: str = Query(..., description="Relative file path"),
+    request: Request = None,
+):
+    """Return size + content-type metadata for a streamable file without a body.
+
+    Lets clients sniff `Content-Length`, `Content-Type`, and the `Accept-Ranges`
+    advertisement before deciding whether to issue Range requests. The handler
+    only `stat()`s the file — no read I/O — so a HEAD against a multi-GiB
+    artifact stays cheap.
+    """
+    require_inspection_access(request)
+    target, _ = _check_path(path, write=False)
+    if not target.exists():
+        raise HTTPException(404, f"File not found: {path}")
+    if not target.is_file():
+        raise HTTPException(400, f"Not a file: {path}")
+
+    stat = target.stat()
+    headers = {
+        "Accept-Ranges": "bytes",
+        "ETag": _etag_for(stat),
+        "Last-Modified": formatdate(stat.st_mtime, usegmt=True),
+        "Content-Length": str(stat.st_size),
+    }
+    return Response(status_code=200, media_type=_guess_media_type(target), headers=headers)
+
+
 @router.get("/files/stream")
 def stream_file(
     path: str = Query(..., description="Relative file path"),
@@ -244,6 +337,7 @@ def stream_file(
 ):
     """Stream a whitelisted file, honoring HTTP Range / If-Range semantics."""
     require_inspection_access(request)
+    check_rate_limit(request, "files_read")
     target, _ = _check_path(path, write=False)
     if not target.exists():
         raise HTTPException(404, f"File not found: {path}")
@@ -314,6 +408,7 @@ class SaveRequest(BaseModel):
 @router.post("/files")
 def save_file(body: SaveRequest, request: Request = None):
     require_execution_access(request)
+    check_rate_limit(request, "files_write")
     base_dir = _base_dir()
     byte_count = len(body.content.encode("utf-8"))
     policy = cfg.get_production_hardening_policy()
@@ -354,9 +449,10 @@ def save_file(body: SaveRequest, request: Request = None):
         )
         raise
 
-    memory_validation_errors = validate_memory_write(clean, body.content)
-    if memory_validation_errors:
-        reason = " ".join(memory_validation_errors)
+    try:
+        write_memory_file(target, clean, body.content)
+    except MemoryFrontmatterError as exc:
+        reason = str(exc)
         append_file_written_event(
             base_dir,
             path=clean,
@@ -366,10 +462,6 @@ def save_file(body: SaveRequest, request: Request = None):
             reason=reason,
         )
         raise HTTPException(400, reason)
-
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(body.content, encoding="utf-8")
     except Exception as exc:
         append_file_written_event(
             base_dir,
@@ -380,17 +472,6 @@ def save_file(body: SaveRequest, request: Request = None):
             reason=str(exc),
         )
         raise
-
-    # Refresh memory index after any memory/ write so multi-file memory stays fresh.
-    # `_maybe_rebuild` only re-embeds the changed file instead of the full corpus.
-    if clean.startswith("memory/"):
-        try:
-            from graph.agent import agent_manager
-
-            if agent_manager.memory_indexer:
-                agent_manager.memory_indexer._maybe_rebuild()
-        except Exception:
-            pass
 
     append_file_written_event(
         base_dir,
@@ -410,19 +491,22 @@ def save_file(body: SaveRequest, request: Request = None):
 def _check_stream_write_path(relative_path: str) -> tuple[Path, str]:
     """Path check for the streaming PUT. Strictly restricted to artifacts/.
 
-    Mirrors the safety checks in `_check_path` but uses a tighter whitelist so
-    the editor POST surface is not widened by large streamed uploads.
+    Mirrors the resolve-first ordering in `_check_path` but with a tighter
+    whitelist so the editor POST surface is not widened by large streamed
+    uploads.
     """
     clean = relative_path.strip().lstrip("/").removeprefix("./")
     if ".." in clean.split("/"):
         raise HTTPException(403, "Path traversal is not allowed.")
 
-    base = _base_dir()
+    base = _base_dir().resolve()
     target = (base / clean).resolve()
     try:
-        target.relative_to(base.resolve())
+        resolved_relative = target.relative_to(base)
     except ValueError:
         raise HTTPException(403, "Path is outside the project directory.")
+
+    clean = resolved_relative.as_posix()
 
     if not any(clean.startswith(p) for p in _STREAM_WRITE_ALLOWED_PREFIXES):
         raise HTTPException(
@@ -449,6 +533,7 @@ async def stream_write_file(
     number of bytes already persisted.
     """
     require_execution_access(request)
+    check_rate_limit(request, "files_write")
     base_dir = _base_dir()
     policy = cfg.get_production_hardening_policy()
 
@@ -521,6 +606,7 @@ async def stream_write_file(
 def list_skills(request: Request = None):
     """Return the active runtime-selected skill summary used by compatibility clients."""
     require_inspection_access(request)
+    check_rate_limit(request, "files_read")
     base = _base_dir()
     from tools.skills_scanner import collect_skill_entries
 
@@ -543,6 +629,7 @@ def list_skills(request: Request = None):
 def list_skills_registry(request: Request = None):
     """Return the full runtime registry, including disabled entries and optional hint metadata."""
     require_inspection_access(request)
+    check_rate_limit(request, "files_read")
     base = _base_dir()
     from tools.skills_scanner import describe_skill_registry
 

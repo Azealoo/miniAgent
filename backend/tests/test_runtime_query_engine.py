@@ -1,12 +1,47 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import AsyncGenerator
 from unittest.mock import patch
 
 import pytest
 
-from runtime.query_engine import QueryEngine, QueryTurnInput
+from runtime.query_engine import (
+    QueryEngine,
+    QueryTurnInput,
+    ToolBatchCall,
+    dispatch_tool_batch,
+)
+from tools.registry import ToolManifestEntry
+
+
+def _manifest(
+    name: str,
+    *,
+    read_only: bool,
+    destructive: bool,
+    concurrency_safe: bool,
+) -> ToolManifestEntry:
+    return ToolManifestEntry(
+        name=name,
+        description=f"fake {name}",
+        args_schema=None,
+        response_format="content_and_artifact",
+        access_scope="inspection" if read_only else "execution",
+        evidence_requirement="none",
+        output_contract_version="tool_result.v1",
+        source_module="tests.test_runtime_query_engine",
+        read_only=read_only,
+        destructive=destructive,
+        concurrency_safe=concurrency_safe,
+        planner_exposed=read_only,
+        verifier_exposed=read_only,
+        interrupt_behavior="restartable" if read_only else "avoid_interrupting",
+        tool_validates_input=False,
+        activity_summary_hint="inspect",
+        result_summary_hint="result",
+    )
 
 
 class _FakeAgentManager:
@@ -32,7 +67,7 @@ async def test_query_engine_run_harness_turn_delegates_to_agent_manager():
 
     assert events == [
         {"type": "token", "content": "ok"},
-        {"type": "done", "turn_status": "ok"},
+        {"type": "done", "turn_status": "ok", "exit": {"reason": "success", "exit_code": 0}},
     ]
 
 
@@ -160,7 +195,7 @@ async def test_query_engine_run_harness_turn_emits_plan_created_then_plan_update
             },
             "tool_trace": [{"tool": "search_memory", "summary": "memory"}],
         },
-        {"type": "done", "turn_status": "ok"},
+        {"type": "done", "turn_status": "ok", "exit": {"reason": "success", "exit_code": 0}},
     ]
 
 
@@ -231,7 +266,7 @@ async def test_query_engine_run_harness_turn_emits_verification_result_event():
             },
             "tool_trace": [{"tool": "read_file", "summary": "result"}],
         },
-        {"type": "done", "turn_status": "ok"},
+        {"type": "done", "turn_status": "ok", "exit": {"reason": "success", "exit_code": 0}},
     ]
 
 
@@ -388,7 +423,7 @@ async def test_query_engine_run_harness_turn_runs_single_repair_pass_with_latest
         },
         {"type": "new_response"},
         {"type": "token", "content": "Repaired answer with citation."},
-        {"type": "done", "turn_status": "ok"},
+        {"type": "done", "turn_status": "ok", "exit": {"reason": "success", "exit_code": 0}},
     ]
 
 
@@ -470,7 +505,11 @@ async def test_query_engine_run_harness_turn_stops_after_one_repair_retry():
     assert manager.calls == 2
     assert [event["type"] for event in events].count("new_response") == 1
     assert [event["type"] for event in events].count("verification_result") == 2
-    assert events[-1] == {"type": "done", "turn_status": "ok"}
+    assert events[-1] == {
+        "type": "done",
+        "turn_status": "ok",
+        "exit": {"reason": "success", "exit_code": 0},
+    }
 
 
 @pytest.mark.asyncio
@@ -523,7 +562,202 @@ async def test_query_engine_can_treat_repair_required_as_advisory():
 
     assert manager.calls == 1
     assert [event["type"] for event in events].count("new_response") == 0
-    assert events[-1] == {"type": "done", "turn_status": "ok"}
+    assert events[-1] == {
+        "type": "done",
+        "turn_status": "ok",
+        "exit": {"reason": "success", "exit_code": 0},
+    }
+
+
+@pytest.mark.asyncio
+async def test_query_engine_emits_typed_error_when_verifier_token_cap_exceeded():
+    class _CapBreachingAgentManager(_FakeAgentManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def astream(self, message: str, history: list[dict]) -> AsyncGenerator[dict, None]:
+            self.calls += 1
+            if self.calls == 1:
+                yield {"type": "token", "content": "First draft."}
+                yield {
+                    "type": "tool_end",
+                    "tool": "verification_agent",
+                    "output": "verifier summary",
+                    "run_id": "verify-run-1",
+                    "result": {
+                        "status": "success",
+                        "summary": "Verifier verdict: repair_required.",
+                        "structured_payload": {
+                            "agent_type": "verification",
+                            "verification": {
+                                "verdict": "repair_required",
+                                "summary": "Needs repair.",
+                                "checks": [],
+                                "issues": ["issue"],
+                                "repair_instructions": ["fix"],
+                            },
+                            "tool_trace": [],
+                        },
+                    },
+                }
+                yield {"type": "done"}
+                return
+
+            # Repair retry: emit a large token that blows the verifier token cap.
+            yield {"type": "token", "content": "blown budget " * 200}
+            yield {"type": "done"}
+
+    manager = _CapBreachingAgentManager()
+    engine = QueryEngine(manager)
+    turn = QueryTurnInput(message="hello", history=[{"role": "system", "content": "ctx"}])
+
+    with patch(
+        "runtime.query_engine.get_verification_settings",
+        return_value={
+            "retry_on_repair_required": True,
+            "verifier_max_wall_s": 0,
+            "verifier_max_tokens": 5,
+        },
+    ):
+        events = [event async for event in engine.run_harness_turn(turn)]
+
+    error_events = [event for event in events if event.get("type") == "error"]
+    assert len(error_events) == 1
+    error = error_events[0]
+    assert error["turn_status"] == "verifier_cap_exceeded"
+    assert error["error"].startswith("verifier token cap exceeded at ")
+    assert error["exit"]["reason"] == "token_budget"
+    assert error["exit"]["exit_code"] == 3
+    assert events[-1] is error
+
+    assert manager.calls == 2, "cap must fire during the first repair retry"
+    assert [event["type"] for event in events].count("new_response") == 1
+    assert not any(event.get("type") == "done" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_query_engine_emits_typed_error_when_verifier_wallclock_cap_exceeded():
+    class _SlowRepairAgentManager(_FakeAgentManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def astream(self, message: str, history: list[dict]) -> AsyncGenerator[dict, None]:
+            self.calls += 1
+            if self.calls == 1:
+                yield {"type": "token", "content": "draft"}
+                yield {
+                    "type": "tool_end",
+                    "tool": "verification_agent",
+                    "output": "verifier summary",
+                    "run_id": "verify-run-1",
+                    "result": {
+                        "status": "success",
+                        "summary": "Verifier verdict: repair_required.",
+                        "structured_payload": {
+                            "agent_type": "verification",
+                            "verification": {
+                                "verdict": "repair_required",
+                                "summary": "Needs repair.",
+                                "checks": [],
+                                "issues": ["issue"],
+                                "repair_instructions": ["fix"],
+                            },
+                            "tool_trace": [],
+                        },
+                    },
+                }
+                yield {"type": "done"}
+                return
+
+            await asyncio.sleep(0.15)
+            yield {"type": "token", "content": "slow repair"}
+            yield {"type": "done"}
+
+    manager = _SlowRepairAgentManager()
+    engine = QueryEngine(manager)
+    turn = QueryTurnInput(message="hello", history=[{"role": "system", "content": "ctx"}])
+
+    with patch(
+        "runtime.query_engine.get_verification_settings",
+        return_value={
+            "retry_on_repair_required": True,
+            "verifier_max_wall_s": 0.05,
+            "verifier_max_tokens": 0,
+        },
+    ):
+        events = [event async for event in engine.run_harness_turn(turn)]
+
+    error_events = [event for event in events if event.get("type") == "error"]
+    assert len(error_events) == 1
+    error = error_events[0]
+    assert error["turn_status"] == "verifier_cap_exceeded"
+    assert error["error"].startswith("verifier wallclock cap exceeded at ")
+    assert error["exit"]["reason"] == "token_budget"
+    assert manager.calls == 2, "cap must fire during the first repair retry"
+
+
+@pytest.mark.asyncio
+async def test_query_engine_run_turn_attaches_turn_result_to_verifier_cap_error():
+    class _CapBreachingAgentManager(_FakeAgentManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def astream(self, message: str, history: list[dict]) -> AsyncGenerator[dict, None]:
+            self.calls += 1
+            if self.calls == 1:
+                yield {"type": "token", "content": "partial draft "}
+                yield {
+                    "type": "tool_end",
+                    "tool": "verification_agent",
+                    "output": "verifier summary",
+                    "run_id": "verify-run-1",
+                    "result": {
+                        "status": "success",
+                        "summary": "Verifier verdict: repair_required.",
+                        "structured_payload": {
+                            "agent_type": "verification",
+                            "verification": {
+                                "verdict": "repair_required",
+                                "summary": "Needs repair.",
+                                "checks": [],
+                                "issues": ["issue"],
+                                "repair_instructions": ["fix"],
+                            },
+                            "tool_trace": [],
+                        },
+                    },
+                }
+                yield {"type": "done"}
+                return
+
+            yield {"type": "token", "content": "oversized repair " * 100}
+            yield {"type": "done"}
+
+    engine = QueryEngine(_CapBreachingAgentManager())
+    turn = QueryTurnInput(message="hello", history=[])
+
+    with patch(
+        "runtime.query_engine.get_verification_settings",
+        return_value={
+            "retry_on_repair_required": True,
+            "verifier_max_wall_s": 0,
+            "verifier_max_tokens": 5,
+        },
+    ):
+        events = [event async for event in engine.run_turn(turn)]
+
+    error_events = [event for event in events if event.get("type") == "error"]
+    assert len(error_events) == 1
+    error = error_events[0]
+    assert error["turn_status"] == "verifier_cap_exceeded"
+    turn_result = error["turn_result"]
+    assert turn_result.turn_status == "verifier_cap_exceeded"
+    assert any(
+        "partial draft" in seg.content for seg in turn_result.segments
+    ), "partial streamed content must be preserved on verifier cap error"
 
 
 @pytest.mark.asyncio
@@ -568,6 +802,8 @@ async def test_query_engine_stops_runaway_planner_when_budget_exceeded():
     error = error_events[0]
     assert error["error"].startswith("turn budget exceeded at ")
     assert error["turn_status"] == "budget_exceeded"
+    assert error["exit"]["reason"] == "token_budget"
+    assert error["exit"]["exit_code"] == 3
     assert events[-1] is error
 
     tool_end_events = [event for event in events if event.get("type") == "tool_end"]
@@ -648,7 +884,7 @@ async def test_query_engine_run_harness_turn_uses_agent_path_when_not_protocol_o
 
     assert events == [
         {"type": "token", "content": "ok"},
-        {"type": "done", "turn_status": "ok"},
+        {"type": "done", "turn_status": "ok", "exit": {"reason": "success", "exit_code": 0}},
     ]
 
 
@@ -732,3 +968,143 @@ async def test_query_engine_run_turn_keeps_biology_questions_on_the_same_dispatc
             [],
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tool_batch_gathers_concurrency_safe_reads():
+    """Read-only/concurrency-safe calls overlap via asyncio.gather.
+
+    Each call increments a shared in-flight counter and sleeps briefly.
+    If gather dispatches them together, the counter's peak equals the
+    number of parallel calls; a serial implementation would peak at 1.
+    """
+    in_flight = 0
+    peak = 0
+    lock = asyncio.Lock()
+
+    async def _make_read_call(label: str):
+        nonlocal in_flight, peak
+
+        async def _invoke():
+            nonlocal in_flight, peak
+            async with lock:
+                in_flight += 1
+                peak = max(peak, in_flight)
+            try:
+                await asyncio.sleep(0.05)
+                return f"{label}-done"
+            finally:
+                async with lock:
+                    in_flight -= 1
+
+        return _invoke
+
+    calls = [
+        ToolBatchCall(
+            manifest=_manifest(
+                f"read_{idx}",
+                read_only=True,
+                destructive=False,
+                concurrency_safe=True,
+            ),
+            invoke=await _make_read_call(f"read-{idx}"),
+        )
+        for idx in range(4)
+    ]
+
+    results = await dispatch_tool_batch(calls)
+
+    assert results == ["read-0-done", "read-1-done", "read-2-done", "read-3-done"]
+    assert peak == 4, (
+        f"expected all 4 read-only tools to run concurrently via gather, "
+        f"observed peak={peak}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tool_batch_serializes_destructive_calls():
+    """Destructive calls must run one at a time, in input order."""
+
+    order: list[str] = []
+    in_flight = 0
+    peak = 0
+    lock = asyncio.Lock()
+
+    def _make_destructive(label: str):
+        async def _invoke():
+            nonlocal in_flight, peak
+            async with lock:
+                in_flight += 1
+                peak = max(peak, in_flight)
+            try:
+                await asyncio.sleep(0.02)
+                order.append(label)
+                return label
+            finally:
+                async with lock:
+                    in_flight -= 1
+
+        return _invoke
+
+    calls = [
+        ToolBatchCall(
+            manifest=_manifest(
+                f"write_{idx}",
+                read_only=False,
+                destructive=True,
+                concurrency_safe=False,
+            ),
+            invoke=_make_destructive(f"write-{idx}"),
+        )
+        for idx in range(3)
+    ]
+
+    results = await dispatch_tool_batch(calls)
+
+    assert results == ["write-0", "write-1", "write-2"]
+    assert order == ["write-0", "write-1", "write-2"]
+    assert peak == 1, f"destructive tier must be serial, observed peak={peak}"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tool_batch_preserves_order_across_mixed_tiers():
+    """A mixed batch returns results in the original input order."""
+
+    async def _return(value):
+        async def _invoke():
+            await asyncio.sleep(0)
+            return value
+
+        return _invoke
+
+    calls = [
+        ToolBatchCall(
+            manifest=_manifest(
+                "read_a",
+                read_only=True,
+                destructive=False,
+                concurrency_safe=True,
+            ),
+            invoke=await _return("a"),
+        ),
+        ToolBatchCall(
+            manifest=_manifest(
+                "write_b",
+                read_only=False,
+                destructive=True,
+                concurrency_safe=False,
+            ),
+            invoke=await _return("b"),
+        ),
+        ToolBatchCall(
+            manifest=_manifest(
+                "read_c",
+                read_only=True,
+                destructive=False,
+                concurrency_safe=True,
+            ),
+            invoke=await _return("c"),
+        ),
+    ]
+
+    assert await dispatch_tool_batch(calls) == ["a", "b", "c"]

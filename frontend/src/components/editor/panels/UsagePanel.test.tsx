@@ -11,6 +11,7 @@ vi.mock("@/lib/api", () => ({
 
 import { useApp } from "@/lib/store";
 import { makeMockAppValue } from "@/test/panel-fixtures";
+import type { Message } from "@/lib/types";
 import UsagePanel from "./UsagePanel";
 
 describe("UsagePanel", () => {
@@ -35,5 +36,95 @@ describe("UsagePanel", () => {
         "Send a message in this session to populate token usage here."
       )
     ).toBeTruthy();
+  });
+
+  it("shows the parse-error counter once the stream has dropped a malformed payload", () => {
+    const messages: Message[] = [
+      {
+        id: "user-1",
+        role: "user",
+        content: "hi",
+        blocks: [{ type: "text", text: "hi" }],
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "hello",
+        blocks: [{ type: "text", text: "hello" }],
+      },
+    ];
+
+    vi.mocked(useApp).mockReturnValue(
+      makeMockAppValue({
+        currentSessionId: "session-with-drops",
+        messages,
+        parseErrorCount: 3,
+      })
+    );
+
+    render(<UsagePanel />);
+
+    expect(screen.getByText("Parse errors")).toBeTruthy();
+    expect(screen.getByText("3")).toBeTruthy();
+  });
+
+  it("shows the request-id drop counter once the dispatcher has dropped a stale event", () => {
+    const messages: Message[] = [
+      {
+        id: "user-1",
+        role: "user",
+        content: "hi",
+        blocks: [{ type: "text", text: "hi" }],
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "hello",
+        blocks: [{ type: "text", text: "hello" }],
+      },
+    ];
+
+    vi.mocked(useApp).mockReturnValue(
+      makeMockAppValue({
+        currentSessionId: "session-stale",
+        messages,
+        requestIdMismatchCount: 2,
+      })
+    );
+
+    render(<UsagePanel />);
+
+    expect(screen.getByText("Request-id drops")).toBeTruthy();
+    expect(screen.getByText("2")).toBeTruthy();
+  });
+
+  it("omits the parse-error row when no malformed payloads have been seen", () => {
+    const messages: Message[] = [
+      {
+        id: "user-1",
+        role: "user",
+        content: "hi",
+        blocks: [{ type: "text", text: "hi" }],
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "hello",
+        blocks: [{ type: "text", text: "hello" }],
+      },
+    ];
+
+    vi.mocked(useApp).mockReturnValue(
+      makeMockAppValue({
+        currentSessionId: "session-clean",
+        messages,
+        parseErrorCount: 0,
+      })
+    );
+
+    render(<UsagePanel />);
+
+    expect(screen.queryByText("Parse errors")).toBeNull();
+    expect(screen.queryByText("Request-id drops")).toBeNull();
   });
 });

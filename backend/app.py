@@ -64,12 +64,36 @@ async def lifespan(app: FastAPI):
     agent_manager.initialize(BASE_DIR)
     print("[startup] AgentManager initialised")
 
+    # Refuse to boot if any tool is misclassified. A contradictory manifest
+    # would silently route a destructive tool into the parallel tier — fail
+    # loudly at boot instead of corrupting a live turn.
+    from tools import get_tool_manifest_entries
+    from tools.registry import validate_tool_classifications
+
+    validate_tool_classifications(get_tool_manifest_entries(BASE_DIR))
+    print("[startup] Tool classifications validated")
+
     # ── 3. Build the memory/ retrieval index ──────────────────────
     try:
         agent_manager.memory_indexer.rebuild_index()
         print("[startup] Memory index built")
     except Exception as exc:
         print(f"[WARNING] Memory index build failed (non-fatal): {exc}")
+
+    # ── 4. Enforce retention / quota on on-disk state (opt-in) ────
+    retention_settings = cfg.get_retention_settings()
+    if retention_settings.get("enabled_on_startup"):
+        try:
+            from runtime.retention import apply_retention
+
+            result = apply_retention(BASE_DIR, config=retention_settings)
+            suffix = " [dry-run]" if result.dry_run else ""
+            print(
+                f"[startup] Retention applied{suffix}: "
+                f"{len(result.results)} dir(s) scanned"
+            )
+        except Exception as exc:
+            print(f"[WARNING] Retention run failed (non-fatal): {exc}")
 
     yield
     # (shutdown cleanup goes here if needed)
@@ -97,6 +121,7 @@ app.add_middleware(
 
 # ── Register chat-engine routers only ──────────────────────────────
 from api.access import router as access_router
+from api.audit_client import router as audit_client_router
 from api.chat import router as chat_router
 from api.config import router as config_router
 from api.debug import router as debug_router
@@ -113,6 +138,7 @@ app.include_router(files_router, prefix="/api")
 app.include_router(tokens_router, prefix="/api")
 app.include_router(debug_router, prefix="/api")
 app.include_router(metrics_router, prefix="/api")
+app.include_router(audit_client_router, prefix="/api")
 
 
 @app.get("/")

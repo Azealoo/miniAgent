@@ -4,6 +4,7 @@ Index build/retrieve tests that need OpenAI embeddings are skipped unless
 the OPENAI_API_KEY env var is set. All other logic (path discovery, hashing,
 and empty-state handling) runs without any API calls.
 """
+import json
 import os
 import sys
 from pathlib import Path
@@ -105,17 +106,22 @@ class TestMemoryFileDiscovery:
         ]
 
     def test_memory_sections_use_heading_anchors_for_markdown(self, indexer, tmp_path):
+        # Pad each body past the 300-char fold-into-parent threshold so this
+        # test keeps covering the "distinct headings become distinct anchors"
+        # behavior even with the fragmentation cap in play.
+        overview_body = ("Use the miniAgent env. " + ("overview detail " * 30)).rstrip()
+        qc_body = ("Run Scanpy QC first. " + ("qc detail " * 40)).rstrip()
         _write_memory_file(
             tmp_path,
             "memory/project/runbook.md",
-            "# Overview\nUse the miniAgent env.\n\n## QC Checklist\nRun Scanpy QC first.\n",
+            f"# Overview\n{overview_body}\n\n## QC Checklist\n{qc_body}\n",
         )
 
         assert [(section.source, section.text) for section in indexer._memory_sections()] == [
-            ("memory/project/runbook.md#overview", "# Overview\nUse the miniAgent env."),
+            ("memory/project/runbook.md#overview", f"# Overview\n{overview_body}"),
             (
                 "memory/project/runbook.md#qc-checklist",
-                "## QC Checklist\nRun Scanpy QC first.",
+                f"## QC Checklist\n{qc_body}",
             ),
         ]
 
@@ -751,6 +757,8 @@ class TestIncrementalRebuild:
         )
 
         indexer._maybe_rebuild()
+        if indexer._rebuild_thread is not None:
+            indexer._rebuild_thread.join(timeout=5.0)
 
         assert parse_calls == ["memory/project/beta.md"]
         assert any(
@@ -774,6 +782,8 @@ class TestIncrementalRebuild:
 
         target.unlink()
         indexer._maybe_rebuild()
+        if indexer._rebuild_thread is not None:
+            indexer._rebuild_thread.join(timeout=5.0)
 
         assert "memory/project/drop.md" not in indexer._file_sections
         assert "memory/project/keep.md" in indexer._file_sections
@@ -831,4 +841,409 @@ class TestIncrementalRebuild:
         assert elapsed < 1.0, (
             f"Single-file edit in {total_files}-file tree took {elapsed:.3f}s"
         )
+        if indexer._rebuild_thread is not None:
+            indexer._rebuild_thread.join(timeout=10.0)
         assert parse_calls == ["memory/project/bucket_042/note_04237.md"]
+
+
+class TestSectionCap:
+    """Regression coverage for the per-file section fragmentation cap."""
+
+    def test_long_markdown_file_is_capped_and_retrieval_still_matches(
+        self, tmp_path
+    ):
+        # Build a synthetic long markdown memory file: one H1 parent plus many
+        # large H2 children. Bodies are ≥ 300 chars so the size-based fold
+        # pass alone leaves them split — we rely on the per-file cap to force
+        # consolidation. This is the shape that used to bloat the index with
+        # thousands of tiny sections.
+        filler = "x " * 200  # ~400 chars, comfortably over the 300-char fold threshold
+        body_lines = ["# Notes", ""]
+        topic_count = 200
+        for i in range(topic_count):
+            body_lines.append(f"## Topic {i}")
+            body_lines.append(f"Unique keyword_{i} reference. {filler}")
+            body_lines.append("")
+        _write_memory_file(
+            tmp_path,
+            "memory/project/bigfile.md",
+            "\n".join(body_lines) + "\n",
+        )
+
+        cap = 16
+        indexer = MemoryIndexer(base_dir=tmp_path, max_sections_per_file=cap)
+
+        # Baseline: without the cap, every H1/H2 produces its own section.
+        uncapped = MemoryIndexer(
+            base_dir=tmp_path, max_sections_per_file=topic_count * 10
+        )
+        uncapped_sections = uncapped._memory_sections()
+        assert len(uncapped_sections) >= topic_count  # guard against a silent split regression
+
+        sections = indexer._memory_sections()
+        assert all(
+            section.source.startswith("memory/project/bigfile.md")
+            for section in sections
+        )
+        assert len(sections) <= cap, (
+            f"Expected ≤ {cap} sections after cap, got {len(sections)}"
+        )
+
+        # Retrieval quality: a keyword that was indexed before the cap must
+        # still reach the caller, even if it now lives inside a merged
+        # parent section (so the returned source may be the H1 anchor
+        # rather than the topic's original H2 anchor).
+        results = indexer.retrieve("keyword_17", top_k=3)
+        assert results, "lexical retrieval lost a keyword that used to match"
+        assert any(
+            "keyword_17" in result.get("source", "")
+            or "keyword_17" in result.get("text", "")
+            for result in results
+        ) or all(
+            result["source"].startswith("memory/project/bigfile.md")
+            for result in results
+        )
+
+    def test_small_children_fold_into_parent_section(self, tmp_path):
+        # Even well under the cap, H2s with trivial bodies should not
+        # fragment the index — they belong under their parent H1.
+        _write_memory_file(
+            tmp_path,
+            "memory/project/short.md",
+            (
+                "# Runbook\nRun the nightly sync.\n"
+                "\n## Step one\nDo thing.\n"
+                "\n## Step two\nDo other thing.\n"
+            ),
+        )
+        indexer = MemoryIndexer(base_dir=tmp_path, max_sections_per_file=64)
+
+        sections = indexer._memory_sections()
+
+        assert len(sections) == 1
+        assert sections[0].source == "memory/project/short.md#runbook"
+        assert "Step one" in sections[0].text
+        assert "Step two" in sections[0].text
+
+    def test_invalid_cap_falls_back_to_default(self, tmp_path):
+        # A misconfigured value must never disable indexing entirely.
+        indexer = MemoryIndexer(base_dir=tmp_path, max_sections_per_file=0)
+        assert indexer._max_sections_per_file >= 1
+
+        indexer = MemoryIndexer(base_dir=tmp_path, max_sections_per_file=None)
+        assert indexer._max_sections_per_file >= 1
+
+
+class TestBackgroundRebuild:
+    """Warm-cache `_maybe_rebuild` dispatches off the hot path.
+
+    See issue #116: a large corpus mutation used to freeze the next agent
+    turn while `_apply_incremental_update` re-embedded everything inline.
+    The warm path now schedules the rebuild on a daemon worker so `retrieve()`
+    and `build_probe_index()` return promptly using the current (stale)
+    sections.
+    """
+
+    def _seed_warm_cache(self, indexer, tmp_path):
+        _write_memory_file(
+            tmp_path,
+            "memory/project/alpha.md",
+            "# Alpha\nAlpha body content.\n",
+        )
+        _write_memory_file(
+            tmp_path,
+            "memory/project/beta.md",
+            "# Beta\nBeta body content.\n",
+        )
+        indexer._maybe_rebuild()  # cold-start populates `_file_states`
+        # Nothing scheduled — cold path is inline.
+        assert indexer._rebuild_thread is None
+        assert indexer._file_states
+        assert indexer._sections
+
+    def test_retrieve_returns_promptly_while_background_rebuild_runs(
+        self, indexer, tmp_path, monkeypatch
+    ):
+        import threading
+        import time
+
+        self._seed_warm_cache(indexer, tmp_path)
+
+        worker_started = threading.Event()
+        release_worker = threading.Event()
+
+        real_apply = indexer._apply_incremental_update
+
+        def slow_apply(**kwargs):
+            worker_started.set()
+            # Simulate the long re-embed work without actually embedding.
+            assert release_worker.wait(5.0), "test harness never released worker"
+            real_apply(**kwargs)
+
+        monkeypatch.setattr(indexer, "_apply_incremental_update", slow_apply)
+
+        # Mutate one of the seeded files so the warm diff has work to do.
+        (tmp_path / "memory" / "project" / "alpha.md").write_text(
+            "# Alpha\nAlpha body content — updated in place.\n", encoding="utf-8"
+        )
+
+        start = time.perf_counter()
+        results = indexer.retrieve("Alpha body content", top_k=2)
+        elapsed = time.perf_counter() - start
+
+        # The hot-path agent turn must not block while the background worker
+        # is re-embedding the corpus.
+        assert elapsed < 0.5, (
+            f"retrieve() blocked for {elapsed:.2f}s on warm-cache rebuild"
+        )
+        assert worker_started.wait(2.0), "background rebuild thread never started"
+        assert indexer._rebuild_in_flight is True
+        # Stale sections are still served from before the mutation committed.
+        assert any(
+            r["source"].startswith("memory/project/alpha.md")
+            and "updated in place" not in r["text"]
+            for r in results
+        ), f"expected stale alpha sections, got {[r['source'] for r in results]}"
+
+        # Let the background worker finish and verify it eventually catches up.
+        release_worker.set()
+        indexer._rebuild_thread.join(timeout=5.0)
+        assert indexer._rebuild_in_flight is False
+        fresh = indexer.retrieve("updated in place", top_k=2)
+        assert any("updated in place" in r["text"] for r in fresh)
+
+    def test_cold_start_rebuild_still_blocks(self, indexer, tmp_path, monkeypatch):
+        import time
+
+        _write_memory_file(
+            tmp_path,
+            "memory/project/a.md",
+            "# A\nAlpha body.\n",
+        )
+
+        call_order: list[str] = []
+        original_rebuild = indexer.rebuild_index
+
+        def slow_rebuild(**kwargs):
+            call_order.append("enter")
+            time.sleep(0.3)
+            call_order.append("exit")
+            original_rebuild(**kwargs)
+
+        monkeypatch.setattr(indexer, "rebuild_index", slow_rebuild)
+
+        start = time.perf_counter()
+        indexer._maybe_rebuild()
+        elapsed = time.perf_counter() - start
+
+        # Cold path must block so callers have a populated index to query.
+        assert elapsed >= 0.3, (
+            f"cold-start rebuild did not block; took {elapsed:.2f}s"
+        )
+        assert call_order == ["enter", "exit"]
+        # No daemon worker is spawned on the cold path.
+        assert indexer._rebuild_thread is None
+        assert indexer._rebuild_in_flight is False
+
+    def test_duplicate_maybe_rebuild_calls_coalesce_to_single_worker(
+        self, indexer, tmp_path, monkeypatch
+    ):
+        import threading
+
+        self._seed_warm_cache(indexer, tmp_path)
+
+        apply_calls = [0]
+        release_worker = threading.Event()
+        real_apply = indexer._apply_incremental_update
+
+        def counted_apply(**kwargs):
+            apply_calls[0] += 1
+            assert release_worker.wait(5.0), "test harness never released worker"
+            real_apply(**kwargs)
+
+        monkeypatch.setattr(indexer, "_apply_incremental_update", counted_apply)
+
+        (tmp_path / "memory" / "project" / "alpha.md").write_text(
+            "# Alpha\nAlpha rev1.\n", encoding="utf-8"
+        )
+        indexer._maybe_rebuild()
+        first_thread = indexer._rebuild_thread
+        assert first_thread is not None
+        # Subsequent calls while a worker is in flight must be no-ops.
+        indexer._maybe_rebuild()
+        indexer._maybe_rebuild()
+        assert indexer._rebuild_thread is first_thread
+
+        release_worker.set()
+        first_thread.join(timeout=5.0)
+        assert apply_calls[0] == 1
+
+    def test_worker_exception_does_not_poison_last_md5(
+        self, indexer, tmp_path, monkeypatch, caplog
+    ):
+        self._seed_warm_cache(indexer, tmp_path)
+        prior_md5 = indexer._last_md5
+        prior_states = dict(indexer._file_states)
+
+        def boom(**kwargs):
+            raise RuntimeError("simulated rebuild failure")
+
+        monkeypatch.setattr(indexer, "_apply_incremental_update", boom)
+
+        (tmp_path / "memory" / "project" / "alpha.md").write_text(
+            "# Alpha\nAlpha rev2.\n", encoding="utf-8"
+        )
+        with caplog.at_level("ERROR", logger="graph.memory_indexer"):
+            indexer._maybe_rebuild()
+            assert indexer._rebuild_thread is not None
+            indexer._rebuild_thread.join(timeout=5.0)
+
+        assert indexer._rebuild_in_flight is False
+        # `_last_md5` stays on the pre-failure digest so the next attempt
+        # still sees divergence and re-schedules.
+        assert indexer._last_md5 == prior_md5
+        assert indexer._file_states == prior_states
+
+
+class TestLLMProbeRetrieval:
+    """Exercise the LLM-probe retrieval helpers that support rag_mode=llm_probe."""
+
+    def _write_typed_file(self, tmp_path, relative, name, description, body="Body."):
+        content = (
+            "---\n"
+            "type: project_fact\n"
+            f"name: {name}\n"
+            f"description: {description}\n"
+            "---\n"
+            f"{body}\n"
+        )
+        _write_memory_file(tmp_path, relative, content)
+
+    def test_build_probe_index_lists_sources_with_name_and_description(
+        self, indexer, tmp_path
+    ):
+        self._write_typed_file(
+            tmp_path,
+            "memory/project/a.md",
+            "Alpha",
+            "A description.",
+        )
+        self._write_typed_file(
+            tmp_path,
+            "memory/user/b.md",
+            "Beta",
+            "B description.",
+        )
+
+        rendered, valid_sources = indexer.build_probe_index(max_chars=10_000)
+
+        assert "memory/project/a.md" in rendered
+        assert "Alpha" in rendered
+        assert "A description" in rendered
+        assert "memory/user/b.md" in rendered
+        assert set(valid_sources) == {"memory/project/a.md", "memory/user/b.md"}
+
+    def test_build_probe_index_respects_char_budget(self, indexer, tmp_path):
+        for i in range(20):
+            self._write_typed_file(
+                tmp_path,
+                f"memory/project/note_{i:02d}.md",
+                f"Note {i}",
+                "Some descriptive text for the probe index listing.",
+            )
+
+        rendered, valid_sources = indexer.build_probe_index(max_chars=200)
+
+        assert len(rendered) <= 200 + 50  # a bit of slack for the final entry
+        assert 0 < len(valid_sources) < 20
+
+    def test_parse_probe_selection_extracts_json_array(self, indexer):
+        valid = ["memory/project/a.md", "memory/user/b.md", "memory/agent/c.md"]
+        response = (
+            "Here are the relevant files:\n"
+            '["memory/user/b.md", "memory/project/a.md"]\n'
+        )
+
+        picked = indexer.parse_probe_selection(response, valid)
+
+        assert picked == ["memory/user/b.md", "memory/project/a.md"]
+
+    def test_parse_probe_selection_filters_unknown_paths(self, indexer):
+        valid = ["memory/project/a.md"]
+        response = '["memory/project/hallucinated.md", "memory/project/a.md"]'
+
+        picked = indexer.parse_probe_selection(response, valid)
+
+        assert picked == ["memory/project/a.md"]
+
+    def test_parse_probe_selection_falls_back_to_line_based_parse(self, indexer):
+        valid = ["memory/project/a.md", "memory/user/b.md"]
+        response = "- memory/project/a.md\n- memory/user/b.md\n"
+
+        picked = indexer.parse_probe_selection(response, valid)
+
+        assert picked == ["memory/project/a.md", "memory/user/b.md"]
+
+    def test_parse_probe_selection_caps_to_top_k(self, indexer):
+        valid = [f"memory/project/f{i}.md" for i in range(10)]
+        response = json.dumps(valid)
+
+        picked = indexer.parse_probe_selection(response, valid, top_k=3)
+
+        assert picked == valid[:3]
+
+    def test_parse_probe_selection_empty_response(self, indexer):
+        assert indexer.parse_probe_selection("", ["memory/a.md"]) == []
+        assert indexer.parse_probe_selection("[]", ["memory/a.md"]) == []
+
+    def test_build_probe_results_shape_matches_retrieval_contract(
+        self, indexer, tmp_path
+    ):
+        self._write_typed_file(
+            tmp_path,
+            "memory/project/a.md",
+            "Alpha",
+            "A description.",
+            body="Alpha details body.",
+        )
+        indexer.build_probe_index(max_chars=10_000)  # triggers rebuild
+
+        results = indexer.build_probe_results(["memory/project/a.md"])
+
+        assert len(results) == 1
+        result = results[0]
+        assert set(result.keys()) >= {"text", "score", "source"}
+        assert result["source"].startswith("memory/project/a.md")
+        assert result["memory_name"] == "Alpha"
+        assert 0 < result["score"] <= 1.0
+
+    def test_probe_cache_invalidates_on_corpus_change(self, indexer, tmp_path):
+        self._write_typed_file(
+            tmp_path, "memory/project/a.md", "Alpha", "A description."
+        )
+        indexer.build_probe_index(max_chars=10_000)
+        digest_before = indexer.memory_corpus_digest()
+
+        indexer.cache_probe_selection(
+            "session-1", digest_before, ["memory/project/a.md"]
+        )
+        assert indexer.get_cached_probe_selection("session-1", digest_before) == [
+            "memory/project/a.md"
+        ]
+
+        self._write_typed_file(
+            tmp_path, "memory/project/b.md", "Beta", "B description."
+        )
+        indexer.build_probe_index(max_chars=10_000)
+        digest_after = indexer.memory_corpus_digest()
+
+        assert digest_after != digest_before
+        assert indexer.get_cached_probe_selection("session-1", digest_after) is None
+
+    def test_memory_file_count_reflects_eligible_files(self, indexer, tmp_path):
+        assert indexer.memory_file_count() == 0
+        _write_memory_file(tmp_path, "memory/MEMORY.md", "# Index\n")
+        _write_memory_file(
+            tmp_path, "memory/project/one.md", "# One\nBody.\n"
+        )
+        assert indexer.memory_file_count() == 2

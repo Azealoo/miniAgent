@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
 from access_control import require_execution_access, require_inspection_access
-from graph.session_manager import _validate_session_id
+from graph.session_manager import SessionCorruptError, _validate_session_id
 from runtime.title_generation import generate_chat_title
 
 router = APIRouter()
@@ -34,6 +34,25 @@ def _check_session_id(session_id: str) -> None:
         _validate_session_id(session_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid session_id")
+
+
+def _session_corrupt_response(exc: SessionCorruptError) -> HTTPException:
+    """Translate a SessionCorruptError into a structured 422 response.
+
+    Frontend matches on ``detail.error == 'session_corrupt'`` to surface a
+    user-visible "session corrupt" notice instead of a generic failure.
+    """
+    return HTTPException(
+        status_code=422,
+        detail={
+            "error": "session_corrupt",
+            "session_id": exc.session_id,
+            "quarantine_path": exc.quarantine_path,
+            "message": (
+                "The saved session file was corrupt and has been quarantined."
+            ),
+        },
+    )
 
 
 def _normalize_session_title(title: str) -> str:
@@ -73,7 +92,10 @@ def list_session_files_workspace_summary(session_id: str, request: Request = Non
 @router.post("/sessions", status_code=201)
 def create_session(request: Request = None):
     require_execution_access(request)
-    session_id = _sm().create_session()
+    # The route requires execution access, so the session is bound to the
+    # ``execution`` tier. Recording it on the session JSON lets ``/api/chat``
+    # cross-check session scope against per-turn requirements (issue #240).
+    session_id = _sm().create_session(access_scope="execution")
     return _sm().get_session_meta(session_id)
 
 
@@ -95,8 +117,11 @@ class RenameRequest(BaseModel):
 def rename_session(session_id: str, body: RenameRequest, request: Request = None):
     require_execution_access(request)
     _check_session_id(session_id)
-    _sm().rename_session(session_id, body.title)
-    return _sm().get_session_meta(session_id)
+    try:
+        _sm().rename_session(session_id, body.title, raise_on_corrupt=True)
+        return _sm().get_session_meta(session_id)
+    except SessionCorruptError as exc:
+        raise _session_corrupt_response(exc) from exc
 
 
 @router.delete("/sessions/{session_id}", status_code=204)
@@ -119,7 +144,10 @@ def get_history(session_id: str, request: Request = None):
     """Returns raw stored messages, including additive typed content blocks."""
     require_inspection_access(request)
     _check_session_id(session_id)
-    return _sm().load_session(session_id)
+    try:
+        return _sm().load_session(session_id, raise_on_corrupt=True)
+    except SessionCorruptError as exc:
+        raise _session_corrupt_response(exc) from exc
 
 
 @router.get("/sessions/{session_id}/continuity")
@@ -157,7 +185,10 @@ async def generate_title(session_id: str, request: Request = None):
     _check_session_id(session_id)
     from graph.agent import agent_manager
 
-    messages = _sm().load_session(session_id)
+    try:
+        messages = _sm().load_session(session_id, raise_on_corrupt=True)
+    except SessionCorruptError as exc:
+        raise _session_corrupt_response(exc) from exc
     if not messages:
         raise HTTPException(400, "Session has no messages")
 
@@ -172,7 +203,10 @@ async def generate_title(session_id: str, request: Request = None):
     except Exception as exc:
         raise HTTPException(500, str(exc))
 
-    _sm().rename_session(session_id, title)
+    try:
+        _sm().rename_session(session_id, title, raise_on_corrupt=True)
+    except SessionCorruptError as exc:
+        raise _session_corrupt_response(exc) from exc
     return {"session_id": session_id, "title": title}
 
 

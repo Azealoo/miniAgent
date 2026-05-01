@@ -2,8 +2,10 @@
 Tests for skills_scanner — scans SKILL.md files and writes SKILLS_SNAPSHOT.md.
 """
 import json
+import os
 import re
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,10 +13,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from tools import skills_scanner
 from tools.skills_scanner import (
+    SkillRegistry,
     _parse_frontmatter,
     collect_skill_entries,
     describe_skill_registry,
+    get_body,
+    get_frontmatter,
     scan_skills,
     skill_required_env_satisfied,
 )
@@ -675,3 +681,275 @@ class TestExtendedSkillContract:
         )
         entry = collect_skill_entries(tmp_path, respect_enabled=False)[0]
         assert entry["required_env"] == ["FOO_TOKEN", "BAR_TOKEN"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SkillRegistry — two-phase frontmatter / body access
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+_BODY_MARKER = "UNIQUE_BODY_MARKER_8f3a1c"
+
+
+def _write_skill_with_body(
+    base: Path, name: str, *, body: str, description: str = "Two-phase skill"
+) -> Path:
+    skill_dir = base / "skills" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skill_dir / "SKILL.md"
+    skill_path.write_text(
+        (
+            f"---\nname: {name}\ndescription: {description}\ncategory: bio/literature\n"
+            "requires_tools: [read_file]\nrequires_network: false\nuser_invocable: true\n"
+            "species: any\nmodality: literature\nstage: analysis\n"
+            "stability: experimental\nsafety_level: low\n"
+            f"---\n{body}"
+        ),
+        encoding="utf-8",
+    )
+    return skill_path
+
+
+class TestSkillRegistryTwoPhase:
+    def test_snapshot_contains_frontmatter_only_no_body_text(self, tmp_path):
+        _write_skill_with_body(
+            tmp_path,
+            "two_phase_skill",
+            body=f"# Steps\n{_BODY_MARKER}\nLots of private body instructions.\n",
+        )
+
+        scan_skills(tmp_path)
+        content = (tmp_path / "SKILLS_SNAPSHOT.md").read_text()
+
+        assert "two_phase_skill" in content  # frontmatter name is present
+        assert _BODY_MARKER not in content
+        assert "private body instructions" not in content
+        assert "# Steps" not in content
+
+    def test_get_body_loads_post_frontmatter_content_on_demand(self, tmp_path):
+        body_text = f"# Steps\n{_BODY_MARKER}\n1. Do the thing.\n"
+        skill_path = _write_skill_with_body(
+            tmp_path, "on_demand_skill", body=body_text
+        )
+
+        registry = SkillRegistry(tmp_path, respect_enabled=False)
+
+        frontmatter = registry.get_frontmatter("on_demand_skill")
+        assert frontmatter is not None
+        assert frontmatter["name"] == "on_demand_skill"
+        assert _BODY_MARKER not in repr(frontmatter)
+
+        loaded_body = registry.get_body("on_demand_skill")
+        assert loaded_body is not None
+        assert loaded_body.startswith("# Steps")
+        assert _BODY_MARKER in loaded_body
+        # Closing frontmatter delimiter must not leak into the body.
+        assert not loaded_body.lstrip().startswith("---")
+        assert "category: bio/literature" not in loaded_body
+
+        # Body must match what's on disk after the frontmatter block.
+        raw = skill_path.read_text(encoding="utf-8")
+        assert loaded_body == raw.split("---", 2)[2].lstrip("\n")
+
+    def test_get_body_returns_none_for_unknown_skill(self, tmp_path):
+        _write_skill_with_body(tmp_path, "known_skill", body="# hi\n")
+        registry = SkillRegistry(tmp_path, respect_enabled=False)
+        assert registry.get_body("does_not_exist") is None
+        assert registry.get_frontmatter("does_not_exist") is None
+
+    def test_get_body_is_lazy_then_cached(self, tmp_path):
+        skill_path = _write_skill_with_body(
+            tmp_path, "lazy_skill", body=f"original\n{_BODY_MARKER}\n"
+        )
+        registry = SkillRegistry(tmp_path, respect_enabled=False)
+
+        # Constructing the registry and inspecting frontmatter must not
+        # pre-load the body — the first get_body() call picks up the
+        # current on-disk body.
+        assert registry.get_frontmatter("lazy_skill") is not None
+
+        header = skill_path.read_text(encoding="utf-8").split("---", 2)
+        skill_path.write_text(
+            f"---{header[1]}---\nupdated\n{_BODY_MARKER}\n", encoding="utf-8"
+        )
+
+        first_body = registry.get_body("lazy_skill")
+        assert first_body is not None
+        assert first_body.startswith("updated")
+
+        # After the first read the body is cached; later on-disk edits are
+        # intentionally not re-read.
+        skill_path.write_text(
+            skill_path.read_text(encoding="utf-8").replace("updated", "changed_again"),
+            encoding="utf-8",
+        )
+        assert registry.get_body("lazy_skill") == first_body
+
+    def test_module_level_helpers_expose_same_two_phase_api(self, tmp_path):
+        _write_skill_with_body(
+            tmp_path,
+            "helper_skill",
+            body=f"body-line\n{_BODY_MARKER}\n",
+        )
+        frontmatter = get_frontmatter(tmp_path, "helper_skill", respect_enabled=False)
+        body = get_body(tmp_path, "helper_skill", respect_enabled=False)
+
+        assert frontmatter is not None
+        assert frontmatter["name"] == "helper_skill"
+        assert body is not None
+        assert _BODY_MARKER in body
+        assert "helper_skill" not in body  # name lived in frontmatter only
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Registry cache — issue #128
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _write_cache_skill(base: Path, name: str) -> Path:
+    skill_dir = base / "skills" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skill_dir / "SKILL.md"
+    skill_path.write_text(
+        (
+            f"---\nname: {name}\ndescription: cache test skill {name}\n"
+            "category: bio/literature\n"
+            "requires_tools: [read_file]\nrequires_network: false\nuser_invocable: true\n"
+            "species: any\nmodality: literature\nstage: analysis\n"
+            "stability: experimental\nsafety_level: low\n"
+            "---\n# Body\n"
+        ),
+        encoding="utf-8",
+    )
+    return skill_path
+
+
+class TestRegistryCache:
+    def setup_method(self):
+        skills_scanner._clear_registry_cache()
+
+    def teardown_method(self):
+        skills_scanner._clear_registry_cache()
+
+    def test_repeated_calls_within_ttl_skip_parsing(self, tmp_path):
+        _write_cache_skill(tmp_path, "cache_alpha")
+        _write_cache_skill(tmp_path, "cache_beta")
+
+        with patch(
+            "tools.skills_scanner.parse_skill_entry",
+            wraps=skills_scanner.parse_skill_entry,
+        ) as parse_mock:
+            first = collect_skill_entries(tmp_path, respect_enabled=False)
+            cold_parses = parse_mock.call_count
+            second = collect_skill_entries(tmp_path, respect_enabled=False)
+            warm_parses = parse_mock.call_count
+
+        assert cold_parses == 2
+        assert warm_parses == cold_parses  # no re-parsing on cache hit
+        assert first == second
+
+    def test_touching_skill_file_invalidates_cache(self, tmp_path):
+        skill_path = _write_cache_skill(tmp_path, "invalidated_skill")
+
+        with patch(
+            "tools.skills_scanner.parse_skill_entry",
+            wraps=skills_scanner.parse_skill_entry,
+        ) as parse_mock:
+            collect_skill_entries(tmp_path, respect_enabled=False)
+            first_parses = parse_mock.call_count
+
+            # Bump mtime to simulate an edit (use +1s so even coarse-grained
+            # filesystems register a change).
+            stat_result = skill_path.stat()
+            os.utime(
+                skill_path,
+                (stat_result.st_atime, stat_result.st_mtime + 1),
+            )
+
+            collect_skill_entries(tmp_path, respect_enabled=False)
+            second_parses = parse_mock.call_count
+
+        assert second_parses > first_parses
+
+    def test_ttl_expiry_invalidates_cache(self, tmp_path, monkeypatch):
+        _write_cache_skill(tmp_path, "ttl_skill")
+        monkeypatch.setattr(skills_scanner, "_CACHE_TTL_SECONDS", 0.01)
+
+        with patch(
+            "tools.skills_scanner.parse_skill_entry",
+            wraps=skills_scanner.parse_skill_entry,
+        ) as parse_mock:
+            collect_skill_entries(tmp_path, respect_enabled=False)
+            first_parses = parse_mock.call_count
+
+            time.sleep(0.05)
+
+            collect_skill_entries(tmp_path, respect_enabled=False)
+            second_parses = parse_mock.call_count
+
+        assert second_parses > first_parses
+
+    def test_respect_enabled_uses_separate_cache_slots(self, tmp_path):
+        _write_cache_skill(tmp_path, "flagged_skill")
+        cfg_file = tmp_path / "backend-config.json"
+        cfg_file.write_text(
+            json.dumps(
+                {"skills": {"entries": {"flagged_skill": {"enabled": False}}}}
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("config._CONFIG_FILE", cfg_file):
+            active_first = collect_skill_entries(tmp_path, respect_enabled=True)
+            unfiltered_first = collect_skill_entries(tmp_path, respect_enabled=False)
+            active_cached = collect_skill_entries(tmp_path, respect_enabled=True)
+            unfiltered_cached = collect_skill_entries(tmp_path, respect_enabled=False)
+
+        assert active_first == []
+        assert [entry["name"] for entry in unfiltered_first] == ["flagged_skill"]
+        # Both slots must remain consistent across repeated cached reads.
+        assert active_first == active_cached
+        assert unfiltered_first == unfiltered_cached
+
+    def test_scan_skills_write_busts_cache_via_mtime(self, tmp_path):
+        skill_path = _write_cache_skill(tmp_path, "snapshot_skill")
+
+        scan_skills(tmp_path)
+        first_snapshot = (tmp_path / "SKILLS_SNAPSHOT.md").read_text()
+        assert "<name>snapshot_skill</name>" in first_snapshot
+
+        # Simulate a SKILL.md edit that renames the skill; scan_skills should
+        # pick it up because the mtime changes the cache fingerprint.
+        skill_path.write_text(
+            skill_path.read_text(encoding="utf-8").replace(
+                "name: snapshot_skill", "name: renamed_skill"
+            ),
+            encoding="utf-8",
+        )
+        stat_result = skill_path.stat()
+        os.utime(skill_path, (stat_result.st_atime, stat_result.st_mtime + 1))
+
+        scan_skills(tmp_path)
+        second_snapshot = (tmp_path / "SKILLS_SNAPSHOT.md").read_text()
+        assert "<name>renamed_skill</name>" in second_snapshot
+        assert "<name>snapshot_skill</name>" not in second_snapshot
+
+    def test_cached_calls_are_substantially_faster(self, tmp_path):
+        for index in range(20):
+            _write_cache_skill(tmp_path, f"bench_skill_{index:02d}")
+
+        skills_scanner._clear_registry_cache()
+        cold_start = time.perf_counter()
+        collect_skill_entries(tmp_path, respect_enabled=False)
+        cold_elapsed = time.perf_counter() - cold_start
+
+        warm_runs = 20
+        warm_start = time.perf_counter()
+        for _ in range(warm_runs):
+            collect_skill_entries(tmp_path, respect_enabled=False)
+        warm_elapsed = (time.perf_counter() - warm_start) / warm_runs
+
+        assert warm_elapsed * 3 < cold_elapsed, (
+            f"Registry cache did not speed up collection: "
+            f"cold={cold_elapsed:.4f}s, warm_avg={warm_elapsed:.4f}s"
+        )

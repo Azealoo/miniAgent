@@ -216,7 +216,12 @@ class TestConfigIntegration:
         assert policy.api.cors_allowed_origins == []
         assert policy.file_write_whitelist == []
 
-    def test_unknown_posture_in_config_fails_closed(self, tmp_path):
+    def test_unknown_posture_in_config_raises_at_startup(self, tmp_path):
+        """An unknown posture in config.json now fails validation at load
+        time (issue #124) so operators notice the typo immediately, instead
+        of silently falling back to hosted-strict at first getter call."""
+        import pydantic
+
         cfg_file = _write_posture_config(
             tmp_path,
             {"production_hardening": {"posture": "paranoid"}},
@@ -224,10 +229,10 @@ class TestConfigIntegration:
         with patch("config._CONFIG_FILE", cfg_file):
             import config
 
-            policy = config.get_production_hardening_policy()
-        assert policy.posture == "hosted-strict"
-        assert policy.tools.terminal_enabled is False
-        assert policy.api.cors_allowed_origins == []
+            with pytest.raises(pydantic.ValidationError) as exc_info:
+                config.get_production_hardening_policy()
+
+        assert "posture" in str(exc_info.value)
 
     def test_explicit_override_layers_on_top_of_posture(self, tmp_path):
         cfg_file = _write_posture_config(

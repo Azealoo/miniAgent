@@ -1,9 +1,12 @@
 """
 Tests for SessionManager — all file I/O uses tmp_path (no side effects).
 """
+import gc
 import json
 import sys
+import threading
 import time
+import weakref
 from pathlib import Path
 
 import pytest
@@ -11,7 +14,7 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from graph.session_manager import SessionManager
+from graph.session_manager import SessionCorruptError, SessionManager
 from graph.session_summary import (
     MAX_SUMMARY_CHARS,
     STRUCTURED_SUMMARY_HEADER,
@@ -212,9 +215,36 @@ class TestCreateAndRead:
     def test_session_meta_fields(self, sm):
         sid = sm.create_session()
         meta = sm.get_session_meta(sid)
-        assert set(meta.keys()) == {"id", "title", "created_at", "updated_at", "message_count"}
+        assert set(meta.keys()) == {
+            "id",
+            "title",
+            "created_at",
+            "updated_at",
+            "message_count",
+            "access_scope",
+        }
         assert meta["id"] == sid
         assert meta["message_count"] == 0
+        assert meta["access_scope"] == "execution"
+
+    def test_create_session_persists_access_scope(self, sm, tmp_path):
+        sid = sm.create_session(access_scope="admin")
+        raw = json.loads((tmp_path / "sessions" / f"{sid}.json").read_text())
+        assert raw["access_scope"] == "admin"
+        assert sm.get_session_access_scope(sid) == "admin"
+
+    def test_create_session_rejects_unknown_scope(self, sm):
+        with pytest.raises(ValueError):
+            sm.create_session(access_scope="superuser")
+
+    def test_legacy_session_without_scope_defaults_to_execution(self, sm, tmp_path):
+        sid = sm.create_session()
+        path = tmp_path / "sessions" / f"{sid}.json"
+        raw = json.loads(path.read_text())
+        raw.pop("access_scope", None)
+        path.write_text(json.dumps(raw))
+        assert sm.get_session_access_scope(sid) == "execution"
+        assert sm.get_session_meta(sid)["access_scope"] == "execution"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -876,6 +906,76 @@ class TestAutoCompress:
         assert result is False
         assert len(sm.load_session(sid)) == 40  # untouched
 
+    @pytest.mark.asyncio
+    async def test_compress_lock_released_when_inner_raises(self, sm, monkeypatch):
+        """Regression for #258: a failed compression must release the asyncio.Lock
+        so the next call can acquire it. ``async with`` in
+        ``auto_compress_if_needed`` is the contract — this test pins it down so a
+        future refactor cannot drop the context manager and silently leak the
+        held state.
+
+        We bypass the inner ``_do_compress_if_needed`` (which is non-fatal by
+        design and swallows LLM errors) and force the *body* of the lock to
+        raise, mirroring the only way an unhandled exception could escape the
+        critical section in production.
+        """
+        sid = sm.create_session()
+        for i in range(40):
+            sm.save_message(sid, "user", f"m{i}")
+
+        async def _boom(self, session_id, llm, threshold):
+            raise RuntimeError("simulated unexpected failure inside lock")
+
+        monkeypatch.setattr(
+            type(sm), "_do_compress_if_needed", _boom, raising=True
+        )
+
+        with pytest.raises(RuntimeError, match="simulated unexpected failure"):
+            await sm.auto_compress_if_needed(sid, llm=None, threshold=40)
+
+        lock = sm.get_or_create_compress_lock(sid)
+        assert not lock.locked(), (
+            "Compression lock is still held after the critical section raised "
+            "— async with did not release it (issue #258)."
+        )
+
+        # Subsequent acquisition must not deadlock. Use wait_for so a
+        # regression surfaces as a timeout instead of hanging the suite.
+        import asyncio
+
+        await asyncio.wait_for(lock.acquire(), timeout=1.0)
+        lock.release()
+
+    @pytest.mark.asyncio
+    async def test_compress_lock_entry_persists_after_failure(self, sm, monkeypatch):
+        """Companion guard for #222 vs #258: the registry entry stays put after
+        a failure. Evicting on failure (the naive ‘fix’ proposed by #258) would
+        re-introduce the GC race the strong-ref dict was built to prevent.
+        """
+        from graph.session import session_store
+
+        sid = sm.create_session()
+        for i in range(40):
+            sm.save_message(sid, "user", f"m{i}")
+
+        original = sm.get_or_create_compress_lock(sid)
+        assert session_store._compress_locks.get(sid) is original
+
+        async def _boom(self, session_id, llm, threshold):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(
+            type(sm), "_do_compress_if_needed", _boom, raising=True
+        )
+
+        with pytest.raises(RuntimeError):
+            await sm.auto_compress_if_needed(sid, llm=None, threshold=40)
+
+        assert session_store._compress_locks.get(sid) is original, (
+            "Lock entry was evicted after a failed compression — that "
+            "re-introduces the GC race fixed by #222."
+        )
+
 
 # --------------------------------------------------------------------- #
 # delete_session post-session distillation hook                         #
@@ -932,3 +1032,361 @@ class TestDeleteSessionDistillationHook:
         assert not (tmp_path / "sessions" / f"{session_id}.json").exists()
         # Failure is surfaced via the in-memory set the debug endpoint exposes.
         assert session_id in get_failed_distillations()
+
+
+# --------------------------------------------------------------------- #
+# Corrupt-session quarantine                                            #
+# --------------------------------------------------------------------- #
+
+
+class TestCorruptSessionQuarantine:
+    def test_corrupt_file_quarantined_and_raises_when_opted_in(self, sm, tmp_path):
+        sid = sm.create_session()
+        path = tmp_path / "sessions" / f"{sid}.json"
+        path.write_text("{not-json", encoding="utf-8")
+
+        with pytest.raises(SessionCorruptError) as excinfo:
+            sm.load_session(sid, raise_on_corrupt=True)
+
+        # Original session_id is exposed on the typed error.
+        assert excinfo.value.session_id == sid
+
+        # Quarantine directory is created on demand.
+        quarantine_dir = tmp_path / "sessions" / "_quarantine"
+        assert quarantine_dir.is_dir()
+
+        # The corrupt bytes were moved aside (not silently wiped).
+        quarantined = list(quarantine_dir.glob(f"*_{sid}.json"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_text(encoding="utf-8") == "{not-json"
+        # The error's quarantine_path matches the file on disk.
+        assert excinfo.value.quarantine_path == str(quarantined[0])
+
+        # Active session slot is freed.
+        assert not path.exists()
+
+    def test_corrupt_file_returns_empty_by_default(self, sm, tmp_path):
+        """Internal callers (turn runtime, files workspace, tokens) must keep
+        working when a single session file is corrupt. ``_read`` quarantines
+        the file but returns an empty session unless ``raise_on_corrupt`` is
+        opted in."""
+        sid = sm.create_session()
+        path = tmp_path / "sessions" / f"{sid}.json"
+        path.write_text("{not-json", encoding="utf-8")
+
+        # Default behavior: no exception, just an empty history.
+        assert sm.load_session(sid) == []
+        assert sm.load_session_for_agent(sid) == []
+
+        # Quarantine still happens so the bad bytes are preserved.
+        quarantined = list(
+            (tmp_path / "sessions" / "_quarantine").glob(f"*_{sid}.json")
+        )
+        assert len(quarantined) == 1
+
+    def test_corrupt_utf8_quarantined_and_raises_when_opted_in(self, sm, tmp_path):
+        sid = sm.create_session()
+        path = tmp_path / "sessions" / f"{sid}.json"
+        # Bytes that cannot be decoded as UTF-8.
+        path.write_bytes(b"\xff\xfe\x00not-utf8")
+
+        with pytest.raises(SessionCorruptError) as excinfo:
+            sm.load_session(sid, raise_on_corrupt=True)
+
+        assert excinfo.value.session_id == sid
+        quarantined = list(
+            (tmp_path / "sessions" / "_quarantine").glob(f"*_{sid}.json")
+        )
+        assert len(quarantined) == 1
+
+    def test_quarantined_session_not_in_active_list(self, sm, tmp_path):
+        good_sid = sm.create_session()
+        bad_sid = sm.create_session()
+
+        # Corrupt the second session's file.
+        (tmp_path / "sessions" / f"{bad_sid}.json").write_text(
+            "{garbage", encoding="utf-8"
+        )
+
+        listed = sm.list_sessions()
+        listed_ids = {s["id"] for s in listed}
+
+        # The good session is still listed; the corrupt one is not.
+        assert good_sid in listed_ids
+        assert bad_sid not in listed_ids
+
+        # The corrupt file was quarantined as part of the listing pass.
+        quarantine_dir = tmp_path / "sessions" / "_quarantine"
+        assert list(quarantine_dir.glob(f"*_{bad_sid}.json"))
+
+    def test_list_sessions_skips_non_utf8_files(self, sm, tmp_path):
+        """A single file with invalid UTF-8 bytes must not abort the catalog."""
+        good_sid = sm.create_session()
+        bad_sid = sm.create_session()
+
+        # Write bytes that cannot be decoded as UTF-8.
+        (tmp_path / "sessions" / f"{bad_sid}.json").write_bytes(
+            b"\xff\xfe\x00not-utf8"
+        )
+
+        listed = sm.list_sessions()
+        listed_ids = {s["id"] for s in listed}
+
+        assert good_sid in listed_ids
+        assert bad_sid not in listed_ids
+
+        # Quarantined rather than left in the active slot to break the next pass.
+        quarantine_dir = tmp_path / "sessions" / "_quarantine"
+        assert list(quarantine_dir.glob(f"*_{bad_sid}.json"))
+
+    def test_quarantine_filename_uses_unix_ts_prefix(self, sm, tmp_path):
+        sid = sm.create_session()
+        (tmp_path / "sessions" / f"{sid}.json").write_text(
+            "not json at all", encoding="utf-8"
+        )
+
+        with pytest.raises(SessionCorruptError):
+            sm._read(sid, raise_on_corrupt=True)
+
+        quarantined = list(
+            (tmp_path / "sessions" / "_quarantine").glob(f"*_{sid}.json")
+        )
+        assert len(quarantined) == 1
+        ts_prefix = quarantined[0].stem.split("_", 1)[0]
+        assert ts_prefix.isdigit()
+
+
+# --------------------------------------------------------------------- #
+# Concurrency-safe per-session lock creation                            #
+# --------------------------------------------------------------------- #
+
+
+class TestPerSessionLockConcurrency:
+    """Guards for issues #109 and #222 — concurrent get_or_create must not
+    create two distinct asyncio.Lock instances for the same session id, the
+    registry must hold strong references (no GC race between insert and a
+    concurrent observer), and eviction via ``delete_session`` must keep the
+    registry bounded as sessions come and go.
+    """
+
+    @pytest.mark.parametrize(
+        "lock_method",
+        ["get_or_create_compress_lock", "get_or_create_turn_lock"],
+    )
+    def test_concurrent_get_or_create_returns_single_identity(self, sm, lock_method):
+        sid = _valid_session_id(42)
+        grab = getattr(sm, lock_method)
+
+        results: list = []
+        errors: list = []
+        barrier = threading.Barrier(32)
+
+        def worker():
+            try:
+                barrier.wait(timeout=5)
+                results.append(grab(sid))
+            except Exception as exc:  # pragma: no cover — surfaced via assert
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(32)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, errors
+        assert len(results) == 32
+        first = results[0]
+        assert all(lock is first for lock in results), (
+            "Concurrent callers received distinct Lock instances for the same "
+            "session id — double-checked locking is broken."
+        )
+
+    @pytest.mark.parametrize(
+        "registry_attr, lock_method",
+        [
+            ("_compress_locks", "get_or_create_compress_lock"),
+            ("_turn_locks", "get_or_create_turn_lock"),
+        ],
+    )
+    def test_lock_registry_holds_strong_reference(
+        self, sm, registry_attr, lock_method
+    ):
+        """Regression for #222: the registry must keep a strong reference so a
+        freshly installed Lock cannot be GC'd before a concurrent caller grabs
+        its own strong ref. Dropping the transient returned by the first call
+        must not cause the entry to disappear.
+        """
+        from graph.session import session_store
+
+        registry = getattr(session_store, registry_attr)
+        assert isinstance(registry, dict) and not isinstance(
+            registry, weakref.WeakValueDictionary
+        ), (
+            "Registry must be a plain dict that pins locks with a strong "
+            "reference; a WeakValueDictionary races GC against concurrent "
+            "lookups (issue #222)."
+        )
+
+        grab = getattr(sm, lock_method)
+        sid = _valid_session_id(777)
+
+        first = grab(sid)
+        del first
+        gc.collect()
+
+        second = grab(sid)
+        assert registry.get(sid) is second, (
+            "Lock was evicted between calls — the strong-ref invariant is "
+            "broken and the GC race from issue #222 can re-emerge."
+        )
+
+    @pytest.mark.parametrize(
+        "registry_attr, lock_method",
+        [
+            ("_compress_locks", "get_or_create_compress_lock"),
+            ("_turn_locks", "get_or_create_turn_lock"),
+        ],
+    )
+    def test_lock_registry_does_not_grow_unbounded_under_churn(
+        self, sm, registry_attr, lock_method
+    ):
+        """Growth is bounded by ``delete_session`` eviction rather than
+        weakref GC. Populate+delete churn must return the registry to
+        baseline — this is the strong-ref design's replacement for the
+        weakref GC guarantee removed by issue #222.
+        """
+        from graph.session import session_store
+
+        registry = getattr(session_store, registry_attr)
+        grab = getattr(sm, lock_method)
+        baseline = len(registry)
+
+        sids = [_valid_session_id(10_000 + i) for i in range(50)]
+        for sid in sids:
+            grab(sid)
+        # Strong-ref registry pins every entry until explicit eviction.
+        assert len(registry) - baseline >= len(sids)
+
+        for sid in sids:
+            sm.delete_session(sid)
+
+        # ``delete_session`` must evict the per-session lock; otherwise
+        # long-running servers accumulate one Lock per ever-seen session id.
+        assert len(registry) - baseline == 0, (
+            f"{registry_attr} retained {len(registry) - baseline} entries "
+            "after delete_session — explicit eviction is broken."
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Atomic session writes (tmp-file + rename)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestAtomicSessionWrite:
+    """Session writes must go through tmp-file + rename so a crash between
+    the write and the rename leaves the prior file intact — not truncated
+    into silent data loss.
+    """
+
+    def test_crash_between_tmp_write_and_rename_preserves_original_session(
+        self, sm, tmp_path, monkeypatch
+    ):
+        sid = sm.create_session()
+        sm.save_message(sid, "user", "first durable message")
+        sm.save_message(sid, "assistant", "first durable reply")
+
+        session_path = tmp_path / "sessions" / f"{sid}.json"
+        original_bytes = session_path.read_bytes()
+
+        real_replace = Path.replace
+
+        def exploding_replace(self, target):
+            if str(self).endswith(f"{sid}.json.tmp"):
+                raise OSError("simulated crash between tmp write and rename")
+            return real_replace(self, target)
+
+        monkeypatch.setattr(Path, "replace", exploding_replace)
+
+        with pytest.raises(OSError):
+            sm.save_message(sid, "user", "write that never lands")
+
+        # Original file untouched (same bytes) — the aborted write did not
+        # truncate it, and no empty session was silently persisted.
+        assert session_path.read_bytes() == original_bytes
+        # And a straggling *.tmp must not masquerade as the session file.
+        assert not (tmp_path / "sessions" / f"{sid}.json.tmp").exists() or (
+            tmp_path / "sessions" / f"{sid}.json.tmp"
+        ).read_bytes() != b""
+
+        monkeypatch.undo()
+
+        # After the crash path is cleared, reads return the original history
+        # rather than the empty-session fallback.
+        msgs = sm.load_session(sid)
+        assert [m["content"] for m in msgs] == [
+            "first durable message",
+            "first durable reply",
+        ]
+        assert sm.get_session_meta(sid)["message_count"] == 2
+
+    def test_crash_during_archive_write_preserves_prior_session_state(
+        self, sm, tmp_path, monkeypatch
+    ):
+        sid = sm.create_session()
+        for i in range(6):
+            sm.save_message(sid, "user" if i % 2 == 0 else "assistant", f"msg{i}")
+
+        session_path = tmp_path / "sessions" / f"{sid}.json"
+        original_bytes = session_path.read_bytes()
+        archive_dir = tmp_path / "sessions" / "archive"
+
+        real_replace = Path.replace
+
+        def exploding_replace(self, target):
+            # Fail only on archive batch writes (ignore the session JSON
+            # and the _index.json sidecar so the simulated crash is scoped
+            # to the archive batch file itself).
+            if str(self).endswith(".json.tmp") and f"{sid}_" in self.name:
+                raise OSError("simulated crash writing archive batch")
+            return real_replace(self, target)
+
+        monkeypatch.setattr(Path, "replace", exploding_replace)
+
+        with pytest.raises(OSError):
+            sm.compress_history(sid, "summary", 4)
+
+        # Session file untouched (compress_history never reached _write).
+        assert session_path.read_bytes() == original_bytes
+
+        monkeypatch.undo()
+
+        # All messages still readable after the aborted compression.
+        msgs = sm.load_session(sid)
+        assert len(msgs) == 6
+        # No partial archive batch file exists for this session.
+        assert not list(archive_dir.glob(f"{sid}_*.json"))
+
+    def test_read_fallback_logs_when_session_file_is_unreadable(
+        self, sm, tmp_path, caplog, monkeypatch
+    ):
+        sid = sm.create_session()
+        session_path = tmp_path / "sessions" / f"{sid}.json"
+
+        real_read_text = Path.read_text
+
+        def unreadable_read_text(self, *args, **kwargs):
+            if self == session_path:
+                raise OSError("simulated transient read failure")
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", unreadable_read_text)
+
+        with caplog.at_level("WARNING", logger="graph.session.session_store"):
+            result = sm.load_session(sid)
+
+        assert result == []
+        assert any(
+            "session_read_fallback" in record.message for record in caplog.records
+        )
