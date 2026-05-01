@@ -185,7 +185,7 @@ export default function ChatInput({
         return;
       }
 
-      if (e.key === "Tab") {
+      if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         setText(matchingSlashActions[activeSlashActionIndex]?.command ?? text);
         return;
