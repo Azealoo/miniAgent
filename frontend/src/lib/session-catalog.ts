@@ -3,6 +3,10 @@ import { isAccessGranted } from "./access-control";
 import * as api from "./api";
 import { runChatTurn, stopChatTurn } from "./chat-turn-runner";
 import {
+  computeRetryBackoffMs,
+  hasReachedRetryCap,
+} from "./retry-backoff";
+import {
   historyToMessages,
   loadSession,
   type SessionHistoryStatus,
@@ -43,6 +47,23 @@ export interface SendMessageOptions {
 export interface FailedTurnState {
   content: string;
   requestId?: string;
+  /**
+   * Number of failures recorded for this retry chain (1 after the first
+   * failure, incremented each time `onTurnError` fires for a retry that
+   * carries the same `requestId`). Resets implicitly when the user dismisses
+   * the failure or the next turn completes successfully.
+   */
+  attemptCount: number;
+  /**
+   * Epoch milliseconds before which the Retry-turn button must remain
+   * disabled. Computed from `attemptCount` via `computeRetryBackoffMs`.
+   */
+  nextAllowedRetryAt: number;
+  /**
+   * True once `attemptCount` has hit the configured max. The UI must refuse
+   * any further retries; the user has to dismiss and start a fresh turn.
+   */
+  reachedCap: boolean;
 }
 
 export interface UseSessionCatalogResult {
@@ -120,6 +141,12 @@ export function useSessionCatalog(
   const currentSessionIdRef = useRef<string | null>(null);
   const messagesRef = useRef<Message[]>([]);
   const sessionContinuitySummariesRef = useRef<SessionContinuitySummary[]>([]);
+  // Mirror of `lastFailedTurn` so the in-flight `onTurnError` callback can
+  // read the prior attempt count without depending on stale closure capture.
+  // We need this because `sendMessage` clears `lastFailedTurn` early, before
+  // running the turn — without the ref, a retry's failure callback would
+  // always observe `null` and reset the counter to 1.
+  const lastFailedTurnRef = useRef<FailedTurnState | null>(null);
 
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
@@ -132,6 +159,10 @@ export function useSessionCatalog(
   useEffect(() => {
     sessionContinuitySummariesRef.current = sessionContinuitySummaries;
   }, [sessionContinuitySummaries]);
+
+  useEffect(() => {
+    lastFailedTurnRef.current = lastFailedTurn;
+  }, [lastFailedTurn]);
 
   // React's useState setters are stable, so this object only needs to be built
   // once — cache it so dependent useCallback deps don't thrash on every render.
@@ -483,6 +514,20 @@ export function useSessionCatalog(
       }
 
       resetDraftAndInspector();
+
+      // Carry the prior attempt count forward only when this send is a retry
+      // of the same correlated request (i.e. the user clicked Retry turn).
+      // A fresh user message — which arrives without `options?.requestId`, or
+      // with a different one — starts a new retry chain at attempt 1.
+      const previousFailure = lastFailedTurnRef.current;
+      const isRetryOfPrevious =
+        previousFailure !== null &&
+        options?.requestId !== undefined &&
+        previousFailure.requestId === options.requestId;
+      const previousAttemptCount = isRetryOfPrevious
+        ? previousFailure.attemptCount
+        : 0;
+
       setLastFailedTurn(null);
 
       await runChatTurn({
@@ -506,9 +551,17 @@ export function useSessionCatalog(
             );
           },
           onTurnError: (failedRequestId) => {
+            const attemptCount = previousAttemptCount + 1;
+            const reachedCap = hasReachedRetryCap(attemptCount);
+            const nextAllowedRetryAt = reachedCap
+              ? Number.POSITIVE_INFINITY
+              : Date.now() + computeRetryBackoffMs(attemptCount);
             setLastFailedTurn({
               content,
               requestId: failedRequestId ?? options?.requestId,
+              attemptCount,
+              nextAllowedRetryAt,
+              reachedCap,
             });
           },
           onParseError: () => {

@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowRight, MessageSquarePlus, RefreshCw, ShieldAlert } from "lucide-react";
 import SurfaceState from "@/components/layout/SurfaceState";
 import { useApp } from "@/lib/store";
+import { RETRY_MAX_ATTEMPTS } from "@/lib/retry-backoff";
 import ChatInput from "./ChatInput";
 import SessionHistorySummary from "@/components/session/SessionHistorySummary";
 
@@ -99,8 +100,41 @@ export default function ChatPanel() {
     await sendMessage(text);
   };
 
+  // Re-render once per second while a cooldown window is active so the
+  // remaining-wait label stays current and the button re-enables on schedule.
+  // Without this, the disabled state would only flip when something else in
+  // the tree triggered a render.
+  const [cooldownNow, setCooldownNow] = useState(() => Date.now());
+  const cooldownTarget = lastFailedTurn?.nextAllowedRetryAt ?? 0;
+  const isCooldownActive =
+    !!lastFailedTurn &&
+    !lastFailedTurn.reachedCap &&
+    cooldownTarget > cooldownNow &&
+    Number.isFinite(cooldownTarget);
+  useEffect(() => {
+    if (!isCooldownActive) return;
+    const handle = window.setInterval(() => {
+      setCooldownNow(Date.now());
+    }, 250);
+    return () => window.clearInterval(handle);
+  }, [isCooldownActive]);
+
+  const cooldownRemainingMs = isCooldownActive
+    ? Math.max(0, cooldownTarget - cooldownNow)
+    : 0;
+  const cooldownRemainingSeconds = Math.ceil(cooldownRemainingMs / 1000);
+  const reachedRetryCap = !!lastFailedTurn?.reachedCap;
+  const retryDisabled = isStreaming || isCooldownActive || reachedRetryCap;
+
   const handleRetryFailedTurn = useCallback(() => {
     if (!lastFailedTurn || isStreaming) return;
+    if (lastFailedTurn.reachedCap) return;
+    if (
+      Number.isFinite(lastFailedTurn.nextAllowedRetryAt) &&
+      Date.now() < lastFailedTurn.nextAllowedRetryAt
+    ) {
+      return;
+    }
     void sendMessage(lastFailedTurn.content, {
       requestId: lastFailedTurn.requestId,
     });
@@ -199,17 +233,31 @@ export default function ChatPanel() {
                   compact
                   tone="error"
                   eyebrow="Turn Failed"
-                  title="Turn failed — retry"
-                  description={
-                    lastFailedTurn.requestId
-                      ? `The last turn did not complete. Retry re-issues it with request ${lastFailedTurn.requestId}.`
-                      : "The last turn did not complete. Retry re-issues it with the same request id."
+                  title={
+                    reachedRetryCap
+                      ? "Turn failed — retry limit reached"
+                      : "Turn failed — retry"
                   }
+                  description={buildRetryBannerDescription({
+                    requestId: lastFailedTurn.requestId,
+                    attemptCount: lastFailedTurn.attemptCount,
+                    reachedCap: reachedRetryCap,
+                    cooldownRemainingSeconds: isCooldownActive
+                      ? cooldownRemainingSeconds
+                      : 0,
+                  })}
                   actions={
                     <div className="flex flex-wrap gap-2">
-                      <InlineActionButton onClick={handleRetryFailedTurn}>
+                      <InlineActionButton
+                        onClick={handleRetryFailedTurn}
+                        disabled={retryDisabled}
+                      >
                         <RefreshCw size={12} />
-                        Retry turn
+                        {isCooldownActive
+                          ? `Retry in ${cooldownRemainingSeconds}s`
+                          : reachedRetryCap
+                            ? "No more retries"
+                            : "Retry turn"}
                       </InlineActionButton>
                       <InlineActionButton onClick={clearLastFailedTurn}>
                         Dismiss
@@ -241,19 +289,46 @@ export default function ChatPanel() {
 function InlineActionButton({
   children,
   onClick,
+  disabled = false,
 }: {
   children: React.ReactNode;
   onClick: () => void;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex items-center gap-2 rounded-full border border-[var(--shell-border)] bg-white/92 px-3 py-1.5 text-[11px] font-medium text-slate-600 transition-colors hover:bg-[var(--panel-soft)] hover:text-slate-800"
+      disabled={disabled}
+      className="inline-flex items-center gap-2 rounded-full border border-[var(--shell-border)] bg-white/92 px-3 py-1.5 text-[11px] font-medium text-slate-600 transition-colors hover:bg-[var(--panel-soft)] hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-white/92 disabled:hover:text-slate-600"
     >
       {children}
     </button>
   );
+}
+
+function buildRetryBannerDescription({
+  requestId,
+  attemptCount,
+  reachedCap,
+  cooldownRemainingSeconds,
+}: {
+  requestId: string | undefined;
+  attemptCount: number;
+  reachedCap: boolean;
+  cooldownRemainingSeconds: number;
+}): string {
+  const reqSuffix = requestId
+    ? ` Retry re-issues it with request ${requestId}.`
+    : " Retry re-issues it with the same request id.";
+
+  if (reachedCap) {
+    return `The last turn failed ${attemptCount} time${attemptCount === 1 ? "" : "s"}; the retry limit (${RETRY_MAX_ATTEMPTS}) has been reached. Dismiss this banner and send a fresh message to try again.`;
+  }
+  if (cooldownRemainingSeconds > 0) {
+    return `The last turn did not complete (attempt ${attemptCount} of ${RETRY_MAX_ATTEMPTS}). Cooling down ${cooldownRemainingSeconds}s before another retry is allowed.${reqSuffix}`;
+  }
+  return `The last turn did not complete (attempt ${attemptCount} of ${RETRY_MAX_ATTEMPTS}).${reqSuffix}`;
 }
 
 function EmptyState({
