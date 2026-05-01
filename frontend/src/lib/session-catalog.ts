@@ -142,6 +142,8 @@ export function useSessionCatalog(
       setSessionHistoryStatus,
       setSessionHistoryError,
       setSessionContinuitySummaries,
+      setParseErrorCount,
+      setRequestIdMismatchCount,
     }),
     []
   );
@@ -349,8 +351,9 @@ export function useSessionCatalog(
           loadSessionSetters,
           getSessionHistoryErrorMessage
         );
-        setParseErrorCount(0);
-        setRequestIdMismatchCount(0);
+        // Counter resets are now applied inside `loadSession` in the same
+        // synchronous setter batch as `setCurrentSessionId(id)`, so the new
+        // session id and zeroed counters always commit together.
         resetDraftAndInspector();
       } catch (error) {
         promoteInspectionScopeError(error);

@@ -26,6 +26,11 @@ export interface SessionLoadSetters {
   setSessionHistoryStatus: (status: SessionHistoryStatus) => void;
   setSessionHistoryError: (error: string | null) => void;
   setSessionContinuitySummaries: (summaries: SessionContinuitySummary[]) => void;
+  // Counter resets fire inside the same synchronous setter batch as
+  // `setCurrentSessionId(id)` so UsagePanel never observes the new session id
+  // alongside the previous session's parse-error / request-id-mismatch counts.
+  setParseErrorCount: (count: number) => void;
+  setRequestIdMismatchCount: (count: number) => void;
 }
 
 function groupHistoryMessagesIntoTurns<T extends { role: string }>(
@@ -116,6 +121,13 @@ export async function loadSession(
     ]);
     const messages = historyToMessages(history);
     setters.setCurrentSessionId(id);
+    if (snapshot.currentSessionId !== id) {
+      // Reset session-scoped error counters in the same synchronous setter
+      // batch as the new session id so a switch never commits with the new
+      // id and the previous session's counters visible to consumers.
+      setters.setParseErrorCount(0);
+      setters.setRequestIdMismatchCount(0);
+    }
     setters.setMessages(messages);
     setters.setSessionContinuitySummaries(continuity.summaries);
     setters.setSessionHistoryStatus("ready");
