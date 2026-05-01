@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -71,6 +72,12 @@ async def dispatch_tool_batch(
 
 _logger = logging.getLogger(__name__)
 
+# Cap on how long the bounded-stream finally: block will wait for the inner
+# agent's ``aclose()`` to return. A wrapped tool (e.g. SLURM wait) that
+# swallows ``CancelledError`` can otherwise wedge teardown indefinitely even
+# after the turn wallclock deadline has already fired.
+_ACLOSE_TIMEOUT_S = 5.0
+
 
 async def _bounded_async_stream(
     agen: AsyncIterator[dict],
@@ -84,6 +91,12 @@ async def _bounded_async_stream(
     awaiting inside the inner agent receives a ``CancelledError`` at its
     next await point. The underlying generator is always closed in the
     ``finally`` block so tool ``finally:`` handlers run.
+
+    The ``aclose()`` call is itself bounded by ``_ACLOSE_TIMEOUT_S``: if the
+    inner generator swallows ``CancelledError`` (for example, a tool that
+    catches cancellation to finish a background RPC), teardown escalates to
+    an explicit ``task.cancel()`` and a second bounded wait, so the turn is
+    not held hostage by a stuck tool.
 
     Raises ``asyncio.TimeoutError`` to the caller when the deadline is hit.
     """
@@ -105,12 +118,28 @@ async def _bounded_async_stream(
     finally:
         aclose = getattr(agen, "aclose", None)
         if aclose is not None:
-            try:
-                await aclose()
-            except Exception:
+            aclose_task = asyncio.ensure_future(aclose())
+            done, _pending = await asyncio.wait(
+                {aclose_task}, timeout=_ACLOSE_TIMEOUT_S
+            )
+            if aclose_task not in done:
+                # Inner agent is stuck (e.g. a SLURM wait tool that swallows
+                # CancelledError). Escalate: request cancellation explicitly
+                # and give it one more bounded window to honor the cancel.
+                _logger.warning(
+                    "agent astream aclose exceeded %.1fs during bounded stream "
+                    "teardown; force-cancelling",
+                    _ACLOSE_TIMEOUT_S,
+                )
+                aclose_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait(
+                        {aclose_task}, timeout=_ACLOSE_TIMEOUT_S
+                    )
+            elif aclose_task.exception() is not None:
                 _logger.debug(
                     "agent astream aclose raised during bounded stream teardown",
-                    exc_info=True,
+                    exc_info=aclose_task.exception(),
                 )
 
 
