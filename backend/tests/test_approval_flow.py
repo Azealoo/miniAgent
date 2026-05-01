@@ -169,6 +169,7 @@ async def test_approval_endpoint_records_decision_to_store_and_audit(isolated_ap
     assert records[0]["decision"] == "approve"
     assert records[0]["actor"] == "alice"
     assert records[0]["rationale"] == "Verified on a disposable VM."
+    assert records[0]["args_hash"] == ""
 
     events = query_audit_events(
         agent_manager.base_dir,
@@ -194,6 +195,7 @@ async def test_next_turn_consumes_approved_tool_runs_from_store(isolated_approva
 
     session_id = agent_manager.session_manager.create_session()
 
+    args_hash = approval_store.compute_args_hash({"command": "ls"})
     approval_store.record_decision(
         agent_manager.base_dir,
         session_id=session_id,
@@ -202,6 +204,7 @@ async def test_next_turn_consumes_approved_tool_runs_from_store(isolated_approva
         decision="approve",
         actor="alice",
         rationale=None,
+        args_hash=args_hash,
     )
 
     captured: dict[str, object] = {}
@@ -219,7 +222,7 @@ async def test_next_turn_consumes_approved_tool_runs_from_store(isolated_approva
 
     policy_context = captured["policy_context"]
     assert policy_context is not None
-    assert "terminal" in policy_context.approved_tool_runs
+    assert ("terminal", args_hash) in policy_context.approved_tool_runs
     assert policy_context.denied_tool_runs == frozenset()
 
     done = next(item for item in payloads if item["type"] == "done")
@@ -240,6 +243,8 @@ async def test_denied_decision_surfaces_as_blocked_instead_of_reprompt(isolated_
     from tools.policy_types import ToolPolicyExecutionContext
 
     session_id = agent_manager.session_manager.create_session()
+    call_kwargs = {"path": "memory/note.md", "content": "hi"}
+    args_hash = approval_store.compute_args_hash(call_kwargs)
     approval_store.record_decision(
         agent_manager.base_dir,
         session_id=session_id,
@@ -248,13 +253,11 @@ async def test_denied_decision_surfaces_as_blocked_instead_of_reprompt(isolated_
         decision="deny",
         actor="bob",
         rationale="Not this run.",
+        args_hash=args_hash,
     )
 
-    denied = frozenset(
-        record["tool_name"]
-        for record in approval_store.denied_records(agent_manager.base_dir, session_id)
-    )
-    assert denied == frozenset({"write_file"})
+    denied = approval_store.denied_tool_runs(agent_manager.base_dir, session_id)
+    assert denied == frozenset({("write_file", args_hash)})
 
     runtime_tools = get_runtime_tools(agent_manager.base_dir)
     write_file = next(tool for tool in runtime_tools if tool.name == "write_file")
@@ -267,8 +270,149 @@ async def test_denied_decision_surfaces_as_blocked_instead_of_reprompt(isolated_
             denied_tool_runs=denied,
         )
     ):
-        summary, artifact = write_file._run(path="memory/note.md", content="hi")
+        summary, artifact = write_file._run(**call_kwargs)
 
     assert artifact["outcome"] == "blocked"
     assert artifact["metadata"]["policy"]["block_reason"] == "reviewer_denied_approval"
     assert "denied" in summary.lower() or "reviewer" in summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_approval_for_different_args_does_not_authorize_new_call(isolated_approval_state):
+    """An approval bound to one args_hash must not authorize a call whose
+    kwargs hash to a different digest — the reviewer only OK'd that specific
+    invocation."""
+    from graph import approval_store
+    from graph.agent import agent_manager
+    from tools import get_runtime_tools
+    from tools.policy import tool_policy_context
+    from tools.policy_types import ToolPolicyExecutionContext
+
+    session_id = agent_manager.session_manager.create_session()
+    approved_args_hash = approval_store.compute_args_hash({"command": "ls /tmp"})
+    approval_store.record_decision(
+        agent_manager.base_dir,
+        session_id=session_id,
+        tool_name="terminal",
+        run_id="run-1",
+        decision="approve",
+        actor="alice",
+        rationale=None,
+        args_hash=approved_args_hash,
+    )
+
+    approved = approval_store.approved_tool_runs(agent_manager.base_dir, session_id)
+    assert approved == frozenset({("terminal", approved_args_hash)})
+
+    runtime_tools = get_runtime_tools(agent_manager.base_dir)
+    terminal = next(tool for tool in runtime_tools if tool.name == "terminal")
+
+    # Same tool, *different* args → must re-prompt.
+    with tool_policy_context(
+        ToolPolicyExecutionContext(
+            session_id=session_id,
+            request_id="req-1",
+            allowed_access_scope="execution",
+            approved_tool_runs=approved,
+        )
+    ):
+        summary, artifact = terminal._run(command="rm -rf /")
+
+    assert artifact["outcome"] == "needs_approval"
+    assert artifact["metadata"]["policy"]["status"] == "needs_approval"
+    assert summary.startswith("[NEEDS_APPROVAL]")
+
+
+def test_expired_approvals_are_dropped_on_load(isolated_approval_state, monkeypatch):
+    """A stored approval older than ``APPROVAL_TTL_SECONDS`` is silently
+    filtered out on load so a stale decision cannot authorize a later call."""
+    from datetime import datetime, timedelta, timezone
+
+    from graph import approval_store
+    from graph.agent import agent_manager
+
+    session_id = agent_manager.session_manager.create_session()
+    args_hash = approval_store.compute_args_hash({"command": "ls"})
+    approval_store.record_decision(
+        agent_manager.base_dir,
+        session_id=session_id,
+        tool_name="terminal",
+        run_id="run-1",
+        decision="approve",
+        actor="alice",
+        rationale=None,
+        args_hash=args_hash,
+    )
+
+    assert approval_store.approved_tool_runs(
+        agent_manager.base_dir, session_id
+    ) == frozenset({("terminal", args_hash)})
+
+    # Fast-forward the wall clock past the TTL by patching the module's
+    # ``datetime.now`` lookup. ``_load`` computes ``now`` as
+    # ``datetime.now(timezone.utc)`` so overriding the module attribute is
+    # enough.
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            base = datetime.now(timezone.utc) + timedelta(
+                seconds=approval_store.APPROVAL_TTL_SECONDS + 10
+            )
+            return base if tz is None else base.astimezone(tz)
+
+    monkeypatch.setattr(approval_store, "datetime", _FrozenDatetime)
+    try:
+        # After TTL elapses, the stored record is filtered out on load.
+        assert approval_store.approved_tool_runs(
+            agent_manager.base_dir, session_id
+        ) == frozenset()
+        assert approval_store.pending_records(
+            agent_manager.base_dir, session_id
+        ) == []
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.mark.asyncio
+async def test_destructive_tool_always_reprompts_even_when_approved(isolated_approval_state):
+    """Approvals stored for a destructive manifest are ignored by the policy
+    layer — the reviewer must confirm each destructive call in the moment."""
+    from graph import approval_store
+    from graph.agent import agent_manager
+    from tools import get_runtime_tools
+    from tools.policy import tool_policy_context
+    from tools.policy_types import ToolPolicyExecutionContext
+
+    session_id = agent_manager.session_manager.create_session()
+    call_kwargs = {"path": "memory/note.md", "content": "hi"}
+    args_hash = approval_store.compute_args_hash(call_kwargs)
+    approval_store.record_decision(
+        agent_manager.base_dir,
+        session_id=session_id,
+        tool_name="write_file",
+        run_id="run-42",
+        decision="approve",
+        actor="alice",
+        rationale=None,
+        args_hash=args_hash,
+    )
+
+    approved = approval_store.approved_tool_runs(agent_manager.base_dir, session_id)
+    assert ("write_file", args_hash) in approved
+
+    runtime_tools = get_runtime_tools(agent_manager.base_dir)
+    write_file = next(tool for tool in runtime_tools if tool.name == "write_file")
+
+    with tool_policy_context(
+        ToolPolicyExecutionContext(
+            session_id=session_id,
+            request_id="req-1",
+            allowed_access_scope="execution",
+            approved_tool_runs=approved,
+        )
+    ):
+        summary, artifact = write_file._run(**call_kwargs)
+
+    assert artifact["outcome"] == "needs_approval"
+    assert artifact["metadata"]["policy"]["status"] == "needs_approval"
+    assert summary.startswith("[NEEDS_APPROVAL]")

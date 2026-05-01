@@ -19,6 +19,7 @@ from config import (
     get_tool_wallclock_default_s,
     get_tool_wallclock_override_s,
 )
+from graph.approval_store import compute_args_hash
 from runtime import hooks as runtime_hooks
 
 from .contracts import (
@@ -496,8 +497,18 @@ class PolicyWrappedTool(BaseTool):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ):
-        decision = evaluate_pre_tool_policy(self.manifest, get_tool_policy_context())
-        if decision.status in ("blocked", "needs_approval"):
+        args_hash = compute_args_hash(kwargs)
+        decision = evaluate_pre_tool_policy(
+            self.manifest,
+            get_tool_policy_context(),
+            args_hash=args_hash,
+        )
+        # A hard block from access scope or the skill allowlist wins over a
+        # sandbox violation — no need to inspect args for a tool that isn't
+        # permitted at all. A ``needs_approval`` decision, however, must not
+        # mask a malformed-args block: destructive tools always return
+        # needs_approval, so sandbox violations would otherwise never surface.
+        if decision.status == "blocked":
             return decision
         sandbox_decision = evaluate_sandbox_arguments(self.manifest, args, kwargs)
         if sandbox_decision.status != "allow":
