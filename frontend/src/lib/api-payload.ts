@@ -277,20 +277,45 @@ export function validateSessionHistory(
 ): SessionHistoryMessage[] {
   const history = expectArray(value, path, "the session history");
   history.forEach((message, index) => {
+    const label = `session history item ${index + 1}`;
     const record = expectObject(message, path, "the session history");
-    expectStringField(record, "role", path, `session history item ${index + 1}`);
-    if ("content" in record && typeof record.content !== "string") {
+    expectStringField(record, "role", path, label);
+
+    let hasContent = false;
+    if ("content" in record && record.content !== undefined) {
+      if (typeof record.content !== "string") {
+        throw createPayloadError(
+          path,
+          label,
+          'Expected "content" to be a string when present.'
+        );
+      }
+      hasContent = record.content.trim().length > 0;
+    }
+
+    let hasBlocks = false;
+    if ("blocks" in record && record.blocks !== undefined) {
+      validateSessionContentBlocks(record.blocks, path, label);
+      hasBlocks = (record.blocks as unknown[]).length > 0;
+    }
+
+    let hasToolCalls = false;
+    if ("tool_calls" in record && record.tool_calls !== undefined) {
+      const calls = expectArray(record.tool_calls, path, label);
+      hasToolCalls = calls.length > 0;
+    }
+
+    let hasRetrievals = false;
+    if ("retrievals" in record && record.retrievals !== undefined) {
+      const retrievals = expectArray(record.retrievals, path, label);
+      hasRetrievals = retrievals.length > 0;
+    }
+
+    if (!hasContent && !hasBlocks && !hasToolCalls && !hasRetrievals) {
       throw createPayloadError(
         path,
-        `session history item ${index + 1}`,
-        'Expected "content" to be a string when present.'
-      );
-    }
-    if ("blocks" in record) {
-      validateSessionContentBlocks(
-        record.blocks,
-        path,
-        `session history item ${index + 1}`
+        label,
+        'Expected "content" or "blocks" to provide message data; both were missing or empty.'
       );
     }
   });
