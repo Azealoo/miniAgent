@@ -97,7 +97,6 @@ class FrozenSessionPrefix:
 # Per-session frozen prefix cache. Sub-agent contracts read this to reuse the
 # byte-identical leading prompt and maximise prompt-cache hits.
 _frozen_prefixes: dict[str, FrozenSessionPrefix] = {}
-_frozen_prefix_drift_logged: set[str] = set()
 _frozen_prefix_lock = threading.Lock()
 
 
@@ -561,17 +560,17 @@ class SessionStore:
         The prefix + tool list are the leading bytes of the system prompt that
         must stay byte-identical across the parent turn and every sub-agent
         run for DeepSeek / OpenAI / Anthropic prompt-cache hits. We freeze on
-        the first turn and never replace the snapshot — subsequent turns with
-        a different prefix log a drift warning (workspace edits, skills added
-        mid-session) so the loss of cache-eligibility is visible.
+        the first turn and never replace the snapshot — every subsequent turn
+        whose prefix fingerprint no longer matches emits a drift warning
+        (workspace edits, skills added mid-session) so repeated degradation
+        stays visible instead of being suppressed after the first occurrence.
         """
         _validate_session_id(session_id)
         fingerprint = _fingerprint_prefix(stable_prefix, tool_names)
         with _frozen_prefix_lock:
             existing = _frozen_prefixes.get(session_id)
             if existing is not None:
-                if existing.prefix_fingerprint != fingerprint and session_id not in _frozen_prefix_drift_logged:
-                    _frozen_prefix_drift_logged.add(session_id)
+                if existing.prefix_fingerprint != fingerprint:
                     logger.warning(
                         "session_prefix_drift session_id=%s — frozen prefix no "
                         "longer matches current prompt assembly; sub-agent "
@@ -598,7 +597,6 @@ class SessionStore:
         """Drop the frozen prefix (used when the session is deleted)."""
         with _frozen_prefix_lock:
             _frozen_prefixes.pop(session_id, None)
-            _frozen_prefix_drift_logged.discard(session_id)
 
     def get_session_meta(self, session_id: str) -> dict:
         data = self._read(session_id)
