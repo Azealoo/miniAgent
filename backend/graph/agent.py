@@ -429,7 +429,10 @@ class AgentManager:
         used_fallback = False
 
         if prefix_registration is not None and prefix_registration.invalidated:
-            streamed_any_event = True
+            # Do NOT set ``streamed_any_event`` here. This event is a
+            # session-state diagnostic emitted before the primary model
+            # stream starts, so the overload/timeout fallback below must
+            # still be allowed to swap in the role's fallback model.
             yield {
                 "type": "prefix_invalidated",
                 "session_id": session_id,

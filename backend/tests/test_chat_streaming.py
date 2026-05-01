@@ -718,6 +718,94 @@ async def test_agent_astream_emits_retrieval_error_when_indexer_raises(
 
 
 @pytest.mark.asyncio
+async def test_agent_astream_falls_back_after_overload_even_when_prefix_invalidated(
+    isolated_chat_state,
+):
+    """Emitting ``prefix_invalidated`` must not disable the overload fallback.
+
+    Regression test for chatgpt-codex-connector review #3171973772: setting
+    ``streamed_any_event = True`` for the prefix-invalidation diagnostic
+    would cause a primary-model overload on that turn to skip the fallback
+    retry and immediately surface as an ``error`` event, even though the
+    primary model never produced any user-visible content.
+    """
+    from typing import Any
+
+    from graph.agent import agent_manager
+    from tools.policy import tool_policy_context
+    from tools.policy_types import ToolPolicyExecutionContext
+
+    original_tools = agent_manager.tools
+    original_memory_indexer = agent_manager.memory_indexer
+
+    class OverloadAgent:
+        async def astream_events(self, payload, version="v2", config=None):
+            if False:
+                yield {}
+            raise RuntimeError("Anthropic API error 529: overloaded_error")
+
+    class FallbackAgent:
+        async def astream_events(self, payload, version="v2", config=None):
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": type("Chunk", (), {"content": "fallback ok"})()},
+            }
+
+    session_id = agent_manager.session_manager.create_session()
+    # Pre-freeze with a deliberately-stale stable prefix so the freeze the
+    # turn performs returns ``invalidated=True`` and triggers the SSE event.
+    agent_manager.session_manager.freeze_session_prefix(
+        session_id,
+        stable_prefix="STALE_PREFIX",
+        tool_names=(),
+    )
+
+    agent_manager.tools = []
+    agent_manager.memory_indexer = MagicMock()
+
+    create_agent_calls: list[Any] = []
+
+    def fake_create_agent(llm, tools, system_prompt):
+        create_agent_calls.append(llm)
+        # Primary build → overload; fallback build → working agent.
+        return OverloadAgent() if len(create_agent_calls) == 1 else FallbackAgent()
+
+    try:
+        with patch("config.get_rag_mode", return_value=False), patch(
+            "graph.agent.create_agent",
+            side_effect=fake_create_agent,
+        ), patch(
+            "graph.agent.build_fallback_chat_model",
+            return_value=MagicMock(name="fallback_llm"),
+        ), tool_policy_context(
+            ToolPolicyExecutionContext(session_id=session_id)
+        ):
+            events = [
+                event
+                async for event in agent_manager.astream(
+                    "Trigger overload after invalidation.",
+                    [],
+                )
+            ]
+    finally:
+        agent_manager.tools = original_tools
+        agent_manager.memory_indexer = original_memory_indexer
+
+    assert any(event["type"] == "prefix_invalidated" for event in events), (
+        "prefix_invalidated must still be yielded when the session prefix drifts"
+    )
+    assert any(
+        event["type"] == "token" and event.get("content") == "fallback ok"
+        for event in events
+    ), "Fallback agent's token must reach the stream"
+    assert not any(event["type"] == "error" for event in events), (
+        "Overload on a prefix-invalidated turn must not skip the fallback "
+        "and surface as an error"
+    )
+    assert len(create_agent_calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_agent_astream_uses_configured_executor_recursion_limit(isolated_chat_state):
     from graph.agent import agent_manager
 
