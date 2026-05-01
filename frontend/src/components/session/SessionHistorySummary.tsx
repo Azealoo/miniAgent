@@ -18,6 +18,7 @@ import {
   normalizeMessageContent,
   normalizeTurnMessages,
 } from "@/lib/message-blocks";
+import type { ContinuitySummariesLoadingStatus } from "@/lib/session-catalog";
 import { cn } from "@/lib/utils";
 import type {
   Message,
@@ -217,10 +218,12 @@ export default function SessionHistorySummary({
   currentSessionId,
   messages,
   continuitySummaries,
+  continuitySummariesLoadingStatus = "ready",
 }: {
   currentSessionId: string | null;
   messages: Message[];
   continuitySummaries: SessionContinuitySummary[];
+  continuitySummariesLoadingStatus?: ContinuitySummariesLoadingStatus;
 }) {
   const [expandedTurnIds, setExpandedTurnIds] = useState<Record<string, boolean>>({});
   const [archiveStates, setArchiveStates] = useState<Record<string, ArchiveLoadState>>({});
@@ -337,6 +340,23 @@ export default function SessionHistorySummary({
 
   return (
     <div className="flex flex-col gap-4 pb-[8rem] sm:gap-5 sm:pb-[8.75rem]">
+      {continuitySummaries.length === 0 &&
+      continuitySummariesLoadingStatus === "loading" ? (
+        <HistorySection
+          eyebrow="Session Continuity"
+          title="Archived Work"
+          description="Older compressed BioAPEX work will appear here once the continuity summaries land."
+        >
+          <p
+            role="status"
+            aria-live="polite"
+            className="text-[13px] leading-6 text-slate-500"
+          >
+            Loading archived summaries…
+          </p>
+        </HistorySection>
+      ) : null}
+
       {continuitySummaries.length > 0 ? (
         <HistorySection
           eyebrow="Session Continuity"

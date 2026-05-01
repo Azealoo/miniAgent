@@ -20,6 +20,7 @@ export default function ChatPanel() {
     sessionHistoryStatus,
     sessionHistoryError,
     sessionContinuitySummaries,
+    continuitySummariesLoadingStatus,
     lastFailedTurn,
     sendMessage,
     stopStreaming,
@@ -183,6 +184,9 @@ export default function ChatPanel() {
                 currentSessionId={currentSessionId}
                 messages={messages}
                 continuitySummaries={sessionContinuitySummaries}
+                continuitySummariesLoadingStatus={
+                  continuitySummariesLoadingStatus
+                }
               />
             )}
             <div ref={bottomRef} className="h-px" />
