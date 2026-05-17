@@ -6,7 +6,6 @@ describe("FeedPlanning", () => {
   it("renders each plan step as its own line", () => {
     render(
       <FeedPlanning
-        kind="planning"
         steps={[
           "Prepared a 2-step plan.",
           "1. Inspect memory.",
@@ -22,7 +21,7 @@ describe("FeedPlanning", () => {
 
   it("defaults to the active accent tone", () => {
     render(
-      <FeedPlanning kind="planning" steps={["Planning next steps."]} />
+      <FeedPlanning steps={["Planning next steps."]} />
     );
 
     expect(screen.getByText("Planning next steps.").className).toContain(
@@ -33,7 +32,6 @@ describe("FeedPlanning", () => {
   it("propagates the configured tone to every rendered line", () => {
     render(
       <FeedPlanning
-        kind="planning"
         steps={["Needs revision.", "Re-check citations."]}
         tone="warning"
       />
@@ -48,7 +46,7 @@ describe("FeedPlanning", () => {
   });
 
   it("renders nothing when no steps are provided", () => {
-    const { container } = render(<FeedPlanning kind="planning" steps={[]} />);
+    const { container } = render(<FeedPlanning steps={[]} />);
 
     expect(container.querySelectorAll("p")).toHaveLength(0);
   });

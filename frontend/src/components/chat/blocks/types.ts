@@ -7,8 +7,14 @@ export type FeedSectionKey =
   | "verification"
   | "workflow";
 
+// Every descriptor carries a stable `id` derived from upstream identifiers
+// (run_id / block index / step_id). FeedSection uses it as the React key so
+// reorders and filters don't remount children and discard internal state
+// such as ApprovalGate's pending/confirming flags.
+
 export interface FeedBlockDescriptor {
   kind: "block";
+  id: string;
   title: string;
   detail: string;
   badge?: string | null;
@@ -17,6 +23,7 @@ export interface FeedBlockDescriptor {
 
 export interface FeedPlanningDescriptor {
   kind: "planning";
+  id: string;
   steps: string[];
   tone?: FeedTone;
 }
@@ -28,6 +35,7 @@ export interface FeedLineFullOutputLink {
 
 export interface FeedLineDescriptor {
   kind: "line";
+  id: string;
   text: string;
   tone?: FeedTone;
   fullOutput?: FeedLineFullOutputLink;
@@ -35,6 +43,7 @@ export interface FeedLineDescriptor {
 
 export interface FeedGateDescriptor {
   kind: "gate";
+  id: string;
   block: SessionApprovalGateBlock;
 }
 
